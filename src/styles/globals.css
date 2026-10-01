@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-dark: #1E1E2E;
+  --color-surface-dark: #313244;
+  --color-text-dark: #CDD6F4;
+  --color-accent-dark: #89B4FA;
+
+  --color-bg-light: #EFF1F5;
+  --color-surface-light: #FFFFFF;
+  --color-text-light: #4C4F69;
+  --color-accent-light: #1E66F5;
+}
+
+@layer base {
+  :root {
+    --bg: var(--color-bg-light);
+    --surface: var(--color-surface-light);
+    --text: var(--color-text-light);
+    --accent: var(--color-accent-light);
+  }
+
+  .dark {
+    --bg: var(--color-bg-dark);
+    --surface: var(--color-surface-dark);
+    --text: var(--color-text-dark);
+    --accent: var(--color-accent-dark);
+  }
+
+  body {
+    @apply bg-[var(--bg)] text-[var(--text)] font-sans antialiased overflow-hidden m-0 p-0;
+    font-family: 'Inter', sans-serif;
+  }
+}
+
+@layer utilities {
+  .window-drag {
+    -webkit-app-region: drag;
+  }
+  .window-no-drag {
+    -webkit-app-region: no-drag;
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.3);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.5);
+}
+
+::selection {
+  background: var(--accent);
+  color: white;
+}
