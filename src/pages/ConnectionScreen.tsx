@@ -24,13 +24,27 @@ export default function ConnectionScreen() {
     setErrorMsg(null);
     try {
       if (connId) {
+        const conn = connections.find(c => c.id === connId);
+        const effectivePassword = password || (conn as any)?.password;
+        const effectiveKey = privateKeyPath || (conn as any)?.privateKeyPath;
+        if (!effectivePassword && !effectiveKey) {
+          setErrorMsg('Please enter your SSH password or specify a private key path.');
+          setIsConnecting(false);
+          return;
+        }
         await connect(connId, {
-          password: password || (selectedConn as any)?.password,
-          privateKeyPath: privateKeyPath || (selectedConn as any)?.privateKeyPath,
+          password: effectivePassword,
+          privateKeyPath: effectiveKey,
         });
       } else {
         if (!host.trim()) {
           setErrorMsg('Please enter a server host address or IP');
+          setIsConnecting(false);
+          return;
+        }
+
+        if (!password.trim() && !privateKeyPath.trim()) {
+          setErrorMsg('Please enter your SSH password or specify a private key path.');
           setIsConnecting(false);
           return;
         }
@@ -54,7 +68,8 @@ export default function ConnectionScreen() {
         await connect(newId, newConn);
       }
     } catch (err: any) {
-      setErrorMsg(err.message || 'Connection failed');
+      const msg = typeof err === 'string' ? err : err?.message || (typeof err === 'object' ? JSON.stringify(err) : String(err));
+      setErrorMsg(msg || 'Authentication failed: Please check server status and credentials.');
       setIsConnecting(false);
     }
   };
@@ -182,9 +197,12 @@ export default function ConnectionScreen() {
       <div className="flex-1 flex items-center justify-center p-8 bg-gradient-to-br from-[#181825] to-[#11111b] overflow-y-auto">
         <div className="w-full max-w-lg bg-[#1e1e2e] rounded-2xl p-7 border border-white/[0.08] shadow-2xl space-y-6">
           {errorMsg && (
-            <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-xs flex items-center space-x-2">
-              <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
-              <span>{errorMsg}</span>
+            <div className="p-3.5 rounded-xl bg-red-500/15 border border-red-500/40 text-red-300 text-xs flex items-start space-x-2.5">
+              <AlertCircle className="w-5 h-5 shrink-0 text-red-400 mt-0.5" />
+              <div className="min-w-0">
+                <div className="font-semibold text-red-200">Connection Failed</div>
+                <div className="text-red-300/90 mt-0.5 break-words font-mono text-[11px] leading-relaxed">{errorMsg}</div>
+              </div>
             </div>
           )}
 

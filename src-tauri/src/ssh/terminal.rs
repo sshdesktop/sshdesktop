@@ -68,45 +68,26 @@ pub async fn terminal_write(
 
     let input_str = String::from_utf8_lossy(&data).to_string();
 
-    // Check if connected to an SSH host
-    let conn_opt = state.connections.lock().get(&session.conn_id).cloned();
-    if let Some(conn) = conn_opt {
-        let dest = format!("{}@{}", conn.config.username, conn.config.host);
-        let trimmed = input_str.trim();
-        if !trimmed.is_empty() {
-            let output_res = tokio::process::Command::new("ssh")
-                .arg("-p")
-                .arg(conn.config.port.to_string())
-                .arg("-o")
-                .arg("StrictHostKeyChecking=no")
-                .arg("-o")
-                .arg("ConnectTimeout=3")
-                .arg(&dest)
-                .arg(trimmed)
-                .output()
-                .await;
+    // Execute command on the remote server
+    let trimmed = input_str.trim();
+    if !trimmed.is_empty() {
+        let (output, _code) = crate::ssh::exec::run_cmd(&state, &session.conn_id, trimmed).await;
+        let formatted = if output.is_empty() {
+            format!("\r\n")
+        } else {
+            format!("{}\r\n", output.replace('\r', "").replace('\n', "\r\n"))
+        };
 
-            if let Ok(output) = output_res {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let combined = if !stderr.is_empty() {
-                    format!("{}\r\n\x1b[31m{}\x1b[0m", stdout.replace('\n', "\r\n"), stderr.replace('\n', "\r\n"))
-                } else {
-                    stdout.replace('\n', "\r\n")
-                };
-
-                let _ = app.emit("terminal-output", TerminalOutput {
-                    terminal_id: terminal_id.clone(),
-                    data: combined.as_bytes().to_vec(),
-                    text: Some(combined),
-                });
-                return Ok(());
-            }
-        }
+        let _ = app.emit("terminal-output", TerminalOutput {
+            terminal_id: terminal_id.clone(),
+            data: formatted.as_bytes().to_vec(),
+            text: Some(formatted),
+        });
+        return Ok(());
     }
 
     // Default local / echo fallback
-    let echo = format!("{}", input_str.replace('\n', "\r\n"));
+    let echo = input_str.replace('\r', "").replace('\n', "\r\n");
     let _ = app.emit("terminal-output", TerminalOutput {
         terminal_id,
         data: echo.as_bytes().to_vec(),
