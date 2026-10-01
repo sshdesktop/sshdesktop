@@ -10,7 +10,7 @@ interface ConnectionState {
   addConnection: (conn: SavedConnection) => void;
   removeConnection: (id: string) => void;
   setActive: (id: string | null) => void;
-  connect: (id: string) => Promise<void>;
+  connect: (id: string, overrideConfig?: Partial<SavedConnection>) => Promise<void>;
   disconnect: (id: string) => Promise<void>;
 }
 
@@ -23,26 +23,28 @@ export const useConnectionStore = create<ConnectionState>()(
       addConnection: (conn) => set((state) => ({ connections: [...state.connections.filter(c => c.id !== conn.id), conn] })),
       removeConnection: (id) => set((state) => ({ connections: state.connections.filter((c) => c.id !== id) })),
       setActive: (id) => set({ activeConnectionId: id }),
-      connect: async (id) => {
+      connect: async (id, overrideConfig) => {
         const conn = get().connections.find(c => c.id === id);
-        if (conn) {
+        const target: any = { ...conn, ...overrideConfig };
+        if (target.host) {
           try {
             await sshConnect({
-              name: conn.name,
-              host: conn.host,
-              port: conn.port || 22,
-              username: conn.username,
-              password: (conn as any).password,
-              private_key_path: (conn as any).privateKeyPath,
-              color: conn.color,
-              group: conn.group,
-              tags: conn.tags || [],
+              id,
+              name: target.name || `${target.username}@${target.host}`,
+              host: target.host,
+              port: Number(target.port) || 22,
+              username: target.username,
+              password: target.password,
+              private_key_path: target.privateKeyPath || target.private_key_path,
+              color: target.color,
+              group: target.group,
+              tags: target.tags || [],
             });
           } catch (err) {
             console.warn('[CloudDesk] sshConnect warning:', err);
           }
           const newMap = new Map(get().connectedServers);
-          newMap.set(id, { id, name: conn.name, host: conn.host, status: 'connected' });
+          newMap.set(id, { id, name: target.name || target.host, host: target.host, status: 'connected' });
           set({ connectedServers: newMap, activeConnectionId: id });
         }
       },
@@ -107,9 +109,13 @@ export const useWindowStore = create<WindowStoreState>((set) => ({
     windows: state.windows.map(w => w.id === id ? { ...w, width, height } : w)
   })),
   bringToFront: (id) => set((state) => ({
-    windows: state.windows.map(w => w.id === id ? { ...w, zIndex: state.nextZIndex } : w),
+    windows: state.windows.map(w => ({
+      ...w,
+      zIndex: w.id === id ? state.nextZIndex : w.zIndex,
+      focused: w.id === id
+    })),
     nextZIndex: state.nextZIndex + 1
-  })),
+  }))
 }));
 
 interface SettingsState {
@@ -119,7 +125,7 @@ interface SettingsState {
   dockPosition: 'bottom' | 'left';
   showHiddenFiles: boolean;
   pollingInterval: number;
-  updateSettings: (settings: Partial<SettingsState>) => void;
+  updateSettings: (newSettings: Partial<Omit<SettingsState, 'updateSettings'>>) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -129,11 +135,13 @@ export const useSettingsStore = create<SettingsState>()(
       accentColor: '#89B4FA',
       terminalFontSize: 14,
       dockPosition: 'bottom',
-      showHiddenFiles: false,
-      pollingInterval: 2000,
-      updateSettings: (s) => set((state) => ({ ...state, ...s })),
+      showHiddenFiles: true,
+      pollingInterval: 3,
+      updateSettings: (newSettings) => set((state) => ({ ...state, ...newSettings }))
     }),
-    { name: 'settings-storage' }
+    {
+      name: 'settings-storage'
+    }
   )
 );
 
@@ -147,7 +155,10 @@ interface NotificationState {
 export const useNotificationStore = create<NotificationState>((set) => ({
   notifications: [],
   addNotification: (n) => set((state) => ({
-    notifications: [{ ...n, id: `notif-${Date.now()}`, timestamp: Date.now(), read: false }, ...state.notifications]
+    notifications: [
+      { ...n, id: `notif-${Date.now()}`, timestamp: Date.now(), read: false },
+      ...state.notifications
+    ]
   })),
   markRead: (id) => set((state) => ({
     notifications: state.notifications.map(n => n.id === id ? { ...n, read: true } : n)
