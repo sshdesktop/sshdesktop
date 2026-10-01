@@ -10,36 +10,48 @@ export default function ConnectionScreen() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Quick connect form state
-  const [host, setHost] = useState('192.168.1.50');
+  const [host, setHost] = useState('');
   const [port, setPort] = useState(22);
   const [username, setUsername] = useState('root');
-  const [password, setPassword] = useState('••••••••');
-  const [serverName, setServerName] = useState('Production Ubuntu Node');
+  const [password, setPassword] = useState('');
+  const [serverName, setServerName] = useState('');
+  const [privateKeyPath, setPrivateKeyPath] = useState('');
+
+  const selectedConn = connections.find(c => c.id === selectedId);
 
   const handleLaunch = async (connId?: string) => {
     setIsConnecting(true);
     setErrorMsg(null);
     try {
       if (connId) {
-        await connect(connId);
+        await connect(connId, {
+          password: password || (selectedConn as any)?.password,
+          privateKeyPath: privateKeyPath || (selectedConn as any)?.privateKeyPath,
+        });
       } else {
-        // Create connection on the fly
+        if (!host.trim()) {
+          setErrorMsg('Please enter a server host address or IP');
+          setIsConnecting(false);
+          return;
+        }
+
         const newId = String(Date.now());
         const newConn: any = {
           id: newId,
-          name: serverName || `${username}@${host}`,
-          host,
-          port,
-          username,
-          authMethod: 'password',
-          password,
+          name: serverName.trim() || `${username}@${host.trim()}`,
+          host: host.trim(),
+          port: Number(port) || 22,
+          username: username.trim() || 'root',
+          authMethod: password ? 'password' : 'key',
+          password: password || undefined,
+          privateKeyPath: privateKeyPath || undefined,
           color: '#89b4fa',
-          group: 'Default',
+          group: 'Servers',
           tags: ['Linux', 'SSH2'],
           created_at: Date.now()
         };
         addConnection(newConn);
-        await connect(newId);
+        await connect(newId, newConn);
       }
     } catch (err: any) {
       setErrorMsg(err.message || 'Connection failed');
@@ -49,15 +61,17 @@ export default function ConnectionScreen() {
 
   const handleCreateServer = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!host.trim()) return;
     const newId = String(Date.now());
     const newConn: any = {
       id: newId,
-      name: serverName,
-      host,
-      port,
-      username,
-      authMethod: 'password',
-      password,
+      name: serverName.trim() || `${username}@${host.trim()}`,
+      host: host.trim(),
+      port: Number(port) || 22,
+      username: username.trim() || 'root',
+      authMethod: password ? 'password' : 'key',
+      password: password || undefined,
+      privateKeyPath: privateKeyPath || undefined,
       color: '#cba6f7',
       group: 'Servers',
       tags: ['Ubuntu', 'Cloud'],
@@ -67,8 +81,6 @@ export default function ConnectionScreen() {
     setSelectedId(newId);
     setShowAddModal(false);
   };
-
-  const selectedConn = connections.find(c => c.id === selectedId);
 
   return (
     <div className="w-full h-full flex bg-[#11111b] text-[#cdd6f4] select-none">
@@ -93,20 +105,27 @@ export default function ConnectionScreen() {
 
           {connections.length === 0 ? (
             <div className="p-4 rounded-xl border border-dashed border-white/10 text-center text-xs text-gray-400">
-              No saved servers yet. Use the Quick Connect form to get started.
+              No saved servers yet. Enter your Linux server details to connect.
             </div>
           ) : (
             connections.map(conn => (
               <div
                 key={conn.id}
-                onClick={() => setSelectedId(conn.id)}
-                className={`p-3 rounded-xl flex items-center justify-between cursor-pointer transition-all group ${
+                onClick={() => {
+                  setSelectedId(conn.id);
+                  setHost(conn.host);
+                  setPort(conn.port);
+                  setUsername(conn.username);
+                  setPassword((conn as any).password || '');
+                  setServerName(conn.name);
+                }}
+                className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between group ${
                   selectedId === conn.id
-                    ? 'bg-[var(--accent)] text-black font-medium shadow-md'
-                    : 'hover:bg-white/5 text-gray-300'
+                    ? 'bg-[var(--accent)] text-black font-medium border-transparent shadow-lg'
+                    : 'bg-[#1e1e2e] border-white/[0.06] hover:border-white/20 text-gray-200'
                 }`}
               >
-                <div className="flex items-center space-x-3 truncate">
+                <div className="flex items-center space-x-3 overflow-hidden">
                   <div
                     className="w-3 h-3 rounded-full shrink-0"
                     style={{ backgroundColor: conn.color || '#89b4fa' }}
@@ -123,6 +142,7 @@ export default function ConnectionScreen() {
                   onClick={(e) => {
                     e.stopPropagation();
                     removeConnection(conn.id);
+                    if (selectedId === conn.id) setSelectedId(null);
                   }}
                   className={`opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-black/10 transition-opacity ${
                     selectedId === conn.id ? 'text-black' : 'text-gray-400 hover:text-red-400'
@@ -136,7 +156,15 @@ export default function ConnectionScreen() {
           )}
 
           <button
-            onClick={() => setShowAddModal(true)}
+            onClick={() => {
+              setSelectedId(null);
+              setHost('');
+              setPort(22);
+              setUsername('root');
+              setPassword('');
+              setServerName('');
+              setShowAddModal(true);
+            }}
             className="w-full mt-2 px-3 py-2.5 rounded-xl border border-dashed border-white/20 text-xs text-gray-400 hover:text-white hover:bg-white/5 flex items-center justify-center space-x-2 transition-colors font-medium"
           >
             <Plus className="w-4 h-4" />
@@ -163,14 +191,14 @@ export default function ConnectionScreen() {
           <div>
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-bold text-white tracking-tight">
-                {selectedConn ? `Connect to ${selectedConn.name}` : 'Quick Connect to Server'}
+                {selectedConn ? `Connect to ${selectedConn.name}` : 'Quick Connect to Linux Server'}
               </h2>
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-medium">
                 SSH2 Direct
               </span>
             </div>
             <p className="text-xs text-gray-400 mt-1">
-              Connect to any remote Linux box without installing any server daemon or agent.
+              Connect to your Linux server without installing any daemon or software on the server.
             </p>
           </div>
 
@@ -180,9 +208,9 @@ export default function ConnectionScreen() {
                 <label className="text-gray-400 block mb-1 font-medium">IP Address / Hostname</label>
                 <input
                   type="text"
-                  value={selectedConn ? selectedConn.host : host}
+                  value={host}
                   onChange={e => setHost(e.target.value)}
-                  placeholder="192.168.1.100 or server.com"
+                  placeholder="e.g. 192.168.1.100 or server.com"
                   className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-[var(--accent)]"
                 />
               </div>
@@ -191,7 +219,7 @@ export default function ConnectionScreen() {
                 <label className="text-gray-400 block mb-1 font-medium">Port</label>
                 <input
                   type="number"
-                  value={selectedConn ? selectedConn.port : port}
+                  value={port}
                   onChange={e => setPort(parseInt(e.target.value) || 22)}
                   className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-[var(--accent)]"
                 />
@@ -203,31 +231,33 @@ export default function ConnectionScreen() {
                 <label className="text-gray-400 block mb-1 font-medium">Username</label>
                 <input
                   type="text"
-                  value={selectedConn ? selectedConn.username : username}
+                  value={username}
                   onChange={e => setUsername(e.target.value)}
-                  placeholder="root or deploy"
+                  placeholder="e.g. root or ubuntu"
                   className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-[var(--accent)]"
                 />
               </div>
 
               <div>
-                <label className="text-gray-400 block mb-1 font-medium">Auth Method</label>
-                <select className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-[var(--accent)]">
-                  <option>Password</option>
-                  <option>SSH Private Key (~/.ssh/id_rsa)</option>
-                  <option>SSH Agent</option>
-                </select>
+                <label className="text-gray-400 block mb-1 font-medium">Password</label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="Enter SSH password..."
+                  className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-[var(--accent)]"
+                />
               </div>
             </div>
 
             <div>
-              <label className="text-gray-400 block mb-1 font-medium">Password or Key Passphrase</label>
+              <label className="text-gray-400 block mb-1 font-medium">SSH Key Path (Optional)</label>
               <input
-                type="password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder="Enter password..."
-                className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-[var(--accent)]"
+                type="text"
+                value={privateKeyPath}
+                onChange={e => setPrivateKeyPath(e.target.value)}
+                placeholder="e.g. C:\Users\Username\.ssh\id_rsa"
+                className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-[var(--accent)]"
               />
             </div>
           </div>
@@ -246,9 +276,9 @@ export default function ConnectionScreen() {
           <div className="border-t border-white/[0.05] pt-4 flex items-center justify-between text-[11px] text-gray-500">
             <span className="flex items-center space-x-1">
               <Shield className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Encrypted via pure Rust SSH2</span>
+              <span>Native SSH2 direct tunnel</span>
             </span>
-            <span>Zero server overhead</span>
+            <span>Zero server installation</span>
           </div>
         </div>
       </div>
@@ -264,7 +294,7 @@ export default function ConnectionScreen() {
                 <input
                   type="text"
                   required
-                  placeholder="e.g. AWS Production EC2"
+                  placeholder="e.g. Production Web Node"
                   value={serverName}
                   onChange={e => setServerName(e.target.value)}
                   className="w-full bg-[#11111b] border border-white/10 rounded-lg px-3 py-2 text-white focus:outline-none"
@@ -273,10 +303,11 @@ export default function ConnectionScreen() {
 
               <div className="grid grid-cols-3 gap-2">
                 <div className="col-span-2">
-                  <label className="text-gray-400 block mb-1">Host / IP</label>
+                  <label className="text-gray-400 block mb-1">IP Address / Host</label>
                   <input
                     type="text"
                     required
+                    placeholder="192.168.1.100"
                     value={host}
                     onChange={e => setHost(e.target.value)}
                     className="w-full bg-[#11111b] border border-white/10 rounded-lg px-3 py-2 text-white font-mono focus:outline-none"
@@ -293,15 +324,26 @@ export default function ConnectionScreen() {
                 </div>
               </div>
 
-              <div>
-                <label className="text-gray-400 block mb-1">Username</label>
-                <input
-                  type="text"
-                  required
-                  value={username}
-                  onChange={e => setUsername(e.target.value)}
-                  className="w-full bg-[#11111b] border border-white/10 rounded-lg px-3 py-2 text-white font-mono focus:outline-none"
-                />
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-gray-400 block mb-1">Username</label>
+                  <input
+                    type="text"
+                    required
+                    value={username}
+                    onChange={e => setUsername(e.target.value)}
+                    className="w-full bg-[#11111b] border border-white/10 rounded-lg px-3 py-2 text-white font-mono focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-gray-400 block mb-1">Password</label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={e => setPassword(e.target.value)}
+                    className="w-full bg-[#11111b] border border-white/10 rounded-lg px-3 py-2 text-white focus:outline-none"
+                  />
+                </div>
               </div>
             </div>
 

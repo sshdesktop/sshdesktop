@@ -9,8 +9,8 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
     try {
       return await invoke<T>(cmd, args);
     } catch (err) {
-      console.warn(`[CloudDesk Tauri] Command '${cmd}' failed:`, err);
-      return fallback;
+      console.error(`[CloudDesk Tauri] Command '${cmd}' failed:`, err);
+      throw err;
     }
   }
   return fallback;
@@ -18,7 +18,7 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
 
 // ----------------- SSH Commands -----------------
 export async function sshConnect(config: any): Promise<string> {
-  return safeInvoke<string>('ssh_connect', { config }, 'demo-conn-id');
+  return safeInvoke<string>('ssh_connect', { config }, '');
 }
 
 export async function sshDisconnect(connId: string): Promise<void> {
@@ -34,17 +34,26 @@ export async function sshTestConnection(config: any): Promise<boolean> {
 }
 
 export async function sshExec(connId: string, command: string): Promise<{ stdout: string; stderr: string; exit_code: number; duration_ms: number }> {
-  return safeInvoke('ssh_exec', { connId, command }, {
-    stdout: `Executed: ${command}\n`,
-    stderr: '',
-    exit_code: 0,
-    duration_ms: 24,
-  });
+  try {
+    return await safeInvoke('ssh_exec', { connId, command }, {
+      stdout: '',
+      stderr: '',
+      exit_code: 0,
+      duration_ms: 0,
+    });
+  } catch (err: any) {
+    return {
+      stdout: '',
+      stderr: String(err?.message || err),
+      exit_code: 1,
+      duration_ms: 0,
+    };
+  }
 }
 
 // ----------------- Terminal Commands -----------------
 export async function terminalCreate(connId: string, rows: number = 24, cols: number = 80): Promise<string> {
-  return safeInvoke<string>('terminal_create', { connId, rows, cols }, 'term-default');
+  return safeInvoke<string>('terminal_create', { connId, rows, cols }, 'term-1');
 }
 
 export async function terminalWrite(terminalId: string, data: number[]): Promise<void> {
@@ -61,11 +70,15 @@ export async function terminalClose(terminalId: string): Promise<void> {
 
 // ----------------- SFTP Commands -----------------
 export async function sftpListDir(connId: string, path: string): Promise<any[]> {
-  return safeInvoke<any[]>('sftp_list_dir', { connId, path }, []);
+  try {
+    return await safeInvoke<any[]>('sftp_list_dir', { connId, path }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function sftpReadTextFile(connId: string, path: string): Promise<string> {
-  return safeInvoke<string>('sftp_read_text_file', { connId, path }, '# Empty file\n');
+  return safeInvoke<string>('sftp_read_text_file', { connId, path }, '');
 }
 
 export async function sftpWriteTextFile(connId: string, path: string, content: string): Promise<void> {
@@ -90,34 +103,35 @@ export async function sftpChmod(connId: string, path: string, mode: number): Pro
 
 // ----------------- System Commands -----------------
 export async function systemGetStats(connId: string = 'default'): Promise<any> {
-  return safeInvoke<any>('system_get_stats', { connId }, {
-    cpu_percent: [18.4, 14.2, 22.1, 16.5],
-    ram_total: 16 * 1024 * 1024 * 1024,
-    ram_used: 6 * 1024 * 1024 * 1024,
-    ram_free: 7 * 1024 * 1024 * 1024,
-    ram_cached: 3 * 1024 * 1024 * 1024,
-    swap_total: 2 * 1024 * 1024 * 1024,
-    swap_used: 0,
-    load_avg: [0.14, 0.08, 0.05],
-    uptime_seconds: 32 * 86400,
-    hostname: 'clouddesk-node',
-    os_name: 'Ubuntu',
-    os_version: '24.04 LTS',
-    kernel: '6.8.0-generic',
-    arch: 'x86_64',
-  });
+  try {
+    return await safeInvoke<any>('system_get_stats', { connId }, null);
+  } catch {
+    return null;
+  }
 }
 
 export async function systemGetDisks(connId: string = 'default'): Promise<any[]> {
-  return safeInvoke<any[]>('system_get_disks', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('system_get_disks', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function systemGetNetwork(connId: string = 'default'): Promise<any[]> {
-  return safeInvoke<any[]>('system_get_network', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('system_get_network', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function processList(connId: string = 'default'): Promise<any[]> {
-  return safeInvoke<any[]>('process_list', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('process_list', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function processKill(connId: string, pid: number, signal: string): Promise<void> {
@@ -129,11 +143,15 @@ export async function processRenice(connId: string, pid: number, value: number):
 }
 
 export async function serviceList(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('service_list', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('service_list', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function serviceAction(connId: string, name: string, action: string): Promise<string> {
-  return safeInvoke<string>('service_action', { connId, name, action }, `Action ${action} executed`);
+  return safeInvoke<string>('service_action', { connId, name, action }, '');
 }
 
 export async function serviceStatus(connId: string, name: string): Promise<string> {
@@ -145,11 +163,15 @@ export async function serviceLogs(connId: string, name: string, lines: number): 
 }
 
 export async function dockerContainers(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('docker_containers', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('docker_containers', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function dockerAction(connId: string, containerId: string, action: string): Promise<string> {
-  return safeInvoke<string>('docker_action', { connId, containerId, action }, `Docker ${action} completed`);
+  return safeInvoke<string>('docker_action', { connId, containerId, action }, '');
 }
 
 export async function dockerLogs(connId: string, containerId: string, lines: number): Promise<string> {
@@ -157,15 +179,27 @@ export async function dockerLogs(connId: string, containerId: string, lines: num
 }
 
 export async function dockerImages(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('docker_images', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('docker_images', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function networkPorts(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('network_ports', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('network_ports', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function networkConnections(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('network_connections', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('network_connections', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function networkPing(connId: string, host: string): Promise<string> {
@@ -177,7 +211,11 @@ export async function networkDnsLookup(connId: string, domain: string): Promise<
 }
 
 export async function packageList(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('package_list', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('package_list', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function packageInstall(connId: string, name: string): Promise<string> {
@@ -193,11 +231,19 @@ export async function packageUpdate(connId: string): Promise<string> {
 }
 
 export async function packageUpgradable(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('package_upgradable', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('package_upgradable', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function userList(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('user_list', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('user_list', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function userAdd(connId: string, username: string, shell?: string, groups?: string[]): Promise<void> {
@@ -209,11 +255,19 @@ export async function userDelete(connId: string, username: string, removeHome: b
 }
 
 export async function groupList(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('group_list', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('group_list', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function cronList(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('cron_list', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('cron_list', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function cronAdd(connId: string, schedule: string, command: string): Promise<void> {
@@ -241,31 +295,43 @@ export async function firewallStatus(connId: string): Promise<string> {
 }
 
 export async function firewallRules(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('firewall_rules', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('firewall_rules', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function firewallAddRule(connId: string, port: string, protocol: string, action: string): Promise<string> {
-  return safeInvoke<string>('firewall_add_rule', { connId, port, protocol, action }, 'Rule added');
+  return safeInvoke<string>('firewall_add_rule', { connId, port, protocol, action }, '');
 }
 
 export async function firewallDeleteRule(connId: string, ruleNumber: number): Promise<string> {
-  return safeInvoke<string>('firewall_delete_rule', { connId, ruleNumber }, 'Rule deleted');
+  return safeInvoke<string>('firewall_delete_rule', { connId, ruleNumber }, '');
 }
 
 export async function firewallToggle(connId: string, enable: boolean): Promise<string> {
-  return safeInvoke<string>('firewall_toggle', { connId, enable }, `Firewall ${enable ? 'enabled' : 'disabled'}`);
+  return safeInvoke<string>('firewall_toggle', { connId, enable }, '');
 }
 
 export async function diskList(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('disk_list', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('disk_list', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function diskUsage(connId: string): Promise<any[]> {
-  return safeInvoke<any[]>('disk_usage', { connId }, []);
+  try {
+    return await safeInvoke<any[]>('disk_usage', { connId }, []);
+  } catch {
+    return [];
+  }
 }
 
 export async function diskSmart(connId: string, device: string): Promise<string> {
-  return safeInvoke<string>('disk_smart', { connId, device }, 'SMART Status: PASSED');
+  return safeInvoke<string>('disk_smart', { connId, device }, '');
 }
 
 export async function diskLargestDirs(connId: string, path: string): Promise<string> {

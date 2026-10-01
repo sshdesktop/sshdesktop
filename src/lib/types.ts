@@ -7,6 +7,8 @@ export interface SavedConnection {
   authMethod: 'password' | 'key';
   password?: string;
   keyPath?: string;
+  privateKeyPath?: string;
+  private_key_path?: string;
   color?: string;
   group?: string;
   tags?: string[];

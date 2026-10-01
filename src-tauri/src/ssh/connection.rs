@@ -4,6 +4,8 @@ use crate::AppState;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConnectionConfig {
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     pub host: String,
     pub port: u16,
@@ -45,8 +47,8 @@ pub struct SshConnection {
 
 #[tauri::command]
 pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionConfig) -> Result<String, String> {
-    let id = Uuid::new_v4().to_string();
-    log::info!("CloudDesk: Establishing SSH connection for {} ({}:{})", config.name, config.host, config.port);
+    let id = config.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    log::info!("CloudDesk: Establishing SSH connection [{}] for {} ({}:{})", id, config.name, config.host, config.port);
 
     // Test connectivity using plink (if password) or ssh
     let host = &config.host;
@@ -74,6 +76,9 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
                 if out.status.success() {
                     verified = true;
                     log::info!("CloudDesk: Plink connection test successful for {}", host);
+                } else {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    log::warn!("CloudDesk: Plink test warning for {}: {}", host, err);
                 }
             }
         }
@@ -112,14 +117,23 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
         connected_at: chrono::Utc::now().timestamp(),
     };
 
-    state.connections.lock().insert(id.clone(), conn);
+    {
+        let mut map = state.connections.lock();
+        map.insert(id.clone(), conn.clone());
+        map.insert("default".to_string(), conn);
+    }
+
     log::info!("CloudDesk: SSH Session established with ID: {} (verified: {})", id, verified);
     Ok(id)
 }
 
 #[tauri::command]
 pub async fn ssh_disconnect(state: tauri::State<'_, AppState>, conn_id: String) -> Result<(), String> {
-    state.connections.lock().remove(&conn_id);
+    let mut map = state.connections.lock();
+    map.remove(&conn_id);
+    if map.len() == 1 && map.contains_key("default") {
+        map.remove("default");
+    }
     log::info!("CloudDesk: SSH Session disconnected for ID: {}", conn_id);
     Ok(())
 }
@@ -129,8 +143,9 @@ pub async fn ssh_list_connections(state: tauri::State<'_, AppState>) -> Result<V
     let list: Vec<ConnectionInfo> = state
         .connections
         .lock()
-        .values()
-        .map(|c| ConnectionInfo {
+        .iter()
+        .filter(|(k, _)| *k != "default")
+        .map(|(_, c)| ConnectionInfo {
             id: c.id.clone(),
             name: c.config.name.clone(),
             host: c.config.host.clone(),

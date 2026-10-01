@@ -2,12 +2,15 @@ import React, { useState, useEffect } from 'react';
 import { Cloud, Bell, LogOut, Settings, ShieldCheck, Terminal, Cpu, MemoryStick } from 'lucide-react';
 import { useConnectionStore } from '../lib/store';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
+import { systemGetStats } from '../lib/tauri-bridge';
 
 export default function Taskbar() {
   const { activeConnectionId, connectedServers, disconnect } = useConnectionStore();
   const { openApp } = useWindowManager();
   const [time, setTime] = useState('');
   const [showAppleMenu, setShowAppleMenu] = useState(false);
+  const [cpuUsage, setCpuUsage] = useState<number>(0);
+  const [ramUsage, setRamUsage] = useState<number>(0);
 
   const server = activeConnectionId ? connectedServers.get(activeConnectionId) : null;
 
@@ -24,6 +27,30 @@ export default function Taskbar() {
     const interval = setInterval(updateTime, 1000);
     return () => clearInterval(interval);
   }, []);
+
+  // Poll real stats for Taskbar gauges
+  useEffect(() => {
+    if (!activeConnectionId) return;
+    const fetchGauges = async () => {
+      try {
+        const stats = await systemGetStats(activeConnectionId);
+        if (stats) {
+          const cpu = Array.isArray(stats.cpu_percent) && stats.cpu_percent.length > 0
+            ? Math.round(stats.cpu_percent[0])
+            : 0;
+          const ram = stats.ram_total > 0
+            ? Math.round((stats.ram_used / stats.ram_total) * 100)
+            : 0;
+          setCpuUsage(cpu);
+          setRamUsage(ram);
+        }
+      } catch {}
+    };
+
+    fetchGauges();
+    const interval = setInterval(fetchGauges, 3000);
+    return () => clearInterval(interval);
+  }, [activeConnectionId]);
 
   return (
     <div className="absolute top-0 left-0 w-full h-8 bg-[#181825]/85 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between px-3 z-50 text-xs text-gray-300 window-drag select-none shadow-sm">
@@ -104,13 +131,13 @@ export default function Taskbar() {
         )}
 
         {/* Live Gauges */}
-        <div className="flex items-center space-x-1 text-blue-400">
+        <div className="flex items-center space-x-1 text-blue-400" title="Live CPU Utilization">
           <Cpu className="w-3 h-3" />
-          <span>18%</span>
+          <span>{cpuUsage}%</span>
         </div>
-        <div className="flex items-center space-x-1 text-purple-400">
+        <div className="flex items-center space-x-1 text-purple-400" title="Live Memory Utilization">
           <MemoryStick className="w-3 h-3" />
-          <span>42%</span>
+          <span>{ramUsage}%</span>
         </div>
 
         {/* Clock */}
