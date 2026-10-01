@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for CloudDesk desktop windows",
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    "shell:default",
+    "clipboard-manager:default",
+    "fs:default",
+    "dialog:default"
+  ]
+}
