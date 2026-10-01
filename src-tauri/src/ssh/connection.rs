@@ -55,12 +55,12 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
     let port = config.port.to_string();
     let user = &config.username;
     let mut verified = false;
+    let mut last_error = String::new();
 
     if let Some(pwd) = &config.password {
         if !pwd.is_empty() {
-            let plink_test = tokio::process::Command::new("plink")
-                .arg("-batch")
-                .arg("-ssh")
+            let mut cmd = tokio::process::Command::new("plink");
+            cmd.arg("-ssh")
                 .arg("-P")
                 .arg(&port)
                 .arg("-l")
@@ -69,30 +69,63 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
                 .arg(pwd)
                 .arg(host)
                 .arg("echo clouddesk-connected")
-                .output()
-                .await;
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
 
-            if let Ok(out) = plink_test {
-                if out.status.success() {
-                    verified = true;
-                    log::info!("CloudDesk: Plink connection test successful for {}", host);
-                } else {
-                    let err = String::from_utf8_lossy(&out.stderr);
-                    log::warn!("CloudDesk: Plink test warning for {}: {}", host, err);
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
+                    }
+                    match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait_with_output()).await {
+                        Ok(Ok(out)) => {
+                            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                            if out.status.success() || stdout.contains("clouddesk-connected") {
+                                verified = true;
+                                log::info!("CloudDesk: Plink connection test successful for {}", host);
+                            } else {
+                                let err_raw = if !stderr.is_empty() { stderr } else { stdout };
+                                last_error = err_raw
+                                    .lines()
+                                    .filter(|l| !l.contains("Store key in cache") && !l.contains("The server's") && !l.contains("fingerprint"))
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                                    .trim()
+                                    .to_string();
+                                if last_error.is_empty() {
+                                    last_error = "SSH Authentication failed (access denied or wrong password)".to_string();
+                                }
+                                log::warn!("CloudDesk: Plink test failed for {}: {}", host, last_error);
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            last_error = format!("Plink execution error: {}", e);
+                        }
+                        Err(_) => {
+                            last_error = format!("Connection timed out after 10s connecting to {}:{}", host, port);
+                        }
+                    }
+                }
+                Err(e) => {
+                    last_error = format!("Could not launch plink: {}", e);
                 }
             }
         }
     }
 
-    if !verified {
+    if !verified && (config.password.is_none() || config.password.as_ref().map(|s| s.is_empty()).unwrap_or(true)) {
         let mut ssh_test = tokio::process::Command::new("ssh");
         ssh_test
             .arg("-p")
             .arg(&port)
             .arg("-o")
-            .arg("StrictHostKeyChecking=no")
+            .arg("StrictHostKeyChecking=accept-new")
             .arg("-o")
-            .arg("ConnectTimeout=4");
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("ConnectTimeout=6");
 
         if let Some(key) = &config.private_key_path {
             if !key.is_empty() {
@@ -102,12 +135,38 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
 
         ssh_test.arg(format!("{}@{}", user, host)).arg("echo clouddesk-connected");
 
-        if let Ok(out) = ssh_test.output().await {
-            if out.status.success() {
-                verified = true;
-                log::info!("CloudDesk: OpenSSH connection test successful for {}", host);
+        match tokio::time::timeout(std::time::Duration::from_secs(10), ssh_test.output()).await {
+            Ok(Ok(out)) => {
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                if out.status.success() || stdout.contains("clouddesk-connected") {
+                    verified = true;
+                    log::info!("CloudDesk: OpenSSH connection test successful for {}", host);
+                } else {
+                    last_error = if !stderr.is_empty() {
+                        stderr.trim().to_string()
+                    } else {
+                        "OpenSSH authentication failed (Permission denied)".to_string()
+                    };
+                }
+            }
+            Ok(Err(e)) => {
+                last_error = format!("OpenSSH execution error: {}", e);
+            }
+            Err(_) => {
+                last_error = format!("Connection timed out after 10s connecting to {}:{}", host, port);
             }
         }
+    }
+
+    if !verified {
+        let clean_error = if last_error.is_empty() {
+            format!("Failed to connect to {}:{}. Please check host IP, port, and credentials.", host, port)
+        } else {
+            last_error
+        };
+        log::error!("CloudDesk: Connection failed for {}: {}", host, clean_error);
+        return Err(clean_error);
     }
 
     let conn = SshConnection {
@@ -123,7 +182,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
         map.insert("default".to_string(), conn);
     }
 
-    log::info!("CloudDesk: SSH Session established with ID: {} (verified: {})", id, verified);
+    log::info!("CloudDesk: SSH Session established with ID: {} (verified: true)", id);
     Ok(id)
 }
 

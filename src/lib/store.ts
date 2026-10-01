@@ -26,27 +26,28 @@ export const useConnectionStore = create<ConnectionState>()(
       connect: async (id, overrideConfig) => {
         const conn = get().connections.find(c => c.id === id);
         const target: any = { ...conn, ...overrideConfig };
-        if (target.host) {
-          try {
-            await sshConnect({
-              id,
-              name: target.name || `${target.username}@${target.host}`,
-              host: target.host,
-              port: Number(target.port) || 22,
-              username: target.username,
-              password: target.password,
-              private_key_path: target.privateKeyPath || target.private_key_path,
-              color: target.color,
-              group: target.group,
-              tags: target.tags || [],
-            });
-          } catch (err) {
-            console.warn('[CloudDesk] sshConnect warning:', err);
-          }
-          const newMap = new Map(get().connectedServers);
-          newMap.set(id, { id, name: target.name || target.host, host: target.host, status: 'connected' });
-          set({ connectedServers: newMap, activeConnectionId: id });
+        if (!target.host) {
+          throw new Error('Server IP or hostname is required');
         }
+
+        // Strictly await backend verification; will throw if credentials or host are invalid
+        await sshConnect({
+          id,
+          name: target.name || `${target.username}@${target.host}`,
+          host: target.host,
+          port: Number(target.port) || 22,
+          username: target.username,
+          password: target.password,
+          private_key_path: target.privateKeyPath || target.private_key_path,
+          color: target.color,
+          group: target.group,
+          tags: target.tags || [],
+        });
+
+        // Only mark connected when backend verification succeeds
+        const newMap = new Map(get().connectedServers);
+        newMap.set(id, { id, name: target.name || target.host, host: target.host, status: 'connected' });
+        set({ connectedServers: newMap, activeConnectionId: id });
       },
       disconnect: async (id) => {
         try {

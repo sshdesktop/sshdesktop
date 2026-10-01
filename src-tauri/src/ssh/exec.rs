@@ -37,9 +37,8 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         // 1. If password is provided, try plink (PuTTY CLI - installed on Windows)
         if let Some(pwd) = &conn.config.password {
             if !pwd.is_empty() {
-                let plink_res = tokio::process::Command::new("plink")
-                    .arg("-batch")
-                    .arg("-ssh")
+                let mut cmd = tokio::process::Command::new("plink");
+                cmd.arg("-ssh")
                     .arg("-P")
                     .arg(&port)
                     .arg("-l")
@@ -48,17 +47,23 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                     .arg(pwd)
                     .arg(host)
                     .arg(command)
-                    .output()
-                    .await;
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
 
-                if let Ok(output) = plink_res {
-                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                    let exit_code = output.status.code().unwrap_or(0);
-                    if output.status.success() || !stdout.is_empty() {
-                        return (stdout, exit_code);
-                    } else if !stderr.is_empty() {
-                        return (stderr, exit_code);
+                if let Ok(mut child) = cmd.spawn() {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
+                    }
+                    if let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(15), child.wait_with_output()).await {
+                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                        let exit_code = output.status.code().unwrap_or(0);
+                        if output.status.success() || !stdout.is_empty() {
+                            return (stdout, exit_code);
+                        } else if !stderr.is_empty() {
+                            return (stderr, exit_code);
+                        }
                     }
                 }
             }
