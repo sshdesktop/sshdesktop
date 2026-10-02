@@ -7,12 +7,17 @@ export function useWindowManager() {
     // Check if an instance of this app is already open
     const existing = store.windows.find(w => w.appId === appId);
     if (existing) {
-      // If minimized, un-minimize it
       if (existing.minimized) {
-        store.minimizeWindow(existing.id); // toggles minimize
+        // 1. Minimized window -> restore and bring to front
+        store.restoreWindow(existing.id);
+      } else if (existing.focused) {
+        // 2. Already focused window -> second click minimizes it
+        store.minimizeWindow(existing.id);
+      } else {
+        // 3. Unfocused window in background -> bring to front and focus
+        store.bringToFront(existing.id);
+        store.focusWindow(existing.id);
       }
-      store.focusWindow(existing.id);
-      store.bringToFront(existing.id);
     } else {
       // Calculate a staggered position for new windows
       const offset = (store.windows.length % 8) * 30;
@@ -37,6 +42,7 @@ export function useWindowManager() {
     close: store.closeWindow,
     focus: store.focusWindow,
     minimize: store.minimizeWindow,
+    restore: store.restoreWindow,
     maximize: store.maximizeWindow,
   };
 }

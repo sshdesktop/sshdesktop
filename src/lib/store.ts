@@ -72,6 +72,7 @@ interface WindowStoreState {
   closeWindow: (id: string) => void;
   focusWindow: (id: string) => void;
   minimizeWindow: (id: string) => void;
+  restoreWindow: (id: string) => void;
   maximizeWindow: (id: string) => void;
   updatePosition: (id: string, x: number, y: number) => void;
   updateSize: (id: string, width: number, height: number) => void;
@@ -84,7 +85,7 @@ export const useWindowStore = create<WindowStoreState>((set) => ({
   openWindow: (win) => set((state) => {
     const id = `win-${Date.now()}`;
     return {
-      windows: [...state.windows, { ...win, id, zIndex: state.nextZIndex }],
+      windows: [...state.windows.map(w => ({ ...w, focused: false })), { ...win, id, zIndex: state.nextZIndex, focused: true }],
       nextZIndex: state.nextZIndex + 1
     };
   }),
@@ -99,6 +100,10 @@ export const useWindowStore = create<WindowStoreState>((set) => ({
   })),
   minimizeWindow: (id) => set((state) => ({
     windows: state.windows.map(w => w.id === id ? { ...w, minimized: true, focused: false } : w)
+  })),
+  restoreWindow: (id) => set((state) => ({
+    windows: state.windows.map(w => w.id === id ? { ...w, minimized: false, focused: true, zIndex: state.nextZIndex } : { ...w, focused: false }),
+    nextZIndex: state.nextZIndex + 1
   })),
   maximizeWindow: (id) => set((state) => ({
     windows: state.windows.map(w => w.id === id ? { ...w, maximized: !w.maximized } : w)
@@ -117,6 +122,18 @@ export const useWindowStore = create<WindowStoreState>((set) => ({
     })),
     nextZIndex: state.nextZIndex + 1
   }))
+}));
+
+interface EditorStoreState {
+  pendingFilePath: string | null;
+  openFileInEditor: (path: string) => void;
+  clearPendingFile: () => void;
+}
+
+export const useEditorStore = create<EditorStoreState>((set) => ({
+  pendingFilePath: null,
+  openFileInEditor: (path) => set({ pendingFilePath: path }),
+  clearPendingFile: () => set({ pendingFilePath: null }),
 }));
 
 interface SettingsState {

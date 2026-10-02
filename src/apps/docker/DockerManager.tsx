@@ -173,17 +173,18 @@ export default function DockerManager() {
 
       {/* Containers View */}
       {activeTab === 'containers' && (
-        <div className="flex-1 bg-[#1e1e2e] rounded-xl border border-white/[0.08] overflow-hidden flex flex-col">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08]">
-              <tr>
-                <th className="py-2.5 px-3">Status</th>
-                <th className="py-2.5 px-3">Name</th>
-                <th className="py-2.5 px-3">Image</th>
-                <th className="py-2.5 px-3">Ports</th>
-                <th className="py-2.5 px-3 text-right">Actions</th>
-              </tr>
-            </thead>
+        <div className="flex-1 min-h-0 bg-[#1e1e2e] rounded-xl border border-white/[0.08] flex flex-col overflow-hidden">
+          <div className="flex-1 overflow-y-auto overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08] sticky top-0 z-10 shadow-sm">
+                <tr>
+                  <th className="py-2.5 px-3">Status</th>
+                  <th className="py-2.5 px-3">Name</th>
+                  <th className="py-2.5 px-3">Image</th>
+                  <th className="py-2.5 px-3">Ports</th>
+                  <th className="py-2.5 px-3 text-right">Actions</th>
+                </tr>
+              </thead>
             <tbody className="divide-y divide-white/[0.05]">
               {containers.length === 0 ? (
                 <tr>
@@ -243,22 +244,24 @@ export default function DockerManager() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
       {/* Images View */}
       {activeTab === 'images' && (
-        <div className="flex-1 bg-[#1e1e2e] rounded-xl border border-white/[0.08] overflow-hidden flex flex-col">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08]">
-              <tr>
-                <th className="py-2.5 px-3">Repository</th>
-                <th className="py-2.5 px-3">Tag</th>
-                <th className="py-2.5 px-3">Image ID</th>
-                <th className="py-2.5 px-3">Size</th>
-                <th className="py-2.5 px-3">Created</th>
-              </tr>
-            </thead>
+        <div className="flex-1 min-h-0 bg-[#1e1e2e] rounded-xl border border-white/[0.08] flex flex-col overflow-hidden">
+          <div className="flex-1 overflow-y-auto overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08] sticky top-0 z-10 shadow-sm">
+                <tr>
+                  <th className="py-2.5 px-3">Repository</th>
+                  <th className="py-2.5 px-3">Tag</th>
+                  <th className="py-2.5 px-3">Image ID</th>
+                  <th className="py-2.5 px-3">Size</th>
+                  <th className="py-2.5 px-3">Created</th>
+                </tr>
+              </thead>
             <tbody className="divide-y divide-white/[0.05]">
               {images.length === 0 ? (
                 <tr>
@@ -279,6 +282,7 @@ export default function DockerManager() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 

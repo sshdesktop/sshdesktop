@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
 import { Save, FileCode, Check, RefreshCw, X, Plus, FolderOpen, AlertCircle } from 'lucide-react';
 import { sftpReadTextFile, sftpWriteTextFile } from '../../lib/tauri-bridge';
-import { useConnectionStore } from '../../lib/store';
+import { useConnectionStore, useEditorStore } from '../../lib/store';
 
 interface FileTab {
   id: string;
@@ -50,6 +50,39 @@ export default function CodeEditor() {
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
+  const { pendingFilePath, clearPendingFile } = useEditorStore();
+
+  useEffect(() => {
+    if (pendingFilePath) {
+      const openTarget = async () => {
+        setLoading(true);
+        setError(null);
+        try {
+          const content = await sftpReadTextFile(activeConnId, pendingFilePath);
+          const fileName = pendingFilePath.split('/').filter(Boolean).pop() || 'file';
+          const newTab: FileTab = {
+            id: String(Date.now()),
+            name: fileName,
+            remotePath: pendingFilePath,
+            language: detectLanguage(fileName),
+            content,
+            isModified: false,
+          };
+          setFiles(prev => {
+            const withoutSame = prev.filter(f => f.remotePath !== pendingFilePath);
+            return [...withoutSame, newTab];
+          });
+          setActiveFileId(newTab.id);
+        } catch (err: any) {
+          setError(`Failed to open remote file ${pendingFilePath}: ${err?.message || err}`);
+        } finally {
+          setLoading(false);
+          clearPendingFile();
+        }
+      };
+      openTarget();
+    }
+  }, [pendingFilePath, activeConnId, clearPendingFile]);
 
   const activeFile = files.find(f => f.id === activeFileId) || files[0];
 

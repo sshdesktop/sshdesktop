@@ -199,18 +199,19 @@ export default function UserManager() {
 
       {/* Users Tab */}
       {tab === 'users' && (
-        <div className="flex-1 bg-[#1e1e2e] rounded-xl border border-white/[0.08] overflow-hidden flex flex-col">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08]">
-              <tr>
-                <th className="py-2.5 px-3">Username</th>
-                <th className="py-2.5 px-3">UID / GID</th>
-                <th className="py-2.5 px-3">Home Directory</th>
-                <th className="py-2.5 px-3">Login Shell</th>
-                <th className="py-2.5 px-3">Privileges</th>
-                <th className="py-2.5 px-3 text-right">Actions</th>
-              </tr>
-            </thead>
+        <div className="flex-1 min-h-0 bg-[#1e1e2e] rounded-xl border border-white/[0.08] flex flex-col overflow-hidden">
+          <div className="flex-1 overflow-y-auto overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08] sticky top-0 z-10 shadow-sm">
+                <tr>
+                  <th className="py-2.5 px-3">Username</th>
+                  <th className="py-2.5 px-3">UID / GID</th>
+                  <th className="py-2.5 px-3">Home Directory</th>
+                  <th className="py-2.5 px-3">Login Shell</th>
+                  <th className="py-2.5 px-3">Privileges</th>
+                  <th className="py-2.5 px-3 text-right">Actions</th>
+                </tr>
+              </thead>
             <tbody className="divide-y divide-white/[0.05]">
               {users.length === 0 ? (
                 <tr>
@@ -271,20 +272,22 @@ export default function UserManager() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
       {/* Groups Tab */}
       {tab === 'groups' && (
-        <div className="flex-1 bg-[#1e1e2e] rounded-xl border border-white/[0.08] overflow-hidden flex flex-col">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08]">
-              <tr>
-                <th className="py-2.5 px-3">Group Name</th>
-                <th className="py-2.5 px-3">GID</th>
-                <th className="py-2.5 px-3">Members</th>
-              </tr>
-            </thead>
+        <div className="flex-1 min-h-0 bg-[#1e1e2e] rounded-xl border border-white/[0.08] flex flex-col overflow-hidden">
+          <div className="flex-1 overflow-y-auto overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08] sticky top-0 z-10 shadow-sm">
+                <tr>
+                  <th className="py-2.5 px-3">Group Name</th>
+                  <th className="py-2.5 px-3">GID</th>
+                  <th className="py-2.5 px-3">Members</th>
+                </tr>
+              </thead>
             <tbody className="divide-y divide-white/[0.05]">
               {groups.length === 0 ? (
                 <tr>
@@ -305,22 +308,24 @@ export default function UserManager() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
       {/* Sessions Tab */}
       {tab === 'sessions' && (
-        <div className="flex-1 bg-[#1e1e2e] rounded-xl border border-white/[0.08] overflow-hidden flex flex-col">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08]">
-              <tr>
-                <th className="py-2.5 px-3">User</th>
-                <th className="py-2.5 px-3">TTY</th>
-                <th className="py-2.5 px-3">From Host</th>
-                <th className="py-2.5 px-3">Login Time</th>
-                <th className="py-2.5 px-3">Status</th>
-              </tr>
-            </thead>
+        <div className="flex-1 min-h-0 bg-[#1e1e2e] rounded-xl border border-white/[0.08] flex flex-col overflow-hidden">
+          <div className="flex-1 overflow-y-auto overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08] sticky top-0 z-10 shadow-sm">
+                <tr>
+                  <th className="py-2.5 px-3">User</th>
+                  <th className="py-2.5 px-3">TTY</th>
+                  <th className="py-2.5 px-3">From Host</th>
+                  <th className="py-2.5 px-3">Login Time</th>
+                  <th className="py-2.5 px-3">Status</th>
+                </tr>
+              </thead>
             <tbody className="divide-y divide-white/[0.05]">
               {sessions.length === 0 ? (
                 <tr>
@@ -341,6 +346,7 @@ export default function UserManager() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
