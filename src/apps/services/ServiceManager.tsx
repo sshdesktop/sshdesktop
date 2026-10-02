@@ -159,17 +159,18 @@ export default function ServiceManager() {
       </div>
 
       {/* Services List Table */}
-      <div className="flex-1 bg-[#1e1e2e] rounded-xl border border-white/[0.08] overflow-hidden flex flex-col">
-        <table className="w-full text-left text-xs">
-          <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08]">
-            <tr>
-              <th className="py-2.5 px-3">Service Unit</th>
-              <th className="py-2.5 px-3">Description</th>
-              <th className="py-2.5 px-3">State</th>
-              <th className="py-2.5 px-3">Substate</th>
-              <th className="py-2.5 px-3 text-right">Actions</th>
-            </tr>
-          </thead>
+      <div className="flex-1 min-h-0 bg-[#1e1e2e] rounded-xl border border-white/[0.08] flex flex-col overflow-hidden">
+        <div className="flex-1 overflow-y-auto overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08] sticky top-0 z-10 shadow-sm">
+              <tr>
+                <th className="py-2.5 px-3">Service Unit</th>
+                <th className="py-2.5 px-3">Description</th>
+                <th className="py-2.5 px-3">State</th>
+                <th className="py-2.5 px-3">Substate</th>
+                <th className="py-2.5 px-3 text-right">Actions</th>
+              </tr>
+            </thead>
           <tbody className="divide-y divide-white/[0.05]">
             {filtered.length === 0 ? (
               <tr>
@@ -238,6 +239,7 @@ export default function ServiceManager() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* Logs Modal */}

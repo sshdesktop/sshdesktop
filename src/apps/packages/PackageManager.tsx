@@ -185,55 +185,57 @@ export default function PackageManager() {
       </div>
 
       {/* Package List Table */}
-      <div className="flex-1 bg-[#1e1e2e] rounded-xl border border-white/[0.08] overflow-hidden flex flex-col">
-        <table className="w-full text-left text-xs">
-          <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08]">
-            <tr>
-              <th className="py-2.5 px-3">Package Name</th>
-              <th className="py-2.5 px-3">Installed Version</th>
-              <th className="py-2.5 px-3">Arch</th>
-              <th className="py-2.5 px-3">Size</th>
-              <th className="py-2.5 px-3">Description</th>
-              <th className="py-2.5 px-3 text-right">Action</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-white/[0.05]">
-            {filtered.length === 0 ? (
+      <div className="flex-1 min-h-0 bg-[#1e1e2e] rounded-xl border border-white/[0.08] flex flex-col overflow-hidden">
+        <div className="flex-1 overflow-y-auto overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08] sticky top-0 z-10 shadow-sm">
               <tr>
-                <td colSpan={6} className="py-8 text-center text-gray-500">
-                  {loading ? 'Fetching packages from server...' : 'No packages found'}
-                </td>
+                <th className="py-2.5 px-3">Package Name</th>
+                <th className="py-2.5 px-3">Installed Version</th>
+                <th className="py-2.5 px-3">Arch</th>
+                <th className="py-2.5 px-3">Size</th>
+                <th className="py-2.5 px-3">Description</th>
+                <th className="py-2.5 px-3 text-right">Action</th>
               </tr>
-            ) : (
-              filtered.map(pkg => (
-                <tr key={pkg.name} className="hover:bg-white/[0.02] transition-colors">
-                  <td className="py-2.5 px-3 font-mono font-bold text-white flex items-center space-x-2">
-                    <Package className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                    <span>{pkg.name}</span>
-                  </td>
-                  <td className="py-2.5 px-3 font-mono text-gray-300">
-                    {pkg.version}
-                    {pkg.upgradable && (
-                      <span className="block text-[10px] text-amber-400">➜ {pkg.newVersion}</span>
-                    )}
-                  </td>
-                  <td className="py-2.5 px-3 font-mono text-gray-500">{pkg.arch}</td>
-                  <td className="py-2.5 px-3 text-gray-400">{pkg.size}</td>
-                  <td className="py-2.5 px-3 text-gray-400 truncate max-w-sm">{pkg.description || '—'}</td>
-                  <td className="py-2.5 px-3 text-right">
-                    <button
-                      onClick={() => removePackage(pkg.name)}
-                      className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-red-400"
-                      title="Uninstall"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+            </thead>
+            <tbody className="divide-y divide-white/[0.05]">
+              {filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="py-8 text-center text-gray-500">
+                    {loading ? 'Fetching packages from server...' : 'No packages found'}
                   </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : (
+                filtered.map(pkg => (
+                  <tr key={pkg.name} className="hover:bg-white/[0.02] transition-colors">
+                    <td className="py-2.5 px-3 font-mono font-bold text-white flex items-center space-x-2">
+                      <Package className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                      <span>{pkg.name}</span>
+                    </td>
+                    <td className="py-2.5 px-3 font-mono text-gray-300">
+                      {pkg.version}
+                      {pkg.upgradable && (
+                        <span className="block text-[10px] text-amber-400">➜ {pkg.newVersion}</span>
+                      )}
+                    </td>
+                    <td className="py-2.5 px-3 font-mono text-gray-500">{pkg.arch}</td>
+                    <td className="py-2.5 px-3 text-gray-400">{pkg.size}</td>
+                    <td className="py-2.5 px-3 text-gray-400 truncate max-w-sm">{pkg.description || '—'}</td>
+                    <td className="py-2.5 px-3 text-right">
+                      <button
+                        onClick={() => removePackage(pkg.name)}
+                        className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-red-400"
+                        title="Uninstall"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

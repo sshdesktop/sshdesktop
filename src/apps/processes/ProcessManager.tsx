@@ -87,7 +87,7 @@ export default function ProcessManager() {
     });
 
   return (
-    <div className="flex flex-col h-full bg-[#181825] text-[#cdd6f4] p-4 space-y-4 overflow-y-auto">
+    <div className="flex flex-col h-full bg-[#181825] text-[#cdd6f4] p-4 space-y-3 min-h-0 overflow-hidden">
       {/* Top Controls */}
       <div className="flex items-center justify-between shrink-0">
         <div className="flex items-center space-x-3">
@@ -130,18 +130,19 @@ export default function ProcessManager() {
         </div>
       </div>
 
-      {/* Process Table */}
-      <div className="flex-1 bg-[#1e1e2e] rounded-xl border border-white/[0.08] overflow-hidden flex flex-col">
-        <table className="w-full text-left text-xs font-mono">
-          <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08] select-none">
-            <tr>
-              <th
-                onClick={() => {
-                  if (sortBy === 'pid') setSortAsc(!sortAsc);
-                  else { setSortBy('pid'); setSortAsc(false); }
-                }}
-                className="py-2.5 px-3 cursor-pointer hover:text-white"
-              >
+      {/* Process Table with Full Scroll and Sticky Header */}
+      <div className="flex-1 min-h-0 bg-[#1e1e2e] rounded-xl border border-white/[0.08] flex flex-col overflow-hidden">
+        <div className="flex-1 overflow-y-auto overflow-x-auto">
+          <table className="w-full text-left text-xs font-mono">
+            <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08] select-none sticky top-0 z-10 shadow-sm">
+              <tr>
+                <th
+                  onClick={() => {
+                    if (sortBy === 'pid') setSortAsc(!sortAsc);
+                    else { setSortBy('pid'); setSortAsc(false); }
+                  }}
+                  className="py-2.5 px-3 cursor-pointer hover:text-white"
+                >
                 PID {sortBy === 'pid' && (sortAsc ? '▲' : '▼')}
               </th>
               <th className="py-2.5 px-3">User</th>
@@ -202,6 +203,7 @@ export default function ProcessManager() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );

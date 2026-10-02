@@ -4,7 +4,8 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { Plus, X, Terminal as TerminalIcon, Trash2 } from 'lucide-react';
-import { useConnectionStore } from '../../lib/store';
+import { useConnectionStore, useEditorStore } from '../../lib/store';
+import { useWindowManager } from '../../lib/hooks/useWindowManager';
 import { sshExec } from '../../lib/tauri-bridge';
 
 interface Tab {
@@ -28,6 +29,9 @@ export default function TerminalApp() {
   const [activeTab, setActiveTab] = useState<string>('1');
   const tabInstances = useRef<Map<string, TabInstance>>(new Map());
   const containersRef = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  const { openApp } = useWindowManager();
+  const { openFileInEditor } = useEditorStore();
 
   const activeServer = useConnectionStore(s => {
     const activeId = s.activeConnectionId;
@@ -54,16 +58,51 @@ export default function TerminalApp() {
       return;
     }
 
+    const trimmed = cmd.trim();
+    const parts = trimmed.split(/\s+/);
+    const action = parts[0]?.toLowerCase();
+    const targetFile = parts.slice(1).join(' ');
+
+    // Seamless GUI integration for interactive editors
+    if (['nano', 'vi', 'vim', 'edit', 'code'].includes(action)) {
+      if (targetFile) {
+        openFileInEditor(targetFile);
+        openApp('editor', `Edit: ${targetFile}`);
+        term.writeln(`\x1b[1;32m[CloudDesk]\x1b[0m Launched graphical Code Editor for \x1b[1m${targetFile}\x1b[0m`);
+      } else {
+        openApp('editor', 'Code Editor');
+        term.writeln('\x1b[1;32m[CloudDesk]\x1b[0m Launched graphical Code Editor.');
+      }
+      term.write(prompt);
+      return;
+    }
+
+    // Seamless GUI integration for interactive top / htop
+    if (action === 'top' || action === 'htop') {
+      openApp('processes', 'Processes');
+      term.writeln('\x1b[1;36m[CloudDesk]\x1b[0m Launched Process Manager app for live process inspection & termination.');
+      const connId = activeServer?.id || 'default';
+      try {
+        const res = await sshExec(connId, 'top -b -n 1 | head -n 25');
+        if (res.stdout) {
+          term.write(res.stdout.replace(/\r?\n/g, '\r\n') + '\r\n');
+        }
+      } catch {}
+      term.write(prompt);
+      return;
+    }
+
     if (cmd === 'help') {
       term.writeln('\x1b[1mBuilt-in & Remote Commands:\x1b[0m');
-      term.writeln('  neofetch      - Show system hardware/OS information');
-      term.writeln('  htop / top    - Interactive process monitor');
-      term.writeln('  df -h         - Mounted filesystem usage');
-      term.writeln('  free -m       - RAM memory statistics');
-      term.writeln('  uname -a      - Kernel and architecture');
-      term.writeln('  docker ps     - List running containers');
-      term.writeln('  uptime        - Server uptime and load');
-      term.writeln('  clear         - Clear terminal screen');
+      term.writeln('  nano / vi <file> - Open file in CloudDesk Code Editor');
+      term.writeln('  top / htop       - Launch Process Manager & print snapshot');
+      term.writeln('  neofetch         - Show system hardware/OS information');
+      term.writeln('  df -h            - Mounted filesystem usage');
+      term.writeln('  free -m          - RAM memory statistics');
+      term.writeln('  uname -a         - Kernel and architecture');
+      term.writeln('  docker ps        - List running containers');
+      term.writeln('  uptime           - Server uptime and load');
+      term.writeln('  clear            - Clear terminal screen');
       term.write(prompt);
       return;
     }
