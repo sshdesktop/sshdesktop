@@ -51,9 +51,13 @@ export async function sshExec(connId: string, command: string): Promise<{ stdout
   }
 }
 
+export async function sshLaunchPutty(connId: string): Promise<void> {
+  return safeInvoke<void>('ssh_launch_putty', { connId }, undefined);
+}
+
 // ----------------- Terminal Commands -----------------
-export async function terminalCreate(connId: string, rows: number = 24, cols: number = 80): Promise<string> {
-  return safeInvoke<string>('terminal_create', { connId, rows, cols }, 'term-1');
+export async function terminalCreate(connId: string, rows: number = 24, cols: number = 80, terminalId?: string): Promise<string> {
+  return safeInvoke<string>('terminal_create', { connId, rows, cols, terminalId }, terminalId || 'term-1');
 }
 
 export async function terminalWrite(terminalId: string, data: number[]): Promise<void> {

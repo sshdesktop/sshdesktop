@@ -38,6 +38,7 @@ fn main() {
             ssh::terminal::terminal_write,
             ssh::terminal::terminal_resize,
             ssh::terminal::terminal_close,
+            ssh::terminal::ssh_launch_putty,
             ssh::sftp::sftp_list_dir,
             ssh::sftp::sftp_read_file,
             ssh::sftp::sftp_read_text_file,
