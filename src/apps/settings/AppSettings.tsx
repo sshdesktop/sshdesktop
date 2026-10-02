@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useSettingsStore } from '../../lib/store';
-import { Palette, Terminal, FileCode, Sliders, Info, ShieldCheck, Check } from 'lucide-react';
+import { Palette, Terminal, FileCode, Sliders, Info, ShieldCheck, Check, Upload, Plus, Image as ImageIcon } from 'lucide-react';
 import { WALLPAPERS } from '../../shell/Desktop';
 
 const ACCENT_COLORS = [
@@ -15,6 +15,27 @@ const ACCENT_COLORS = [
 export default function AppSettings() {
   const { theme, updateSettings, terminalFontSize, accentColor, wallpaper } = useSettingsStore();
   const [activeTab, setActiveTab] = useState<'appearance' | 'terminal' | 'editor' | 'ssh' | 'about'>('appearance');
+  const [customUrl, setCustomUrl] = useState('');
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || e.target.files.length === 0) return;
+    const file = e.target.files[0];
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      if (typeof event.target?.result === 'string') {
+        updateSettings({ wallpaper: event.target.result });
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleApplyUrl = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!customUrl.trim()) return;
+    updateSettings({ wallpaper: customUrl.trim() });
+    setCustomUrl('');
+  };
 
   return (
     <div className="flex h-full bg-[#181825] text-[#cdd6f4]">
@@ -126,29 +147,78 @@ export default function AppSettings() {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-medium text-gray-300 mb-2">Desktop Wallpaper</label>
-                <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-200">Desktop 4K Wallpaper</label>
+                    <p className="text-[11px] text-gray-400">Authentic Apple 4K dynamic wallpapers or upload custom photography</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-medium flex items-center space-x-1.5 transition-colors shadow-sm"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>Upload Image</span>
+                  </button>
+                </div>
+
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFileUpload}
+                  accept="image/*"
+                  className="hidden"
+                />
+
+                {/* Direct Image URL input */}
+                <form onSubmit={handleApplyUrl} className="flex items-center space-x-2">
+                  <input
+                    type="text"
+                    placeholder="Or paste direct 4K image URL..."
+                    value={customUrl}
+                    onChange={(e) => setCustomUrl(e.target.value)}
+                    className="bg-[#12121e] border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder-gray-500 flex-1 focus:outline-none focus:border-blue-400"
+                  />
+                  <button
+                    type="submit"
+                    className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white text-xs font-medium rounded-xl transition-colors shrink-0"
+                  >
+                    Apply URL
+                  </button>
+                </form>
+
+                <div className="grid grid-cols-2 gap-3 pt-1">
                   {WALLPAPERS.map(w => {
-                    const isSelected = (wallpaper || 'sonoma') === w.id;
+                    const isSelected = wallpaper === w.id;
                     return (
                       <div
                         key={w.id}
                         onClick={() => updateSettings({ wallpaper: w.id })}
-                        className={`group relative overflow-hidden rounded-xl border p-2.5 cursor-pointer transition-all ${
+                        className={`group relative overflow-hidden rounded-2xl border p-2 cursor-pointer transition-all ${
                           isSelected
-                            ? 'border-[var(--accent)] ring-2 ring-[var(--accent)]/30 bg-white/5'
-                            : 'border-white/10 hover:border-white/30 hover:bg-white/[0.02]'
+                            ? 'border-blue-500 ring-2 ring-blue-500/40 bg-blue-500/10'
+                            : 'border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
                         }`}
                       >
-                        <div className={`h-16 w-full rounded-lg ${w.bg} flex items-center justify-center shadow-inner mb-2`}>
+                        <div className="relative h-20 w-full rounded-xl overflow-hidden mb-2 bg-black/40">
+                          <img
+                            src={w.thumbnail}
+                            alt={w.name}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                            loading="lazy"
+                          />
+                          <span className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-md text-[9px] font-bold text-white tracking-wider border border-white/10">
+                            4K
+                          </span>
                           {isSelected && (
-                            <span className="p-1 rounded-full bg-black/50 text-white backdrop-blur-md">
-                              <Check className="w-4 h-4 stroke-[3]" />
+                            <span className="absolute bottom-1 right-1 p-1 rounded-full bg-blue-600 text-white shadow-md">
+                              <Check className="w-3.5 h-3.5 stroke-[3]" />
                             </span>
                           )}
                         </div>
                         <div className="text-xs font-semibold text-white truncate">{w.name}</div>
+                        <div className="text-[10px] text-gray-400 truncate">{w.subtitle}</div>
                       </div>
                     );
                   })}
