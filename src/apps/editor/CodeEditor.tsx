@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Editor from '@monaco-editor/react';
-import { Save, FileCode, Check, RefreshCw, X, Plus, FolderOpen, AlertCircle } from 'lucide-react';
+import { Save, FileCode, Check, RefreshCw, X, Plus, FolderOpen, AlertCircle, Upload } from 'lucide-react';
 import { sftpReadTextFile, sftpWriteTextFile } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 
@@ -49,6 +49,7 @@ export default function CodeEditor() {
   const [remotePathInput, setRemotePathInput] = useState<string>('/etc/hosts');
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [isDragOver, setIsDragOver] = useState<boolean>(false);
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
   const { pendingFilePath, clearPendingFile } = useEditorStore();
 
@@ -95,7 +96,39 @@ export default function CodeEditor() {
     );
   };
 
-  const handleSave = async () => {
+  const openPathInEditor = useCallback(async (targetPath: string) => {
+    if (!targetPath.trim()) return;
+    const clean = targetPath.trim();
+    // Check if already open
+    const existing = files.find(f => f.remotePath === clean);
+    if (existing) {
+      setActiveFileId(existing.id);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const content = await sftpReadTextFile(activeConnId, clean);
+      const fileName = clean.split('/').filter(Boolean).pop() || 'file.txt';
+      const newTab: FileTab = {
+        id: String(Date.now()),
+        name: fileName,
+        remotePath: clean,
+        language: detectLanguage(fileName),
+        content,
+        isModified: false,
+      };
+      setFiles(prev => [...prev, newTab]);
+      setActiveFileId(newTab.id);
+      setOpenModal(false);
+    } catch (err: any) {
+      setError(`Failed to read remote file: ${err?.message || err}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [activeConnId, files]);
+
+  const handleSave = useCallback(async () => {
     if (!activeFile) return;
     setLoading(true);
     setError(null);
@@ -107,36 +140,33 @@ export default function CodeEditor() {
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 2000);
     } catch (err: any) {
-      setError(`Failed to save via SFTP: ${err}`);
+      setError(`Failed to save via SFTP: ${err?.message || err}`);
     } finally {
       setLoading(false);
     }
-  };
+  }, [activeConnId, activeFile, activeFileId]);
+
+  const handleSaveRef = useRef(handleSave);
+  useEffect(() => {
+    handleSaveRef.current = handleSave;
+  }, [handleSave]);
+
+  // Window-level Ctrl+S / Cmd+S listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleSaveRef.current();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const handleOpenRemoteFile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!remotePathInput.trim()) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const content = await sftpReadTextFile(activeConnId, remotePathInput.trim());
-      const fileName = remotePathInput.split('/').filter(Boolean).pop() || 'file.txt';
-      const newTab: FileTab = {
-        id: String(Date.now()),
-        name: fileName,
-        remotePath: remotePathInput.trim(),
-        language: detectLanguage(fileName),
-        content,
-        isModified: false,
-      };
-      setFiles(prev => [...prev, newTab]);
-      setActiveFileId(newTab.id);
-      setOpenModal(false);
-    } catch (err: any) {
-      setError(`Failed to read remote file: ${err}`);
-    } finally {
-      setLoading(false);
-    }
+    await openPathInEditor(remotePathInput);
   };
 
   const closeTab = (id: string, e: React.MouseEvent) => {
@@ -262,13 +292,61 @@ export default function CodeEditor() {
       )}
 
       {/* Editor Main Canvas */}
-      <div className="flex-1 overflow-hidden">
+      <div 
+        className="flex-1 overflow-hidden relative"
+        onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+        onDragLeave={() => setIsDragOver(false)}
+        onDrop={async (e) => {
+          e.preventDefault();
+          setIsDragOver(false);
+          const rawText = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('application/clouddesk-file');
+          if (rawText && rawText.startsWith('/')) {
+            await openPathInEditor(rawText.trim());
+            return;
+          }
+          try {
+            const parsed = JSON.parse(rawText);
+            if (parsed?.path) {
+              await openPathInEditor(parsed.path);
+              return;
+            }
+          } catch {}
+
+          if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            const file = e.dataTransfer.files[0];
+            const text = await file.text();
+            const newTab: FileTab = {
+              id: String(Date.now()),
+              name: file.name,
+              remotePath: `/tmp/${file.name}`,
+              language: detectLanguage(file.name),
+              content: text,
+              isModified: true,
+            };
+            setFiles(prev => [...prev, newTab]);
+            setActiveFileId(newTab.id);
+          }
+        }}
+      >
+        {isDragOver && (
+          <div className="absolute inset-0 bg-blue-500/20 backdrop-blur-sm border-2 border-dashed border-blue-400 z-30 flex flex-col items-center justify-center pointer-events-none">
+            <Upload className="w-10 h-10 text-blue-300 animate-bounce mb-2" />
+            <span className="text-sm font-semibold text-white">Drop file to open in Code Editor</span>
+          </div>
+        )}
+
         <Editor
           height="100%"
           language={activeFile?.language || 'plaintext'}
           value={activeFile?.content || ''}
           theme="vs-dark"
           onChange={handleEditorChange}
+          onMount={(editor, monaco) => {
+            // Bind Ctrl+S / Cmd+S directly within Monaco
+            editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+              handleSaveRef.current();
+            });
+          }}
           options={{
             fontSize: 14,
             fontFamily: "'JetBrains Mono', 'Fira Code', monospace",

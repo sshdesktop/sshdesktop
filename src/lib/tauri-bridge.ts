@@ -101,6 +101,10 @@ export async function sftpChmod(connId: string, path: string, mode: number): Pro
   return safeInvoke<void>('sftp_chmod', { connId, path, mode }, undefined);
 }
 
+export async function sftpChown(connId: string, path: string, owner: string, group: string = ''): Promise<void> {
+  return safeInvoke<void>('sftp_chown', { connId, path, owner, group }, undefined);
+}
+
 // ----------------- System Commands -----------------
 export async function systemGetStats(connId: string = 'default'): Promise<any> {
   try {

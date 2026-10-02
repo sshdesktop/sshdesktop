@@ -4,9 +4,9 @@ import {
   Grid, List, Search, Plus, Trash2, ChevronRight, RefreshCw, 
   Copy, Scissors, ClipboardPaste, FileCode, CheckSquare, Square,
   Upload, Terminal, Edit3, Key, Archive, PackageOpen, Star, BookmarkPlus,
-  Compass, HardDrive, ShieldAlert, X
+  Compass, HardDrive, ShieldAlert, X, Users
 } from 'lucide-react';
-import { sftpListDir, sftpMkdir, sftpDelete, sftpRename, sftpChmod, sftpWriteTextFile, sshExec } from '../../lib/tauri-bridge';
+import { sftpListDir, sftpMkdir, sftpDelete, sftpRename, sftpChmod, sftpChown, sftpWriteTextFile, sshExec } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore, useSettingsStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
 
@@ -60,6 +60,18 @@ export default function FileManager() {
   const [showChmodModal, setShowChmodModal] = useState(false);
   const [chmodTarget, setChmodTarget] = useState<RemoteFile | null>(null);
   const [octalMode, setOctalMode] = useState<string>('755');
+
+  // Chown Modal State
+  const [showChownModal, setShowChownModal] = useState(false);
+  const [chownTarget, setChownTarget] = useState<RemoteFile | null>(null);
+  const [chownOwner, setChownOwner] = useState('root');
+  const [chownGroup, setChownGroup] = useState('root');
+  const [chownRecursive, setChownRecursive] = useState(true);
+
+  // Drag and drop moving between folders
+  const [draggedItem, setDraggedItem] = useState<string | null>(null);
+  const [dropTargetDir, setDropTargetDir] = useState<string | null>(null);
+  const longPressTimerRef = useRef<any>(null);
   const [search, setSearch] = useState('');
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
@@ -271,6 +283,77 @@ export default function FileManager() {
       await loadDirectory(currentPath);
     } catch (err: any) {
       alert(`Chmod failed: ${err?.message || err}`);
+    }
+  };
+
+  // Chown (Change Ownership)
+  const handleChown = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const targets = chownTarget 
+      ? [chownTarget.name] 
+      : Array.from(selectedFiles);
+    if (targets.length === 0) return;
+    setIsLoading(true);
+    try {
+      for (const name of targets) {
+        const targetPath = currentPath === '/' ? `/${name}` : `${currentPath}/${name}`;
+        await sftpChown(activeConnId, targetPath, chownOwner.trim(), chownGroup.trim());
+      }
+      setShowChownModal(false);
+      setChownTarget(null);
+      await loadDirectory(currentPath);
+    } catch (err: any) {
+      alert(`Chown failed: ${err?.message || err}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Move files/folders into a folder via Drag & Drop
+  const handleMoveItemsToFolder = async (targetFolderName: string) => {
+    const targetDirPath = currentPath === '/' ? `/${targetFolderName}` : `${currentPath}/${targetFolderName}`;
+    const itemsToMove = (draggedItem && selectedFiles.has(draggedItem) && selectedFiles.size > 1)
+      ? Array.from(selectedFiles)
+      : draggedItem ? [draggedItem] : [];
+
+    if (itemsToMove.length === 0) return;
+    if (itemsToMove.includes(targetFolderName)) return;
+
+    setIsLoading(true);
+    try {
+      for (const name of itemsToMove) {
+        const oldPath = currentPath === '/' ? `/${name}` : `${currentPath}/${name}`;
+        const newPath = `${targetDirPath}/${name}`;
+        await sftpRename(activeConnId, oldPath, newPath);
+      }
+      setSelectedFiles(new Set());
+      await loadDirectory(currentPath);
+    } catch (err: any) {
+      alert(`Move failed: ${err?.message || err}`);
+    } finally {
+      setIsLoading(false);
+      setDraggedItem(null);
+      setDropTargetDir(null);
+    }
+  };
+
+  // Long press selection helper
+  const handlePointerDown = (f: RemoteFile) => {
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = setTimeout(() => {
+      setSelectedFiles(prev => {
+        const next = new Set(prev);
+        if (next.has(f.name)) next.delete(f.name);
+        else next.add(f.name);
+        return next;
+      });
+    }, 400);
+  };
+
+  const cancelLongPress = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
     }
   };
 
@@ -688,14 +771,50 @@ export default function FileManager() {
               {filteredFiles.map((f, idx) => {
                 const isSelected = selectedFiles.has(f.name);
                 const isArchive = ['tar', 'gz', 'tgz', 'zip'].includes(f.extension || '');
+                const isDropTarget = dropTargetDir === f.name && f.type === 'dir';
                 return (
                   <div
                     key={f.name}
+                    draggable={true}
+                    onDragStart={(e) => {
+                      setDraggedItem(f.name);
+                      const fullPath = currentPath === '/' ? `/${f.name}` : `${currentPath}/${f.name}`;
+                      e.dataTransfer.setData('text/plain', fullPath);
+                      e.dataTransfer.setData('application/clouddesk-file', fullPath);
+                      e.dataTransfer.setData('application/clouddesk-name', f.name);
+                    }}
+                    onDragEnd={() => { setDraggedItem(null); setDropTargetDir(null); }}
+                    onDragOver={(e) => {
+                      if (f.type === 'dir' && draggedItem && draggedItem !== f.name) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDropTargetDir(f.name);
+                      }
+                    }}
+                    onDragLeave={() => {
+                      if (dropTargetDir === f.name) setDropTargetDir(null);
+                    }}
+                    onDrop={(e) => {
+                      if (f.type === 'dir' && draggedItem && draggedItem !== f.name) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        handleMoveItemsToFolder(f.name);
+                      }
+                    }}
+                    onMouseDown={() => handlePointerDown(f)}
+                    onMouseUp={cancelLongPress}
+                    onMouseMove={cancelLongPress}
+                    onTouchStart={() => handlePointerDown(f)}
+                    onTouchEnd={cancelLongPress}
                     onClick={(e) => handleSelectFile(f, idx, e)}
                     onDoubleClick={() => handleFileDoubleClick(f)}
                     onContextMenu={(e) => handleContextMenu(e, f)}
                     className={`flex flex-col items-center p-3 rounded-xl cursor-pointer select-none transition-all group relative ${
-                      isSelected ? 'bg-[var(--accent)]/20 border border-[var(--accent)]/50 shadow-md' : 'hover:bg-white/5 border border-transparent'
+                      isDropTarget
+                        ? 'bg-blue-500/30 ring-2 ring-[var(--accent)] scale-105 shadow-xl'
+                        : isSelected
+                        ? 'bg-[var(--accent)]/20 border border-[var(--accent)]/50 shadow-md'
+                        : 'hover:bg-white/5 border border-transparent'
                     }`}
                   >
                     {f.type === 'dir' ? (
@@ -745,14 +864,50 @@ export default function FileManager() {
                   {filteredFiles.map((f, idx) => {
                     const isSelected = selectedFiles.has(f.name);
                     const isArchive = ['tar', 'gz', 'tgz', 'zip'].includes(f.extension || '');
+                    const isDropTarget = dropTargetDir === f.name && f.type === 'dir';
                     return (
                       <tr
                         key={f.name}
+                        draggable={true}
+                        onDragStart={(e) => {
+                          setDraggedItem(f.name);
+                          const fullPath = currentPath === '/' ? `/${f.name}` : `${currentPath}/${f.name}`;
+                          e.dataTransfer.setData('text/plain', fullPath);
+                          e.dataTransfer.setData('application/clouddesk-file', fullPath);
+                          e.dataTransfer.setData('application/clouddesk-name', f.name);
+                        }}
+                        onDragEnd={() => { setDraggedItem(null); setDropTargetDir(null); }}
+                        onDragOver={(e) => {
+                          if (f.type === 'dir' && draggedItem && draggedItem !== f.name) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setDropTargetDir(f.name);
+                          }
+                        }}
+                        onDragLeave={() => {
+                          if (dropTargetDir === f.name) setDropTargetDir(null);
+                        }}
+                        onDrop={(e) => {
+                          if (f.type === 'dir' && draggedItem && draggedItem !== f.name) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleMoveItemsToFolder(f.name);
+                          }
+                        }}
+                        onMouseDown={() => handlePointerDown(f)}
+                        onMouseUp={cancelLongPress}
+                        onMouseMove={cancelLongPress}
+                        onTouchStart={() => handlePointerDown(f)}
+                        onTouchEnd={cancelLongPress}
                         onClick={(e) => handleSelectFile(f, idx, e)}
                         onDoubleClick={() => handleFileDoubleClick(f)}
                         onContextMenu={(e) => handleContextMenu(e, f)}
-                        className={`hover:bg-white/[0.03] cursor-pointer ${
-                          isSelected ? 'bg-[var(--accent)]/15 font-medium' : ''
+                        className={`cursor-pointer transition-colors ${
+                          isDropTarget
+                            ? 'bg-blue-500/30 ring-2 ring-[var(--accent)] font-semibold'
+                            : isSelected
+                            ? 'bg-[var(--accent)]/15 font-medium'
+                            : 'hover:bg-white/[0.03]'
                         }`}
                       >
                         <td className="py-2 px-3">
@@ -805,6 +960,17 @@ export default function FileManager() {
                           >
                             <Key className="w-3.5 h-3.5" />
                           </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setChownTarget(f);
+                              setShowChownModal(true);
+                            }}
+                            className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-purple-400"
+                            title="Ownership (chown)"
+                          >
+                            <Users className="w-3.5 h-3.5" />
+                          </button>
                         </td>
                       </tr>
                     );
@@ -851,6 +1017,17 @@ export default function FileManager() {
                   <span>Compress</span>
                 </button>
               )}
+              <button
+                onClick={() => {
+                  setChownTarget(null);
+                  setShowChownModal(true);
+                }}
+                className="px-2.5 py-1 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 flex items-center space-x-1"
+                title="Change Ownership (chown)"
+              >
+                <Users className="w-3.5 h-3.5" />
+                <span>Chown</span>
+              </button>
               <button
                 onClick={handleCopy}
                 className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-gray-200 flex items-center space-x-1"
@@ -973,6 +1150,19 @@ export default function FileManager() {
                 <span>Permissions (chmod)...</span>
               </div>
 
+              <div 
+                onClick={() => {
+                  setChownTarget(contextMenu.file!);
+                  setChownOwner(contextMenu.file!.owner || 'root');
+                  setShowChownModal(true);
+                  setContextMenu(null);
+                }}
+                className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer"
+              >
+                <Users className="w-3.5 h-3.5" />
+                <span>Change Ownership (chown)...</span>
+              </div>
+
               <div className="my-1 border-t border-white/10" />
 
               <div 
@@ -1066,6 +1256,76 @@ export default function FileManager() {
                 className="px-3.5 py-1.5 rounded-lg text-xs bg-[var(--accent)] hover:bg-blue-600 text-white font-medium"
               >
                 Apply chmod
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Permissions (chown) Modal */}
+      {showChownModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+          <form onSubmit={handleChown} className="bg-[#1e1e2e] border border-white/10 rounded-2xl w-full max-w-sm p-6 space-y-4 shadow-2xl">
+            <h3 className="font-bold text-sm text-white flex items-center space-x-2">
+              <Users className="w-4 h-4 text-purple-400" />
+              <span>Change Ownership (chown)</span>
+            </h3>
+            <p className="text-xs text-gray-400 font-mono truncate">
+              {chownTarget ? chownTarget.name : `${selectedFiles.size} selected items`}
+            </p>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-[11px] text-gray-400 block mb-1 font-medium">New Owner (User)</label>
+                <input
+                  type="text"
+                  autoFocus
+                  required
+                  placeholder="e.g. root, deploy, www-data"
+                  value={chownOwner}
+                  onChange={e => setChownOwner(e.target.value)}
+                  className="w-full bg-[#11111b] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[var(--accent)] font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] text-gray-400 block mb-1 font-medium">New Group</label>
+                <input
+                  type="text"
+                  placeholder="e.g. root, deploy, www-data, docker"
+                  value={chownGroup}
+                  onChange={e => setChownGroup(e.target.value)}
+                  className="w-full bg-[#11111b] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[var(--accent)] font-mono"
+                />
+              </div>
+
+              <div className="flex items-center space-x-2 pt-1">
+                <input
+                  type="checkbox"
+                  id="chownRecursive"
+                  checked={chownRecursive}
+                  onChange={e => setChownRecursive(e.target.checked)}
+                  className="rounded border-white/20 bg-[#11111b] text-blue-500"
+                />
+                <label htmlFor="chownRecursive" className="text-xs text-gray-300 cursor-pointer">
+                  Apply recursively (-R) to subdirectories & files
+                </label>
+              </div>
+            </div>
+
+            <div className="flex justify-end space-x-2 pt-2">
+              <button
+                type="button"
+                onClick={() => { setShowChownModal(false); setChownTarget(null); }}
+                className="px-3 py-1.5 rounded-lg text-xs text-gray-400 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-3.5 py-1.5 rounded-lg text-xs bg-purple-600 hover:bg-purple-700 text-white font-medium"
+              >
+                Apply chown
               </button>
             </div>
           </form>

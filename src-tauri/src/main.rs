@@ -47,6 +47,7 @@ fn main() {
             ssh::sftp::sftp_delete,
             ssh::sftp::sftp_rename,
             ssh::sftp::sftp_chmod,
+            ssh::sftp::sftp_chown,
             ssh::sftp::sftp_stat,
             ssh::sftp::sftp_download,
             ssh::sftp::sftp_upload,

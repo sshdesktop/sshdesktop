@@ -1,23 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Cloud, Bell, LogOut, Settings, ShieldCheck, Terminal, Cpu, MemoryStick,
-  Palette, Sun, Moon, Minimize2, Eye
+  Palette, Sun, Moon, Minimize2, Eye, Server, ChevronDown, Check, Plus
 } from 'lucide-react';
 import { useConnectionStore, useSettingsStore, useWindowStore } from '../lib/store';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
 import { systemGetStats } from '../lib/tauri-bridge';
 
 export default function Taskbar({ onOpenWallpapers }: { onOpenWallpapers?: () => void }) {
-  const { activeConnectionId, connectedServers, disconnect } = useConnectionStore();
+  const { activeConnectionId, connectedServers, connections, setActive, disconnect } = useConnectionStore();
   const { theme, updateSettings } = useSettingsStore();
   const { minimizeAllWindows } = useWindowStore();
   const { openApp } = useWindowManager();
   const [time, setTime] = useState('');
   const [showAppleMenu, setShowAppleMenu] = useState(false);
+  const [showServerSwitcher, setShowServerSwitcher] = useState(false);
   const [cpuUsage, setCpuUsage] = useState<number>(0);
   const [ramUsage, setRamUsage] = useState<number>(0);
 
-  const server = activeConnectionId ? connectedServers.get(activeConnectionId) : null;
+  const server = activeConnectionId ? (connectedServers.get(activeConnectionId) || connections.find(c => c.id === activeConnectionId)) : null;
 
   useEffect(() => {
     const updateTime = () => {
@@ -144,11 +145,66 @@ export default function Taskbar({ onOpenWallpapers }: { onOpenWallpapers?: () =>
 
       {/* Right System Tray */}
       <div className="flex items-center space-x-3 window-no-drag font-mono text-[11px]">
-        {/* Active Node Badge */}
+        {/* Active Node Badge & Switcher */}
         {server && (
-          <div className="flex items-center space-x-1.5 bg-white/5 px-2.5 py-0.5 rounded-full border border-white/10">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-gray-200 font-sans">{server.name}</span>
+          <div className="relative">
+            <button
+              onClick={() => setShowServerSwitcher(!showServerSwitcher)}
+              className="flex items-center space-x-1.5 bg-white/5 hover:bg-white/10 px-2.5 py-0.5 rounded-full border border-white/10 transition-colors cursor-pointer"
+              title="Click to switch or manage connected servers"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="text-gray-200 font-sans font-medium">{server.name}</span>
+              <ChevronDown className="w-3 h-3 text-gray-400" />
+            </button>
+
+            {showServerSwitcher && (
+              <div 
+                className="absolute right-0 top-8 w-60 bg-[#1e1e2e]/95 backdrop-blur-2xl border border-white/15 rounded-xl shadow-2xl py-1.5 z-50 text-xs font-sans"
+                onClick={() => setShowServerSwitcher(false)}
+              >
+                <div className="px-3 py-1 text-[10px] uppercase font-bold text-gray-400 tracking-wider flex items-center justify-between">
+                  <span>Connected Servers</span>
+                  <span className="text-[10px] text-emerald-400">{connections.length} active</span>
+                </div>
+
+                <div className="space-y-0.5 my-1 max-h-48 overflow-y-auto">
+                  {connections.map(c => {
+                    const isActive = c.id === activeConnectionId;
+                    return (
+                      <div
+                        key={c.id}
+                        onClick={() => setActive(c.id)}
+                        className={`px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black cursor-pointer flex items-center justify-between transition-colors ${
+                          isActive ? 'bg-white/10 font-bold text-white' : 'text-gray-300'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-2 truncate">
+                          <Server className="w-3.5 h-3.5 shrink-0" />
+                          <div className="truncate">
+                            <div className="truncate">{c.name}</div>
+                            <div className="text-[10px] opacity-70 truncate">{c.username}@{c.host}</div>
+                          </div>
+                        </div>
+                        {isActive && <Check className="w-3.5 h-3.5 shrink-0 text-emerald-400" />}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="my-1 border-t border-white/10" />
+
+                <div
+                  onClick={() => {
+                    if (activeConnectionId) disconnect(activeConnectionId);
+                  }}
+                  className="px-3 py-1.5 hover:bg-rose-500/20 text-rose-400 cursor-pointer flex items-center space-x-2"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Disconnect Current Server</span>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -178,6 +234,20 @@ export default function Taskbar({ onOpenWallpapers }: { onOpenWallpapers?: () =>
           title="Minimize All Windows"
         >
           <Minimize2 className="w-3.5 h-3.5" />
+        </button>
+
+        {/* Prominent Log Out Button */}
+        <button
+          onClick={() => {
+            if (activeConnectionId) {
+              disconnect(activeConnectionId);
+            }
+          }}
+          className="flex items-center space-x-1.5 px-2.5 py-0.5 rounded-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-white border border-rose-500/30 transition-all font-sans cursor-pointer"
+          title="Log Out & Disconnect Server"
+        >
+          <LogOut className="w-3 h-3" />
+          <span className="font-semibold text-[11px]">Log Out</span>
         </button>
 
         {/* Clock */}

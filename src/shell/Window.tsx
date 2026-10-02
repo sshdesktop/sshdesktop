@@ -22,7 +22,8 @@ export default function Window({ window, children }: { window: WindowState; chil
       }}
       minWidth={300}
       minHeight={200}
-      bounds="parent"
+      bounds="window"
+      dragHandleClassName="drag-handle"
       disableDragging={window.maximized}
       onMouseDown={() => { focusWindow(window.id); bringToFront(window.id); }}
       className="absolute"
