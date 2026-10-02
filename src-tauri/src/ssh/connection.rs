@@ -60,6 +60,9 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
     if let Some(pwd) = &config.password {
         if !pwd.is_empty() {
             let mut cmd = tokio::process::Command::new("plink");
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
             cmd.arg("-ssh")
                 .arg("-P")
                 .arg(&port)
@@ -117,6 +120,9 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
 
     if !verified && (config.password.is_none() || config.password.as_ref().map(|s| s.is_empty()).unwrap_or(true)) {
         let mut ssh_test = tokio::process::Command::new("ssh");
+        #[cfg(windows)]
+        ssh_test.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
         ssh_test
             .arg("-p")
             .arg(&port)

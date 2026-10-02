@@ -38,6 +38,9 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         if let Some(pwd) = &conn.config.password {
             if !pwd.is_empty() {
                 let mut cmd = tokio::process::Command::new("plink");
+                #[cfg(windows)]
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
                 cmd.arg("-ssh")
                     .arg("-P")
                     .arg(&port)
@@ -71,6 +74,9 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
 
         // 2. Try OpenSSH client
         let mut ssh_cmd = tokio::process::Command::new("ssh");
+        #[cfg(windows)]
+        ssh_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
         ssh_cmd
             .arg("-p")
             .arg(&port)
