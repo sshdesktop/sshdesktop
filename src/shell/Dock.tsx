@@ -4,7 +4,7 @@ import {
   Terminal, Folder, FileCode, Monitor, Activity, Settings,
   Container, Server, ScrollText, Globe, Package, Users,
   Clock, Database, Shield, HardDrive, Flame, StickyNote,
-  LayoutGrid, Trash2
+  Rocket, Trash2
 } from 'lucide-react';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
 
@@ -44,11 +44,11 @@ export default function Dock({ onToggleLauncher }: { onToggleLauncher: () => voi
         transition={{ type: 'spring', damping: 22, stiffness: 280 }}
         className="bg-white/10 dark:bg-black/35 backdrop-blur-3xl rounded-[24px] px-2.5 py-2 flex items-end space-x-1.5 border border-white/20 shadow-[0_25px_50px_rgba(0,0,0,0.5),inset_0_1px_1px_rgba(255,255,255,0.3)] ring-1 ring-black/10"
       >
-        {/* Launcher Button */}
+        {/* Launcher Button (macOS authentic Launchpad Rocket) */}
         <DockSquircleItem
-          icon={LayoutGrid}
+          icon={Rocket}
           label="Launchpad"
-          tileBg="from-[#64748b] via-[#475569] to-[#334155]"
+          tileBg="from-[#94a3b8] via-[#64748b] to-[#334155]"
           iconColor="#ffffff"
           onClick={onToggleLauncher}
         />

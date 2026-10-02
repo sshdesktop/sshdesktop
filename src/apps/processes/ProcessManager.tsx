@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Activity, Search, Trash2, Sliders, RefreshCw, AlertCircle, Play, Square } from 'lucide-react';
-import { processList, processKill } from '../../lib/tauri-bridge';
+import { 
+  Activity, Search, Trash2, Sliders, RefreshCw, AlertCircle, 
+  Play, Square, Copy, ShieldAlert, X, Terminal, CornerDownRight
+} from 'lucide-react';
+import { processList, processKill, processRenice } from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
 
 interface ProcessRow {
@@ -15,6 +18,12 @@ interface ProcessRow {
   command: string;
 }
 
+interface ContextMenuState {
+  x: number;
+  y: number;
+  process: ProcessRow;
+}
+
 export default function ProcessManager() {
   const [processes, setProcesses] = useState<ProcessRow[]>([]);
   const [search, setSearch] = useState('');
@@ -22,6 +31,7 @@ export default function ProcessManager() {
   const [sortAsc, setSortAsc] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
 
@@ -62,14 +72,57 @@ export default function ProcessManager() {
     return () => clearInterval(interval);
   }, [autoRefresh, loadProcesses]);
 
-  const killProcess = async (pid: number) => {
-    if (!confirm(`Are you sure you want to terminate PID ${pid}?`)) return;
+  // Close context menu on outside click
+  useEffect(() => {
+    const handleCloseMenu = () => setContextMenu(null);
+    window.addEventListener('click', handleCloseMenu);
+    return () => window.removeEventListener('click', handleCloseMenu);
+  }, []);
+
+  const handleTerminate = async (pid: number) => {
+    setContextMenu(null);
+    if (!confirm(`Send SIGTERM to PID ${pid}?`)) return;
     try {
       await processKill(activeConnId, pid, 'TERM');
       await loadProcesses();
     } catch (err) {
-      alert(`Failed to kill process: ${err}`);
+      alert(`Failed to terminate process: ${err}`);
     }
+  };
+
+  const handleForceKill = async (pid: number) => {
+    setContextMenu(null);
+    if (!confirm(`Force kill (SIGKILL -9) PID ${pid}?`)) return;
+    try {
+      await processKill(activeConnId, pid, 'KILL');
+      await loadProcesses();
+    } catch (err) {
+      alert(`Failed to force kill process: ${err}`);
+    }
+  };
+
+  const handleRenice = async (proc: ProcessRow) => {
+    setContextMenu(null);
+    const val = prompt(`Set nice priority (-20 high priority to 19 low priority) for PID ${proc.pid}:`, '0');
+    if (val === null) return;
+    const num = parseInt(val, 10);
+    if (isNaN(num)) return;
+    try {
+      await processRenice(activeConnId, proc.pid, num);
+      await loadProcesses();
+    } catch (err) {
+      alert(`Renice failed: ${err}`);
+    }
+  };
+
+  const handleCopyPid = (proc: ProcessRow) => {
+    setContextMenu(null);
+    navigator.clipboard.writeText(String(proc.pid));
+  };
+
+  const handleCopyCommand = (proc: ProcessRow) => {
+    setContextMenu(null);
+    navigator.clipboard.writeText(proc.command);
   };
 
   const sorted = [...processes]
@@ -87,7 +140,7 @@ export default function ProcessManager() {
     });
 
   return (
-    <div className="flex flex-col h-full bg-[#181825] text-[#cdd6f4] p-4 space-y-3 min-h-0 overflow-hidden">
+    <div className="flex flex-col h-full bg-[#181825] text-[#cdd6f4] p-4 space-y-3 min-h-0 overflow-hidden select-none">
       {/* Top Controls */}
       <div className="flex items-center justify-between shrink-0">
         <div className="flex items-center space-x-3">
@@ -143,68 +196,133 @@ export default function ProcessManager() {
                   }}
                   className="py-2.5 px-3 cursor-pointer hover:text-white"
                 >
-                PID {sortBy === 'pid' && (sortAsc ? '▲' : '▼')}
-              </th>
-              <th className="py-2.5 px-3">User</th>
-              <th
-                onClick={() => {
-                  if (sortBy === 'cpu') setSortAsc(!sortAsc);
-                  else { setSortBy('cpu'); setSortAsc(false); }
-                }}
-                className="py-2.5 px-3 cursor-pointer hover:text-white"
-              >
-                CPU% {sortBy === 'cpu' && (sortAsc ? '▲' : '▼')}
-              </th>
-              <th
-                onClick={() => {
-                  if (sortBy === 'mem') setSortAsc(!sortAsc);
-                  else { setSortBy('mem'); setSortAsc(false); }
-                }}
-                className="py-2.5 px-3 cursor-pointer hover:text-white"
-              >
-                MEM% {sortBy === 'mem' && (sortAsc ? '▲' : '▼')}
-              </th>
-              <th className="py-2.5 px-3">VSZ / RSS</th>
-              <th className="py-2.5 px-3">Stat</th>
-              <th className="py-2.5 px-3">Command</th>
-              <th className="py-2.5 px-3 text-right">Kill</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-white/[0.05]">
-            {sorted.length === 0 ? (
-              <tr>
-                <td colSpan={8} className="py-12 text-center text-gray-500 font-sans text-xs">
-                  {isLoading ? 'Scanning processes via ps aux...' : 'No processes found'}
-                </td>
+                  PID {sortBy === 'pid' && (sortAsc ? '▲' : '▼')}
+                </th>
+                <th className="py-2.5 px-3">User</th>
+                <th
+                  onClick={() => {
+                    if (sortBy === 'cpu') setSortAsc(!sortAsc);
+                    else { setSortBy('cpu'); setSortAsc(false); }
+                  }}
+                  className="py-2.5 px-3 cursor-pointer hover:text-white"
+                >
+                  CPU% {sortBy === 'cpu' && (sortAsc ? '▲' : '▼')}
+                </th>
+                <th
+                  onClick={() => {
+                    if (sortBy === 'mem') setSortAsc(!sortAsc);
+                    else { setSortBy('mem'); setSortAsc(false); }
+                  }}
+                  className="py-2.5 px-3 cursor-pointer hover:text-white"
+                >
+                  MEM% {sortBy === 'mem' && (sortAsc ? '▲' : '▼')}
+                </th>
+                <th className="py-2.5 px-3">VSZ / RSS</th>
+                <th className="py-2.5 px-3">Stat</th>
+                <th className="py-2.5 px-3">Command</th>
+                <th className="py-2.5 px-3 text-right">Kill</th>
               </tr>
-            ) : (
-              sorted.map(proc => (
-                <tr key={proc.pid} className="hover:bg-white/[0.02] transition-colors">
-                  <td className="py-2 px-3 font-bold text-white">{proc.pid}</td>
-                  <td className="py-2 px-3 text-purple-400">{proc.user}</td>
-                  <td className={`py-2 px-3 ${proc.cpu > 5 ? 'text-amber-400 font-bold' : 'text-gray-300'}`}>
-                    {proc.cpu.toFixed(1)}%
-                  </td>
-                  <td className="py-2 px-3 text-gray-300">{proc.mem.toFixed(1)}%</td>
-                  <td className="py-2 px-3 text-gray-500">{proc.vsz} / {proc.rss}</td>
-                  <td className="py-2 px-3 text-gray-400">{proc.stat}</td>
-                  <td className="py-2 px-3 text-gray-200 truncate max-w-sm">{proc.command}</td>
-                  <td className="py-2 px-3 text-right">
-                    <button
-                      onClick={() => killProcess(proc.pid)}
-                      className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-red-400"
-                      title="Terminate (SIGTERM)"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+            </thead>
+            <tbody className="divide-y divide-white/[0.05]">
+              {sorted.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="py-12 text-center text-gray-500 font-sans text-xs">
+                    {isLoading ? 'Scanning processes via ps aux...' : 'No processes found'}
                   </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : (
+                sorted.map(proc => (
+                  <tr 
+                    key={proc.pid} 
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setContextMenu({ x: e.clientX, y: e.clientY, process: proc });
+                    }}
+                    className="hover:bg-white/[0.04] transition-colors cursor-context-menu"
+                  >
+                    <td className="py-2 px-3 font-bold text-white">{proc.pid}</td>
+                    <td className="py-2 px-3 text-purple-400">{proc.user}</td>
+                    <td className={`py-2 px-3 ${proc.cpu > 5 ? 'text-amber-400 font-bold' : 'text-gray-300'}`}>
+                      {proc.cpu.toFixed(1)}%
+                    </td>
+                    <td className="py-2 px-3 text-gray-300">{proc.mem.toFixed(1)}%</td>
+                    <td className="py-2 px-3 text-gray-500">{proc.vsz} / {proc.rss}</td>
+                    <td className="py-2 px-3 text-gray-400">{proc.stat}</td>
+                    <td className="py-2 px-3 text-gray-200 truncate max-w-sm" title={proc.command}>{proc.command}</td>
+                    <td className="py-2 px-3 text-right">
+                      <button
+                        onClick={() => handleTerminate(proc.pid)}
+                        className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-red-400"
+                        title="Terminate (SIGTERM)"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
+
+      {/* Right-Click Context Menu */}
+      {contextMenu && (
+        <div
+          className="fixed z-50 bg-[#1e1e2e]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl py-1.5 w-60 text-xs text-gray-200 font-sans select-none animate-in fade-in duration-100"
+          style={{
+            top: Math.min(contextMenu.y, window.innerHeight - 220),
+            left: Math.min(contextMenu.x, window.innerWidth - 250)
+          }}
+          onClick={e => e.stopPropagation()}
+        >
+          <div className="px-3.5 py-1 text-[11px] font-bold text-gray-400 border-b border-white/10 mb-1 truncate">
+            PID {contextMenu.process.pid} ({contextMenu.process.user})
+          </div>
+
+          <div
+            onClick={() => handleForceKill(contextMenu.process.pid)}
+            className="px-3.5 py-1.5 hover:bg-rose-600 hover:text-white flex items-center space-x-2 cursor-pointer font-medium text-rose-400"
+          >
+            <ShieldAlert className="w-3.5 h-3.5" />
+            <span>Force Kill (SIGKILL -9)</span>
+          </div>
+
+          <div
+            onClick={() => handleTerminate(contextMenu.process.pid)}
+            className="px-3.5 py-1.5 hover:bg-amber-600 hover:text-white flex items-center space-x-2 cursor-pointer font-medium text-amber-300"
+          >
+            <Square className="w-3.5 h-3.5" />
+            <span>Quit Process (SIGTERM -15)</span>
+          </div>
+
+          <div
+            onClick={() => handleRenice(contextMenu.process)}
+            className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
+          >
+            <Sliders className="w-3.5 h-3.5" />
+            <span>Change Priority (renice)...</span>
+          </div>
+
+          <div className="my-1 border-t border-white/10" />
+
+          <div
+            onClick={() => handleCopyPid(contextMenu.process)}
+            className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
+          >
+            <Copy className="w-3.5 h-3.5" />
+            <span>Copy PID ({contextMenu.process.pid})</span>
+          </div>
+
+          <div
+            onClick={() => handleCopyCommand(contextMenu.process)}
+            className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
+          >
+            <CornerDownRight className="w-3.5 h-3.5" />
+            <span>Copy Full Command</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

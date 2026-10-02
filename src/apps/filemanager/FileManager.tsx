@@ -5,7 +5,7 @@ import {
   ChevronRight, RefreshCw, Copy, Scissors, ClipboardPaste, FileCode, 
   CheckSquare, Square, Upload, Terminal, Edit3, Key, Archive, PackageOpen, 
   Star, BookmarkPlus, Compass, HardDrive, ShieldAlert, X, Users, Eye, 
-  Tag, MoreHorizontal, Download, Layers
+  Tag, MoreHorizontal, Download, Layers, Pin
 } from 'lucide-react';
 import { 
   sftpListDir, sftpMkdir, sftpDelete, sftpRename, sftpChmod, sftpChown, 
@@ -133,8 +133,8 @@ export default function FileManager() {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   const { openApp } = useWindowManager();
-  const { openFileInEditor } = useEditorStore();
-  const { favorites, addFavorite, removeFavorite } = useSettingsStore();
+  const { openFileInEditor, finderTargetPath, clearFinderTarget, runTerminalCommand } = useEditorStore();
+  const { favorites, addFavorite, removeFavorite, pinToDesktop } = useSettingsStore();
 
   const loadDirectory = useCallback(async (path: string) => {
     setIsLoading(true);
@@ -168,6 +168,14 @@ export default function FileManager() {
     loadDirectory(currentPath);
     setPathInput(currentPath);
   }, [currentPath, loadDirectory]);
+
+  // Deep-link navigation when requested from Desktop icons (Macintosh HD, Home, Trash)
+  useEffect(() => {
+    if (finderTargetPath) {
+      navigateTo(finderTargetPath);
+      clearFinderTarget();
+    }
+  }, [finderTargetPath, clearFinderTarget]);
 
   // Close context menu on outside click
   useEffect(() => {
@@ -461,6 +469,72 @@ export default function FileManager() {
       await loadDirectory(currentPath);
     } catch (err: any) {
       console.warn('Undo error:', err);
+    }
+  };
+
+  const handleOpenTerminalHere = () => {
+    runTerminalCommand(`cd "${currentPath}" && clear\n`);
+    openApp('terminal', 'Terminal');
+  };
+
+  const handlePinToDesktop = (file: RemoteFile) => {
+    const itemPath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+    pinToDesktop({
+      id: `pinned-${Date.now()}-${file.name}`,
+      name: file.name,
+      path: itemPath,
+      type: file.type,
+    });
+  };
+
+  const handleCreateTar = async (type: 'tar.gz' | 'zip') => {
+    const items = selectedFiles.size > 0 
+      ? Array.from(selectedFiles) 
+      : (contextMenu?.file ? [contextMenu.file.name] : []);
+    if (items.length === 0) return;
+    const defaultArchiveName = items.length === 1 ? `${items[0]}.${type}` : `archive.${type}`;
+    const archiveName = prompt(`Enter archive name (.${type}):`, defaultArchiveName);
+    if (!archiveName) return;
+
+    setIsLoading(true);
+    try {
+      const itemsList = items.map(i => `'${i}'`).join(' ');
+      const cmd = type === 'tar.gz'
+        ? `cd '${currentPath}' && tar -czvf '${archiveName}' ${itemsList}`
+        : `cd '${currentPath}' && zip -r '${archiveName}' ${itemsList}`;
+      await sshExec(activeConnId, cmd);
+      await loadDirectory(currentPath);
+    } catch (err: any) {
+      alert(`Archive creation failed: ${err?.message || err}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleExtractArchive = async (file: RemoteFile) => {
+    setIsLoading(true);
+    try {
+      const fn = file.name;
+      let cmd = '';
+      if (fn.endsWith('.tar.gz') || fn.endsWith('.tgz')) {
+        cmd = `cd '${currentPath}' && tar -xzvf '${fn}'`;
+      } else if (fn.endsWith('.tar.bz2') || fn.endsWith('.tbz2')) {
+        cmd = `cd '${currentPath}' && tar -xjvf '${fn}'`;
+      } else if (fn.endsWith('.tar')) {
+        cmd = `cd '${currentPath}' && tar -xvf '${fn}'`;
+      } else if (fn.endsWith('.zip')) {
+        cmd = `cd '${currentPath}' && unzip -o '${fn}'`;
+      } else if (fn.endsWith('.gz')) {
+        cmd = `cd '${currentPath}' && gunzip -k '${fn}'`;
+      } else {
+        cmd = `cd '${currentPath}' && tar -xvf '${fn}'`;
+      }
+      await sshExec(activeConnId, cmd);
+      await loadDirectory(currentPath);
+    } catch (err: any) {
+      alert(`Extract failed: ${err?.message || err}`);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -885,7 +959,7 @@ export default function FileManager() {
                   </div>
                   <div className="my-1 border-t border-white/10 mx-2" />
                   <div 
-                    onClick={() => openApp('terminal', 'Terminal')}
+                    onClick={handleOpenTerminalHere}
                     className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center space-x-2"
                   >
                     <Terminal className="w-3.5 h-3.5 text-emerald-400" />
@@ -1396,6 +1470,56 @@ export default function FileManager() {
                 <span>Change Ownership (chown)...</span>
               </div>
 
+              {/* Pin to Desktop */}
+              <div 
+                onClick={() => { handlePinToDesktop(contextMenu.file!); setContextMenu(null); }}
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer font-medium text-amber-300"
+              >
+                <Pin className="w-3.5 h-3.5" />
+                <span>Pin to Desktop</span>
+              </div>
+
+              {/* Extract Archive if applicable */}
+              {(contextMenu.file!.name.endsWith('.tar.gz') || 
+                contextMenu.file!.name.endsWith('.tgz') || 
+                contextMenu.file!.name.endsWith('.tar.bz2') || 
+                contextMenu.file!.name.endsWith('.tar') || 
+                contextMenu.file!.name.endsWith('.zip') || 
+                contextMenu.file!.name.endsWith('.gz')) && (
+                <div 
+                  onClick={() => { handleExtractArchive(contextMenu.file!); setContextMenu(null); }}
+                  className="px-3.5 py-1.5 hover:bg-emerald-600 hover:text-white flex items-center space-x-2 cursor-pointer font-medium text-emerald-300"
+                >
+                  <PackageOpen className="w-3.5 h-3.5" />
+                  <span>Extract Archive Here</span>
+                </div>
+              )}
+
+              {/* Compress options */}
+              <div 
+                onClick={() => { handleCreateTar('tar.gz'); setContextMenu(null); }}
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
+              >
+                <Archive className="w-3.5 h-3.5" />
+                <span>Compress (.tar.gz)</span>
+              </div>
+
+              <div 
+                onClick={() => { handleCreateTar('zip'); setContextMenu(null); }}
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
+              >
+                <Archive className="w-3.5 h-3.5" />
+                <span>Compress (.zip)</span>
+              </div>
+
+              <div 
+                onClick={() => { handleOpenTerminalHere(); setContextMenu(null); }}
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
+              >
+                <Terminal className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Open Terminal Here</span>
+              </div>
+
               <div className="my-1 border-t border-white/10" />
 
               <div 
@@ -1422,6 +1546,15 @@ export default function FileManager() {
                 <FileText className="w-3.5 h-3.5" />
                 <span>New Text File</span>
               </div>
+              {selectedFiles.size > 0 && (
+                <div 
+                  onClick={() => { handleCreateTar('tar.gz'); setContextMenu(null); }}
+                  className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
+                >
+                  <Archive className="w-3.5 h-3.5" />
+                  <span>Compress Selected ({selectedFiles.size})</span>
+                </div>
+              )}
               {clipboard && (
                 <div 
                   onClick={() => { handlePaste(); setContextMenu(null); }}
@@ -1432,7 +1565,7 @@ export default function FileManager() {
                 </div>
               )}
               <div 
-                onClick={() => { openApp('terminal', 'Terminal'); setContextMenu(null); }}
+                onClick={() => { handleOpenTerminalHere(); setContextMenu(null); }}
                 className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
               >
                 <Terminal className="w-3.5 h-3.5 text-emerald-400" />
