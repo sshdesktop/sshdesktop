@@ -20,7 +20,7 @@ pub async fn sftp_list_dir(state: tauri::State<'_, AppState>, conn_id: String, p
     let clean_path = if path.is_empty() { "/" } else { &path };
     let (stdout, code) = run_cmd(&state, &conn_id, &format!("ls -la --time-style=+%s '{}'", clean_path)).await;
 
-    if code == 0 && !stdout.is_empty() {
+    if code == 0 {
         let mut entries = Vec::new();
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -53,9 +53,7 @@ pub async fn sftp_list_dir(state: tauri::State<'_, AppState>, conn_id: String, p
                 });
             }
         }
-        if !entries.is_empty() {
-            return Ok(entries);
-        }
+        return Ok(entries);
     }
 
     // High fidelity fallback for demo / offline
@@ -153,6 +151,16 @@ pub async fn sftp_chmod(state: tauri::State<'_, AppState>, conn_id: String, path
     let (_stdout, code) = run_cmd(&state, &conn_id, &format!("chmod {:o} '{}'", mode, path)).await;
     if code != 0 && code != -1 {
         return Err("Failed to update remote permissions".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_chown(state: tauri::State<'_, AppState>, conn_id: String, path: String, owner: String, group: String) -> Result<(), String> {
+    let target = if group.is_empty() { owner } else { format!("{}:{}", owner, group) };
+    let (_stdout, code) = run_cmd(&state, &conn_id, &format!("chown -R '{}' '{}'", target, path)).await;
+    if code != 0 && code != -1 {
+        return Err("Failed to update remote ownership".into());
     }
     Ok(())
 }

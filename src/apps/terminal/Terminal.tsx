@@ -3,7 +3,7 @@ import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
-import { Plus, X, Terminal as TerminalIcon, Trash2 } from 'lucide-react';
+import { Plus, X, Terminal as TerminalIcon, Trash2, ChevronDown, Server } from 'lucide-react';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
 import { sshExec } from '../../lib/tauri-bridge';
@@ -12,6 +12,8 @@ interface Tab {
   id: string;
   title: string;
   shell: string;
+  connId: string;
+  serverName: string;
 }
 
 interface TabInstance {
@@ -23,29 +25,44 @@ interface TabInstance {
 }
 
 export default function TerminalApp() {
+  const connections = useConnectionStore(s => s.connections);
+  const activeConnectionId = useConnectionStore(s => s.activeConnectionId) || 'default';
+  const activeServer = connections.find(c => c.id === activeConnectionId);
+
   const [tabs, setTabs] = useState<Tab[]>([
-    { id: '1', title: 'bash (1)', shell: '/bin/bash' }
+    { 
+      id: '1', 
+      title: activeServer ? `${activeServer.name || activeServer.host}` : 'bash (1)', 
+      shell: '/bin/bash',
+      connId: activeConnectionId,
+      serverName: activeServer?.name || activeServer?.host || 'server'
+    }
   ]);
   const [activeTab, setActiveTab] = useState<string>('1');
+  const [showServerMenu, setShowServerMenu] = useState(false);
   const tabInstances = useRef<Map<string, TabInstance>>(new Map());
   const containersRef = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const { openApp } = useWindowManager();
   const { openFileInEditor } = useEditorStore();
 
-  const activeServer = useConnectionStore(s => {
-    const activeId = s.activeConnectionId;
-    return activeId ? s.connections.find(c => c.id === activeId) : null;
-  });
-
-  const serverUser = activeServer?.username || 'root';
-  const serverHost = activeServer?.host || 'server';
-  const prompt = `\x1b[1;32m${serverUser}@${serverHost}\x1b[0m:\x1b[1;34m~\x1b[0m$ `;
+  const getPromptForTab = useCallback((tabId: string) => {
+    const tab = tabs.find(t => t.id === tabId);
+    const connId = tab?.connId || activeConnectionId;
+    const s = connections.find(c => c.id === connId) || activeServer;
+    const u = s?.username || 'root';
+    const h = s?.host || 'server';
+    return `\x1b[1;32m${u}@${h}\x1b[0m:\x1b[1;34m~\x1b[0m$ `;
+  }, [tabs, connections, activeConnectionId, activeServer]);
 
   const executeCommand = async (cmd: string, tabId: string) => {
     const instance = tabInstances.current.get(tabId);
     if (!instance) return;
     const term = instance.term;
+
+    const prompt = getPromptForTab(tabId);
+    const tab = tabs.find(t => t.id === tabId);
+    const connId = tab?.connId || activeConnectionId || 'default';
 
     if (!cmd) {
       term.write(prompt);
@@ -81,7 +98,6 @@ export default function TerminalApp() {
     if (action === 'top' || action === 'htop') {
       openApp('processes', 'Processes');
       term.writeln('\x1b[1;36m[CloudDesk]\x1b[0m Launched Process Manager app for live process inspection & termination.');
-      const connId = activeServer?.id || 'default';
       try {
         const res = await sshExec(connId, 'top -b -n 1 | head -n 25');
         if (res.stdout) {
@@ -107,7 +123,6 @@ export default function TerminalApp() {
       return;
     }
 
-    const connId = activeServer?.id || 'default';
     try {
       const res = await sshExec(connId, cmd);
       if (res.stdout) {
@@ -181,12 +196,18 @@ export default function TerminalApp() {
       currentLine: '',
     };
 
+    const prompt = getPromptForTab(tabId);
+    const tab = tabs.find(t => t.id === tabId);
+    const tabServer = tab ? connections.find(c => c.id === tab.connId) || activeServer : activeServer;
+    const user = tabServer?.username || 'root';
+    const host = tabServer?.host || 'server';
+
     tabInstances.current.set(tabId, instance);
 
     // Welcome banner
     term.writeln('\x1b[1;34m╔════════════════════════════════════════════════════════════╗\x1b[0m');
     term.writeln('\x1b[1;34m║\x1b[0m   \x1b[1;36mCloudDesk Remote Terminal Shell\x1b[0m                          \x1b[1;34m║\x1b[0m');
-    term.writeln(`\x1b[1;34m║\x1b[0m   Connected to: \x1b[1;32m${serverUser}@${serverHost}\x1b[0m                            \x1b[1;34m║\x1b[0m`);
+    term.writeln(`\x1b[1;34m║\x1b[0m   Connected to: \x1b[1;32m${user}@${host}\x1b[0m                            \x1b[1;34m║\x1b[0m`);
     term.writeln('\x1b[1;34m╚════════════════════════════════════════════════════════════╝\x1b[0m\r\n');
     term.write(prompt);
 
@@ -209,7 +230,7 @@ export default function TerminalApp() {
       } else if (code === 3) { // Ctrl+C
         term.writeln('^C');
         instance.currentLine = '';
-        term.write(prompt);
+        term.write(getPromptForTab(tabId));
       } else if (data === '\x1b[A') { // Up Arrow (history)
         if (instance.history.length > 0 && instance.historyIndex > 0) {
           instance.historyIndex--;
@@ -244,7 +265,7 @@ export default function TerminalApp() {
         term.write(data);
       }
     });
-  }, [serverUser, serverHost, prompt]);
+  }, [getPromptForTab, tabs, connections, activeServer]);
 
   // Window resize handler
   useEffect(() => {
@@ -271,11 +292,24 @@ export default function TerminalApp() {
     return () => clearTimeout(timer);
   }, [activeTab]);
 
-  const addTab = () => {
+  const addTab = (chosenConnId?: string) => {
     const newId = String(Date.now());
-    const nextNum = tabs.length + 1;
-    setTabs(prev => [...prev, { id: newId, title: `bash (${nextNum})`, shell: '/bin/bash' }]);
+    const connId = chosenConnId || activeConnectionId || 'default';
+    const s = connections.find(c => c.id === connId) || activeServer;
+    const serverLabel = s?.name || s?.host || 'Server';
+    const nextNum = tabs.filter(t => t.connId === connId).length + 1;
+    setTabs(prev => [
+      ...prev,
+      {
+        id: newId,
+        title: `${serverLabel} (${nextNum})`,
+        shell: '/bin/bash',
+        connId,
+        serverName: serverLabel
+      }
+    ]);
     setActiveTab(newId);
+    setShowServerMenu(false);
   };
 
   const removeTab = (id: string, e: React.MouseEvent) => {
@@ -311,8 +345,9 @@ export default function TerminalApp() {
                 : 'text-gray-400 hover:bg-white/[0.05] hover:text-gray-200'
             }`}
           >
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
             <TerminalIcon className="w-3.5 h-3.5" />
-            <span>{tab.title}</span>
+            <span className="truncate max-w-[130px]">{tab.title}</span>
             {tabs.length > 1 && (
               <button
                 onClick={(e) => removeTab(tab.id, e)}
@@ -324,13 +359,47 @@ export default function TerminalApp() {
           </div>
         ))}
 
-        <button
-          onClick={addTab}
-          className="p-1.5 hover:bg-white/[0.08] rounded-md text-gray-400 hover:text-white transition-colors"
-          title="New Tab"
-        >
-          <Plus className="w-3.5 h-3.5" />
-        </button>
+        <div className="relative">
+          <div className="flex items-center bg-white/[0.04] rounded-md">
+            <button
+              onClick={() => addTab()}
+              className="p-1.5 hover:bg-white/[0.08] rounded-l-md text-gray-400 hover:text-white transition-colors"
+              title="New Tab (Active Server)"
+            >
+              <Plus className="w-3.5 h-3.5" />
+            </button>
+            {connections.length > 1 && (
+              <button
+                onClick={() => setShowServerMenu(!showServerMenu)}
+                className="p-1.5 hover:bg-white/[0.08] rounded-r-md text-gray-400 hover:text-white border-l border-white/10"
+                title="Select Server for New Tab"
+              >
+                <ChevronDown className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+
+          {showServerMenu && (
+            <div 
+              className="absolute left-0 top-8 bg-[#1e1e2e] border border-white/15 rounded-xl shadow-2xl py-1 z-50 text-xs w-52 font-sans"
+              onClick={() => setShowServerMenu(false)}
+            >
+              <div className="px-3 py-1 text-[10px] uppercase font-bold text-gray-400 tracking-wider">
+                Open Tab On Server
+              </div>
+              {connections.map(c => (
+                <div
+                  key={c.id}
+                  onClick={() => addTab(c.id)}
+                  className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black cursor-pointer flex items-center space-x-2"
+                >
+                  <Server className="w-3.5 h-3.5" />
+                  <span className="truncate">{c.name || c.host}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         <div className="flex-1" />
 
@@ -339,7 +408,7 @@ export default function TerminalApp() {
             const inst = tabInstances.current.get(activeTab);
             if (inst) {
               inst.term.clear();
-              inst.term.write(prompt);
+              inst.term.write(getPromptForTab(activeTab));
             }
           }}
           className="p-1 text-gray-400 hover:text-red-400 hover:bg-white/5 rounded text-xs flex items-center space-x-1 px-2"
@@ -379,7 +448,7 @@ export default function TerminalApp() {
           <span className="text-gray-500">Active Tab: {activeTab}</span>
         </div>
         <div className="flex items-center space-x-3">
-          <span>{serverUser}@{serverHost}</span>
+          <span>{activeServer?.username || 'root'}@{activeServer?.host || 'server'}</span>
           <span>/bin/bash</span>
         </div>
       </div>
