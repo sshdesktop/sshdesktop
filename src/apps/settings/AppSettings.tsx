@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useSettingsStore } from '../../lib/store';
 import { Palette, Terminal, FileCode, Sliders, Info, ShieldCheck, Check } from 'lucide-react';
+import { WALLPAPERS } from '../../shell/Desktop';
 
 const ACCENT_COLORS = [
   { name: 'Sapphire Blue', value: '#89B4FA' },
@@ -12,7 +13,7 @@ const ACCENT_COLORS = [
 ];
 
 export default function AppSettings() {
-  const { theme, updateSettings, terminalFontSize, accentColor } = useSettingsStore();
+  const { theme, updateSettings, terminalFontSize, accentColor, wallpaper } = useSettingsStore();
   const [activeTab, setActiveTab] = useState<'appearance' | 'terminal' | 'editor' | 'ssh' | 'about'>('appearance');
 
   return (
@@ -122,6 +123,35 @@ export default function AppSettings() {
                       {accentColor === c.value && <Check className="w-4 h-4 text-black stroke-[3]" />}
                     </button>
                   ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-300 mb-2">Desktop Wallpaper</label>
+                <div className="grid grid-cols-2 gap-3">
+                  {WALLPAPERS.map(w => {
+                    const isSelected = (wallpaper || 'sonoma') === w.id;
+                    return (
+                      <div
+                        key={w.id}
+                        onClick={() => updateSettings({ wallpaper: w.id })}
+                        className={`group relative overflow-hidden rounded-xl border p-2.5 cursor-pointer transition-all ${
+                          isSelected
+                            ? 'border-[var(--accent)] ring-2 ring-[var(--accent)]/30 bg-white/5'
+                            : 'border-white/10 hover:border-white/30 hover:bg-white/[0.02]'
+                        }`}
+                      >
+                        <div className={`h-16 w-full rounded-lg ${w.bg} flex items-center justify-center shadow-inner mb-2`}>
+                          {isSelected && (
+                            <span className="p-1 rounded-full bg-black/50 text-white backdrop-blur-md">
+                              <Check className="w-4 h-4 stroke-[3]" />
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs font-semibold text-white truncate">{w.name}</div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </div>

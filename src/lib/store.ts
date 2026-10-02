@@ -77,6 +77,8 @@ interface WindowStoreState {
   updatePosition: (id: string, x: number, y: number) => void;
   updateSize: (id: string, width: number, height: number) => void;
   bringToFront: (id: string) => void;
+  minimizeAllWindows: () => void;
+  restoreAllWindows: () => void;
 }
 
 export const useWindowStore = create<WindowStoreState>((set) => ({
@@ -104,6 +106,12 @@ export const useWindowStore = create<WindowStoreState>((set) => ({
   restoreWindow: (id) => set((state) => ({
     windows: state.windows.map(w => w.id === id ? { ...w, minimized: false, focused: true, zIndex: state.nextZIndex } : { ...w, focused: false }),
     nextZIndex: state.nextZIndex + 1
+  })),
+  minimizeAllWindows: () => set((state) => ({
+    windows: state.windows.map(w => ({ ...w, minimized: true, focused: false }))
+  })),
+  restoreAllWindows: () => set((state) => ({
+    windows: state.windows.map(w => ({ ...w, minimized: false }))
   })),
   maximizeWindow: (id) => set((state) => ({
     windows: state.windows.map(w => w.id === id ? { ...w, maximized: !w.maximized } : w)
@@ -143,7 +151,11 @@ interface SettingsState {
   dockPosition: 'bottom' | 'left';
   showHiddenFiles: boolean;
   pollingInterval: number;
-  updateSettings: (newSettings: Partial<Omit<SettingsState, 'updateSettings'>>) => void;
+  wallpaper: string;
+  favorites: string[];
+  addFavorite: (path: string) => void;
+  removeFavorite: (path: string) => void;
+  updateSettings: (newSettings: Partial<Omit<SettingsState, 'updateSettings' | 'addFavorite' | 'removeFavorite'>>) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -155,6 +167,14 @@ export const useSettingsStore = create<SettingsState>()(
       dockPosition: 'bottom',
       showHiddenFiles: true,
       pollingInterval: 3,
+      wallpaper: 'sonoma',
+      favorites: ['/', '/home', '/etc', '/var/log', '/tmp'],
+      addFavorite: (path) => set((state) => ({
+        favorites: Array.from(new Set([...state.favorites, path]))
+      })),
+      removeFavorite: (path) => set((state) => ({
+        favorites: state.favorites.filter(p => p !== path)
+      })),
       updateSettings: (newSettings) => set((state) => ({ ...state, ...newSettings }))
     }),
     {
