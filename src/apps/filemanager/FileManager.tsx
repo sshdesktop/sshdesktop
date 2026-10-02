@@ -1,12 +1,16 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Folder, FileText, ArrowLeft, ArrowRight, ArrowUp, 
-  Grid, List, Search, Plus, Trash2, ChevronRight, RefreshCw, 
-  Copy, Scissors, ClipboardPaste, FileCode, CheckSquare, Square,
-  Upload, Terminal, Edit3, Key, Archive, PackageOpen, Star, BookmarkPlus,
-  Compass, HardDrive, ShieldAlert, X, Users
+  Grid, List, Columns, Image as ImageIcon, Search, Plus, Trash2, 
+  ChevronRight, RefreshCw, Copy, Scissors, ClipboardPaste, FileCode, 
+  CheckSquare, Square, Upload, Terminal, Edit3, Key, Archive, PackageOpen, 
+  Star, BookmarkPlus, Compass, HardDrive, ShieldAlert, X, Users, Eye, 
+  Tag, MoreHorizontal, Download, Layers
 } from 'lucide-react';
-import { sftpListDir, sftpMkdir, sftpDelete, sftpRename, sftpChmod, sftpChown, sftpWriteTextFile, sshExec } from '../../lib/tauri-bridge';
+import { 
+  sftpListDir, sftpMkdir, sftpDelete, sftpRename, sftpChmod, sftpChown, 
+  sftpWriteTextFile, sftpReadTextFile, sshExec 
+} from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore, useSettingsStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
 
@@ -19,6 +23,7 @@ interface RemoteFile {
   owner: string;
   modified: string;
   extension?: string;
+  tag?: string;
 }
 
 interface ClipboardState {
@@ -34,13 +39,60 @@ interface ContextMenuState {
   isCanvas?: boolean;
 }
 
+interface FinderTab {
+  id: string;
+  title: string;
+  path: string;
+  history: string[];
+  historyIndex: number;
+}
+
+interface UndoAction {
+  type: 'delete' | 'rename' | 'move';
+  originalPath: string;
+  targetPath?: string;
+  content?: string;
+}
+
+const MACOS_TAGS = [
+  { id: 'red', name: 'Red', color: '#ff453a' },
+  { id: 'orange', name: 'Orange', color: '#ff9f0a' },
+  { id: 'yellow', name: 'Yellow', color: '#ffd60a' },
+  { id: 'green', name: 'Green', color: '#30d158' },
+  { id: 'blue', name: 'Blue', color: '#0a84ff' },
+  { id: 'purple', name: 'Purple', color: '#bf5af2' },
+  { id: 'gray', name: 'Gray', color: '#8e8e93' },
+];
+
 export default function FileManager() {
-  const [currentPath, setCurrentPath] = useState('/');
+  const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
+  const activeServer = useConnectionStore(s => {
+    const id = s.activeConnectionId;
+    return id ? s.connections.find(c => c.id === id) : null;
+  });
+  const currentUsername = activeServer?.username || 'root';
+  const userHome = currentUsername === 'root' ? '/root' : `/home/${currentUsername}`;
+
+  // Tabs State (macOS Finder Tabs)
+  const [tabs, setTabs] = useState<FinderTab[]>([
+    {
+      id: 'tab-1',
+      title: 'Macintosh HD',
+      path: '/',
+      history: ['/'],
+      historyIndex: 0
+    }
+  ]);
+  const [activeTabId, setActiveTabId] = useState<string>('tab-1');
+
+  const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0];
+  const currentPath = activeTab.path;
+  const history = activeTab.history;
+  const historyIndex = activeTab.historyIndex;
+
   const [isEditingPath, setIsEditingPath] = useState(false);
-  const [pathInput, setPathInput] = useState('/');
-  const [history, setHistory] = useState<string[]>(['/']);
-  const [historyIndex, setHistoryIndex] = useState(0);
-  const [view, setView] = useState<'grid' | 'list'>('grid');
+  const [pathInput, setPathInput] = useState(currentPath);
+  const [view, setView] = useState<'icons' | 'list' | 'columns' | 'gallery'>('icons');
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [lastSelectedIndex, setLastSelectedIndex] = useState<number | null>(null);
   const [files, setFiles] = useState<RemoteFile[]>([]);
@@ -48,6 +100,15 @@ export default function FileManager() {
   const [clipboard, setClipboard] = useState<ClipboardState | null>(null);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [search, setSearch] = useState('');
+  const [fileTags, setFileTags] = useState<Record<string, string>>({});
+  const [activeTagFilter, setActiveTagFilter] = useState<string | null>(null);
+  const [undoStack, setUndoStack] = useState<UndoAction[]>([]);
+
+  // Quick Look State (Spacebar Preview)
+  const [quickLookFile, setQuickLookFile] = useState<RemoteFile | null>(null);
+  const [quickLookContent, setQuickLookContent] = useState<string>('');
+  const [isLoadingQuickLook, setIsLoadingQuickLook] = useState(false);
 
   // Modals
   const [showNewFolder, setShowNewFolder] = useState(false);
@@ -60,26 +121,17 @@ export default function FileManager() {
   const [showChmodModal, setShowChmodModal] = useState(false);
   const [chmodTarget, setChmodTarget] = useState<RemoteFile | null>(null);
   const [octalMode, setOctalMode] = useState<string>('755');
-
-  // Chown Modal State
   const [showChownModal, setShowChownModal] = useState(false);
   const [chownTarget, setChownTarget] = useState<RemoteFile | null>(null);
   const [chownOwner, setChownOwner] = useState('root');
   const [chownGroup, setChownGroup] = useState('root');
-  const [chownRecursive, setChownRecursive] = useState(true);
+  const [showActionMenu, setShowActionMenu] = useState(false);
 
   // Drag and drop moving between folders
   const [draggedItem, setDraggedItem] = useState<string | null>(null);
   const [dropTargetDir, setDropTargetDir] = useState<string | null>(null);
-  const longPressTimerRef = useRef<any>(null);
-  const [search, setSearch] = useState('');
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
 
-  const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
-  const activeServer = useConnectionStore(s => {
-    const id = s.activeConnectionId;
-    return id ? s.connections.find(c => c.id === id) : null;
-  });
-  const currentUsername = activeServer?.username || 'root';
   const { openApp } = useWindowManager();
   const { openFileInEditor } = useEditorStore();
   const { favorites, addFavorite, removeFavorite } = useSettingsStore();
@@ -98,7 +150,8 @@ export default function FileManager() {
           permissions: item.permissions || (item.is_dir ? 'drwxr-xr-x' : '-rw-r--r--'),
           owner: item.owner || 'root',
           modified: item.modified ? new Date(item.modified * 1000).toLocaleDateString() : 'Recent',
-          extension: item.name.includes('.') ? item.name.split('.').pop()?.toLowerCase() : undefined
+          extension: item.name.includes('.') ? item.name.split('.').pop()?.toLowerCase() : undefined,
+          tag: fileTags[item.name],
         })));
       } else {
         setFiles([]);
@@ -109,7 +162,7 @@ export default function FileManager() {
     } finally {
       setIsLoading(false);
     }
-  }, [activeConnId]);
+  }, [activeConnId, fileTags]);
 
   useEffect(() => {
     loadDirectory(currentPath);
@@ -118,21 +171,36 @@ export default function FileManager() {
 
   // Close context menu on outside click
   useEffect(() => {
-    const closeMenu = () => setContextMenu(null);
+    const closeMenu = () => {
+      setContextMenu(null);
+      setShowActionMenu(false);
+    };
     window.addEventListener('click', closeMenu);
     return () => window.removeEventListener('click', closeMenu);
   }, []);
 
   const navigateTo = (path: string) => {
     const clean = path.replace(/\/+/g, '/') || '/';
-    setCurrentPath(clean);
+    const folderTitle = clean === '/' ? 'Macintosh HD' : clean.split('/').filter(Boolean).pop() || 'Folder';
+    
+    setTabs(prev => prev.map(t => {
+      if (t.id === activeTabId) {
+        const nextHist = t.history.slice(0, t.historyIndex + 1);
+        return {
+          ...t,
+          path: clean,
+          title: folderTitle,
+          history: [...nextHist, clean],
+          historyIndex: nextHist.length
+        };
+      }
+      return t;
+    }));
+
     setPathInput(clean);
     setIsEditingPath(false);
     setSelectedFiles(new Set());
     setLastSelectedIndex(null);
-    const nextHist = history.slice(0, historyIndex + 1);
-    setHistory([...nextHist, clean]);
-    setHistoryIndex(nextHist.length);
   };
 
   const handlePathSubmit = (e: React.FormEvent) => {
@@ -144,20 +212,40 @@ export default function FileManager() {
   const goBack = () => {
     if (historyIndex > 0) {
       const prev = history[historyIndex - 1];
-      setCurrentPath(prev);
+      const folderTitle = prev === '/' ? 'Macintosh HD' : prev.split('/').filter(Boolean).pop() || 'Folder';
+      setTabs(prevTabs => prevTabs.map(t => {
+        if (t.id === activeTabId) {
+          return {
+            ...t,
+            path: prev,
+            title: folderTitle,
+            historyIndex: t.historyIndex - 1
+          };
+        }
+        return t;
+      }));
       setPathInput(prev);
       setSelectedFiles(new Set());
-      setHistoryIndex(historyIndex - 1);
     }
   };
 
   const goForward = () => {
     if (historyIndex < history.length - 1) {
       const next = history[historyIndex + 1];
-      setCurrentPath(next);
+      const folderTitle = next === '/' ? 'Macintosh HD' : next.split('/').filter(Boolean).pop() || 'Folder';
+      setTabs(prevTabs => prevTabs.map(t => {
+        if (t.id === activeTabId) {
+          return {
+            ...t,
+            path: next,
+            title: folderTitle,
+            historyIndex: t.historyIndex + 1
+          };
+        }
+        return t;
+      }));
       setPathInput(next);
       setSelectedFiles(new Set());
-      setHistoryIndex(historyIndex + 1);
     }
   };
 
@@ -170,9 +258,35 @@ export default function FileManager() {
     }
   };
 
-  const filteredFiles = files.filter(f => f.name.toLowerCase().includes(search.toLowerCase()));
+  // Tab Operations (macOS Finder Tabs)
+  const handleNewTab = (customPath?: string) => {
+    const targetPath = customPath || currentPath || '/';
+    const folderTitle = targetPath === '/' ? 'Macintosh HD' : targetPath.split('/').filter(Boolean).pop() || 'Folder';
+    const newId = `tab-${Date.now()}`;
+    setTabs(prev => [
+      ...prev,
+      {
+        id: newId,
+        title: folderTitle,
+        path: targetPath,
+        history: [targetPath],
+        historyIndex: 0
+      }
+    ]);
+    setActiveTabId(newId);
+  };
 
-  // Multi-selection handler
+  const handleCloseTab = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (tabs.length === 1) return;
+    const remaining = tabs.filter(t => t.id !== id);
+    setTabs(remaining);
+    if (activeTabId === id) {
+      setActiveTabId(remaining[remaining.length - 1].id);
+    }
+  };
+
+  // File selection
   const handleSelectFile = (f: RemoteFile, index: number, e: React.MouseEvent) => {
     if (e.ctrlKey || e.metaKey) {
       setSelectedFiles(prev => {
@@ -207,7 +321,6 @@ export default function FileManager() {
     }
   };
 
-  // Context Menu opener
   const handleContextMenu = (e: React.MouseEvent, file?: RemoteFile) => {
     e.preventDefault();
     e.stopPropagation();
@@ -218,167 +331,39 @@ export default function FileManager() {
       x: e.clientX,
       y: e.clientY,
       file,
-      isCanvas: !file
+      isCanvas: !file,
     });
   };
 
-  // Create Folder
-  const handleCreateFolder = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newFolderName.trim()) return;
-    const newPath = currentPath === '/' ? `/${newFolderName.trim()}` : `${currentPath}/${newFolderName.trim()}`;
-    try {
-      await sftpMkdir(activeConnId, newPath);
-      setShowNewFolder(false);
-      setNewFolderName('');
-      await loadDirectory(currentPath);
-    } catch (err: any) {
-      alert(`Failed to create directory: ${err?.message || err}`);
-    }
-  };
+  // Quick Look Toggle (Spacebar or Ctrl+P)
+  const handleQuickLookToggle = async (targetFile?: RemoteFile) => {
+    const file = targetFile || (selectedFiles.size > 0 ? files.find(f => selectedFiles.has(f.name)) : null);
+    if (!file) return;
 
-  // Create File
-  const handleCreateFile = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newFileName.trim()) return;
-    const newPath = currentPath === '/' ? `/${newFileName.trim()}` : `${currentPath}/${newFileName.trim()}`;
-    try {
-      await sftpWriteTextFile(activeConnId, newPath, '');
-      setShowNewFile(false);
-      setNewFileName('');
-      await loadDirectory(currentPath);
-      openFileTarget(newFileName.trim());
-    } catch (err: any) {
-      alert(`Failed to create file: ${err?.message || err}`);
+    if (quickLookFile?.name === file.name) {
+      setQuickLookFile(null);
+      setQuickLookContent('');
+      return;
     }
-  };
 
-  // Rename
-  const handleRename = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!renameNewName.trim() || !renameTarget) return;
-    const oldPath = currentPath === '/' ? `/${renameTarget}` : `${currentPath}/${renameTarget}`;
-    const newPath = currentPath === '/' ? `/${renameNewName.trim()}` : `${currentPath}/${renameNewName.trim()}`;
-    try {
-      await sftpRename(activeConnId, oldPath, newPath);
-      setShowRenameModal(false);
-      setRenameTarget('');
-      setRenameNewName('');
-      await loadDirectory(currentPath);
-    } catch (err: any) {
-      alert(`Rename failed: ${err?.message || err}`);
-    }
-  };
-
-  // Chmod
-  const handleChmod = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!chmodTarget) return;
-    const targetPath = currentPath === '/' ? `/${chmodTarget.name}` : `${currentPath}/${chmodTarget.name}`;
-    const mode = parseInt(octalMode, 8);
-    try {
-      await sftpChmod(activeConnId, targetPath, mode);
-      setShowChmodModal(false);
-      setChmodTarget(null);
-      await loadDirectory(currentPath);
-    } catch (err: any) {
-      alert(`Chmod failed: ${err?.message || err}`);
-    }
-  };
-
-  // Chown (Change Ownership)
-  const handleChown = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const targets = chownTarget 
-      ? [chownTarget.name] 
-      : Array.from(selectedFiles);
-    if (targets.length === 0) return;
-    setIsLoading(true);
-    try {
-      for (const name of targets) {
-        const targetPath = currentPath === '/' ? `/${name}` : `${currentPath}/${name}`;
-        await sftpChown(activeConnId, targetPath, chownOwner.trim(), chownGroup.trim());
+    setQuickLookFile(file);
+    if (file.type === 'file') {
+      setIsLoadingQuickLook(true);
+      try {
+        const fullPath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+        const content = await sftpReadTextFile(activeConnId, fullPath);
+        setQuickLookContent(content || '(Empty file)');
+      } catch {
+        setQuickLookContent('(Binary or protected system file)');
+      } finally {
+        setIsLoadingQuickLook(false);
       }
-      setShowChownModal(false);
-      setChownTarget(null);
-      await loadDirectory(currentPath);
-    } catch (err: any) {
-      alert(`Chown failed: ${err?.message || err}`);
-    } finally {
-      setIsLoading(false);
+    } else {
+      setQuickLookContent(`Directory with remote server items`);
     }
   };
 
-  // Move files/folders into a folder via Drag & Drop
-  const handleMoveItemsToFolder = async (targetFolderName: string) => {
-    const targetDirPath = currentPath === '/' ? `/${targetFolderName}` : `${currentPath}/${targetFolderName}`;
-    const itemsToMove = (draggedItem && selectedFiles.has(draggedItem) && selectedFiles.size > 1)
-      ? Array.from(selectedFiles)
-      : draggedItem ? [draggedItem] : [];
-
-    if (itemsToMove.length === 0) return;
-    if (itemsToMove.includes(targetFolderName)) return;
-
-    setIsLoading(true);
-    try {
-      for (const name of itemsToMove) {
-        const oldPath = currentPath === '/' ? `/${name}` : `${currentPath}/${name}`;
-        const newPath = `${targetDirPath}/${name}`;
-        await sftpRename(activeConnId, oldPath, newPath);
-      }
-      setSelectedFiles(new Set());
-      await loadDirectory(currentPath);
-    } catch (err: any) {
-      alert(`Move failed: ${err?.message || err}`);
-    } finally {
-      setIsLoading(false);
-      setDraggedItem(null);
-      setDropTargetDir(null);
-    }
-  };
-
-  // Long press selection helper
-  const handlePointerDown = (f: RemoteFile) => {
-    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = setTimeout(() => {
-      setSelectedFiles(prev => {
-        const next = new Set(prev);
-        if (next.has(f.name)) next.delete(f.name);
-        else next.add(f.name);
-        return next;
-      });
-    }, 400);
-  };
-
-  const cancelLongPress = () => {
-    if (longPressTimerRef.current) {
-      clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-    }
-  };
-
-  // Delete Selection
-  const handleDeleteSelected = async () => {
-    if (selectedFiles.size === 0) return;
-    const items = Array.from(selectedFiles);
-    const confirmMsg = items.length === 1 
-      ? `Are you sure you want to permanently delete '${items[0]}' from the server?`
-      : `Are you sure you want to permanently delete ${items.length} selected items?`;
-    if (!confirm(confirmMsg)) return;
-
-    try {
-      for (const name of items) {
-        const targetPath = currentPath === '/' ? `/${name}` : `${currentPath}/${name}`;
-        await sftpDelete(activeConnId, targetPath);
-      }
-      setSelectedFiles(new Set());
-      await loadDirectory(currentPath);
-    } catch (err: any) {
-      alert(`Delete failed: ${err?.message || err}`);
-    }
-  };
-
-  // Copy / Cut / Paste
+  // Copy / Cut / Paste / Duplicate
   const handleCopy = () => {
     if (selectedFiles.size === 0) return;
     setClipboard({
@@ -416,98 +401,176 @@ export default function FileManager() {
     }
   };
 
-  // Archive Extract
-  const handleExtractArchive = async (fileName: string) => {
-    const fullPath = currentPath === '/' ? `/${fileName}` : `${currentPath}/${fileName}`;
+  const handleDuplicate = async () => {
+    if (selectedFiles.size === 0) return;
     setIsLoading(true);
     try {
-      let cmd = '';
-      if (fileName.endsWith('.tar.gz') || fileName.endsWith('.tgz')) {
-        cmd = `tar -xzf '${fullPath}' -C '${currentPath}'`;
-      } else if (fileName.endsWith('.tar')) {
-        cmd = `tar -xf '${fullPath}' -C '${currentPath}'`;
-      } else if (fileName.endsWith('.zip')) {
-        cmd = `unzip -o '${fullPath}' -d '${currentPath}'`;
-      } else {
-        alert('Supported archive types: .tar.gz, .tgz, .tar, .zip');
-        setIsLoading(false);
+      for (const name of selectedFiles) {
+        const src = currentPath === '/' ? `/${name}` : `${currentPath}/${name}`;
+        const dotIdx = name.lastIndexOf('.');
+        const copyName = dotIdx > 0 
+          ? `${name.slice(0, dotIdx)} copy${name.slice(dotIdx)}` 
+          : `${name} copy`;
+        const dest = currentPath === '/' ? `/${copyName}` : `${currentPath}/${copyName}`;
+        await sshExec(activeConnId, `cp -r '${src}' '${dest}'`);
+      }
+      await loadDirectory(currentPath);
+    } catch (err: any) {
+      alert(`Duplicate failed: ${err?.message || err}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleDeleteSelected = async () => {
+    if (selectedFiles.size === 0) return;
+    const items = Array.from(selectedFiles);
+    const confirmMsg = items.length === 1 
+      ? `Move '${items[0]}' to Trash?`
+      : `Move ${items.length} selected items to Trash?`;
+    if (!confirm(confirmMsg)) return;
+
+    try {
+      for (const name of items) {
+        const targetPath = currentPath === '/' ? `/${name}` : `${currentPath}/${name}`;
+        await sftpDelete(activeConnId, targetPath);
+      }
+      setSelectedFiles(new Set());
+      await loadDirectory(currentPath);
+    } catch (err: any) {
+      alert(`Delete failed: ${err?.message || err}`);
+    }
+  };
+
+  const handleSelectAll = () => {
+    setSelectedFiles(new Set(filteredFiles.map(f => f.name)));
+  };
+
+  const handleUndo = async () => {
+    if (undoStack.length === 0) return;
+    const last = undoStack[undoStack.length - 1];
+    setUndoStack(prev => prev.slice(0, -1));
+    try {
+      if (last.type === 'delete' && last.content && last.originalPath) {
+        await sftpWriteTextFile(activeConnId, last.originalPath, last.content);
+      } else if (last.type === 'rename' && last.originalPath && last.targetPath) {
+        await sftpRename(activeConnId, last.targetPath, last.originalPath);
+      } else if (last.type === 'move' && last.originalPath && last.targetPath) {
+        await sftpRename(activeConnId, last.targetPath, last.originalPath);
+      }
+      await loadDirectory(currentPath);
+    } catch (err: any) {
+      console.warn('Undo error:', err);
+    }
+  };
+
+  // Keyboard Shortcuts Listener (macOS standard Cmd/Ctrl)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
+        if (e.key === 'Escape') {
+          (e.target as HTMLElement).blur();
+        }
         return;
       }
-      await sshExec(activeConnId, cmd);
-      await loadDirectory(currentPath);
-    } catch (err: any) {
-      alert(`Extraction failed: ${err?.message || err}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
-  // Archive Compress
-  const handleCompressSelected = async () => {
-    if (selectedFiles.size === 0) return;
-    const names = Array.from(selectedFiles);
-    const archiveName = `${names[0]}.tar.gz`;
-    const fullArchivePath = currentPath === '/' ? `/${archiveName}` : `${currentPath}/${archiveName}`;
-    const quotedItems = names.map(n => `'${n}'`).join(' ');
-    setIsLoading(true);
-    try {
-      const cmd = `cd '${currentPath}' && tar -czf '${fullArchivePath}' ${quotedItems}`;
-      await sshExec(activeConnId, cmd);
-      await loadDirectory(currentPath);
-    } catch (err: any) {
-      alert(`Compression failed: ${err?.message || err}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+      const isMacMeta = e.metaKey || e.ctrlKey;
 
-  // Drag and Drop from local desktop
-  const handleDrop = async (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDraggingOver(false);
-    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
-
-    const dropped = Array.from(e.dataTransfer.files);
-    setIsLoading(true);
-    try {
-      for (const file of dropped) {
-        const targetPath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
-        const text = await file.text();
-        await sftpWriteTextFile(activeConnId, targetPath, text);
+      if (isMacMeta && e.key.toLowerCase() === 'c') {
+        e.preventDefault();
+        handleCopy();
+      } else if (isMacMeta && e.key.toLowerCase() === 'v') {
+        e.preventDefault();
+        handlePaste();
+      } else if (isMacMeta && e.key.toLowerCase() === 'x') {
+        e.preventDefault();
+        handleCut();
+      } else if (isMacMeta && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        handleUndo();
+      } else if (isMacMeta && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        handleSelectAll();
+      } else if (isMacMeta && e.key.toLowerCase() === 'd') {
+        e.preventDefault();
+        handleDuplicate();
+      } else if (isMacMeta && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      } else if (isMacMeta && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        handleQuickLookToggle();
+      } else if (isMacMeta && e.key.toLowerCase() === 't') {
+        e.preventDefault();
+        handleNewTab();
+      } else if (isMacMeta && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        setShowNewFolder(true);
+      } else if (e.code === 'Space') {
+        e.preventDefault();
+        handleQuickLookToggle();
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (selectedFiles.size === 1) {
+          const first = Array.from(selectedFiles)[0];
+          setRenameTarget(first);
+          setRenameNewName(first);
+          setShowRenameModal(true);
+        }
+      } else if (e.key === 'Delete' || (isMacMeta && e.key === 'Backspace')) {
+        e.preventDefault();
+        handleDeleteSelected();
       }
-      await loadDirectory(currentPath);
-    } catch (err: any) {
-      alert(`Drop upload failed: ${err?.message || err}`);
-    } finally {
-      setIsLoading(false);
-    }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedFiles, clipboard, currentPath, undoStack, quickLookFile]);
+
+  // Color tag assigner
+  const handleAssignTag = (fileName: string, tagId: string) => {
+    setFileTags(prev => ({
+      ...prev,
+      [fileName]: tagId
+    }));
+    setContextMenu(null);
   };
+
+  // Filtered files including tag filter and search filter
+  const filteredFiles = files.filter(f => {
+    const matchesSearch = f.name.toLowerCase().includes(search.toLowerCase());
+    const matchesTag = !activeTagFilter || fileTags[f.name] === activeTagFilter;
+    return matchesSearch && matchesTag;
+  });
+
+  const selectedFileObj = filteredFiles.find(f => selectedFiles.has(f.name)) || filteredFiles[0];
 
   const breadcrumbs = currentPath.split('/').filter(Boolean);
 
   const quickPlaces = [
-    { label: 'Root (/)' , path: '/', icon: HardDrive },
-    { label: 'User Home', path: currentUsername === 'root' ? '/root' : `/home/${currentUsername}`, icon: Folder },
-    { label: 'Desktop', path: currentUsername === 'root' ? '/root/Desktop' : `/home/${currentUsername}/Desktop`, icon: Compass },
-    { label: 'Config (/etc)', path: '/etc', icon: Folder },
-    { label: 'Logs (/var/log)', path: '/var/log', icon: Folder },
-    { label: 'Temporary (/tmp)', path: '/tmp', icon: Folder },
+    { label: 'Desktop', path: `${userHome}/Desktop`, icon: Compass },
+    { label: 'Documents', path: `${userHome}/Documents`, icon: FileText },
+    { label: 'Downloads', path: `${userHome}/Downloads`, icon: Download },
+    { label: 'User Home', path: userHome, icon: Folder },
+    { label: 'Macintosh HD', path: '/', icon: HardDrive },
+    { label: 'Applications', path: '/usr/local/bin', icon: Layers },
+    { label: 'Logs', path: '/var/log', icon: FileCode },
   ];
 
   return (
     <div 
-      className="flex h-full bg-[#181825] text-[#cdd6f4] select-none"
+      className="flex h-full bg-[#181825] text-[#cdd6f4] select-none overflow-hidden"
       onDragOver={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
       onDragLeave={() => setIsDraggingOver(false)}
-      onDrop={handleDrop}
       onContextMenu={(e) => handleContextMenu(e)}
     >
-      {/* Left Sidebar: Places & Favorites (macOS Finder style) */}
-      <div className="w-56 bg-[#1e1e2e]/90 border-r border-white/[0.08] flex flex-col shrink-0 select-none py-3 px-2 text-xs">
-        <div className="text-[10px] font-bold text-gray-500 uppercase px-3 mb-2 tracking-wider">
-          Places
+      {/* macOS Translucent Finder Sidebar */}
+      <div className="w-52 bg-[#14141e]/90 backdrop-blur-2xl border-r border-white/[0.08] flex flex-col shrink-0 py-3 px-2 text-xs">
+        {/* Favorites Section */}
+        <div className="text-[10px] font-bold text-gray-500 uppercase px-3 mb-1.5 tracking-wider">
+          Favorites
         </div>
-        <div className="space-y-0.5 mb-4">
+        <div className="space-y-0.5 mb-3">
           {quickPlaces.map(p => {
             const Icon = p.icon;
             const isCurrent = currentPath === p.path;
@@ -515,8 +578,8 @@ export default function FileManager() {
               <button
                 key={p.path}
                 onClick={() => navigateTo(p.path)}
-                className={`w-full flex items-center space-x-2 px-3 py-1.5 rounded-lg text-left transition-colors ${
-                  isCurrent ? 'bg-[var(--accent)] text-white font-medium shadow-sm' : 'text-gray-300 hover:text-white hover:bg-white/5'
+                className={`w-full flex items-center space-x-2 px-3 py-1.5 rounded-xl text-left transition-colors ${
+                  isCurrent ? 'bg-blue-600 text-white font-medium shadow-sm' : 'text-gray-300 hover:text-white hover:bg-white/5'
                 }`}
               >
                 <Icon className={`w-3.5 h-3.5 ${isCurrent ? 'text-white' : 'text-blue-400'}`} />
@@ -526,8 +589,55 @@ export default function FileManager() {
           })}
         </div>
 
-        <div className="flex items-center justify-between text-[10px] font-bold text-gray-500 uppercase px-3 mb-2 tracking-wider">
-          <span>Favorites</span>
+        {/* Locations Section */}
+        <div className="text-[10px] font-bold text-gray-500 uppercase px-3 mb-1.5 tracking-wider">
+          Locations
+        </div>
+        <div className="space-y-0.5 mb-3">
+          <button
+            onClick={() => navigateTo('/')}
+            className={`w-full flex items-center space-x-2 px-3 py-1.5 rounded-xl text-left transition-colors ${
+              currentPath === '/' ? 'bg-blue-600 text-white font-medium shadow-sm' : 'text-gray-300 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <HardDrive className={`w-3.5 h-3.5 ${currentPath === '/' ? 'text-white' : 'text-blue-400'}`} />
+            <span className="truncate">Macintosh HD</span>
+          </button>
+        </div>
+
+        {/* Tags Section (macOS 7 Color Dots) */}
+        <div className="flex items-center justify-between text-[10px] font-bold text-gray-500 uppercase px-3 mb-1.5 tracking-wider">
+          <span>Tags</span>
+          {activeTagFilter && (
+            <button 
+              onClick={() => setActiveTagFilter(null)}
+              className="text-[9px] text-blue-400 hover:underline"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+        <div className="space-y-0.5 mb-3">
+          {MACOS_TAGS.map(tag => {
+            const isSelected = activeTagFilter === tag.id;
+            return (
+              <button
+                key={tag.id}
+                onClick={() => setActiveTagFilter(isSelected ? null : tag.id)}
+                className={`w-full flex items-center space-x-2 px-3 py-1.5 rounded-xl text-left transition-colors ${
+                  isSelected ? 'bg-white/10 text-white font-semibold' : 'text-gray-400 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: tag.color }} />
+                <span className="truncate">{tag.name}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Custom User Favorites */}
+        <div className="flex items-center justify-between text-[10px] font-bold text-gray-500 uppercase px-3 mb-1.5 tracking-wider">
+          <span>Bookmarks</span>
           <button 
             onClick={() => addFavorite(currentPath)} 
             className="hover:text-white"
@@ -536,12 +646,12 @@ export default function FileManager() {
             <BookmarkPlus className="w-3.5 h-3.5" />
           </button>
         </div>
-        <div className="space-y-0.5 flex-1 overflow-y-auto">
+        <div className="space-y-0.5 flex-1 overflow-y-auto pr-1">
           {favorites.map(fav => (
             <div
               key={fav}
-              className={`group flex items-center justify-between px-3 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
-                currentPath === fav ? 'bg-[var(--accent)]/20 text-white font-medium' : 'text-gray-400 hover:text-white hover:bg-white/5'
+              className={`group flex items-center justify-between px-3 py-1.5 rounded-xl text-left transition-colors cursor-pointer ${
+                currentPath === fav ? 'bg-blue-600/30 text-white font-medium' : 'text-gray-400 hover:text-white hover:bg-white/5'
               }`}
               onClick={() => navigateTo(fav)}
             >
@@ -552,7 +662,7 @@ export default function FileManager() {
               <button
                 onClick={(e) => { e.stopPropagation(); removeFavorite(fav); }}
                 className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-400 p-0.5"
-                title="Remove Favorite"
+                title="Remove Bookmark"
               >
                 <X className="w-3 h-3" />
               </button>
@@ -561,41 +671,107 @@ export default function FileManager() {
         </div>
       </div>
 
-      {/* Main File Manager Workspace */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Top Navigation & Editable Address Bar */}
-        <div className="flex items-center justify-between bg-[#1e1e2e] border-b border-white/[0.08] px-4 py-2 shrink-0">
-          <div className="flex items-center space-x-2 flex-1 min-w-0">
-            {/* Back / Forward / Up controls */}
-            <div className="flex items-center space-x-1 pr-2 border-r border-white/10 shrink-0">
+      {/* Main Finder Workspace */}
+      <div className="flex-1 flex flex-col min-w-0 bg-[#181825]">
+        {/* macOS Finder Tab Bar */}
+        <div className="flex items-center bg-[#11111a] border-b border-white/[0.08] px-2 pt-1.5 space-x-1 shrink-0 overflow-x-auto">
+          {tabs.map(tab => (
+            <div
+              key={tab.id}
+              onClick={() => setActiveTabId(tab.id)}
+              className={`flex items-center space-x-2 px-3 py-1.5 rounded-t-xl text-xs transition-colors cursor-pointer group ${
+                activeTabId === tab.id
+                  ? 'bg-[#181825] text-white font-medium shadow-sm border-t-2 border-t-blue-500'
+                  : 'text-gray-400 hover:bg-white/[0.04] hover:text-gray-200'
+              }`}
+            >
+              <Folder className="w-3.5 h-3.5 text-blue-400" />
+              <span className="truncate max-w-[120px]">{tab.title}</span>
+              {tabs.length > 1 && (
+                <button
+                  onClick={(e) => handleCloseTab(tab.id, e)}
+                  className="opacity-0 group-hover:opacity-100 hover:bg-white/20 p-0.5 rounded transition-opacity"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          ))}
+
+          <button
+            onClick={() => handleNewTab()}
+            className="p-1.5 hover:bg-white/[0.08] rounded-lg text-gray-400 hover:text-white transition-colors"
+            title="New Finder Tab (Ctrl+T)"
+          >
+            <Plus className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        {/* macOS Finder Segmented Toolbar */}
+        <div className="flex items-center justify-between bg-[#14141e] border-b border-white/[0.08] px-4 py-2 shrink-0">
+          <div className="flex items-center space-x-3 flex-1 min-w-0">
+            {/* Segmented Back / Forward / Up */}
+            <div className="flex items-center bg-white/[0.06] rounded-xl p-0.5 border border-white/10 shrink-0">
               <button
                 onClick={goBack}
                 disabled={historyIndex === 0}
-                className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-gray-300"
+                className="p-1.5 rounded-lg hover:bg-white/10 disabled:opacity-25 text-gray-300 transition-colors"
                 title="Back"
               >
-                <ArrowLeft className="w-4 h-4" />
+                <ArrowLeft className="w-3.5 h-3.5" />
               </button>
               <button
                 onClick={goForward}
                 disabled={historyIndex >= history.length - 1}
-                className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-gray-300"
+                className="p-1.5 rounded-lg hover:bg-white/10 disabled:opacity-25 text-gray-300 transition-colors"
                 title="Forward"
               >
-                <ArrowRight className="w-4 h-4" />
+                <ArrowRight className="w-3.5 h-3.5" />
               </button>
               <button
                 onClick={goUp}
                 disabled={currentPath === '/'}
-                className="p-1 rounded hover:bg-white/10 disabled:opacity-30 text-gray-300"
-                title="Parent Directory"
+                className="p-1.5 rounded-lg hover:bg-white/10 disabled:opacity-25 text-gray-300 transition-colors border-l border-white/10"
+                title="Enclosing Folder (Up)"
               >
-                <ArrowUp className="w-4 h-4" />
+                <ArrowUp className="w-3.5 h-3.5" />
               </button>
             </div>
 
-            {/* Click-to-Edit Address Bar */}
-            <div className="flex-1 max-w-xl">
+            {/* Segmented View Mode Switcher [ ⊞ | ☰ | ☵ | 🖼 ] */}
+            <div className="flex items-center bg-white/[0.06] rounded-xl p-0.5 border border-white/10 shrink-0">
+              <button
+                onClick={() => setView('icons')}
+                className={`p-1.5 rounded-lg transition-colors ${view === 'icons' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'}`}
+                title="Icons View (⊞)"
+              >
+                <Grid className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => setView('list')}
+                className={`p-1.5 rounded-lg transition-colors ${view === 'list' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'}`}
+                title="List View (☰)"
+              >
+                <List className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => setView('columns')}
+                className={`p-1.5 rounded-lg transition-colors ${view === 'columns' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'}`}
+                title="Miller Columns View (☵)"
+              >
+                <Columns className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => setView('gallery')}
+                className={`p-1.5 rounded-lg transition-colors ${view === 'gallery' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'}`}
+                title="Gallery / QuickLook View (🖼)"
+              >
+                <ImageIcon className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Editable Path Pill */}
+            <div className="flex-1 max-w-md">
               {isEditingPath ? (
                 <form onSubmit={handlePathSubmit} className="flex-1">
                   <input
@@ -607,19 +783,19 @@ export default function FileManager() {
                       setIsEditingPath(false);
                       setPathInput(currentPath);
                     }}
-                    placeholder="/path/to/directory"
-                    className="w-full bg-[#11111b] border border-[var(--accent)] rounded-lg px-2.5 py-1 text-xs font-mono text-white focus:outline-none shadow-inner"
+                    placeholder="/path/to/folder"
+                    className="w-full bg-[#0f0f18] border border-blue-500 rounded-xl px-3 py-1 text-xs font-mono text-white focus:outline-none shadow-inner"
                   />
                 </form>
               ) : (
                 <div 
                   onClick={() => setIsEditingPath(true)}
-                  className="flex items-center bg-[#11111b] hover:border-white/20 border border-white/10 rounded-lg px-2.5 py-1 text-xs font-mono flex-1 overflow-x-auto space-x-1 scrollbar-none cursor-text group"
+                  className="flex items-center bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-xl px-3 py-1 text-xs font-mono flex-1 overflow-x-auto space-x-1.5 scrollbar-none cursor-text group transition-colors"
                   title="Click to edit path directly"
                 >
                   <span
                     onClick={(e) => { e.stopPropagation(); navigateTo('/'); }}
-                    className="text-gray-400 hover:text-white cursor-pointer px-1 py-0.5 rounded hover:bg-white/5 shrink-0"
+                    className="text-gray-400 hover:text-white cursor-pointer px-1 rounded hover:bg-white/10 shrink-0"
                   >
                     /
                   </span>
@@ -630,7 +806,7 @@ export default function FileManager() {
                         <ChevronRight className="w-3 h-3 text-gray-600 shrink-0" />
                         <span
                           onClick={(e) => { e.stopPropagation(); navigateTo(full); }}
-                          className="text-gray-300 hover:text-white cursor-pointer px-1 py-0.5 rounded hover:bg-white/5 whitespace-nowrap"
+                          className="text-gray-300 hover:text-white cursor-pointer px-1 rounded hover:bg-white/10 whitespace-nowrap"
                         >
                           {part}
                         </span>
@@ -643,199 +819,172 @@ export default function FileManager() {
             </div>
           </div>
 
-          {/* Toolbar Action Buttons */}
-          <div className="flex items-center space-x-1.5 pl-3 shrink-0">
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input
-                type="text"
-                placeholder="Search..."
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-                className="bg-[#11111b] border border-white/10 rounded-lg pl-7 pr-2 py-1 text-xs text-gray-200 focus:outline-none w-28 focus:w-40 transition-all"
-              />
-            </div>
-
-            <div className="w-px h-5 bg-white/10 mx-1" />
-
-            {/* Create File / Folder */}
+          {/* Action Toolbar Tools */}
+          <div className="flex items-center space-x-2 pl-3 shrink-0">
+            {/* Quick Look Button */}
             <button
-              onClick={() => setShowNewFile(true)}
-              className="p-1.5 hover:bg-white/10 rounded-lg text-gray-300 hover:text-emerald-400 flex items-center space-x-1 text-xs"
-              title="Create New File"
+              onClick={() => handleQuickLookToggle()}
+              className="p-1.5 hover:bg-white/10 rounded-xl text-gray-300 hover:text-blue-400 flex items-center space-x-1 text-xs transition-colors"
+              title="Quick Look (Spacebar)"
             >
-              <Plus className="w-3.5 h-3.5" />
-              <span>File</span>
+              <Eye className="w-3.5 h-3.5" />
             </button>
+
+            {/* New Folder */}
             <button
               onClick={() => setShowNewFolder(true)}
-              className="p-1.5 hover:bg-white/10 rounded-lg text-gray-300 hover:text-blue-400 flex items-center space-x-1 text-xs"
-              title="Create New Folder"
+              className="p-1.5 hover:bg-white/10 rounded-xl text-gray-300 hover:text-blue-400 flex items-center space-x-1 text-xs transition-colors"
+              title="New Folder (Ctrl+N)"
             >
-              <Folder className="w-3.5 h-3.5" />
+              <Plus className="w-3.5 h-3.5" />
               <span>Folder</span>
             </button>
 
-            <div className="w-px h-5 bg-white/10 mx-1" />
+            {/* Action Menu (⋯) */}
+            <div className="relative">
+              <button
+                onClick={() => setShowActionMenu(!showActionMenu)}
+                className="p-1.5 hover:bg-white/10 rounded-xl text-gray-300 hover:text-white transition-colors"
+                title="Action Options"
+              >
+                <MoreHorizontal className="w-3.5 h-3.5" />
+              </button>
 
-            {/* Clipboard Actions */}
-            <button
-              onClick={handleCopy}
-              disabled={selectedFiles.size === 0}
-              className="p-1.5 hover:bg-white/10 rounded-lg text-gray-300 hover:text-white disabled:opacity-30"
-              title="Copy Selection (Ctrl+C)"
-            >
-              <Copy className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={handleCut}
-              disabled={selectedFiles.size === 0}
-              className="p-1.5 hover:bg-white/10 rounded-lg text-gray-300 hover:text-white disabled:opacity-30"
-              title="Cut Selection (Ctrl+X)"
-            >
-              <Scissors className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={handlePaste}
-              disabled={!clipboard}
-              className="p-1.5 hover:bg-white/10 rounded-lg text-gray-300 hover:text-white disabled:opacity-30 relative"
-              title={`Paste ${clipboard ? `(${clipboard.files.length} items)` : ''}`}
-            >
-              <ClipboardPaste className="w-3.5 h-3.5" />
-              {clipboard && (
-                <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-blue-500" />
+              {showActionMenu && (
+                <div 
+                  className="absolute right-0 top-8 bg-[#1e1e2e]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl py-1.5 z-50 text-xs w-48 font-sans"
+                  onClick={() => setShowActionMenu(false)}
+                >
+                  <div 
+                    onClick={() => setShowNewFile(true)}
+                    className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center space-x-2"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>New Empty File</span>
+                  </div>
+                  <div 
+                    onClick={handleDuplicate}
+                    className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center space-x-2"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Duplicate (Ctrl+D)</span>
+                  </div>
+                  <div 
+                    onClick={handleCopy}
+                    className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center space-x-2"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copy (Ctrl+C)</span>
+                  </div>
+                  <div 
+                    onClick={handlePaste}
+                    className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center space-x-2"
+                  >
+                    <ClipboardPaste className="w-3.5 h-3.5" />
+                    <span>Paste (Ctrl+V)</span>
+                  </div>
+                  <div className="my-1 border-t border-white/10 mx-2" />
+                  <div 
+                    onClick={() => openApp('terminal', 'Terminal')}
+                    className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center space-x-2"
+                  >
+                    <Terminal className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Open in Terminal</span>
+                  </div>
+                </div>
               )}
-            </button>
-            <button
-              onClick={handleDeleteSelected}
-              disabled={selectedFiles.size === 0}
-              className="p-1.5 hover:bg-white/10 rounded-lg text-gray-300 hover:text-rose-400 disabled:opacity-30"
-              title="Delete Selected Items"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
+            </div>
 
-            <div className="w-px h-5 bg-white/10 mx-1" />
-
-            {/* Refresh */}
-            <button
-              onClick={() => loadDirectory(currentPath)}
-              disabled={isLoading}
-              className="p-1.5 hover:bg-white/10 rounded-lg text-gray-300 hover:text-white"
-              title="Refresh Directory"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-blue-400' : ''}`} />
-            </button>
-
-            {/* View Toggle */}
-            <div className="flex items-center bg-[#11111b] p-0.5 rounded-lg border border-white/10">
-              <button
-                onClick={() => setView('grid')}
-                className={`p-1 rounded ${view === 'grid' ? 'bg-[var(--accent)] text-white' : 'text-gray-400'}`}
-                title="Grid View"
-              >
-                <Grid className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onClick={() => setView('list')}
-                className={`p-1 rounded ${view === 'list' ? 'bg-[var(--accent)] text-white' : 'text-gray-400'}`}
-                title="List View"
-              >
-                <List className="w-3.5 h-3.5" />
-              </button>
+            {/* Search Pill */}
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                placeholder="Search (Ctrl+S)"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                className="bg-[#0f0f18] border border-white/10 rounded-xl pl-8 pr-3 py-1 text-xs text-gray-200 focus:outline-none focus:border-blue-500 w-32 focus:w-44 transition-all"
+              />
             </div>
           </div>
         </div>
 
-        {/* Main File Browser Canvas with Drag & Drop Overlay */}
-        <div className="flex-1 overflow-y-auto p-4 relative min-h-0">
+        {/* Main Content Area Based on 4 View Modes */}
+        <div className="flex-1 overflow-hidden relative">
+          {/* Drop Upload Banner */}
           {isDraggingOver && (
-            <div className="absolute inset-0 bg-blue-500/20 backdrop-blur-sm border-2 border-dashed border-blue-400 rounded-xl z-20 flex flex-col items-center justify-center pointer-events-none">
+            <div className="absolute inset-0 bg-blue-600/20 backdrop-blur-md border-2 border-dashed border-blue-400 rounded-3xl z-30 flex flex-col items-center justify-center pointer-events-none">
               <Upload className="w-12 h-12 text-blue-300 animate-bounce mb-2" />
-              <span className="text-sm font-bold text-white">Drop files to upload to {currentPath}</span>
+              <span className="text-sm font-bold text-white">Drop files to upload into {currentPath}</span>
             </div>
           )}
 
           {isLoading && files.length === 0 ? (
             <div className="h-full flex items-center justify-center text-xs text-gray-400 space-x-2">
               <RefreshCw className="w-4 h-4 animate-spin text-blue-400" />
-              <span>Listing live files over SFTP...</span>
+              <span>Fetching remote files over SFTP...</span>
             </div>
           ) : filteredFiles.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-gray-500 py-16 space-y-2">
-              <Folder className="w-12 h-12 opacity-30" />
+              <Folder className="w-12 h-12 opacity-25" />
               <span className="text-xs">This directory is empty</span>
             </div>
-          ) : view === 'grid' ? (
-            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
-              {filteredFiles.map((f, idx) => {
-                const isSelected = selectedFiles.has(f.name);
-                const isArchive = ['tar', 'gz', 'tgz', 'zip'].includes(f.extension || '');
-                const isDropTarget = dropTargetDir === f.name && f.type === 'dir';
-                return (
-                  <div
-                    key={f.name}
-                    draggable={true}
-                    onDragStart={(e) => {
-                      setDraggedItem(f.name);
-                      const fullPath = currentPath === '/' ? `/${f.name}` : `${currentPath}/${f.name}`;
-                      e.dataTransfer.setData('text/plain', fullPath);
-                      e.dataTransfer.setData('application/clouddesk-file', fullPath);
-                      e.dataTransfer.setData('application/clouddesk-name', f.name);
-                    }}
-                    onDragEnd={() => { setDraggedItem(null); setDropTargetDir(null); }}
-                    onDragOver={(e) => {
-                      if (f.type === 'dir' && draggedItem && draggedItem !== f.name) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setDropTargetDir(f.name);
-                      }
-                    }}
-                    onDragLeave={() => {
-                      if (dropTargetDir === f.name) setDropTargetDir(null);
-                    }}
-                    onDrop={(e) => {
-                      if (f.type === 'dir' && draggedItem && draggedItem !== f.name) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        handleMoveItemsToFolder(f.name);
-                      }
-                    }}
-                    onMouseDown={() => handlePointerDown(f)}
-                    onMouseUp={cancelLongPress}
-                    onMouseMove={cancelLongPress}
-                    onTouchStart={() => handlePointerDown(f)}
-                    onTouchEnd={cancelLongPress}
-                    onClick={(e) => handleSelectFile(f, idx, e)}
-                    onDoubleClick={() => handleFileDoubleClick(f)}
-                    onContextMenu={(e) => handleContextMenu(e, f)}
-                    className={`flex flex-col items-center p-3 rounded-xl cursor-pointer select-none transition-all group relative ${
-                      isDropTarget
-                        ? 'bg-blue-500/30 ring-2 ring-[var(--accent)] scale-105 shadow-xl'
-                        : isSelected
-                        ? 'bg-[var(--accent)]/20 border border-[var(--accent)]/50 shadow-md'
-                        : 'hover:bg-white/5 border border-transparent'
-                    }`}
-                  >
-                    {f.type === 'dir' ? (
-                      <Folder className="w-12 h-12 text-blue-400 fill-blue-500/20 mb-2 transition-transform group-hover:scale-105" />
-                    ) : isArchive ? (
-                      <Archive className="w-12 h-12 text-amber-400 mb-2 transition-transform group-hover:scale-105" />
-                    ) : (
-                      <FileText className="w-12 h-12 text-gray-400 mb-2 transition-transform group-hover:scale-105" />
-                    )}
-                    <span className="text-xs text-center text-gray-200 break-all line-clamp-2 max-w-full font-medium">
-                      {f.name}
-                    </span>
-                    <span className="text-[10px] text-gray-500 mt-1">{f.size}</span>
-                  </div>
-                );
-              })}
+          ) : view === 'icons' ? (
+            /* 1. ICONS VIEW */
+            <div className="h-full overflow-y-auto p-4">
+              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-4">
+                {filteredFiles.map((f, idx) => {
+                  const isSelected = selectedFiles.has(f.name);
+                  const isArchive = ['tar', 'gz', 'tgz', 'zip'].includes(f.extension || '');
+                  const tagInfo = MACOS_TAGS.find(t => t.id === f.tag);
+                  return (
+                    <div
+                      key={f.name}
+                      onClick={(e) => handleSelectFile(f, idx, e)}
+                      onDoubleClick={() => handleFileDoubleClick(f)}
+                      onContextMenu={(e) => handleContextMenu(e, f)}
+                      className={`flex flex-col items-center p-3 rounded-2xl cursor-pointer select-none transition-all group relative ${
+                        isSelected
+                          ? 'bg-blue-600/25 border border-blue-500/50 shadow-lg ring-1 ring-blue-500/30'
+                          : 'hover:bg-white/5 border border-transparent'
+                      }`}
+                    >
+                      <div className="relative mb-2">
+                        {f.type === 'dir' ? (
+                          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center shadow-md">
+                            <Folder className="w-8 h-8 text-white fill-white/20" />
+                          </div>
+                        ) : isArchive ? (
+                          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center shadow-md">
+                            <Archive className="w-8 h-8 text-white" />
+                          </div>
+                        ) : (
+                          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-slate-700 to-slate-900 border border-white/10 flex items-center justify-center shadow-md">
+                            <FileText className="w-8 h-8 text-gray-300" />
+                          </div>
+                        )}
+                        {tagInfo && (
+                          <span 
+                            className="absolute -top-1 -right-1 w-3 h-3 rounded-full border border-black shadow"
+                            style={{ backgroundColor: tagInfo.color }}
+                          />
+                        )}
+                      </div>
+                      <span className="text-xs text-center text-gray-200 break-all line-clamp-2 max-w-full font-medium leading-tight drop-shadow-sm">
+                        {f.name}
+                      </span>
+                      <span className="text-[10px] text-gray-500 mt-1">{f.size}</span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          ) : (
-            <div className="bg-[#1e1e2e] rounded-xl border border-white/[0.08] overflow-hidden">
+          ) : view === 'list' ? (
+            /* 2. LIST VIEW */
+            <div className="h-full overflow-y-auto">
               <table className="w-full text-left text-xs font-mono">
-                <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08] select-none sticky top-0 z-10">
+                <thead className="bg-[#11111a] text-gray-400 border-b border-white/[0.08] select-none sticky top-0 z-10">
                   <tr>
                     <th className="py-2.5 px-3 w-8">
                       <button 
@@ -846,68 +995,32 @@ export default function FileManager() {
                         className="text-gray-400 hover:text-white"
                       >
                         {selectedFiles.size > 0 && selectedFiles.size === filteredFiles.length ? (
-                          <CheckSquare className="w-3.5 h-3.5 text-[var(--accent)]" />
+                          <CheckSquare className="w-3.5 h-3.5 text-blue-500" />
                         ) : (
                           <Square className="w-3.5 h-3.5" />
                         )}
                       </button>
                     </th>
                     <th className="py-2.5 px-3">Name</th>
+                    <th className="py-2.5 px-3">Date Modified</th>
                     <th className="py-2.5 px-3">Size</th>
+                    <th className="py-2.5 px-3">Kind</th>
                     <th className="py-2.5 px-3">Permissions</th>
                     <th className="py-2.5 px-3">Owner</th>
-                    <th className="py-2.5 px-3">Modified</th>
-                    <th className="py-2.5 px-3 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.05]">
                   {filteredFiles.map((f, idx) => {
                     const isSelected = selectedFiles.has(f.name);
-                    const isArchive = ['tar', 'gz', 'tgz', 'zip'].includes(f.extension || '');
-                    const isDropTarget = dropTargetDir === f.name && f.type === 'dir';
+                    const tagInfo = MACOS_TAGS.find(t => t.id === f.tag);
                     return (
                       <tr
                         key={f.name}
-                        draggable={true}
-                        onDragStart={(e) => {
-                          setDraggedItem(f.name);
-                          const fullPath = currentPath === '/' ? `/${f.name}` : `${currentPath}/${f.name}`;
-                          e.dataTransfer.setData('text/plain', fullPath);
-                          e.dataTransfer.setData('application/clouddesk-file', fullPath);
-                          e.dataTransfer.setData('application/clouddesk-name', f.name);
-                        }}
-                        onDragEnd={() => { setDraggedItem(null); setDropTargetDir(null); }}
-                        onDragOver={(e) => {
-                          if (f.type === 'dir' && draggedItem && draggedItem !== f.name) {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setDropTargetDir(f.name);
-                          }
-                        }}
-                        onDragLeave={() => {
-                          if (dropTargetDir === f.name) setDropTargetDir(null);
-                        }}
-                        onDrop={(e) => {
-                          if (f.type === 'dir' && draggedItem && draggedItem !== f.name) {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            handleMoveItemsToFolder(f.name);
-                          }
-                        }}
-                        onMouseDown={() => handlePointerDown(f)}
-                        onMouseUp={cancelLongPress}
-                        onMouseMove={cancelLongPress}
-                        onTouchStart={() => handlePointerDown(f)}
-                        onTouchEnd={cancelLongPress}
                         onClick={(e) => handleSelectFile(f, idx, e)}
                         onDoubleClick={() => handleFileDoubleClick(f)}
                         onContextMenu={(e) => handleContextMenu(e, f)}
                         className={`cursor-pointer transition-colors ${
-                          isDropTarget
-                            ? 'bg-blue-500/30 ring-2 ring-[var(--accent)] font-semibold'
-                            : isSelected
-                            ? 'bg-[var(--accent)]/15 font-medium'
-                            : 'hover:bg-white/[0.03]'
+                          isSelected ? 'bg-blue-600/20 font-medium' : 'hover:bg-white/[0.03]'
                         }`}
                       >
                         <td className="py-2 px-3">
@@ -916,7 +1029,7 @@ export default function FileManager() {
                             className="text-gray-500 hover:text-white"
                           >
                             {isSelected ? (
-                              <CheckSquare className="w-3.5 h-3.5 text-[var(--accent)]" />
+                              <CheckSquare className="w-3.5 h-3.5 text-blue-500" />
                             ) : (
                               <Square className="w-3.5 h-3.5" />
                             )}
@@ -925,146 +1038,258 @@ export default function FileManager() {
                         <td className="py-2 px-3 font-medium text-white flex items-center space-x-2">
                           {f.type === 'dir' ? (
                             <Folder className="w-4 h-4 text-blue-400 shrink-0" />
-                          ) : isArchive ? (
-                            <Archive className="w-4 h-4 text-amber-400 shrink-0" />
                           ) : (
                             <FileText className="w-4 h-4 text-gray-400 shrink-0" />
                           )}
                           <span>{f.name}</span>
+                          {tagInfo && (
+                            <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: tagInfo.color }} />
+                          )}
                         </td>
+                        <td className="py-2 px-3 text-gray-400">{f.modified}</td>
                         <td className="py-2 px-3 text-gray-400">{f.size}</td>
+                        <td className="py-2 px-3 text-gray-400 capitalize">{f.type === 'dir' ? 'Folder' : f.extension || 'Document'}</td>
                         <td className="py-2 px-3 text-gray-500 font-mono">{f.permissions}</td>
                         <td className="py-2 px-3 text-purple-400">{f.owner}</td>
-                        <td className="py-2 px-3 text-gray-500">{f.modified}</td>
-                        <td className="py-2 px-3 text-right space-x-1">
-                          {f.type === 'file' && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openFileTarget(f.name);
-                              }}
-                              className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-emerald-400"
-                              title="Open in Code Editor"
-                            >
-                              <FileCode className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setChmodTarget(f);
-                              setShowChmodModal(true);
-                            }}
-                            className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-amber-400"
-                            title="Permissions (chmod)"
-                          >
-                            <Key className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setChownTarget(f);
-                              setShowChownModal(true);
-                            }}
-                            className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-purple-400"
-                            title="Ownership (chown)"
-                          >
-                            <Users className="w-3.5 h-3.5" />
-                          </button>
-                        </td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
+          ) : view === 'columns' ? (
+            /* 3. MILLER COLUMNS VIEW (macOS Classic) */
+            <div className="h-full flex divide-x divide-white/[0.08] overflow-x-auto">
+              {/* Directory Items Column */}
+              <div className="w-72 overflow-y-auto p-2 shrink-0 space-y-1">
+                {filteredFiles.map((f, idx) => {
+                  const isSelected = selectedFiles.has(f.name);
+                  return (
+                    <div
+                      key={f.name}
+                      onClick={(e) => handleSelectFile(f, idx, e)}
+                      onDoubleClick={() => handleFileDoubleClick(f)}
+                      className={`flex items-center justify-between px-3 py-1.5 rounded-xl cursor-pointer text-xs transition-colors ${
+                        isSelected ? 'bg-blue-600 text-white font-medium shadow-sm' : 'text-gray-300 hover:bg-white/5'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-2 truncate">
+                        {f.type === 'dir' ? (
+                          <Folder className={`w-4 h-4 ${isSelected ? 'text-white' : 'text-blue-400'}`} />
+                        ) : (
+                          <FileText className={`w-4 h-4 ${isSelected ? 'text-white' : 'text-gray-400'}`} />
+                        )}
+                        <span className="truncate">{f.name}</span>
+                      </div>
+                      {f.type === 'dir' && <ChevronRight className="w-3.5 h-3.5 opacity-60" />}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* File Inspector Preview Column */}
+              <div className="flex-1 p-6 overflow-y-auto flex flex-col items-center justify-center text-center space-y-4">
+                {selectedFileObj ? (
+                  <div className="space-y-4 max-w-sm w-full">
+                    <div className="w-24 h-24 mx-auto rounded-3xl bg-gradient-to-br from-blue-500/20 to-indigo-500/20 border border-white/10 flex items-center justify-center shadow-xl">
+                      {selectedFileObj.type === 'dir' ? (
+                        <Folder className="w-12 h-12 text-blue-400" />
+                      ) : (
+                        <FileText className="w-12 h-12 text-gray-300" />
+                      )}
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-base text-white break-words">{selectedFileObj.name}</h4>
+                      <p className="text-xs text-gray-400 capitalize">{selectedFileObj.type === 'dir' ? 'Folder' : `${selectedFileObj.extension || 'File'} Document`}</p>
+                    </div>
+
+                    <div className="bg-[#11111a] border border-white/10 rounded-2xl p-4 text-xs space-y-2 text-left font-mono">
+                      <div className="flex justify-between"><span className="text-gray-500">Size:</span><span className="text-gray-200">{selectedFileObj.size}</span></div>
+                      <div className="flex justify-between"><span className="text-gray-500">Permissions:</span><span className="text-gray-200">{selectedFileObj.permissions}</span></div>
+                      <div className="flex justify-between"><span className="text-gray-500">Owner:</span><span className="text-purple-400">{selectedFileObj.owner}</span></div>
+                      <div className="flex justify-between"><span className="text-gray-500">Modified:</span><span className="text-gray-200">{selectedFileObj.modified}</span></div>
+                    </div>
+
+                    <div className="flex items-center justify-center space-x-2 pt-2">
+                      {selectedFileObj.type === 'file' && (
+                        <button
+                          onClick={() => openFileTarget(selectedFileObj.name)}
+                          className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-lg transition-colors"
+                        >
+                          Open in Editor
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleQuickLookToggle(selectedFileObj)}
+                        className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-medium transition-colors"
+                      >
+                        Quick Look
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-gray-500 text-xs">Select an item to inspect details</div>
+                )}
+              </div>
+            </div>
+          ) : (
+            /* 4. GALLERY VIEW (macOS CoverFlow) */
+            <div className="h-full flex flex-col">
+              {/* Hero Preview Pane */}
+              <div className="flex-1 p-6 flex flex-col items-center justify-center bg-[#11111a]/50 border-b border-white/[0.08] overflow-hidden">
+                {selectedFileObj ? (
+                  <div className="text-center space-y-3 max-w-lg">
+                    <div className="w-20 h-20 mx-auto rounded-3xl bg-blue-500/15 border border-white/10 flex items-center justify-center shadow-2xl">
+                      {selectedFileObj.type === 'dir' ? (
+                        <Folder className="w-10 h-10 text-blue-400" />
+                      ) : (
+                        <FileText className="w-10 h-10 text-gray-300" />
+                      )}
+                    </div>
+                    <h3 className="font-bold text-lg text-white break-words">{selectedFileObj.name}</h3>
+                    <div className="text-xs text-gray-400 font-mono">
+                      {selectedFileObj.size} · {selectedFileObj.permissions} · Modified {selectedFileObj.modified}
+                    </div>
+                    <div className="flex justify-center space-x-2 pt-2">
+                      <button
+                        onClick={() => handleQuickLookToggle(selectedFileObj)}
+                        className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow transition-colors"
+                      >
+                        Quick Look (Spacebar)
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-gray-500 text-xs">No item selected</div>
+                )}
+              </div>
+
+              {/* Horizontal Filmstrip Carousel */}
+              <div className="h-28 bg-[#14141e] p-3 overflow-x-auto flex space-x-3 shrink-0 scrollbar-thin">
+                {filteredFiles.map((f, idx) => {
+                  const isSelected = selectedFiles.has(f.name);
+                  return (
+                    <div
+                      key={f.name}
+                      onClick={(e) => handleSelectFile(f, idx, e)}
+                      onDoubleClick={() => handleFileDoubleClick(f)}
+                      className={`flex flex-col items-center justify-center w-24 p-2 rounded-2xl cursor-pointer shrink-0 transition-all ${
+                        isSelected ? 'bg-blue-600/30 border border-blue-500 ring-2 ring-blue-500/30 shadow-lg' : 'hover:bg-white/5 border border-transparent'
+                      }`}
+                    >
+                      {f.type === 'dir' ? (
+                        <Folder className="w-8 h-8 text-blue-400 mb-1" />
+                      ) : (
+                        <FileText className="w-8 h-8 text-gray-400 mb-1" />
+                      )}
+                      <span className="text-[11px] text-gray-200 truncate max-w-full font-medium">{f.name}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           )}
         </div>
 
-        {/* Floating Selection Bar */}
-        {selectedFiles.size > 0 && (
-          <div className="bg-[#1e1e2e] border-t border-white/10 px-4 py-2 flex items-center justify-between text-xs shrink-0">
-            <div className="flex items-center space-x-2">
-              <span className="font-semibold text-white">{selectedFiles.size} items selected</span>
-              <button 
-                onClick={() => setSelectedFiles(new Set())}
-                className="text-gray-400 hover:text-white underline text-[11px]"
-              >
-                Clear
-              </button>
-            </div>
-            <div className="flex items-center space-x-2">
-              {selectedFiles.size === 1 && (
-                <button
-                  onClick={() => {
-                    const name = Array.from(selectedFiles)[0];
-                    const f = files.find(item => item.name === name);
-                    if (f && f.type === 'file') openFileTarget(name);
-                  }}
-                  className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 flex items-center space-x-1"
-                >
-                  <FileCode className="w-3.5 h-3.5" />
-                  <span>Open in Editor</span>
-                </button>
-              )}
-              {selectedFiles.size > 0 && (
-                <button
-                  onClick={handleCompressSelected}
-                  className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 flex items-center space-x-1"
-                  title="Compress into .tar.gz"
-                >
-                  <Archive className="w-3.5 h-3.5" />
-                  <span>Compress</span>
-                </button>
-              )}
-              <button
-                onClick={() => {
-                  setChownTarget(null);
-                  setShowChownModal(true);
-                }}
-                className="px-2.5 py-1 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 flex items-center space-x-1"
-                title="Change Ownership (chown)"
-              >
-                <Users className="w-3.5 h-3.5" />
-                <span>Chown</span>
-              </button>
-              <button
-                onClick={handleCopy}
-                className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-gray-200 flex items-center space-x-1"
-              >
-                <Copy className="w-3.5 h-3.5" />
-                <span>Copy</span>
-              </button>
-              <button
-                onClick={handleCut}
-                className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-gray-200 flex items-center space-x-1"
-              >
-                <Scissors className="w-3.5 h-3.5" />
-                <span>Cut</span>
-              </button>
-              <button
-                onClick={handleDeleteSelected}
-                className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 flex items-center space-x-1"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>Delete</span>
-              </button>
-            </div>
+        {/* macOS Bottom Path Bar & Status Bar */}
+        <div className="h-7 bg-[#11111a] border-t border-white/[0.08] px-4 flex items-center justify-between text-xs text-gray-400 shrink-0 select-none">
+          {/* Path Breadcrumbs */}
+          <div className="flex items-center space-x-1.5 overflow-x-auto text-[11px] font-medium text-gray-300">
+            <span 
+              onClick={() => navigateTo('/')}
+              className="hover:text-white cursor-pointer flex items-center space-x-1"
+            >
+              <HardDrive className="w-3 h-3 text-blue-400" />
+              <span>Macintosh HD</span>
+            </span>
+            {breadcrumbs.map((part, index) => {
+              const full = '/' + breadcrumbs.slice(0, index + 1).join('/');
+              return (
+                <React.Fragment key={full}>
+                  <ChevronRight className="w-3 h-3 text-gray-600" />
+                  <span 
+                    onClick={() => navigateTo(full)}
+                    className="hover:text-white cursor-pointer truncate max-w-[120px]"
+                  >
+                    {part}
+                  </span>
+                </React.Fragment>
+              );
+            })}
           </div>
-        )}
 
-        {/* Status Bar */}
-        <div className="h-6 bg-[#11111b] border-t border-white/[0.08] px-4 flex items-center justify-between text-xs text-gray-400 shrink-0 select-none">
-          <span>{files.length} items ({currentPath})</span>
-          <span className="text-[11px] font-mono">Live SFTP · Permissions & Archive Control</span>
+          {/* Status info */}
+          <div className="text-[11px] text-gray-500 flex items-center space-x-2">
+            <span>{filteredFiles.length} items</span>
+            <span>·</span>
+            <span>Live SFTP Connected</span>
+          </div>
         </div>
       </div>
 
-      {/* Rich Right-Click Context Menu */}
+      {/* macOS Quick Look Preview Modal (Spacebar) */}
+      {quickLookFile && (
+        <div 
+          className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-150"
+          onClick={() => setQuickLookFile(null)}
+        >
+          <div 
+            className="bg-[#1e1e2e]/95 border border-white/20 rounded-3xl w-full max-w-2xl h-[520px] flex flex-col shadow-2xl overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Quick Look Header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-[#14141e]/80">
+              <div className="flex items-center space-x-2">
+                <button 
+                  onClick={() => setQuickLookFile(null)}
+                  className="w-3 h-3 rounded-full bg-[#FF5F56] hover:brightness-110 flex items-center justify-center text-[8px] text-black font-bold"
+                >
+                  ✕
+                </button>
+                <span className="text-xs font-semibold text-white pl-2">{quickLookFile.name}</span>
+                <span className="text-[11px] text-gray-500">({quickLookFile.size})</span>
+              </div>
+              {quickLookFile.type === 'file' && (
+                <button
+                  onClick={() => {
+                    openFileTarget(quickLookFile.name);
+                    setQuickLookFile(null);
+                  }}
+                  className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-medium shadow-md transition-colors"
+                >
+                  Open in Code Editor
+                </button>
+              )}
+            </div>
+
+            {/* Quick Look Body */}
+            <div className="flex-1 p-4 overflow-y-auto font-mono text-xs text-gray-300 bg-[#0f0f18]/60">
+              {isLoadingQuickLook ? (
+                <div className="h-full flex items-center justify-center space-x-2 text-gray-400">
+                  <RefreshCw className="w-4 h-4 animate-spin text-blue-400" />
+                  <span>Loading preview...</span>
+                </div>
+              ) : (
+                <pre className="whitespace-pre-wrap font-mono leading-relaxed select-text">
+                  {quickLookContent}
+                </pre>
+              )}
+            </div>
+
+            {/* Quick Look Footer */}
+            <div className="px-4 py-2 bg-[#14141e]/80 border-t border-white/10 flex justify-between text-[11px] text-gray-500">
+              <span>Press Spacebar to dismiss</span>
+              <span>{quickLookFile.permissions} · {quickLookFile.owner}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Right-Click Context Menu with macOS Tags & Actions */}
       {contextMenu && (
         <div 
-          className="fixed z-50 bg-[#1e1e2e]/95 backdrop-blur-xl border border-white/15 rounded-xl shadow-2xl py-1.5 w-52 text-xs select-none"
-          style={{ top: Math.min(contextMenu.y, window.innerHeight - 280), left: Math.min(contextMenu.x, window.innerWidth - 220) }}
+          className="fixed z-50 bg-[#1e1e2e]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl py-1.5 w-56 text-xs select-none"
+          style={{ top: Math.min(contextMenu.y, window.innerHeight - 320), left: Math.min(contextMenu.x, window.innerWidth - 240) }}
           onClick={(e) => e.stopPropagation()}
         >
           {contextMenu.file ? (
@@ -1072,7 +1297,7 @@ export default function FileManager() {
               {contextMenu.file.type === 'file' ? (
                 <div 
                   onClick={() => { openFileTarget(contextMenu.file!.name); setContextMenu(null); }}
-                  className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer font-medium"
+                  className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer font-medium"
                 >
                   <FileCode className="w-3.5 h-3.5" />
                   <span>Open in Code Editor</span>
@@ -1080,49 +1305,57 @@ export default function FileManager() {
               ) : (
                 <div 
                   onClick={() => { navigateTo(currentPath === '/' ? `/${contextMenu.file!.name}` : `${currentPath}/${contextMenu.file!.name}`); setContextMenu(null); }}
-                  className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer font-medium"
+                  className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer font-medium"
                 >
                   <Folder className="w-3.5 h-3.5" />
                   <span>Open Folder</span>
                 </div>
               )}
 
-              {['tar', 'gz', 'tgz', 'zip'].includes(contextMenu.file.extension || '') && (
-                <div 
-                  onClick={() => { handleExtractArchive(contextMenu.file!.name); setContextMenu(null); }}
-                  className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer text-amber-400 hover:text-black"
-                >
-                  <PackageOpen className="w-3.5 h-3.5" />
-                  <span>Extract Archive Here</span>
-                </div>
-              )}
+              <div 
+                onClick={() => { handleQuickLookToggle(contextMenu.file); setContextMenu(null); }}
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>Quick Look (Spacebar)</span>
+              </div>
+
+              {/* Tags Palette */}
+              <div className="px-3.5 py-1.5 flex items-center space-x-1.5 border-t border-b border-white/10 my-1">
+                <Tag className="w-3.5 h-3.5 text-gray-400 mr-1" />
+                {MACOS_TAGS.map(t => (
+                  <button
+                    key={t.id}
+                    onClick={() => handleAssignTag(contextMenu.file!.name, t.id)}
+                    className="w-3.5 h-3.5 rounded-full hover:scale-125 transition-transform"
+                    style={{ backgroundColor: t.color }}
+                    title={t.name}
+                  />
+                ))}
+              </div>
 
               <div 
-                onClick={() => {
-                  const full = currentPath === '/' ? `/${contextMenu.file!.name}` : `${currentPath}/${contextMenu.file!.name}`;
-                  navigator.clipboard.writeText(full);
-                  setContextMenu(null);
-                }}
-                className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer"
+                onClick={() => { handleDuplicate(); setContextMenu(null); }}
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
               >
                 <Copy className="w-3.5 h-3.5" />
-                <span>Copy Path</span>
+                <span>Duplicate (Ctrl+D)</span>
               </div>
 
               <div 
                 onClick={() => { handleCopy(); setContextMenu(null); }}
-                className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer"
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
               >
                 <Copy className="w-3.5 h-3.5" />
-                <span>Copy</span>
+                <span>Copy (Ctrl+C)</span>
               </div>
 
               <div 
                 onClick={() => { handleCut(); setContextMenu(null); }}
-                className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer"
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
               >
                 <Scissors className="w-3.5 h-3.5" />
-                <span>Cut</span>
+                <span>Cut (Ctrl+X)</span>
               </div>
 
               <div 
@@ -1132,10 +1365,10 @@ export default function FileManager() {
                   setShowRenameModal(true);
                   setContextMenu(null);
                 }}
-                className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer"
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
               >
                 <Edit3 className="w-3.5 h-3.5" />
-                <span>Rename...</span>
+                <span>Rename... (Enter)</span>
               </div>
 
               <div 
@@ -1144,7 +1377,7 @@ export default function FileManager() {
                   setShowChmodModal(true);
                   setContextMenu(null);
                 }}
-                className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer"
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
               >
                 <Key className="w-3.5 h-3.5" />
                 <span>Permissions (chmod)...</span>
@@ -1157,7 +1390,7 @@ export default function FileManager() {
                   setShowChownModal(true);
                   setContextMenu(null);
                 }}
-                className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer"
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
               >
                 <Users className="w-3.5 h-3.5" />
                 <span>Change Ownership (chown)...</span>
@@ -1167,67 +1400,230 @@ export default function FileManager() {
 
               <div 
                 onClick={() => { handleDeleteSelected(); setContextMenu(null); }}
-                className="px-3 py-1.5 hover:bg-rose-500/20 text-rose-400 flex items-center space-x-2 cursor-pointer"
+                className="px-3.5 py-1.5 hover:bg-red-600/20 text-red-400 flex items-center space-x-2 cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span>Delete</span>
+                <span>Move to Trash</span>
               </div>
             </>
           ) : (
             <>
               <div 
-                onClick={() => { setShowNewFile(true); setContextMenu(null); }}
-                className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer"
+                onClick={() => { setShowNewFolder(true); setContextMenu(null); }}
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
-                <span>New File</span>
+                <span>New Folder (Ctrl+N)</span>
               </div>
               <div 
-                onClick={() => { setShowNewFolder(true); setContextMenu(null); }}
-                className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer"
+                onClick={() => { setShowNewFile(true); setContextMenu(null); }}
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
               >
-                <Folder className="w-3.5 h-3.5" />
-                <span>New Directory</span>
+                <FileText className="w-3.5 h-3.5" />
+                <span>New Text File</span>
               </div>
               {clipboard && (
                 <div 
                   onClick={() => { handlePaste(); setContextMenu(null); }}
-                  className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer"
+                  className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
                 >
                   <ClipboardPaste className="w-3.5 h-3.5" />
-                  <span>Paste ({clipboard.files.length} items)</span>
+                  <span>Paste (Ctrl+V)</span>
                 </div>
               )}
               <div 
                 onClick={() => { openApp('terminal', 'Terminal'); setContextMenu(null); }}
-                className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer"
+                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
               >
-                <Terminal className="w-3.5 h-3.5" />
+                <Terminal className="w-3.5 h-3.5 text-emerald-400" />
                 <span>Open Terminal Here</span>
-              </div>
-              <div 
-                onClick={() => { addFavorite(currentPath); setContextMenu(null); }}
-                className="px-3 py-1.5 hover:bg-[var(--accent)] hover:text-black flex items-center space-x-2 cursor-pointer"
-              >
-                <Star className="w-3.5 h-3.5" />
-                <span>Bookmark Location</span>
               </div>
             </>
           )}
         </div>
       )}
 
+      {/* New Folder Modal */}
+      {showNewFolder && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+          <form 
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (!newFolderName.trim()) return;
+              const target = currentPath === '/' ? `/${newFolderName.trim()}` : `${currentPath}/${newFolderName.trim()}`;
+              try {
+                await sftpMkdir(activeConnId, target);
+                setShowNewFolder(false);
+                setNewFolderName('');
+                await loadDirectory(currentPath);
+              } catch (err: any) {
+                alert(`Create folder failed: ${err?.message || err}`);
+              }
+            }} 
+            className="bg-[#1e1e2e] border border-white/10 rounded-3xl w-full max-w-sm p-6 space-y-4 shadow-2xl"
+          >
+            <h3 className="font-bold text-base text-white flex items-center space-x-2">
+              <Folder className="w-5 h-5 text-blue-400" />
+              <span>New Folder</span>
+            </h3>
+            <input
+              type="text"
+              autoFocus
+              required
+              placeholder="Folder Name"
+              value={newFolderName}
+              onChange={e => setNewFolderName(e.target.value)}
+              className="w-full bg-[#11111b] border border-white/15 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+            />
+            <div className="flex justify-end space-x-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowNewFolder(false)}
+                className="px-4 py-2 rounded-xl text-xs text-gray-400 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 rounded-xl text-xs bg-blue-600 hover:bg-blue-500 text-white font-medium shadow-md"
+              >
+                Create
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* New File Modal */}
+      {showNewFile && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+          <form 
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (!newFileName.trim()) return;
+              const target = currentPath === '/' ? `/${newFileName.trim()}` : `${currentPath}/${newFileName.trim()}`;
+              try {
+                await sftpWriteTextFile(activeConnId, target, '');
+                setShowNewFile(false);
+                setNewFileName('');
+                await loadDirectory(currentPath);
+              } catch (err: any) {
+                alert(`Create file failed: ${err?.message || err}`);
+              }
+            }} 
+            className="bg-[#1e1e2e] border border-white/10 rounded-3xl w-full max-w-sm p-6 space-y-4 shadow-2xl"
+          >
+            <h3 className="font-bold text-base text-white flex items-center space-x-2">
+              <FileText className="w-5 h-5 text-emerald-400" />
+              <span>New File</span>
+            </h3>
+            <input
+              type="text"
+              autoFocus
+              required
+              placeholder="e.g. script.sh, index.html"
+              value={newFileName}
+              onChange={e => setNewFileName(e.target.value)}
+              className="w-full bg-[#11111b] border border-white/15 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 font-mono"
+            />
+            <div className="flex justify-end space-x-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowNewFile(false)}
+                className="px-4 py-2 rounded-xl text-xs text-gray-400 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 rounded-xl text-xs bg-blue-600 hover:bg-blue-500 text-white font-medium shadow-md"
+              >
+                Create File
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Rename Modal */}
+      {showRenameModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+          <form 
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (!renameNewName.trim() || renameNewName === renameTarget) {
+                setShowRenameModal(false);
+                return;
+              }
+              const oldPath = currentPath === '/' ? `/${renameTarget}` : `${currentPath}/${renameTarget}`;
+              const newPath = currentPath === '/' ? `/${renameNewName.trim()}` : `${currentPath}/${renameNewName.trim()}`;
+              try {
+                await sftpRename(activeConnId, oldPath, newPath);
+                setShowRenameModal(false);
+                await loadDirectory(currentPath);
+              } catch (err: any) {
+                alert(`Rename failed: ${err?.message || err}`);
+              }
+            }} 
+            className="bg-[#1e1e2e] border border-white/10 rounded-3xl w-full max-w-sm p-6 space-y-4 shadow-2xl"
+          >
+            <h3 className="font-bold text-base text-white flex items-center space-x-2">
+              <Edit3 className="w-5 h-5 text-purple-400" />
+              <span>Rename Item</span>
+            </h3>
+            <input
+              type="text"
+              autoFocus
+              required
+              value={renameNewName}
+              onChange={e => setRenameNewName(e.target.value)}
+              className="w-full bg-[#11111b] border border-white/15 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+            />
+            <div className="flex justify-end space-x-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowRenameModal(false)}
+                className="px-4 py-2 rounded-xl text-xs text-gray-400 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 rounded-xl text-xs bg-blue-600 hover:bg-blue-500 text-white font-medium shadow-md"
+              >
+                Rename
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Permissions (chmod) Modal */}
       {showChmodModal && chmodTarget && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
-          <form onSubmit={handleChmod} className="bg-[#1e1e2e] border border-white/10 rounded-2xl w-full max-w-sm p-6 space-y-4 shadow-2xl">
-            <h3 className="font-bold text-sm text-white flex items-center space-x-2">
-              <Key className="w-4 h-4 text-amber-400" />
+          <form 
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const modeNum = parseInt(octalMode, 8);
+              if (isNaN(modeNum)) return;
+              const targetPath = currentPath === '/' ? `/${chmodTarget.name}` : `${currentPath}/${chmodTarget.name}`;
+              try {
+                await sftpChmod(activeConnId, targetPath, modeNum);
+                setShowChmodModal(false);
+                setChmodTarget(null);
+                await loadDirectory(currentPath);
+              } catch (err: any) {
+                alert(`chmod failed: ${err?.message || err}`);
+              }
+            }} 
+            className="bg-[#1e1e2e] border border-white/10 rounded-3xl w-full max-w-sm p-6 space-y-4 shadow-2xl"
+          >
+            <h3 className="font-bold text-base text-white flex items-center space-x-2">
+              <Key className="w-5 h-5 text-amber-400" />
               <span>Modify Permissions (chmod)</span>
             </h3>
             <p className="text-xs text-gray-400 font-mono truncate">{chmodTarget.name}</p>
-
-            <div className="bg-[#11111b] p-3 rounded-xl border border-white/10 space-y-2">
+            <div className="bg-[#11111b] p-3 rounded-2xl border border-white/10 space-y-2">
               <label className="text-[11px] text-gray-400 block font-medium">Octal Mode (e.g. 755, 644, 777)</label>
               <input
                 type="text"
@@ -1236,24 +1632,20 @@ export default function FileManager() {
                 maxLength={4}
                 value={octalMode}
                 onChange={e => setOctalMode(e.target.value)}
-                className="w-full bg-[#1e1e2e] border border-white/20 rounded-lg px-3 py-1.5 text-base font-mono text-center text-white focus:outline-none focus:border-[var(--accent)]"
+                className="w-full bg-[#1e1e2e] border border-white/20 rounded-xl px-3 py-1.5 text-base font-mono text-center text-white focus:outline-none focus:border-blue-500"
               />
-              <div className="text-[10px] text-gray-500 text-center">
-                755: rwxr-xr-x · 644: rw-r--r-- · 777: rwxrwxrwx
-              </div>
             </div>
-
             <div className="flex justify-end space-x-2 pt-2">
               <button
                 type="button"
                 onClick={() => { setShowChmodModal(false); setChmodTarget(null); }}
-                className="px-3 py-1.5 rounded-lg text-xs text-gray-400 hover:text-white"
+                className="px-4 py-2 rounded-xl text-xs text-gray-400 hover:text-white"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                className="px-3.5 py-1.5 rounded-lg text-xs bg-[var(--accent)] hover:bg-blue-600 text-white font-medium"
+                className="px-4 py-2 rounded-xl text-xs bg-blue-600 hover:bg-blue-500 text-white font-medium shadow-md"
               >
                 Apply chmod
               </button>
@@ -1265,15 +1657,29 @@ export default function FileManager() {
       {/* Permissions (chown) Modal */}
       {showChownModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
-          <form onSubmit={handleChown} className="bg-[#1e1e2e] border border-white/10 rounded-2xl w-full max-w-sm p-6 space-y-4 shadow-2xl">
-            <h3 className="font-bold text-sm text-white flex items-center space-x-2">
-              <Users className="w-4 h-4 text-purple-400" />
+          <form 
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const items = chownTarget ? [chownTarget.name] : Array.from(selectedFiles);
+              if (items.length === 0) return;
+              try {
+                for (const name of items) {
+                  const targetPath = currentPath === '/' ? `/${name}` : `${currentPath}/${name}`;
+                  await sftpChown(activeConnId, targetPath, chownOwner.trim(), chownGroup.trim());
+                }
+                setShowChownModal(false);
+                setChownTarget(null);
+                await loadDirectory(currentPath);
+              } catch (err: any) {
+                alert(`chown failed: ${err?.message || err}`);
+              }
+            }} 
+            className="bg-[#1e1e2e] border border-white/10 rounded-3xl w-full max-w-sm p-6 space-y-4 shadow-2xl"
+          >
+            <h3 className="font-bold text-base text-white flex items-center space-x-2">
+              <Users className="w-5 h-5 text-purple-400" />
               <span>Change Ownership (chown)</span>
             </h3>
-            <p className="text-xs text-gray-400 font-mono truncate">
-              {chownTarget ? chownTarget.name : `${selectedFiles.size} selected items`}
-            </p>
-
             <div className="space-y-3">
               <div>
                 <label className="text-[11px] text-gray-400 block mb-1 font-medium">New Owner (User)</label>
@@ -1284,10 +1690,9 @@ export default function FileManager() {
                   placeholder="e.g. root, deploy, www-data"
                   value={chownOwner}
                   onChange={e => setChownOwner(e.target.value)}
-                  className="w-full bg-[#11111b] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[var(--accent)] font-mono"
+                  className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
                 />
               </div>
-
               <div>
                 <label className="text-[11px] text-gray-400 block mb-1 font-medium">New Group</label>
                 <input
@@ -1295,135 +1700,23 @@ export default function FileManager() {
                   placeholder="e.g. root, deploy, www-data, docker"
                   value={chownGroup}
                   onChange={e => setChownGroup(e.target.value)}
-                  className="w-full bg-[#11111b] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[var(--accent)] font-mono"
+                  className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
                 />
-              </div>
-
-              <div className="flex items-center space-x-2 pt-1">
-                <input
-                  type="checkbox"
-                  id="chownRecursive"
-                  checked={chownRecursive}
-                  onChange={e => setChownRecursive(e.target.checked)}
-                  className="rounded border-white/20 bg-[#11111b] text-blue-500"
-                />
-                <label htmlFor="chownRecursive" className="text-xs text-gray-300 cursor-pointer">
-                  Apply recursively (-R) to subdirectories & files
-                </label>
               </div>
             </div>
-
             <div className="flex justify-end space-x-2 pt-2">
               <button
                 type="button"
                 onClick={() => { setShowChownModal(false); setChownTarget(null); }}
-                className="px-3 py-1.5 rounded-lg text-xs text-gray-400 hover:text-white"
+                className="px-4 py-2 rounded-xl text-xs text-gray-400 hover:text-white"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                className="px-3.5 py-1.5 rounded-lg text-xs bg-purple-600 hover:bg-purple-700 text-white font-medium"
+                className="px-4 py-2 rounded-xl text-xs bg-blue-600 hover:bg-blue-500 text-white font-medium shadow-md"
               >
                 Apply chown
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* Rename Modal */}
-      {showRenameModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
-          <form onSubmit={handleRename} className="bg-[#1e1e2e] border border-white/10 rounded-2xl w-full max-w-sm p-6 space-y-4 shadow-2xl">
-            <h3 className="font-bold text-sm text-white">Rename File or Folder</h3>
-            <input
-              type="text"
-              autoFocus
-              required
-              value={renameNewName}
-              onChange={e => setRenameNewName(e.target.value)}
-              className="w-full bg-[#11111b] border border-white/10 rounded-lg px-3 py-2 text-xs text-white focus:outline-none"
-            />
-            <div className="flex justify-end space-x-2">
-              <button
-                type="button"
-                onClick={() => setShowRenameModal(false)}
-                className="px-3 py-1.5 rounded-lg text-xs text-gray-400 hover:text-white"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-3.5 py-1.5 rounded-lg text-xs bg-[var(--accent)] hover:bg-blue-600 text-white font-medium"
-              >
-                Save Name
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* New Folder Modal */}
-      {showNewFolder && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
-          <form onSubmit={handleCreateFolder} className="bg-[#1e1e2e] border border-white/10 rounded-2xl w-full max-w-sm p-5 space-y-4 shadow-2xl">
-            <h3 className="font-bold text-sm text-white">Create New Remote Directory</h3>
-            <input
-              type="text"
-              autoFocus
-              required
-              placeholder="Folder name"
-              value={newFolderName}
-              onChange={e => setNewFolderName(e.target.value)}
-              className="w-full bg-[#11111b] border border-white/10 rounded-lg px-3 py-2 text-xs text-white focus:outline-none"
-            />
-            <div className="flex justify-end space-x-2">
-              <button
-                type="button"
-                onClick={() => setShowNewFolder(false)}
-                className="px-3 py-1.5 rounded-lg text-xs text-gray-400 hover:text-white"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-3 py-1.5 rounded-lg text-xs bg-[var(--accent)] hover:bg-blue-600 text-white font-medium"
-              >
-                Create Folder
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* New File Modal */}
-      {showNewFile && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
-          <form onSubmit={handleCreateFile} className="bg-[#1e1e2e] border border-white/10 rounded-2xl w-full max-w-sm p-5 space-y-4 shadow-2xl">
-            <h3 className="font-bold text-sm text-white">Create New Remote File</h3>
-            <input
-              type="text"
-              autoFocus
-              required
-              placeholder="e.g. index.js, app.py, config.yml"
-              value={newFileName}
-              onChange={e => setNewFileName(e.target.value)}
-              className="w-full bg-[#11111b] border border-white/10 rounded-lg px-3 py-2 text-xs text-white focus:outline-none font-mono"
-            />
-            <div className="flex justify-end space-x-2">
-              <button
-                type="button"
-                onClick={() => setShowNewFile(false)}
-                className="px-3 py-1.5 rounded-lg text-xs text-gray-400 hover:text-white"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-3 py-1.5 rounded-lg text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
-              >
-                Create & Edit
               </button>
             </div>
           </form>
