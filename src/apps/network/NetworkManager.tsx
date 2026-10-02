@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Globe, Radio, Activity, Network as NetworkIcon, Search, Play, CheckCircle2, Shield, RefreshCw } from 'lucide-react';
-import { networkPorts, networkConnections, systemGetNetwork, networkPing } from '../../lib/tauri-bridge';
+import { 
+  Globe, Radio, Activity, Network as NetworkIcon, Search, Play, 
+  CheckCircle2, Shield, RefreshCw, Plus, X, PowerOff, ShieldAlert, Trash2 
+} from 'lucide-react';
+import { 
+  networkPorts, networkConnections, systemGetNetwork, networkPing, 
+  sshExec, processKill 
+} from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
 
 interface ListeningPort {
@@ -39,7 +45,49 @@ export default function NetworkManager() {
   const [pingHost, setPingHost] = useState('8.8.8.8');
   const [pingResults, setPingResults] = useState<string[]>([]);
   const [pinging, setPinging] = useState(false);
+
+  // Open Port Modal State
+  const [showOpenPortModal, setShowOpenPortModal] = useState(false);
+  const [newPortNum, setNewPortNum] = useState('');
+  const [newPortProto, setNewPortProto] = useState<'tcp' | 'udp'>('tcp');
+
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
+
+  const handleOpenPort = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newPortNum.trim()) return;
+    try {
+      await sshExec(activeConnId, `sudo ufw allow ${newPortNum.trim()}/${newPortProto}`);
+      setShowOpenPortModal(false);
+      setNewPortNum('');
+      await loadNetworkData();
+      alert(`Port ${newPortNum.trim()}/${newPortProto} allowed in firewall.`);
+    } catch (err: any) {
+      alert(`Failed to open port: ${err?.message || err}`);
+    }
+  };
+
+  const handleClosePort = async (port: number, protocol: string) => {
+    if (!confirm(`Block / close port ${port}/${protocol} in server firewall (UFW)?`)) return;
+    try {
+      await sshExec(activeConnId, `sudo ufw deny ${port}/${protocol}`);
+      await loadNetworkData();
+      alert(`Port ${port}/${protocol} blocked in firewall.`);
+    } catch (err: any) {
+      alert(`Failed to block port: ${err?.message || err}`);
+    }
+  };
+
+  const handleKillPortProcess = async (pid: number, port: number) => {
+    if (!confirm(`Terminate process PID ${pid} listening on port ${port}?`)) return;
+    try {
+      await processKill(activeConnId, pid, 'KILL');
+      await loadNetworkData();
+      alert(`Process ${pid} terminated.`);
+    } catch (err: any) {
+      alert(`Failed to kill process: ${err?.message || err}`);
+    }
+  };
 
   const loadNetworkData = useCallback(async () => {
     setLoading(true);
@@ -147,6 +195,16 @@ export default function NetworkManager() {
         </div>
 
         <div className="flex items-center space-x-2">
+          {tab === 'ports' && (
+            <button
+              onClick={() => setShowOpenPortModal(true)}
+              className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded-lg transition-colors font-medium shadow-sm"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Open Port</span>
+            </button>
+          )}
+
           {tab !== 'ping' && (
             <div className="relative">
               <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -182,13 +240,14 @@ export default function NetworkManager() {
                 <th className="py-2.5 px-3">Bind Address</th>
                 <th className="py-2.5 px-3">Process</th>
                 <th className="py-2.5 px-3">PID</th>
-                <th className="py-2.5 px-3 text-right">Access</th>
+                <th className="py-2.5 px-3">Access</th>
+                <th className="py-2.5 px-3 text-right">Controls</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/[0.05]">
               {ports.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-gray-500">
+                  <td colSpan={7} className="py-8 text-center text-gray-500">
                     {loading ? 'Scanning listening sockets...' : 'No listening ports detected'}
                   </td>
                 </tr>
@@ -202,7 +261,7 @@ export default function NetworkManager() {
                       <td className="py-2.5 px-3 font-mono text-gray-400">{port.bindAddr}</td>
                       <td className="py-2.5 px-3 font-medium text-emerald-400">{port.process}</td>
                       <td className="py-2.5 px-3 font-mono text-gray-500">{port.pid || '—'}</td>
-                      <td className="py-2.5 px-3 text-right">
+                      <td className="py-2.5 px-3">
                         <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${
                           port.bindAddr === '0.0.0.0' || port.bindAddr === '*' || port.bindAddr === '::'
                             ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
@@ -210,6 +269,24 @@ export default function NetworkManager() {
                         }`}>
                           {port.bindAddr === '0.0.0.0' || port.bindAddr === '*' || port.bindAddr === '::' ? 'Public' : 'Localhost'}
                         </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right space-x-1">
+                        <button
+                          onClick={() => handleClosePort(port.port, port.protocol)}
+                          className="px-2 py-0.5 rounded bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/20 text-[10px] font-medium transition-colors"
+                          title="Block / Close Port in Firewall"
+                        >
+                          Close Port
+                        </button>
+                        {port.pid > 0 && (
+                          <button
+                            onClick={() => handleKillPortProcess(port.pid, port.port)}
+                            className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-red-400 transition-colors"
+                            title={`Terminate process ${port.pid}`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))
@@ -334,6 +411,86 @@ export default function NetworkManager() {
               ))
             )}
           </div>
+        </div>
+      )}
+
+      {/* Open Port Modal */}
+      {showOpenPortModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+          <form 
+            onSubmit={handleOpenPort} 
+            className="bg-[#1e1e2e] border border-white/10 rounded-2xl w-full max-w-sm p-5 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2 text-white font-bold text-sm">
+                <Shield className="w-4 h-4 text-blue-400" />
+                <span>Open Firewall Port (UFW)</span>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setShowOpenPortModal(false)} 
+                className="text-gray-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Port Number</label>
+                <input
+                  type="number"
+                  required
+                  autoFocus
+                  value={newPortNum}
+                  onChange={e => setNewPortNum(e.target.value)}
+                  placeholder="e.g. 80, 443, 8080, 3000, 5432"
+                  className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Protocol</label>
+                <div className="flex space-x-2">
+                  <button
+                    type="button"
+                    onClick={() => setNewPortProto('tcp')}
+                    className={`flex-1 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors ${
+                      newPortProto === 'tcp' ? 'bg-blue-600 text-white' : 'bg-[#11111b] text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    TCP
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNewPortProto('udp')}
+                    className={`flex-1 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors ${
+                      newPortProto === 'udp' ? 'bg-blue-600 text-white' : 'bg-[#11111b] text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    UDP
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end space-x-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowOpenPortModal(false)}
+                className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-gray-300"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!newPortNum.trim()}
+                className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs font-semibold text-white"
+              >
+                Allow Port
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>

@@ -49,7 +49,7 @@ export default function ServiceManager() {
     loadServices();
   }, [loadServices]);
 
-  const handleAction = async (name: string, action: 'start' | 'stop' | 'restart') => {
+  const handleAction = async (name: string, action: 'start' | 'stop' | 'restart' | 'enable' | 'disable') => {
     setActionInProgress(name);
     try {
       await serviceAction(activeConnId, name, action);
@@ -198,7 +198,21 @@ export default function ServiceManager() {
                     </span>
                   </td>
                   <td className="py-2.5 px-3 font-mono text-gray-500">{service.subState}</td>
-                  <td className="py-2.5 px-3 text-right space-x-1">
+                  <td className="py-2.5 px-3 text-right space-x-1.5">
+                    {/* Enable / Disable at boot */}
+                    <button
+                      onClick={() => handleAction(service.name, service.enabled ? 'disable' : 'enable')}
+                      disabled={actionInProgress === service.name}
+                      className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                        service.enabled
+                          ? 'bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 border-blue-500/30'
+                          : 'bg-white/5 hover:bg-white/10 text-gray-400 border-white/10'
+                      }`}
+                      title={service.enabled ? 'Autostart Enabled (Click to Disable)' : 'Autostart Disabled (Click to Enable)'}
+                    >
+                      {actionInProgress === service.name ? '...' : service.enabled ? 'Enabled' : 'Disabled'}
+                    </button>
+
                     <button
                       onClick={() => handleViewLogs(service.name)}
                       className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-white"

@@ -132,16 +132,35 @@ export const useWindowStore = create<WindowStoreState>((set) => ({
   }))
 }));
 
+export interface PinnedItem {
+  id: string;
+  name: string;
+  path: string;
+  type: 'dir' | 'file';
+}
+
 interface EditorStoreState {
   pendingFilePath: string | null;
   openFileInEditor: (path: string) => void;
   clearPendingFile: () => void;
+  finderTargetPath: string | null;
+  navigateFinder: (path: string) => void;
+  clearFinderTarget: () => void;
+  pendingTerminalCommand: string | null;
+  runTerminalCommand: (cmd: string) => void;
+  clearTerminalCommand: () => void;
 }
 
 export const useEditorStore = create<EditorStoreState>((set) => ({
   pendingFilePath: null,
   openFileInEditor: (path) => set({ pendingFilePath: path }),
   clearPendingFile: () => set({ pendingFilePath: null }),
+  finderTargetPath: null,
+  navigateFinder: (path) => set({ finderTargetPath: path }),
+  clearFinderTarget: () => set({ finderTargetPath: null }),
+  pendingTerminalCommand: null,
+  runTerminalCommand: (cmd) => set({ pendingTerminalCommand: cmd }),
+  clearTerminalCommand: () => set({ pendingTerminalCommand: null }),
 }));
 
 interface SettingsState {
@@ -153,9 +172,12 @@ interface SettingsState {
   pollingInterval: number;
   wallpaper: string;
   favorites: string[];
+  pinnedDesktopItems: PinnedItem[];
+  pinToDesktop: (item: PinnedItem) => void;
+  unpinFromDesktop: (id: string) => void;
   addFavorite: (path: string) => void;
   removeFavorite: (path: string) => void;
-  updateSettings: (newSettings: Partial<Omit<SettingsState, 'updateSettings' | 'addFavorite' | 'removeFavorite'>>) => void;
+  updateSettings: (newSettings: Partial<Omit<SettingsState, 'updateSettings' | 'addFavorite' | 'removeFavorite' | 'pinToDesktop' | 'unpinFromDesktop'>>) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -169,6 +191,13 @@ export const useSettingsStore = create<SettingsState>()(
       pollingInterval: 3,
       wallpaper: 'sonoma',
       favorites: ['/', '/home', '/etc', '/var/log', '/tmp'],
+      pinnedDesktopItems: [],
+      pinToDesktop: (item) => set((state) => ({
+        pinnedDesktopItems: [...state.pinnedDesktopItems.filter(p => p.id !== item.id), item]
+      })),
+      unpinFromDesktop: (id) => set((state) => ({
+        pinnedDesktopItems: state.pinnedDesktopItems.filter(p => p.id !== id)
+      })),
       addFavorite: (path) => set((state) => ({
         favorites: Array.from(new Set([...state.favorites, path]))
       })),

@@ -176,6 +176,26 @@ export default function TerminalApp() {
     return () => clearTimeout(timer);
   }, [activeTab]);
 
+  // Execute external commands sent to Terminal (e.g. Finder "Open Terminal Here")
+  const pendingTerminalCommand = useEditorStore(s => s.pendingTerminalCommand);
+  const clearTerminalCommand = useEditorStore(s => s.clearTerminalCommand);
+
+  useEffect(() => {
+    if (!pendingTerminalCommand) return;
+    const cmd = pendingTerminalCommand;
+    clearTerminalCommand();
+
+    const timer = setTimeout(() => {
+      const encoder = new TextEncoder();
+      const bytes = Array.from(encoder.encode(cmd));
+      terminalWrite(activeTab, bytes).catch(err => {
+        console.warn('Failed to send pending terminal command:', err);
+      });
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [pendingTerminalCommand, activeTab, clearTerminalCommand]);
+
   const addTab = (chosenConnId?: string) => {
     const newId = `tab-${Date.now()}`;
     const connId = chosenConnId || activeConnectionId || 'default';

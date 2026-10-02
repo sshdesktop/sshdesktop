@@ -10,7 +10,7 @@ import {
   Palette, Sun, Moon, Minimize2, Plus, Monitor, ShieldCheck
 } from 'lucide-react';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
-import { useSettingsStore, useConnectionStore, useWindowStore } from '../lib/store';
+import { useSettingsStore, useConnectionStore, useWindowStore, useEditorStore } from '../lib/store';
 import { sftpMkdir, sftpWriteTextFile, sftpReadTextFile, sshExec } from '../lib/tauri-bridge';
 
 interface DesktopContextMenu {
@@ -103,8 +103,11 @@ export default function Desktop() {
   const [wallpaperCategory, setWallpaperCategory] = useState<string>('All');
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
+  const [selectedDesktopId, setSelectedDesktopId] = useState<string | null>(null);
+
   const { openApp } = useWindowManager();
-  const { wallpaper, theme, updateSettings } = useSettingsStore();
+  const { wallpaper, theme, updateSettings, pinnedDesktopItems, unpinFromDesktop } = useSettingsStore();
+  const { navigateFinder, openFileInEditor } = useEditorStore();
   const { minimizeAllWindows } = useWindowStore();
   const activeConnectionId = useConnectionStore(s => s.activeConnectionId);
   const activeServer = useConnectionStore(s => {
@@ -112,6 +115,7 @@ export default function Desktop() {
     return id ? s.connections.find(c => c.id === id) : null;
   });
   const username = activeServer?.username || 'root';
+  const userHome = username === 'root' ? '/root' : `/home/${username}`;
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -123,9 +127,12 @@ export default function Desktop() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Close context menu on left click anywhere
+  // Close context menu and unselect icon on left click anywhere
   useEffect(() => {
-    const handleClick = () => setDesktopMenu(null);
+    const handleClick = () => {
+      setDesktopMenu(null);
+      setSelectedDesktopId(null);
+    };
     window.addEventListener('click', handleClick);
     return () => window.removeEventListener('click', handleClick);
   }, []);
@@ -162,9 +169,10 @@ export default function Desktop() {
   const handleCreateDesktopFolder = async () => {
     const folderName = prompt('Enter new folder name on Desktop:', 'New Folder');
     if (!folderName || !activeConnectionId) return;
-    const desktopPath = username === 'root' ? `/root/Desktop/${folderName}` : `/home/${username}/Desktop/${folderName}`;
+    const desktopPath = `${userHome}/Desktop/${folderName}`;
     try {
       await sftpMkdir(activeConnectionId, desktopPath);
+      navigateFinder(desktopPath);
       openApp('files', 'Finder');
     } catch (err: any) {
       alert(`Could not create folder: ${err?.message || err}`);
@@ -174,9 +182,10 @@ export default function Desktop() {
   const handleCreateDesktopFile = async () => {
     const fileName = prompt('Enter new file name on Desktop:', 'notes.txt');
     if (!fileName || !activeConnectionId) return;
-    const desktopPath = username === 'root' ? `/root/Desktop/${fileName}` : `/home/${username}/Desktop/${fileName}`;
+    const desktopPath = `${userHome}/Desktop/${fileName}`;
     try {
       await sftpWriteTextFile(activeConnectionId, desktopPath, '');
+      navigateFinder(`${userHome}/Desktop`);
       openApp('files', 'Finder');
     } catch (err: any) {
       alert(`Could not create file: ${err?.message || err}`);
@@ -208,12 +217,48 @@ export default function Desktop() {
   const activeWallpaperUrl = isCustom ? wallpaper : activeWallpaperItem.url;
 
   const desktopIcons = [
-    { id: 'root', label: 'Macintosh HD', icon: HardDrive, tileBg: 'from-[#38bdf8] to-[#0284c7]', action: () => openApp('files', 'Finder') },
-    { id: 'home', label: `${username}'s Home`, icon: Folder, tileBg: 'from-[#818cf8] to-[#4f46e5]', action: () => openApp('files', 'Finder') },
-    { id: 'terminal', label: 'Terminal', icon: Terminal, tileBg: 'from-[#334155] to-[#0f172a]', action: () => openApp('terminal', 'Terminal') },
-    { id: 'editor', label: 'Code Editor', icon: FileCode, tileBg: 'from-[#a855f7] to-[#7e22ce]', action: () => openApp('editor', 'Code Editor') },
-    { id: 'monitor', label: 'Activity Monitor', icon: Activity, tileBg: 'from-[#06b6d4] to-[#0e7490]', action: () => openApp('monitor', 'Activity Monitor') },
-    { id: 'trash', label: 'Trash', icon: Trash2, tileBg: 'from-[#64748b] to-[#334155]', action: () => openApp('files', 'Finder') },
+    { 
+      id: 'root', 
+      label: 'Macintosh HD', 
+      icon: HardDrive, 
+      tileBg: 'from-[#38bdf8] to-[#0284c7]', 
+      action: () => { navigateFinder('/'); openApp('files', 'Finder'); } 
+    },
+    { 
+      id: 'home', 
+      label: `${username}'s Home`, 
+      icon: Folder, 
+      tileBg: 'from-[#818cf8] to-[#4f46e5]', 
+      action: () => { navigateFinder(userHome); openApp('files', 'Finder'); } 
+    },
+    { 
+      id: 'terminal', 
+      label: 'Terminal', 
+      icon: Terminal, 
+      tileBg: 'from-[#334155] to-[#0f172a]', 
+      action: () => openApp('terminal', 'Terminal') 
+    },
+    { 
+      id: 'editor', 
+      label: 'Code Editor', 
+      icon: FileCode, 
+      tileBg: 'from-[#a855f7] to-[#7e22ce]', 
+      action: () => openApp('editor', 'Code Editor') 
+    },
+    { 
+      id: 'monitor', 
+      label: 'Activity Monitor', 
+      icon: Activity, 
+      tileBg: 'from-[#06b6d4] to-[#0e7490]', 
+      action: () => openApp('monitor', 'Activity Monitor') 
+    },
+    { 
+      id: 'trash', 
+      label: 'Trash', 
+      icon: Trash2, 
+      tileBg: 'from-[#64748b] to-[#334155]', 
+      action: () => { navigateFinder(`${userHome}/.local/share/Trash`); openApp('files', 'Finder'); } 
+    },
   ];
 
   const categories = ['All', 'macOS Official', 'Nature 4K', 'Cosmic', 'Abstract 4K'];
@@ -247,23 +292,75 @@ export default function Desktop() {
         className="hidden"
       />
 
-      {/* Desktop Canvas Icons (macOS right-aligned or left-aligned desktop items) */}
-      <div className="absolute top-12 left-6 grid grid-cols-1 gap-4 z-0 pointer-events-auto">
+      {/* Desktop Canvas Icons (Standard System Icons + Pinned Folders & Files) */}
+      <div className="absolute top-12 left-6 grid grid-cols-1 gap-3 z-0 pointer-events-auto">
         {desktopIcons.map(item => {
           const Icon = item.icon;
+          const isSelected = selectedDesktopId === item.id;
           return (
             <div
               key={item.id}
-              onDoubleClick={item.action}
-              className="flex flex-col items-center w-24 p-2 rounded-2xl hover:bg-black/30 hover:backdrop-blur-md border border-transparent hover:border-white/20 cursor-pointer transition-all group select-none text-center"
+              onClick={(e) => { e.stopPropagation(); setSelectedDesktopId(item.id); }}
+              onDoubleClick={(e) => { e.stopPropagation(); item.action(); }}
+              className={`flex flex-col items-center w-24 p-2 rounded-2xl cursor-pointer transition-all group select-none text-center ${
+                isSelected
+                  ? 'bg-blue-600/35 backdrop-blur-md border border-blue-400/60 shadow-lg'
+                  : 'hover:bg-black/30 hover:backdrop-blur-md border border-transparent hover:border-white/20'
+              }`}
             >
               <div 
                 className={`w-12 h-12 rounded-[14px] bg-gradient-to-br ${item.tileBg} flex items-center justify-center shadow-[0_8px_20px_rgba(0,0,0,0.5)] border border-white/25 group-hover:scale-105 transition-transform`}
               >
                 <Icon className="w-6 h-6 text-white drop-shadow-md" />
               </div>
-              <span className="text-white text-[11px] font-medium mt-1.5 drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)] break-words max-w-full leading-tight">
+              <span className={`text-[11px] font-medium mt-1.5 drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)] break-words max-w-full leading-tight ${
+                isSelected ? 'text-blue-200' : 'text-white'
+              }`}>
                 {item.label}
+              </span>
+            </div>
+          );
+        })}
+
+        {/* User Pinned Items from Finder */}
+        {pinnedDesktopItems.map(item => {
+          const isSelected = selectedDesktopId === item.id;
+          return (
+            <div
+              key={item.id}
+              onClick={(e) => { e.stopPropagation(); setSelectedDesktopId(item.id); }}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                if (item.type === 'dir') {
+                  navigateFinder(item.path);
+                  openApp('files', 'Finder');
+                } else {
+                  openFileInEditor(item.path);
+                  openApp('editor', 'Code Editor');
+                }
+              }}
+              className={`flex flex-col items-center w-24 p-2 rounded-2xl cursor-pointer transition-all group select-none text-center ${
+                isSelected
+                  ? 'bg-blue-600/35 backdrop-blur-md border border-blue-400/60 shadow-lg'
+                  : 'hover:bg-black/30 hover:backdrop-blur-md border border-transparent hover:border-white/20'
+              }`}
+              title={`${item.name} (${item.path})`}
+            >
+              <div 
+                className={`w-12 h-12 rounded-[14px] bg-gradient-to-br ${
+                  item.type === 'dir' ? 'from-amber-400 to-amber-600' : 'from-indigo-500 to-purple-600'
+                } flex items-center justify-center shadow-[0_8px_20px_rgba(0,0,0,0.5)] border border-white/25 group-hover:scale-105 transition-transform`}
+              >
+                {item.type === 'dir' ? (
+                  <Folder className="w-6 h-6 text-white drop-shadow-md" />
+                ) : (
+                  <FileCode className="w-6 h-6 text-white drop-shadow-md" />
+                )}
+              </div>
+              <span className={`text-[11px] font-medium mt-1.5 drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)] break-words max-w-full leading-tight line-clamp-2 ${
+                isSelected ? 'text-blue-200' : 'text-white'
+              }`}>
+                {item.name}
               </span>
             </div>
           );
@@ -272,9 +369,7 @@ export default function Desktop() {
 
       {/* Window Manager Layer */}
       <div className="absolute inset-0 top-8 bottom-16 pt-2 pb-14 pointer-events-none">
-        <div className="w-full h-full pointer-events-auto">
-          <WindowManager />
-        </div>
+        <WindowManager />
       </div>
 
       {/* Bottom Dock */}

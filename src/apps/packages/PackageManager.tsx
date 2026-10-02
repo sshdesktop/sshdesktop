@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Package, Search, Download, Trash2, ArrowUpCircle, CheckCircle, RefreshCw, AlertCircle } from 'lucide-react';
+import { 
+  Package, Search, Download, Trash2, ArrowUpCircle, CheckCircle, 
+  RefreshCw, Plus, X, AlertCircle, ShieldCheck, Terminal
+} from 'lucide-react';
 import { packageList, packageUpgradable, packageInstall, packageRemove, packageUpdate } from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
 
@@ -15,11 +18,17 @@ interface PackageItem {
 
 export default function PackageManager() {
   const [packages, setPackages] = useState<PackageItem[]>([]);
-  const [tab, setTab] = useState<'installed' | 'upgrades' | 'search'>('installed');
+  const [tab, setTab] = useState<'installed' | 'upgrades'>('installed');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
-  const [isUpdating, setIsUpdating] = useState(false);
+  const [isUpdatingAll, setIsUpdatingAll] = useState(false);
+  const [actionInProgress, setActionInProgress] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Install Package Modal
+  const [showInstallModal, setShowInstallModal] = useState(false);
+  const [installPkgName, setInstallPkgName] = useState('');
+
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
 
   const loadPackages = useCallback(async () => {
@@ -60,29 +69,69 @@ export default function PackageManager() {
 
   const upgrades = packages.filter(p => p.upgradable);
 
-  const upgradeAll = async () => {
-    setIsUpdating(true);
-    setStatusMessage('Running live system package upgrade (apt/dnf)...');
+  // Upgrade ALL packages
+  const handleUpgradeAll = async () => {
+    setIsUpdatingAll(true);
+    setStatusMessage('Running full system package upgrade (apt/dnf)...');
     try {
       const res = await packageUpdate(activeConnId);
-      setStatusMessage(res || 'System packages updated successfully');
+      setStatusMessage(res || 'All system packages upgraded successfully');
       await loadPackages();
-    } catch (err) {
-      setStatusMessage(`Error upgrading packages: ${err}`);
+    } catch (err: any) {
+      setStatusMessage(`Error upgrading packages: ${err?.message || err}`);
     } finally {
-      setIsUpdating(false);
+      setIsUpdatingAll(false);
     }
   };
 
-  const removePackage = async (name: string) => {
-    if (!confirm(`Are you sure you want to uninstall '${name}' from the server?`)) return;
+  // Upgrade SPECIFIC package
+  const handleUpgradeSingle = async (name: string) => {
+    setActionInProgress(name);
+    setStatusMessage(`Upgrading package ${name}...`);
+    try {
+      const res = await packageInstall(activeConnId, name);
+      setStatusMessage(res || `Package ${name} upgraded to latest version`);
+      await loadPackages();
+    } catch (err: any) {
+      setStatusMessage(`Error updating ${name}: ${err?.message || err}`);
+    } finally {
+      setActionInProgress(null);
+    }
+  };
+
+  // Install NEW package
+  const handleInstallNew = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!installPkgName.trim()) return;
+    const pkg = installPkgName.trim();
+    setActionInProgress(pkg);
+    setShowInstallModal(false);
+    setStatusMessage(`Installing package '${pkg}' from repository...`);
+    try {
+      const res = await packageInstall(activeConnId, pkg);
+      setStatusMessage(res || `Package '${pkg}' installed successfully`);
+      setInstallPkgName('');
+      await loadPackages();
+    } catch (err: any) {
+      setStatusMessage(`Failed to install ${pkg}: ${err?.message || err}`);
+    } finally {
+      setActionInProgress(null);
+    }
+  };
+
+  // Remove/Uninstall package
+  const handleRemovePackage = async (name: string) => {
+    if (!confirm(`Are you sure you want to uninstall package '${name}' from server?`)) return;
+    setActionInProgress(name);
     try {
       setStatusMessage(`Uninstalling ${name}...`);
       await packageRemove(activeConnId, name);
       setPackages(prev => prev.filter(p => p.name !== name));
-      setStatusMessage(`Package ${name} uninstalled`);
-    } catch (err) {
-      setStatusMessage(`Failed to remove ${name}: ${err}`);
+      setStatusMessage(`Package '${name}' uninstalled successfully`);
+    } catch (err: any) {
+      setStatusMessage(`Failed to remove ${name}: ${err?.message || err}`);
+    } finally {
+      setActionInProgress(null);
     }
   };
 
@@ -92,13 +141,13 @@ export default function PackageManager() {
   });
 
   return (
-    <div className="flex flex-col h-full bg-[#181825] text-[#cdd6f4] p-4 space-y-4 overflow-y-auto">
+    <div className="flex flex-col h-full bg-[#181825] text-[#cdd6f4] p-4 space-y-4 overflow-hidden select-none">
       {/* Top Banner Stats */}
       <div className="grid grid-cols-3 gap-3 shrink-0">
         <div className="bg-[#1e1e2e] p-3 rounded-xl border border-white/[0.08]">
           <div className="text-gray-400 text-xs">Installed Packages</div>
-          <div className="text-xl font-bold mt-1">{loading ? '...' : packages.length}</div>
-          <div className="text-[11px] text-gray-500 mt-0.5">Live Linux OS Packages</div>
+          <div className="text-xl font-bold mt-1 text-white">{loading ? '...' : packages.length}</div>
+          <div className="text-[11px] text-gray-500 mt-0.5">Live Remote Linux OS Packages</div>
         </div>
 
         <div className="bg-[#1e1e2e] p-3 rounded-xl border border-white/[0.08]">
@@ -107,19 +156,31 @@ export default function PackageManager() {
             <ArrowUpCircle className="w-4 h-4 text-amber-400" />
           </div>
           <div className="text-xl font-bold mt-1 text-amber-400">{loading ? '...' : upgrades.length}</div>
-          <div className="text-[11px] text-amber-300 mt-0.5">Security & features</div>
+          <div className="text-[11px] text-amber-300 mt-0.5">Security & Version Updates</div>
         </div>
 
-        <div className="bg-[#1e1e2e] p-3 rounded-xl border border-white/[0.08]">
-          <div className="text-gray-400 text-xs">Package System</div>
-          <div className="text-base font-bold font-mono text-emerald-400 mt-1">APT / DNF / PACMAN</div>
-          <div className="text-[11px] text-gray-500 mt-0.5">Native Remote Manager</div>
+        <div className="bg-[#1e1e2e] p-3 rounded-xl border border-white/[0.08] flex items-center justify-between">
+          <div>
+            <div className="text-gray-400 text-xs">Package Manager</div>
+            <div className="text-sm font-bold font-mono text-emerald-400 mt-1">APT / DNF / PACMAN</div>
+            <div className="text-[11px] text-gray-500 mt-0.5">Native OS Repositories</div>
+          </div>
+          <button
+            onClick={() => setShowInstallModal(true)}
+            className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-2 rounded-xl transition-all shadow-md font-medium"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Install Package</span>
+          </button>
         </div>
       </div>
 
       {statusMessage && (
-        <div className="bg-blue-500/10 border border-blue-500/30 text-blue-300 text-xs px-3 py-2 rounded-lg flex items-center justify-between">
-          <span>{statusMessage}</span>
+        <div className="bg-blue-500/10 border border-blue-500/30 text-blue-300 text-xs px-3 py-2 rounded-xl flex items-center justify-between shrink-0">
+          <span className="flex items-center space-x-2">
+            <CheckCircle className="w-4 h-4 text-blue-400 shrink-0" />
+            <span>{statusMessage}</span>
+          </span>
           <button onClick={() => setStatusMessage(null)} className="text-gray-400 hover:text-white">✕</button>
         </div>
       )}
@@ -130,7 +191,7 @@ export default function PackageManager() {
           <button
             onClick={() => setTab('installed')}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-              tab === 'installed' ? 'bg-[var(--accent)] text-white' : 'text-gray-400 hover:text-white'
+              tab === 'installed' ? 'bg-[var(--accent)] text-white shadow-sm' : 'text-gray-400 hover:text-white'
             }`}
           >
             All Installed ({packages.length})
@@ -138,10 +199,10 @@ export default function PackageManager() {
           <button
             onClick={() => setTab('upgrades')}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1.5 ${
-              tab === 'upgrades' ? 'bg-[var(--accent)] text-white' : 'text-gray-400 hover:text-white'
+              tab === 'upgrades' ? 'bg-[var(--accent)] text-white shadow-sm' : 'text-gray-400 hover:text-white'
             }`}
           >
-            <span>Updates</span>
+            <span>Updates Available</span>
             {upgrades.length > 0 && (
               <span className="w-4 h-4 rounded-full bg-amber-500 text-black text-[10px] font-bold flex items-center justify-center">
                 {upgrades.length}
@@ -153,12 +214,12 @@ export default function PackageManager() {
         <div className="flex items-center space-x-2">
           {tab === 'upgrades' && upgrades.length > 0 && (
             <button
-              onClick={upgradeAll}
-              disabled={isUpdating}
-              className="flex items-center space-x-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs px-3 py-1.5 rounded-lg transition-colors font-medium"
+              onClick={handleUpgradeAll}
+              disabled={isUpdatingAll}
+              className="flex items-center space-x-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs px-3 py-1.5 rounded-lg transition-colors font-medium shadow-sm"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${isUpdating ? 'animate-spin' : ''}`} />
-              <span>{isUpdating ? 'Upgrading System...' : 'Upgrade All Packages'}</span>
+              <RefreshCw className={`w-3.5 h-3.5 ${isUpdatingAll ? 'animate-spin' : ''}`} />
+              <span>{isUpdatingAll ? 'Upgrading All...' : 'Upgrade All Packages'}</span>
             </button>
           )}
 
@@ -195,7 +256,7 @@ export default function PackageManager() {
                 <th className="py-2.5 px-3">Arch</th>
                 <th className="py-2.5 px-3">Size</th>
                 <th className="py-2.5 px-3">Description</th>
-                <th className="py-2.5 px-3 text-right">Action</th>
+                <th className="py-2.5 px-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/[0.05]">
@@ -221,11 +282,22 @@ export default function PackageManager() {
                     <td className="py-2.5 px-3 font-mono text-gray-500">{pkg.arch}</td>
                     <td className="py-2.5 px-3 text-gray-400">{pkg.size}</td>
                     <td className="py-2.5 px-3 text-gray-400 truncate max-w-sm">{pkg.description || '—'}</td>
-                    <td className="py-2.5 px-3 text-right">
+                    <td className="py-2.5 px-3 text-right space-x-2">
+                      {pkg.upgradable && (
+                        <button
+                          onClick={() => handleUpgradeSingle(pkg.name)}
+                          disabled={actionInProgress === pkg.name}
+                          className="px-2.5 py-1 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-semibold transition-colors"
+                          title="Update this package specifically"
+                        >
+                          {actionInProgress === pkg.name ? 'Updating...' : 'Update'}
+                        </button>
+                      )}
                       <button
-                        onClick={() => removePackage(pkg.name)}
-                        className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-red-400"
-                        title="Uninstall"
+                        onClick={() => handleRemovePackage(pkg.name)}
+                        disabled={actionInProgress === pkg.name}
+                        className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-red-400 transition-colors"
+                        title="Uninstall Package"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -237,6 +309,62 @@ export default function PackageManager() {
           </table>
         </div>
       </div>
+
+      {/* Install Package Modal */}
+      {showInstallModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+          <form 
+            onSubmit={handleInstallNew}
+            className="bg-[#1e1e2e] border border-white/10 rounded-2xl w-full max-w-md p-5 shadow-2xl space-y-4"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2 text-white font-bold text-sm">
+                <Package className="w-4 h-4 text-blue-400" />
+                <span>Install Linux Package</span>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setShowInstallModal(false)}
+                className="text-gray-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Package Name</label>
+              <input
+                type="text"
+                autoFocus
+                value={installPkgName}
+                onChange={e => setInstallPkgName(e.target.value)}
+                placeholder="e.g. nginx, git, htop, curl, nodejs, build-essential"
+                className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+              />
+              <span className="text-[10px] text-gray-500 mt-1 block">
+                Will execute native package installer (apt install -y / dnf install -y)
+              </span>
+            </div>
+
+            <div className="flex justify-end space-x-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowInstallModal(false)}
+                className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-gray-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!installPkgName.trim()}
+                className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs font-semibold text-white transition-colors"
+              >
+                Install Now
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

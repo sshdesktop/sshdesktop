@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Users, UserPlus, Shield, Trash2, Lock, Unlock, Search, RefreshCw, Terminal } from 'lucide-react';
+import { Users, UserPlus, Shield, Trash2, Lock, Unlock, Search, RefreshCw, Terminal, Key, X, Check, Plus } from 'lucide-react';
 import { userList, groupList, userAdd, userDelete, sshExec } from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
 
@@ -37,6 +37,16 @@ export default function UserManager() {
   const [search, setSearch] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [newUser, setNewUser] = useState({ username: '', shell: '/bin/bash', sudo: false });
+  
+  // Password & Group Management Modals
+  const [passwordModalUser, setPasswordModalUser] = useState<string | null>(null);
+  const [newPassword, setNewPassword] = useState('');
+  const [passwordStatus, setPasswordStatus] = useState<string | null>(null);
+
+  const [groupModalUser, setGroupModalUser] = useState<UserEntry | null>(null);
+  const [customGroupName, setCustomGroupName] = useState('');
+  const [groupStatus, setGroupStatus] = useState<string | null>(null);
+
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
 
   const loadData = useCallback(async () => {
@@ -132,6 +142,49 @@ export default function UserManager() {
       await loadData();
     } catch (err) {
       console.warn('Failed to add user:', err);
+    }
+  };
+
+  const handleSetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!passwordModalUser || !newPassword) return;
+    try {
+      setPasswordStatus('Updating password...');
+      await sshExec(activeConnId, `echo "${passwordModalUser}:${newPassword}" | sudo chpasswd`);
+      setPasswordStatus('Password updated successfully!');
+      setTimeout(() => {
+        setPasswordModalUser(null);
+        setNewPassword('');
+        setPasswordStatus(null);
+      }, 1000);
+    } catch (err: any) {
+      setPasswordStatus(`Failed: ${err?.message || err}`);
+    }
+  };
+
+  const handleJoinGroup = async (groupName: string) => {
+    if (!groupModalUser || !groupName) return;
+    try {
+      setGroupStatus(`Adding to ${groupName}...`);
+      await sshExec(activeConnId, `sudo usermod -aG ${groupName} ${groupModalUser.username}`);
+      setGroupStatus(`User joined group '${groupName}'!`);
+      await loadData();
+      setGroupModalUser(prev => prev ? { ...prev, groups: [...prev.groups, groupName] } : null);
+    } catch (err: any) {
+      setGroupStatus(`Failed: ${err?.message || err}`);
+    }
+  };
+
+  const handleRemoveFromGroup = async (groupName: string) => {
+    if (!groupModalUser || !groupName) return;
+    try {
+      setGroupStatus(`Removing from ${groupName}...`);
+      await sshExec(activeConnId, `sudo gpasswd -d ${groupModalUser.username} ${groupName}`);
+      setGroupStatus(`User removed from group '${groupName}'!`);
+      await loadData();
+      setGroupModalUser(prev => prev ? { ...prev, groups: prev.groups.filter(g => g !== groupName) } : null);
+    } catch (err: any) {
+      setGroupStatus(`Failed: ${err?.message || err}`);
     }
   };
 
@@ -248,6 +301,28 @@ export default function UserManager() {
                         </div>
                       </td>
                       <td className="py-2.5 px-3 text-right space-x-1">
+                        <button
+                          onClick={() => {
+                            setPasswordModalUser(user.username);
+                            setNewPassword('');
+                            setPasswordStatus(null);
+                          }}
+                          className="p-1.5 rounded hover:bg-white/10 text-gray-400 hover:text-amber-300"
+                          title="Set / Change Password"
+                        >
+                          <Key className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => {
+                            setGroupModalUser(user);
+                            setCustomGroupName('');
+                            setGroupStatus(null);
+                          }}
+                          className="p-1.5 rounded hover:bg-white/10 text-gray-400 hover:text-blue-300"
+                          title="Manage Groups (Join / Leave)"
+                        >
+                          <Users className="w-3.5 h-3.5" />
+                        </button>
                         <button
                           onClick={() => toggleLock(user.username, user.isLocked)}
                           className={`p-1.5 rounded hover:bg-white/10 ${
@@ -406,6 +481,173 @@ export default function UserManager() {
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Set Password Modal */}
+      {passwordModalUser && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+          <form 
+            onSubmit={handleSetPassword} 
+            className="bg-[#1e1e2e] border border-white/10 rounded-2xl w-full max-w-sm p-5 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2 text-white font-bold text-sm">
+                <Key className="w-4 h-4 text-amber-400" />
+                <span>Set Password: {passwordModalUser}</span>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setPasswordModalUser(null)} 
+                className="text-gray-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {passwordStatus && (
+              <div className="p-2 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-300 text-xs">
+                {passwordStatus}
+              </div>
+            )}
+
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">New Password</label>
+              <input
+                type="password"
+                required
+                autoFocus
+                value={newPassword}
+                onChange={e => setNewPassword(e.target.value)}
+                placeholder="Enter new account password"
+                className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-amber-400"
+              />
+              <span className="text-[10px] text-gray-500 mt-1 block">
+                Will execute sudo chpasswd to update Linux user password
+              </span>
+            </div>
+
+            <div className="flex justify-end space-x-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setPasswordModalUser(null)}
+                className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-gray-300"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!newPassword}
+                className="px-4 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-xs font-semibold text-black"
+              >
+                Update Password
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Manage User Groups Modal */}
+      {groupModalUser && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+          <div className="bg-[#1e1e2e] border border-white/10 rounded-2xl w-full max-w-md p-5 space-y-4 shadow-2xl flex flex-col max-h-[85vh]">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2 text-white font-bold text-sm">
+                <Users className="w-4 h-4 text-blue-400" />
+                <span>Manage Groups: {groupModalUser.username}</span>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setGroupModalUser(null)} 
+                className="text-gray-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {groupStatus && (
+              <div className="p-2 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-300 text-xs">
+                {groupStatus}
+              </div>
+            )}
+
+            {/* Quick Add Custom Group */}
+            <div className="flex space-x-2">
+              <input
+                type="text"
+                value={customGroupName}
+                onChange={e => setCustomGroupName(e.target.value)}
+                placeholder="Join existing or new group (e.g. docker, sudo)..."
+                className="flex-1 bg-[#11111b] border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+              <button
+                onClick={() => {
+                  if (customGroupName.trim()) {
+                    handleJoinGroup(customGroupName.trim());
+                    setCustomGroupName('');
+                  }
+                }}
+                disabled={!customGroupName.trim()}
+                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-xl text-xs text-white font-medium flex items-center space-x-1"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Join</span>
+              </button>
+            </div>
+
+            {/* Group Membership Chips */}
+            <div className="text-xs text-gray-400">Current Groups:</div>
+            <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto p-1 bg-[#11111b] rounded-xl border border-white/[0.05]">
+              {groupModalUser.groups.length === 0 ? (
+                <span className="text-gray-500 text-xs p-2">No secondary groups</span>
+              ) : (
+                groupModalUser.groups.map(grp => (
+                  <span
+                    key={grp}
+                    className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-white/10 text-white text-xs"
+                  >
+                    <span>{grp}</span>
+                    <button
+                      onClick={() => handleRemoveFromGroup(grp)}
+                      className="hover:text-red-400 ml-1"
+                      title="Remove user from this group"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                ))
+              )}
+            </div>
+
+            {/* Available Server Groups to Join */}
+            <div className="text-xs text-gray-400">Available Server Groups:</div>
+            <div className="flex-1 overflow-y-auto divide-y divide-white/[0.05] border border-white/[0.08] rounded-xl max-h-48">
+              {groups
+                .filter(g => !groupModalUser.groups.includes(g.name))
+                .slice(0, 30)
+                .map(g => (
+                  <div key={g.name} className="flex items-center justify-between px-3 py-1.5 text-xs hover:bg-white/[0.02]">
+                    <span className="font-mono text-gray-300">{g.name} (GID: {g.gid})</span>
+                    <button
+                      onClick={() => handleJoinGroup(g.name)}
+                      className="px-2 py-0.5 rounded bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 text-[10px] font-medium"
+                    >
+                      + Add
+                    </button>
+                  </div>
+                ))}
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => setGroupModalUser(null)}
+                className="px-4 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs text-white font-medium"
+              >
+                Done
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
