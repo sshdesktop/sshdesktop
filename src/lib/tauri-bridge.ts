@@ -8,8 +8,19 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
   if (isTauri()) {
     try {
       return await invoke<T>(cmd, args);
-    } catch (err) {
+    } catch (err: any) {
       console.error(`[CloudDesk Tauri] Command '${cmd}' failed:`, err);
+      const errMsg = String(err?.message || err);
+      if (
+        errMsg.includes('No active SSH connection') || 
+        errMsg.includes('Connection closed') || 
+        errMsg.includes('connection reset') || 
+        errMsg.includes('broken pipe')
+      ) {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('clouddesk-ssh-disconnected', { detail: { reason: errMsg } }));
+        }
+      }
       throw err;
     }
   }
@@ -51,8 +62,8 @@ export async function sshExec(connId: string, command: string): Promise<{ stdout
   }
 }
 
-export async function sshLaunchPutty(connId: string): Promise<void> {
-  return safeInvoke<void>('ssh_launch_putty', { connId }, undefined);
+export async function sshLaunchPutty(connId: string, remoteDir?: string): Promise<void> {
+  return safeInvoke<void>('ssh_launch_putty', { connId, remoteDir: remoteDir || null }, undefined);
 }
 
 // ----------------- Terminal Commands -----------------
@@ -74,15 +85,15 @@ export async function terminalClose(terminalId: string): Promise<void> {
 
 // ----------------- SFTP Commands -----------------
 export async function sftpListDir(connId: string, path: string): Promise<any[]> {
-  try {
-    return await safeInvoke<any[]>('sftp_list_dir', { connId, path }, []);
-  } catch {
-    return [];
-  }
+  return safeInvoke<any[]>('sftp_list_dir', { connId, path }, []);
 }
 
 export async function sftpReadTextFile(connId: string, path: string): Promise<string> {
   return safeInvoke<string>('sftp_read_text_file', { connId, path }, '');
+}
+
+export async function sftpReadFileBase64(connId: string, path: string): Promise<string> {
+  return safeInvoke<string>('sftp_read_file_base64', { connId, path }, '');
 }
 
 export async function sftpWriteTextFile(connId: string, path: string, content: string): Promise<void> {
@@ -107,6 +118,41 @@ export async function sftpChmod(connId: string, path: string, mode: number): Pro
 
 export async function sftpChown(connId: string, path: string, owner: string, group: string = ''): Promise<void> {
   return safeInvoke<void>('sftp_chown', { connId, path, owner, group }, undefined);
+}
+
+export async function sftpFolderSize(connId: string, path: string): Promise<string> {
+  return safeInvoke<string>('sftp_folder_size', { connId, path }, '—');
+}
+
+export async function sftpDownloadToDownloads(connId: string, remotePath: string): Promise<string> {
+  return safeInvoke<string>('sftp_download_to_downloads', { connId, remotePath }, '');
+}
+
+export async function sftpDownloadFile(connId: string, remotePath: string, localPath?: string): Promise<string> {
+  try {
+    if (isTauri()) {
+      if (localPath) {
+        await safeInvoke<void>('sftp_download', { connId, remotePath, localPath }, undefined);
+        return localPath;
+      }
+      return await sftpDownloadToDownloads(connId, remotePath);
+    }
+    // Web browser fallback
+    const textContent = await sftpReadTextFile(connId, remotePath);
+    const blob = new Blob([textContent], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = remotePath.split('/').pop() || 'downloaded_file';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    return 'Downloads';
+  } catch (err) {
+    console.warn('sftpDownloadFile error:', err);
+    throw err;
+  }
 }
 
 // ----------------- System Commands -----------------
@@ -194,6 +240,10 @@ export async function dockerImages(connId: string): Promise<any[]> {
   }
 }
 
+export async function dockerImageRemove(connId: string, imageId: string): Promise<string> {
+  return safeInvoke<string>('docker_image_remove', { connId, imageId }, '');
+}
+
 export async function networkPorts(connId: string): Promise<any[]> {
   try {
     return await safeInvoke<any[]>('network_ports', { connId }, []);
@@ -244,6 +294,18 @@ export async function packageUpgradable(connId: string): Promise<any[]> {
   } catch {
     return [];
   }
+}
+
+export async function packageSearch(connId: string, query: string): Promise<any[]> {
+  try {
+    return await safeInvoke<any[]>('package_search', { connId, query }, []);
+  } catch {
+    return [];
+  }
+}
+
+export async function packageDetectManager(connId: string): Promise<string> {
+  return safeInvoke<string>('package_detect_manager', { connId }, 'apt');
 }
 
 export async function userList(connId: string): Promise<any[]> {
@@ -365,4 +427,226 @@ export async function settingsGet(): Promise<any> {
 
 export async function settingsSave(settings: any): Promise<void> {
   return safeInvoke<void>('settings_save', { settings }, undefined);
+}
+
+export async function pickKeyFile(): Promise<string | null> {
+  if (isTauri()) {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: 'SSH Private Keys (*.pem, *.ppk, id_rsa, id_ed25519)',
+            extensions: ['pem', 'ppk', 'key', 'id_rsa', 'id_ed25519', '*']
+          }
+        ]
+      });
+      if (selected && typeof selected === 'string') {
+        return selected;
+      }
+    } catch (e) {
+      console.warn('[CloudDesk] Failed to open native file picker:', e);
+    }
+  }
+  return null;
+}
+
+// ----------------- Native Database Commands (Direct Drivers + SSH Tunnel) -----------------
+export interface DatabaseConnectionConfig {
+  id: string;
+  name: string;
+  engine: 'mysql' | 'mariadb' | 'postgresql' | 'sqlite' | 'mssql' | 'mongodb' | 'redis' | string;
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  database: string;
+  schema?: string;
+  use_ssh?: boolean;
+  ssh_connection_id?: string;
+  ssh_host?: string;
+  ssh_port?: number;
+  ssh_user?: string;
+  ssh_password?: string;
+  ssh_key_path?: string;
+  sqlite_path?: string;
+  read_only?: boolean;
+  timeout_seconds?: number;
+}
+
+export interface ColumnMeta {
+  name: string;
+  data_type: string;
+  nullable: boolean;
+  is_primary_key: boolean;
+  is_foreign_key: boolean;
+  referenced_table?: string | null;
+  referenced_column?: string | null;
+  default_value?: string | null;
+  extra?: string | null;
+}
+
+export interface QueryResult {
+  columns: ColumnMeta[];
+  rows: any[];
+  affected_rows: number;
+  last_insert_id?: number | null;
+  execution_time_ms: number;
+  command_type: string;
+  server_version?: string | null;
+  warnings: string[];
+}
+
+export interface ServerCapabilities {
+  engine: string;
+  server_version: string;
+  supports_transactions: boolean;
+  supports_schemas: boolean;
+  supports_procedures: boolean;
+  supports_functions: boolean;
+  supports_triggers: boolean;
+  supports_views: boolean;
+  supports_indexes: boolean;
+  supports_foreign_keys: boolean;
+  supports_explain: boolean;
+  supports_process_list: boolean;
+  read_only: boolean;
+}
+
+export interface DatabaseObject {
+  name: string;
+  object_type: string; // 'table' | 'view' | 'procedure' | 'function' | 'trigger' | 'index' | 'collection'
+  schema?: string | null;
+  row_count?: number | null;
+  size_bytes?: number | null;
+  definition?: string | null;
+}
+
+export interface RedisKeyItem {
+  key: string;
+  key_type: string;
+  ttl: number;
+  size?: number | null;
+}
+
+export interface RedisValueItem {
+  key: string;
+  key_type: string;
+  ttl: number;
+  value: any;
+}
+
+export async function dbConnect(config: DatabaseConnectionConfig): Promise<ServerCapabilities> {
+  return safeInvoke<ServerCapabilities>('db_connect', { config }, {
+    engine: config.engine,
+    server_version: '1.0.0',
+    supports_transactions: true,
+    supports_schemas: true,
+    supports_procedures: true,
+    supports_functions: true,
+    supports_triggers: true,
+    supports_views: true,
+    supports_indexes: true,
+    supports_foreign_keys: true,
+    supports_explain: true,
+    supports_process_list: true,
+    read_only: false,
+  });
+}
+
+export async function dbDisconnect(connectionId: string): Promise<void> {
+  return safeInvoke<void>('db_disconnect', { connectionId }, undefined);
+}
+
+export async function dbTestConnection(config: DatabaseConnectionConfig): Promise<ServerCapabilities> {
+  return safeInvoke<ServerCapabilities>('db_test_connection', { config }, {
+    engine: config.engine,
+    server_version: '1.0.0',
+    supports_transactions: true,
+    supports_schemas: true,
+    supports_procedures: true,
+    supports_functions: true,
+    supports_triggers: true,
+    supports_views: true,
+    supports_indexes: true,
+    supports_foreign_keys: true,
+    supports_explain: true,
+    supports_process_list: true,
+    read_only: false,
+  });
+}
+
+export async function dbExecuteQuery(connectionId: string, query: string, maxRows?: number): Promise<QueryResult> {
+  return safeInvoke<QueryResult>('db_execute_query', { connectionId, query, maxRows: maxRows || 500 }, {
+    columns: [],
+    rows: [],
+    affected_rows: 0,
+    execution_time_ms: 0,
+    command_type: 'SELECT',
+    warnings: [],
+  });
+}
+
+export async function dbListTables(connectionId: string, schema?: string): Promise<DatabaseObject[]> {
+  return safeInvoke<DatabaseObject[]>('db_list_tables', { connectionId, schema: schema || null }, []);
+}
+
+export async function dbGetTableColumns(connectionId: string, tableName: string): Promise<ColumnMeta[]> {
+  return safeInvoke<ColumnMeta[]>('db_get_table_columns', { connectionId, tableName }, []);
+}
+
+export async function redisScanKeys(connectionId: string, pattern?: string, count?: number): Promise<RedisKeyItem[]> {
+  return safeInvoke<RedisKeyItem[]>('redis_scan_keys', { connectionId, pattern: pattern || '*', count: count || 100 }, []);
+}
+
+export async function redisGetValue(connectionId: string, key: string): Promise<RedisValueItem> {
+  return safeInvoke<RedisValueItem>('redis_get_value', { connectionId, key }, {
+    key,
+    key_type: 'none',
+    ttl: -1,
+    value: null,
+  });
+}
+
+export async function redisSetValue(connectionId: string, key: string, value: string, ttl?: number): Promise<void> {
+  return safeInvoke<void>('redis_set_value', { connectionId, key, value, ttl: ttl || null }, undefined);
+}
+
+export async function redisDeleteKey(connectionId: string, key: string): Promise<boolean> {
+  return safeInvoke<boolean>('redis_delete_key', { connectionId, key }, true);
+}
+
+export async function mongodbListCollections(connectionId: string): Promise<string[]> {
+  return safeInvoke<string[]>('mongodb_list_collections', { connectionId }, []);
+}
+
+export async function mongodbFindDocuments(
+  connectionId: string,
+  collection: string,
+  filterJson?: string,
+  skip?: number,
+  limit?: number
+): Promise<QueryResult> {
+  return safeInvoke<QueryResult>(
+    'mongodb_find_documents',
+    { connectionId, collection, filterJson: filterJson || null, skip: skip || null, limit: limit || 100 },
+    {
+      columns: [{ name: 'document', data_type: 'BSON Document', nullable: true, is_primary_key: false, is_foreign_key: false }],
+      rows: [],
+      affected_rows: 0,
+      execution_time_ms: 0,
+      command_type: 'MongoDB Find',
+      warnings: [],
+    }
+  );
+}
+
+export async function mongodbInsertDocument(
+  connectionId: string,
+  collection: string,
+  docJson: string
+): Promise<string> {
+  return safeInvoke<string>('mongodb_insert_document', { connectionId, collection, docJson }, '');
 }

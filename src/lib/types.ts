@@ -9,10 +9,13 @@ export interface SavedConnection {
   keyPath?: string;
   privateKeyPath?: string;
   private_key_path?: string;
+  passphrase?: string;
   color?: string;
   group?: string;
   tags?: string[];
   lastConnected?: number;
+  last_connected_at?: number;
+  created_at?: number;
 }
 
 export interface WindowState {
@@ -26,6 +29,9 @@ export interface WindowState {
   height: number;
   minimized: boolean;
   maximized: boolean;
+  fullscreen?: boolean;
+  snapState?: 'none' | 'left' | 'right' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'maximize';
+  serverId?: string;
   focused: boolean;
   zIndex: number;
 }

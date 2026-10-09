@@ -54,28 +54,37 @@ function AppLoader() {
   );
 }
 
+import { useConnectionStore } from '../lib/store';
+
 export default function WindowManager() {
-  const { windows } = useWindowManager();
+  const { allWindows } = useWindowManager();
+  const activeConnId = useConnectionStore((s) => s.activeConnectionId);
 
   return (
     <>
-      {windows.map(win => {
+      {allWindows.map(win => {
+        const isCurrentServer = !win.serverId || win.serverId === activeConnId;
         const AppComp = APP_COMPONENTS[win.appId];
         if (!AppComp) {
-          return (
+          return isCurrentServer ? (
             <Window key={win.id} window={win}>
               <div className="w-full h-full flex items-center justify-center text-[var(--text-secondary)]">
                 App "{win.appId}" not found
               </div>
             </Window>
-          );
+          ) : null;
         }
         return (
-          <Window key={win.id} window={win}>
-            <Suspense fallback={<AppLoader />}>
-              <AppComp />
-            </Suspense>
-          </Window>
+          <div 
+            key={win.id} 
+            style={{ display: isCurrentServer ? 'contents' : 'none' }}
+          >
+            <Window window={win}>
+              <Suspense fallback={<AppLoader />}>
+                <AppComp />
+              </Suspense>
+            </Window>
+          </div>
         );
       })}
     </>

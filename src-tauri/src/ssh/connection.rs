@@ -45,21 +45,98 @@ pub struct SshConnection {
     pub connected_at: i64,
 }
 
+pub fn get_plink_path() -> &'static str {
+    if std::path::Path::new(r"C:\Program Files\PuTTY\plink.exe").exists() {
+        r"C:\Program Files\PuTTY\plink.exe"
+    } else if std::path::Path::new(r"C:\Program Files (x86)\PuTTY\plink.exe").exists() {
+        r"C:\Program Files (x86)\PuTTY\plink.exe"
+    } else {
+        "plink"
+    }
+}
+
+pub fn is_ppk_key(path_or_content: &str) -> bool {
+    let trimmed = path_or_content.trim();
+    if trimmed.to_lowercase().ends_with(".ppk") {
+        return true;
+    }
+    if trimmed.contains("PuTTY-User-Key-File") {
+        return true;
+    }
+    if let Ok(content) = std::fs::read_to_string(trimmed) {
+        if content.contains("PuTTY-User-Key-File") {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn resolve_key_path(key_input: &str) -> Option<String> {
+    let trimmed = key_input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let path = std::path::Path::new(trimmed);
+    if path.exists() && path.is_file() {
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
 #[tauri::command]
-pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionConfig) -> Result<String, String> {
+pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: ConnectionConfig) -> Result<String, String> {
     let id = config.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    config.id = Some(id.clone());
     log::info!("CloudDesk: Establishing SSH connection [{}] for {} ({}:{})", id, config.name, config.host, config.port);
 
-    // Test connectivity using plink (if password) or ssh
+    // Clean up any legacy or stored keys on disk - client private keys are NOT stored
+    if let Some(base) = directories::BaseDirs::new() {
+        let keys_dir = base.home_dir().join(".clouddesk").join("keys");
+        if keys_dir.exists() {
+            let _ = std::fs::remove_dir_all(&keys_dir);
+        }
+    }
+
+    // If an existing file on the client computer was supplied, use its path directly.
+    // Otherwise keep the key in memory only for native cryptographic handshake.
+    if let Some(raw_key) = &config.private_key_path {
+        if let Some(existing_file) = resolve_key_path(raw_key) {
+            config.private_key_path = Some(existing_file);
+        }
+    }
+
     let host = &config.host;
     let port = config.port.to_string();
     let user = &config.username;
     let mut verified = false;
     let mut last_error = String::new();
 
-    if let Some(pwd) = &config.password {
-        if !pwd.is_empty() {
-            let mut cmd = tokio::process::Command::new("plink");
+    let is_ppk = config.private_key_path.as_deref().map(is_ppk_key).unwrap_or(false);
+
+    // 0. Primary Fast Path: Try establishing persistent in-memory SSH transport (for PEM/OpenSSH keys or password)
+    if !is_ppk {
+        if let Ok(handle) = crate::ssh::session::connect_session(
+            host,
+            config.port,
+            user,
+            config.password.as_deref(),
+            config.private_key_path.as_deref(),
+        ).await {
+            verified = true;
+            let mut sessions = state.sessions.lock().await;
+            let arc_handle = std::sync::Arc::new(handle);
+            sessions.insert(id.clone(), arc_handle.clone());
+            sessions.insert("default".to_string(), arc_handle);
+            log::info!("CloudDesk: Native persistent SSH session established for {}", host);
+        }
+    }
+
+    // 1. If PPK key is provided, use PuTTY's plink with -i
+    if !verified && is_ppk {
+        if let Some(key_path) = &config.private_key_path {
+            let plink_bin = get_plink_path();
+            let mut cmd = tokio::process::Command::new(plink_bin);
             #[cfg(windows)]
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
@@ -68,8 +145,8 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
                 .arg(&port)
                 .arg("-l")
                 .arg(user)
-                .arg("-pw")
-                .arg(pwd)
+                .arg("-i")
+                .arg(key_path)
                 .arg(host)
                 .arg("echo clouddesk-connected")
                 .stdin(std::process::Stdio::piped())
@@ -81,13 +158,13 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
                     if let Some(mut stdin) = child.stdin.take() {
                         let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
                     }
-                    match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait_with_output()).await {
+                    match tokio::time::timeout(std::time::Duration::from_secs(12), child.wait_with_output()).await {
                         Ok(Ok(out)) => {
                             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
                             if out.status.success() || stdout.contains("clouddesk-connected") {
                                 verified = true;
-                                log::info!("CloudDesk: Plink connection test successful for {}", host);
+                                log::info!("CloudDesk: Plink connection test with PuTTY PPK successful for {}", host);
                             } else {
                                 let err_raw = if !stderr.is_empty() { stderr } else { stdout };
                                 last_error = err_raw
@@ -98,27 +175,93 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
                                     .trim()
                                     .to_string();
                                 if last_error.is_empty() {
-                                    last_error = "SSH Authentication failed (access denied or wrong password)".to_string();
+                                    last_error = "PuTTY PPK authentication failed (access denied)".to_string();
                                 }
-                                log::warn!("CloudDesk: Plink test failed for {}: {}", host, last_error);
+                                log::warn!("CloudDesk: Plink PPK test failed for {}: {}", host, last_error);
                             }
                         }
                         Ok(Err(e)) => {
-                            last_error = format!("Plink execution error: {}", e);
+                            last_error = format!("Plink PPK error: {}", e);
                         }
                         Err(_) => {
-                            last_error = format!("Connection timed out after 10s connecting to {}:{}", host, port);
+                            last_error = format!("Connection timed out connecting to {}:{} with PuTTY PPK key", host, port);
                         }
                     }
                 }
                 Err(e) => {
-                    last_error = format!("Could not launch plink: {}", e);
+                    last_error = format!("Could not launch plink for PPK key auth: {}", e);
                 }
             }
         }
     }
 
-    if !verified && (config.password.is_none() || config.password.as_ref().map(|s| s.is_empty()).unwrap_or(true)) {
+    // 2. Password auth via plink
+    if !verified {
+        if let Some(pwd) = &config.password {
+            if !pwd.is_empty() {
+                let plink_bin = get_plink_path();
+                let mut cmd = tokio::process::Command::new(plink_bin);
+                #[cfg(windows)]
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+                cmd.arg("-ssh")
+                    .arg("-P")
+                    .arg(&port)
+                    .arg("-l")
+                    .arg(user)
+                    .arg("-pw")
+                    .arg(pwd)
+                    .arg(host)
+                    .arg("echo clouddesk-connected")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        if let Some(mut stdin) = child.stdin.take() {
+                            let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
+                        }
+                        match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait_with_output()).await {
+                            Ok(Ok(out)) => {
+                                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                                if out.status.success() || stdout.contains("clouddesk-connected") {
+                                    verified = true;
+                                    log::info!("CloudDesk: Plink connection test successful for {}", host);
+                                } else {
+                                    let err_raw = if !stderr.is_empty() { stderr } else { stdout };
+                                    last_error = err_raw
+                                    .lines()
+                                    .filter(|l| !l.contains("Store key in cache") && !l.contains("The server's") && !l.contains("fingerprint"))
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                                    .trim()
+                                    .to_string();
+                                    if last_error.is_empty() {
+                                        last_error = "SSH Authentication failed (access denied or wrong password)".to_string();
+                                    }
+                                    log::warn!("CloudDesk: Plink test failed for {}: {}", host, last_error);
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                last_error = format!("Plink execution error: {}", e);
+                            }
+                            Err(_) => {
+                                last_error = format!("Connection timed out after 10s connecting to {}:{}", host, port);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        last_error = format!("Could not launch plink: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. OpenSSH auth (for PEM keys)
+    if !verified && !is_ppk && (config.password.is_none() || config.password.as_ref().map(|s| s.is_empty()).unwrap_or(true)) {
         let mut ssh_test = tokio::process::Command::new("ssh");
         #[cfg(windows)]
         ssh_test.creation_flags(0x08000000); // CREATE_NO_WINDOW
@@ -134,7 +277,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
             .arg("ConnectTimeout=6");
 
         if let Some(key) = &config.private_key_path {
-            if !key.is_empty() {
+            if resolve_key_path(key).is_some() {
                 ssh_test.arg("-i").arg(key);
             }
         }
@@ -177,7 +320,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
 
     let conn = SshConnection {
         id: id.clone(),
-        config,
+        config: config.clone(),
         connected: true,
         connected_at: chrono::Utc::now().timestamp(),
     };
@@ -188,12 +331,96 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, config: ConnectionCo
         map.insert("default".to_string(), conn);
     }
 
+    // Automatically persist to disk so all apps and future restarts can self-heal
+    let saved = crate::store::connections::SavedConnection {
+        id: id.clone(),
+        created_at: chrono::Utc::now().timestamp(),
+        last_connected_at: Some(chrono::Utc::now().timestamp()),
+        notes: None,
+        name: config.name.clone(),
+        host: config.host.clone(),
+        port: config.port,
+        username: config.username.clone(),
+        password: config.password.clone(),
+        private_key_path: config.private_key_path.clone(),
+        auth_method: config.auth_method.clone(),
+        color: config.color.clone(),
+        group: config.group.clone(),
+        tags: config.tags.clone(),
+    };
+    let _ = crate::store::connections::save_or_update_connection_on_disk(saved);
+
     log::info!("CloudDesk: SSH Session established with ID: {} (verified: true)", id);
     Ok(id)
 }
 
+impl From<crate::store::connections::SavedConnection> for ConnectionConfig {
+    fn from(s: crate::store::connections::SavedConnection) -> Self {
+        ConnectionConfig {
+            id: Some(s.id),
+            name: s.name,
+            host: s.host,
+            port: s.port,
+            username: s.username,
+            password: s.password,
+            private_key_path: s.private_key_path,
+            passphrase: None,
+            auth_method: s.auth_method,
+            color: s.color,
+            group: s.group,
+            tags: s.tags,
+        }
+    }
+}
+
+/// Helper: resolve a connection by ID.
+/// Searches in-memory connections, auto-restores from disk if needed,
+/// or falls back to the default or first available active server.
+pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnection> {
+    // 1. In-memory check
+    {
+        let lock = state.connections.lock();
+        if let Some(c) = lock.get(conn_id).cloned() {
+            return Some(c);
+        }
+        if conn_id == "default" || conn_id.is_empty() {
+            if let Some(c) = lock.get("default").cloned().or_else(|| lock.values().next().cloned()) {
+                return Some(c);
+            }
+        }
+    }
+
+    // 2. Try disk persistence auto-restore
+    if let Some(saved) = crate::store::connections::get_saved_connection_by_id(conn_id) {
+        let restored = SshConnection {
+            id: saved.id.clone(),
+            config: saved.into(),
+            connected: true,
+            connected_at: chrono::Utc::now().timestamp(),
+        };
+        let mut lock = state.connections.lock();
+        lock.insert(restored.id.clone(), restored.clone());
+        lock.insert("default".to_string(), restored.clone());
+        log::info!("CloudDesk: Auto-restored SSH connection '{}' from disk storage into memory", conn_id);
+        return Some(restored);
+    }
+
+    // 3. Fallback to any connection in memory
+    {
+        let lock = state.connections.lock();
+        lock.values().next().cloned()
+    }
+}
+
 #[tauri::command]
 pub async fn ssh_disconnect(state: tauri::State<'_, AppState>, conn_id: String) -> Result<(), String> {
+    {
+        let mut sessions = state.sessions.lock().await;
+        sessions.remove(&conn_id);
+        if conn_id == "default" || sessions.len() <= 1 {
+            sessions.remove("default");
+        }
+    }
     let mut map = state.connections.lock();
     map.remove(&conn_id);
     if map.len() == 1 && map.contains_key("default") {
@@ -224,9 +451,106 @@ pub async fn ssh_list_connections(state: tauri::State<'_, AppState>) -> Result<V
 }
 
 #[tauri::command]
-pub async fn ssh_test_connection(config: ConnectionConfig) -> Result<bool, String> {
+pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, String> {
     if config.host.is_empty() || config.port == 0 {
         return Err("Invalid host or port configuration".into());
     }
+
+    if let Some(raw_key) = &config.private_key_path {
+        if let Some(existing_path) = resolve_key_path(raw_key) {
+            config.private_key_path = Some(existing_path);
+        }
+    }
+
+    let is_ppk = config.private_key_path.as_deref().map(is_ppk_key).unwrap_or(false);
+
+    // 1. In-memory persistent probe (for PEM keys / password)
+    if !is_ppk {
+        if let Ok(handle) = crate::ssh::session::connect_session(
+            &config.host,
+            config.port,
+            &config.username,
+            config.password.as_deref(),
+            config.private_key_path.as_deref(),
+        ).await {
+            if let Ok((out, code)) = crate::ssh::session::run_exec_channel(&handle, "echo clouddesk-ok").await {
+                if code == 0 && out.contains("clouddesk-ok") {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    let host = &config.host;
+    let port = config.port.to_string();
+    let user = &config.username;
+
+    // 2. PPK Key probe via Plink
+    if is_ppk {
+        if let Some(key_path) = &config.private_key_path {
+            let plink_bin = get_plink_path();
+            let mut cmd = tokio::process::Command::new(plink_bin);
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000);
+            cmd.arg("-ssh")
+                .arg("-batch")
+                .arg("-P").arg(&port)
+                .arg("-l").arg(user)
+                .arg("-i").arg(key_path)
+                .arg(host)
+                .arg("echo clouddesk-ok");
+            if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await {
+                if res.status.success() {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    // 3. Password probe via Plink
+    if let Some(pwd) = &config.password {
+        if !pwd.is_empty() {
+            let plink_bin = get_plink_path();
+            let mut cmd = tokio::process::Command::new(plink_bin);
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000);
+            cmd.arg("-ssh")
+                .arg("-batch")
+                .arg("-P").arg(&port)
+                .arg("-l").arg(user)
+                .arg("-pw").arg(pwd)
+                .arg(host)
+                .arg("echo clouddesk-ok");
+            if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await {
+                if res.status.success() {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    // 4. OpenSSH PEM probe
+    if !is_ppk && config.private_key_path.is_some() {
+        let mut cmd = tokio::process::Command::new("ssh");
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        cmd.arg("-p").arg(&port)
+            .arg("-o").arg("StrictHostKeyChecking=accept-new")
+            .arg("-o").arg("BatchMode=yes")
+            .arg("-o").arg("ConnectTimeout=6");
+        if let Some(k) = &config.private_key_path {
+            if resolve_key_path(k).is_some() {
+                cmd.arg("-i").arg(k);
+            }
+        }
+        cmd.arg(format!("{}@{}", user, host)).arg("echo clouddesk-ok");
+        if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await {
+            if res.status.success() {
+                return Ok(true);
+            }
+        }
+    }
+
     Ok(true)
 }
+

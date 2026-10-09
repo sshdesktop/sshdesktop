@@ -1,16 +1,25 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { SavedConnection, WindowState, Notification } from './types';
-import { sshConnect, sshDisconnect } from './tauri-bridge';
+import { sshConnect, sshDisconnect, settingsGet, settingsSave, storeSaveConnection, storeDeleteConnection } from './tauri-bridge';
 
 interface ConnectionState {
   connections: SavedConnection[];
   activeConnectionId: string | null;
   connectedServers: Map<string, { id: string; name: string; host: string; status: string }>;
+  isDisconnected: boolean;
+  disconnectReason: string | null;
+  isReconnecting: boolean;
+  reconnectAttempts: number;
+  reconnectError: string | null;
   addConnection: (conn: SavedConnection) => void;
+  updateConnection: (id: string, updates: Partial<SavedConnection>) => void;
   removeConnection: (id: string) => void;
   setActive: (id: string | null) => void;
+  setDisconnected: (isDisconnected: boolean, reason?: string) => void;
+  triggerDisconnectAlert: (reason?: string) => void;
   connect: (id: string, overrideConfig?: Partial<SavedConnection>) => Promise<void>;
+  reconnect: () => Promise<void>;
   disconnect: (id: string) => Promise<void>;
 }
 
@@ -20,14 +29,84 @@ export const useConnectionStore = create<ConnectionState>()(
       connections: [],
       activeConnectionId: null,
       connectedServers: new Map(),
-      addConnection: (conn) => set((state) => ({ connections: [...state.connections.filter(c => c.id !== conn.id), conn] })),
-      removeConnection: (id) => set((state) => ({ connections: state.connections.filter((c) => c.id !== id) })),
+      isDisconnected: false,
+      disconnectReason: null,
+      isReconnecting: false,
+      reconnectAttempts: 0,
+      reconnectError: null,
+      addConnection: (conn) => {
+        set((state) => ({ connections: [...state.connections.filter(c => c.id !== conn.id), conn] }));
+        storeSaveConnection({
+          id: conn.id,
+          created_at: conn.created_at || Date.now(),
+          last_connected_at: conn.last_connected_at || conn.lastConnected || Date.now(),
+          name: conn.name,
+          host: conn.host,
+          port: Number(conn.port) || 22,
+          username: conn.username,
+          password: conn.password,
+          private_key_path: (conn as any).privateKeyPath || (conn as any).private_key_path,
+          auth_method: (conn as any).authMethod || (conn as any).auth_method,
+          color: conn.color,
+          group: conn.group,
+          tags: conn.tags || [],
+        }).catch(() => {});
+      },
+      updateConnection: (id, updates) => {
+        const existing = get().connections.find(c => c.id === id);
+        if (!existing) return;
+        const updated: SavedConnection = { ...existing, ...updates };
+        set((state) => ({ connections: state.connections.map(c => c.id === id ? updated : c) }));
+        storeSaveConnection({
+          id: updated.id,
+          created_at: updated.created_at || Date.now(),
+          last_connected_at: updated.last_connected_at || Date.now(),
+          name: updated.name,
+          host: updated.host,
+          port: Number(updated.port) || 22,
+          username: updated.username,
+          password: updated.password,
+          private_key_path: (updated as any).privateKeyPath || (updated as any).private_key_path,
+          auth_method: (updated as any).authMethod || (updated as any).auth_method,
+          color: updated.color,
+          group: updated.group,
+          tags: updated.tags || [],
+        }).catch(() => {});
+      },
+      removeConnection: (id) => {
+        storeDeleteConnection(id).catch(() => {});
+        set((state) => ({
+          connections: state.connections.filter((c) => c.id !== id),
+          activeConnectionId: state.activeConnectionId === id ? null : state.activeConnectionId
+        }));
+      },
       setActive: (id) => set({ activeConnectionId: id }),
+      setDisconnected: (isDisconnected, reason) => set({
+        isDisconnected,
+        disconnectReason: reason || (isDisconnected ? 'Connection to remote server was lost or timed out.' : null),
+        isReconnecting: false,
+        reconnectError: null,
+      }),
+      triggerDisconnectAlert: (reason) => set({
+        isDisconnected: true,
+        disconnectReason: reason || 'Connection to remote server was disconnected.',
+        isReconnecting: false,
+        reconnectError: null,
+      }),
       connect: async (id, overrideConfig) => {
         const conn = get().connections.find(c => c.id === id);
         const target: any = { ...conn, ...overrideConfig };
         if (!target.host) {
           throw new Error('Server IP or hostname is required');
+        }
+
+        const effectiveAuth = target.authMethod || target.auth_method || (target.privateKeyPath || target.private_key_path ? 'key' : 'password');
+        const effectiveKey = target.privateKeyPath || target.private_key_path;
+
+        if (effectiveAuth === 'key') {
+          if (!effectiveKey || String(effectiveKey).trim().length === 0) {
+            throw new Error(`Missing SSH Private Key: Profile "${target.name || target.host}" is set to SSH Key authentication, but no private key file was found. Please re-upload or select your key file.`);
+          }
         }
 
         // Strictly await backend verification; will throw if credentials or host are invalid
@@ -44,10 +123,46 @@ export const useConnectionStore = create<ConnectionState>()(
           tags: target.tags || [],
         });
 
+        // Persist to disk as well
+        storeSaveConnection({
+          id,
+          created_at: target.created_at || Date.now(),
+          last_connected_at: Date.now(),
+          name: target.name || `${target.username}@${target.host}`,
+          host: target.host,
+          port: Number(target.port) || 22,
+          username: target.username,
+          password: target.password,
+          private_key_path: target.privateKeyPath || target.private_key_path,
+          auth_method: target.authMethod || target.auth_method,
+          color: target.color,
+          group: target.group,
+          tags: target.tags || [],
+        }).catch(() => {});
+
         // Only mark connected when backend verification succeeds
         const newMap = new Map(get().connectedServers);
         newMap.set(id, { id, name: target.name || target.host, host: target.host, status: 'connected' });
-        set({ connectedServers: newMap, activeConnectionId: id });
+        set({
+          connectedServers: newMap,
+          activeConnectionId: id,
+          isDisconnected: false,
+          disconnectReason: null,
+          isReconnecting: false,
+          reconnectAttempts: 0,
+          reconnectError: null,
+        });
+      },
+      reconnect: async () => {
+        const activeId = get().activeConnectionId;
+        if (!activeId) return;
+        set((s) => ({ isReconnecting: true, reconnectError: null, reconnectAttempts: s.reconnectAttempts + 1 }));
+        try {
+          await get().connect(activeId);
+        } catch (err: any) {
+          set({ isReconnecting: false, reconnectError: err?.message || String(err) });
+          throw err;
+        }
       },
       disconnect: async (id) => {
         try {
@@ -55,12 +170,20 @@ export const useConnectionStore = create<ConnectionState>()(
         } catch {}
         const newMap = new Map(get().connectedServers);
         newMap.delete(id);
-        set({ connectedServers: newMap, activeConnectionId: get().activeConnectionId === id ? null : get().activeConnectionId });
+        set({
+          connectedServers: newMap,
+          activeConnectionId: get().activeConnectionId === id ? null : get().activeConnectionId,
+          isDisconnected: false,
+          disconnectReason: null,
+          isReconnecting: false,
+          reconnectAttempts: 0,
+          reconnectError: null,
+        });
       },
     }),
     {
       name: 'connection-storage',
-      partialize: (state) => ({ connections: state.connections }),
+      partialize: (state) => ({ connections: state.connections, activeConnectionId: state.activeConnectionId }),
     }
   )
 );
@@ -68,12 +191,19 @@ export const useConnectionStore = create<ConnectionState>()(
 interface WindowStoreState {
   windows: WindowState[];
   nextZIndex: number;
+  launchingAppId: string | null;
+  closeInterceptors: Record<string, () => boolean | Promise<boolean>>;
+  registerCloseInterceptor: (id: string, fn: () => boolean | Promise<boolean>) => void;
+  unregisterCloseInterceptor: (id: string) => void;
+  setLaunchingApp: (id: string | null) => void;
   openWindow: (win: Omit<WindowState, 'id' | 'zIndex'>) => void;
   closeWindow: (id: string) => void;
   focusWindow: (id: string) => void;
   minimizeWindow: (id: string) => void;
   restoreWindow: (id: string) => void;
   maximizeWindow: (id: string) => void;
+  snapWindow: (id: string, snap: 'none' | 'left' | 'right' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'maximize') => void;
+  toggleFullscreen: (id: string) => void;
   updatePosition: (id: string, x: number, y: number) => void;
   updateSize: (id: string, width: number, height: number) => void;
   bringToFront: (id: string) => void;
@@ -81,21 +211,58 @@ interface WindowStoreState {
   restoreAllWindows: () => void;
 }
 
-export const useWindowStore = create<WindowStoreState>((set) => ({
+export const useWindowStore = create<WindowStoreState>((set, get) => ({
   windows: [],
   nextZIndex: 10,
+  launchingAppId: null,
+  closeInterceptors: {},
+  registerCloseInterceptor: (id, fn) => set((state) => ({
+    closeInterceptors: { ...state.closeInterceptors, [id]: fn }
+  })),
+  unregisterCloseInterceptor: (id) => set((state) => {
+    const next = { ...state.closeInterceptors };
+    delete next[id];
+    return { closeInterceptors: next };
+  }),
+  setLaunchingApp: (id) => set({ launchingAppId: id }),
   openWindow: (win) => set((state) => {
     const id = `win-${Date.now()}`;
+    const activeServer = useConnectionStore.getState().activeConnectionId;
+    const isAutoFS = useSettingsStore.getState().autoFullScreen;
     return {
-      windows: [...state.windows.map(w => ({ ...w, focused: false })), { ...win, id, zIndex: state.nextZIndex, focused: true }],
+      windows: [
+        ...state.windows.map(w => ({ ...w, focused: false })),
+        {
+          ...win,
+          id,
+          serverId: win.serverId || (activeServer ?? undefined),
+          maximized: isAutoFS ? true : (win.maximized ?? false),
+          snapState: 'none',
+          fullscreen: false,
+          zIndex: state.nextZIndex,
+          focused: true
+        }
+      ],
       nextZIndex: state.nextZIndex + 1
     };
   }),
-  closeWindow: (id) => set((state) => ({ windows: state.windows.filter(w => w.id !== id) })),
+  closeWindow: async (id) => {
+    const interceptor = get().closeInterceptors?.[id];
+    if (interceptor) {
+      try {
+        const canClose = await interceptor();
+        if (!canClose) return;
+      } catch {
+        return;
+      }
+    }
+    set((state) => ({ windows: state.windows.filter(w => w.id !== id) }));
+  },
   focusWindow: (id) => set((state) => ({
     windows: state.windows.map(w => ({
       ...w,
       focused: w.id === id,
+      minimized: w.id === id ? false : w.minimized,
       zIndex: w.id === id ? state.nextZIndex : w.zIndex
     })),
     nextZIndex: state.nextZIndex + 1
@@ -114,18 +281,43 @@ export const useWindowStore = create<WindowStoreState>((set) => ({
     windows: state.windows.map(w => ({ ...w, minimized: false }))
   })),
   maximizeWindow: (id) => set((state) => ({
-    windows: state.windows.map(w => w.id === id ? { ...w, maximized: !w.maximized } : w)
+    windows: state.windows.map(w => w.id === id ? { 
+      ...w, 
+      maximized: !w.maximized,
+      snapState: !w.maximized ? 'maximize' : 'none',
+      fullscreen: false
+    } : w)
+  })),
+  snapWindow: (id, snap) => set((state) => ({
+    windows: state.windows.map(w => w.id === id ? {
+      ...w,
+      snapState: snap,
+      maximized: snap === 'maximize',
+      fullscreen: false,
+      minimized: false,
+      focused: true
+    } : w)
+  })),
+  toggleFullscreen: (id) => set((state) => ({
+    windows: state.windows.map(w => w.id === id ? {
+      ...w,
+      fullscreen: !w.fullscreen,
+      snapState: 'none',
+      minimized: false,
+      focused: true
+    } : w)
   })),
   updatePosition: (id, x, y) => set((state) => ({
-    windows: state.windows.map(w => w.id === id ? { ...w, x, y } : w)
+    windows: state.windows.map(w => w.id === id ? { ...w, x, y, snapState: 'none' } : w)
   })),
   updateSize: (id, width, height) => set((state) => ({
-    windows: state.windows.map(w => w.id === id ? { ...w, width, height } : w)
+    windows: state.windows.map(w => w.id === id ? { ...w, width, height, snapState: 'none' } : w)
   })),
   bringToFront: (id) => set((state) => ({
     windows: state.windows.map(w => ({
       ...w,
       zIndex: w.id === id ? state.nextZIndex : w.zIndex,
+      minimized: w.id === id ? false : w.minimized,
       focused: w.id === id
     })),
     nextZIndex: state.nextZIndex + 1
@@ -149,6 +341,9 @@ interface EditorStoreState {
   pendingTerminalCommand: string | null;
   runTerminalCommand: (cmd: string) => void;
   clearTerminalCommand: () => void;
+  pendingTerminalDir: string | null;
+  openTerminalInDir: (dir: string) => void;
+  clearPendingTerminalDir: () => void;
 }
 
 export const useEditorStore = create<EditorStoreState>((set) => ({
@@ -161,6 +356,9 @@ export const useEditorStore = create<EditorStoreState>((set) => ({
   pendingTerminalCommand: null,
   runTerminalCommand: (cmd) => set({ pendingTerminalCommand: cmd }),
   clearTerminalCommand: () => set({ pendingTerminalCommand: null }),
+  pendingTerminalDir: null,
+  openTerminalInDir: (dir) => set({ pendingTerminalDir: dir }),
+  clearPendingTerminalDir: () => set({ pendingTerminalDir: null }),
 }));
 
 interface SettingsState {
@@ -171,6 +369,8 @@ interface SettingsState {
   showHiddenFiles: boolean;
   pollingInterval: number;
   wallpaper: string;
+  desktopIconSize: 'small' | 'medium' | 'large';
+  autoFullScreen: boolean;
   favorites: string[];
   pinnedDesktopItems: PinnedItem[];
   pinToDesktop: (item: PinnedItem) => void;
@@ -187,9 +387,11 @@ export const useSettingsStore = create<SettingsState>()(
       accentColor: '#89B4FA',
       terminalFontSize: 14,
       dockPosition: 'bottom',
-      showHiddenFiles: true,
-      pollingInterval: 3,
+      showHiddenFiles: false,
+      pollingInterval: 15,
       wallpaper: 'sonoma',
+      desktopIconSize: 'medium',
+      autoFullScreen: false,
       favorites: ['/', '/home', '/etc', '/var/log', '/tmp'],
       pinnedDesktopItems: [],
       pinToDesktop: (item) => set((state) => ({
@@ -201,13 +403,58 @@ export const useSettingsStore = create<SettingsState>()(
       addFavorite: (path) => set((state) => ({
         favorites: Array.from(new Set([...state.favorites, path]))
       })),
-      removeFavorite: (path) => set((state) => ({
-        favorites: state.favorites.filter(p => p !== path)
-      })),
-      updateSettings: (newSettings) => set((state) => ({ ...state, ...newSettings }))
+      removeFavorite: (path) => set((state) => {
+        const nextFavs = state.favorites.filter(p => p !== path);
+        settingsSave({
+          theme: state.theme,
+          accent_color: state.accentColor,
+          terminal_font_size: state.terminalFontSize,
+          terminal_color_scheme: 'catppuccin-mocha',
+          editor_font_size: 14,
+          dock_position: state.dockPosition,
+          polling_interval_ms: (state.pollingInterval || 15) * 1000,
+          show_hidden_files: state.showHiddenFiles,
+          wallpaper: state.wallpaper,
+          favorites: nextFavs,
+        }).catch(() => {});
+        return { favorites: nextFavs };
+      }),
+      updateSettings: (newSettings) => set((state) => {
+        const next = { ...state, ...newSettings };
+        settingsSave({
+          theme: next.theme,
+          accent_color: next.accentColor,
+          terminal_font_size: next.terminalFontSize,
+          terminal_color_scheme: 'catppuccin-mocha',
+          editor_font_size: 14,
+          dock_position: next.dockPosition,
+          polling_interval_ms: (next.pollingInterval || 15) * 1000,
+          show_hidden_files: next.showHiddenFiles,
+          wallpaper: next.wallpaper,
+          favorites: next.favorites,
+        }).catch(() => {});
+        return next;
+      })
     }),
     {
-      name: 'settings-storage'
+      name: 'settings-storage',
+      onRehydrateStorage: () => (state) => {
+        // Hydrate from .clouddesk/settings.json if available
+        settingsGet().then((saved) => {
+          if (saved && state) {
+            state.updateSettings({
+              theme: (saved.theme as any) || state.theme,
+              accentColor: saved.accent_color || state.accentColor,
+              terminalFontSize: saved.terminal_font_size || state.terminalFontSize,
+              dockPosition: (saved.dock_position as any) || state.dockPosition,
+              showHiddenFiles: saved.show_hidden_files !== undefined ? saved.show_hidden_files : state.showHiddenFiles,
+              pollingInterval: saved.polling_interval_ms ? Math.round(saved.polling_interval_ms / 1000) : state.pollingInterval,
+              wallpaper: saved.wallpaper || state.wallpaper,
+              favorites: saved.favorites || state.favorites,
+            });
+          }
+        }).catch(() => {});
+      }
     }
   )
 );
@@ -232,3 +479,39 @@ export const useNotificationStore = create<NotificationState>((set) => ({
   })),
   clearAll: () => set({ notifications: [] })
 }));
+
+export interface ServerTelemetry {
+  cpu: number;
+  ramPct: number;
+  ramUsed: string;
+  ramTotal: string;
+  diskPct: number;
+  diskUsed: string;
+  diskTotal: string;
+  loadAvg: string;
+  uptime: string;
+  kernel: string;
+  pingMs: number;
+  lastUpdated: number;
+}
+
+interface TelemetryStoreState extends ServerTelemetry {
+  updateTelemetry: (data: Partial<ServerTelemetry>) => void;
+}
+
+export const useTelemetryStore = create<TelemetryStoreState>((set) => ({
+  cpu: 0,
+  ramPct: 0,
+  ramUsed: '—',
+  ramTotal: '—',
+  diskPct: 0,
+  diskUsed: '—',
+  diskTotal: '—',
+  loadAvg: '—',
+  uptime: '—',
+  kernel: 'Linux',
+  pingMs: 0,
+  lastUpdated: 0,
+  updateTelemetry: (data) => set((state) => ({ ...state, ...data, lastUpdated: Date.now() })),
+}));
+

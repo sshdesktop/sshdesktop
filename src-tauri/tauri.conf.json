@@ -1,7 +1,7 @@
 {
   "productName": "CloudDesk",
   "version": "0.1.0",
-  "identifier": "com.clouddesk.app",
+  "identifier": "com.clouddesk.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",

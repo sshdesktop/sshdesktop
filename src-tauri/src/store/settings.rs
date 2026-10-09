@@ -5,47 +5,94 @@ use crate::AppState;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
+    #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default = "default_accent")]
     pub accent_color: String,
+    #[serde(default = "default_font_size")]
     pub terminal_font_size: u32,
+    #[serde(default = "default_color_scheme")]
     pub terminal_color_scheme: String,
+    #[serde(default = "default_font_size")]
     pub editor_font_size: u32,
+    #[serde(default = "default_dock_position")]
     pub dock_position: String,
+    #[serde(default = "default_polling")]
     pub polling_interval_ms: u64,
+    #[serde(default = "default_true")]
     pub show_hidden_files: bool,
+    #[serde(default)]
+    pub wallpaper: Option<String>,
+    #[serde(default)]
+    pub custom_wallpaper_url: Option<String>,
+    #[serde(default)]
+    pub icon_positions: Option<serde_json::Value>,
+    #[serde(default)]
+    pub sticky_notes: Option<String>,
+    #[serde(default)]
+    pub favorites: Option<Vec<String>>,
 }
+
+fn default_theme() -> String { "dark".into() }
+fn default_accent() -> String { "#89B4FA".into() }
+fn default_font_size() -> u32 { 14 }
+fn default_color_scheme() -> String { "catppuccin-mocha".into() }
+fn default_dock_position() -> String { "bottom".into() }
+fn default_polling() -> u64 { 2000 }
+fn default_true() -> bool { true }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            theme: "dark".into(),
-            accent_color: "#89B4FA".into(),
-            terminal_font_size: 14,
-            terminal_color_scheme: "catppuccin-mocha".into(),
-            editor_font_size: 14,
-            dock_position: "bottom".into(),
-            polling_interval_ms: 2000,
+            theme: default_theme(),
+            accent_color: default_accent(),
+            terminal_font_size: default_font_size(),
+            terminal_color_scheme: default_color_scheme(),
+            editor_font_size: default_font_size(),
+            dock_position: default_dock_position(),
+            polling_interval_ms: default_polling(),
             show_hidden_files: true,
+            wallpaper: Some("sonoma".into()),
+            custom_wallpaper_url: None,
+            icon_positions: None,
+            sticky_notes: None,
+            favorites: Some(vec!["/".into(), "/home".into(), "/etc".into(), "/var/log".into(), "/tmp".into()]),
         }
     }
 }
 
+pub fn get_clouddesk_dir() -> PathBuf {
+    if let Some(base) = directories::BaseDirs::new() {
+        let home_dot_dir = base.home_dir().join(".clouddesk");
+        let _ = fs::create_dir_all(&home_dot_dir);
+        return home_dot_dir;
+    }
+    let local = PathBuf::from(".clouddesk");
+    let _ = fs::create_dir_all(&local);
+    local
+}
+
 fn get_settings_path() -> PathBuf {
-    let mut dir = directories::BaseDirs::new()
-        .map(|b| b.data_local_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    dir.push("clouddesk");
-    let _ = fs::create_dir_all(&dir);
-    dir.push("settings.json");
-    dir
+    let dir = get_clouddesk_dir();
+    dir.join("settings.json")
 }
 
 #[tauri::command]
 pub async fn settings_get(_state: tauri::State<'_, AppState>) -> Result<AppSettings, String> {
     let path = get_settings_path();
-    if let Ok(content) = fs::read_to_string(path) {
+    if let Ok(content) = fs::read_to_string(&path) {
         if let Ok(settings) = serde_json::from_str::<AppSettings>(&content) {
             return Ok(settings);
+        }
+    }
+    // Fallback check legacy location
+    if let Some(base) = directories::BaseDirs::new() {
+        let legacy = base.data_local_dir().join("clouddesk").join("settings.json");
+        if let Ok(content) = fs::read_to_string(legacy) {
+            if let Ok(settings) = serde_json::from_str::<AppSettings>(&content) {
+                let _ = fs::write(&path, &content);
+                return Ok(settings);
+            }
         }
     }
     Ok(AppSettings::default())

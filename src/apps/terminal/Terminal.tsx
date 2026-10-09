@@ -5,7 +5,8 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { 
   Plus, X, Terminal as TerminalIcon, Trash2, ChevronDown, Server, 
-  ExternalLink, ShieldAlert, Activity, RefreshCw, Copy, CornerDownLeft
+  ExternalLink, ShieldAlert, Activity, RefreshCw, Copy, CornerDownLeft,
+  ZoomIn, ZoomOut
 } from 'lucide-react';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
@@ -26,6 +27,7 @@ interface TabInstance {
   term: XTerm;
   fitAddon: FitAddon;
   disposed: boolean;
+  cleanup?: () => void;
 }
 
 export default function TerminalApp() {
@@ -46,6 +48,28 @@ export default function TerminalApp() {
   const [showServerMenu, setShowServerMenu] = useState(false);
   const tabInstances = useRef<Map<string, TabInstance>>(new Map());
   const containersRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const [fontSize, setFontSize] = useState<number>(14);
+  const fontSizeRef = useRef<number>(14);
+  fontSizeRef.current = fontSize;
+
+  const updateZoom = useCallback((newSize: number) => {
+    const clamped = Math.max(9, Math.min(32, newSize));
+    setFontSize(clamped);
+    fontSizeRef.current = clamped;
+    tabInstances.current.forEach(inst => {
+      if (!inst.disposed) {
+        inst.term.options.fontSize = clamped;
+        try {
+          inst.fitAddon.fit();
+        } catch {}
+        requestAnimationFrame(() => {
+          try {
+            inst.fitAddon.fit();
+          } catch {}
+        });
+      }
+    });
+  }, []);
 
   // Listen to Tauri terminal-output events globally
   useEffect(() => {
@@ -81,7 +105,7 @@ export default function TerminalApp() {
     const term = new XTerm({
       cursorBlink: true,
       cursorStyle: 'bar',
-      fontSize: 14,
+      fontSize: fontSizeRef.current,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
       theme: {
         background: '#14141e',
@@ -120,10 +144,50 @@ export default function TerminalApp() {
       } catch {}
     }, 50);
 
+    // Ctrl + Mouse Wheel Zoom (In / Out)
+    const handleWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.deltaY < 0) {
+          updateZoom(fontSizeRef.current + 1);
+        } else if (e.deltaY > 0) {
+          updateZoom(fontSizeRef.current - 1);
+        }
+      }
+    };
+    el.addEventListener('wheel', handleWheel, { passive: false, capture: true });
+
+    // Keyboard Zoom Shortcuts (Ctrl+Plus, Ctrl+Minus, Ctrl+0)
+    term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      if (e.ctrlKey && (e.key === '=' || e.key === '+' || e.key === 'Add')) {
+        if (e.type === 'keydown') {
+          updateZoom(fontSizeRef.current + 1);
+        }
+        return false;
+      }
+      if (e.ctrlKey && (e.key === '-' || e.key === '_' || e.key === 'Subtract')) {
+        if (e.type === 'keydown') {
+          updateZoom(fontSizeRef.current - 1);
+        }
+        return false;
+      }
+      if (e.ctrlKey && (e.key === '0' || e.key === 'NumPad0')) {
+        if (e.type === 'keydown') {
+          updateZoom(14);
+        }
+        return false;
+      }
+      return true;
+    });
+
     const instance: TabInstance = {
       term,
       fitAddon,
       disposed: false,
+      cleanup: () => {
+        el.removeEventListener('wheel', handleWheel, { capture: true });
+      },
     };
     tabInstances.current.set(tabId, instance);
 
@@ -176,9 +240,70 @@ export default function TerminalApp() {
     return () => clearTimeout(timer);
   }, [activeTab]);
 
-  // Execute external commands sent to Terminal (e.g. Finder "Open Terminal Here")
+  // Execute external commands or directory requests sent to Terminal (e.g. Finder "Open Terminal Here")
   const pendingTerminalCommand = useEditorStore(s => s.pendingTerminalCommand);
   const clearTerminalCommand = useEditorStore(s => s.clearTerminalCommand);
+  const pendingTerminalDir = useEditorStore(s => s.pendingTerminalDir);
+  const clearPendingTerminalDir = useEditorStore(s => s.clearPendingTerminalDir);
+  const isFirstMount = useRef(true);
+
+  const addTab = (chosenConnId?: string, initialDir?: string) => {
+    const newId = `tab-${Date.now()}`;
+    const connId = chosenConnId || activeConnectionId || 'default';
+    const s = connections.find(c => c.id === connId) || activeServer;
+    const serverLabel = s?.name || s?.host || 'Server';
+    const folderLabel = initialDir ? (initialDir === '/' ? '/' : initialDir.split('/').filter(Boolean).pop() || initialDir) : null;
+    const nextNum = tabs.filter(t => t.connId === connId).length + 1;
+    const title = folderLabel ? `${folderLabel} (${nextNum})` : `${serverLabel} (${nextNum})`;
+    setTabs(prev => [
+      ...prev,
+      {
+        id: newId,
+        title,
+        shell: '/bin/bash',
+        connId,
+        serverName: serverLabel
+      }
+    ]);
+    setActiveTab(newId);
+    setShowServerMenu(false);
+
+    if (initialDir) {
+      setTimeout(() => {
+        const cmd = `cd "${initialDir}" && clear\r`;
+        const encoder = new TextEncoder();
+        const bytes = Array.from(encoder.encode(cmd));
+        terminalWrite(newId, bytes).catch(() => {});
+      }, 700);
+    }
+  };
+
+  useEffect(() => {
+    if (!pendingTerminalDir) return;
+    const dir = pendingTerminalDir;
+    clearPendingTerminalDir();
+
+    if (isFirstMount.current && tabs.length === 1 && !tabInstances.current.has('tab-1')) {
+      isFirstMount.current = false;
+      const folderLabel = dir === '/' ? '/' : dir.split('/').filter(Boolean).pop() || dir;
+      setTabs([{
+        id: 'tab-1',
+        title: `${folderLabel} (term)`,
+        shell: '/bin/bash',
+        connId: activeConnectionId,
+        serverName: activeServer?.name || activeServer?.host || 'server'
+      }]);
+      setTimeout(() => {
+        const cmd = `cd "${dir}" && clear\r`;
+        const encoder = new TextEncoder();
+        const bytes = Array.from(encoder.encode(cmd));
+        terminalWrite('tab-1', bytes).catch(() => {});
+      }, 700);
+    } else {
+      isFirstMount.current = false;
+      addTab(activeConnectionId, dir);
+    }
+  }, [pendingTerminalDir, activeConnectionId, clearPendingTerminalDir]);
 
   useEffect(() => {
     if (!pendingTerminalCommand) return;
@@ -196,26 +321,6 @@ export default function TerminalApp() {
     return () => clearTimeout(timer);
   }, [pendingTerminalCommand, activeTab, clearTerminalCommand]);
 
-  const addTab = (chosenConnId?: string) => {
-    const newId = `tab-${Date.now()}`;
-    const connId = chosenConnId || activeConnectionId || 'default';
-    const s = connections.find(c => c.id === connId) || activeServer;
-    const serverLabel = s?.name || s?.host || 'Server';
-    const nextNum = tabs.filter(t => t.connId === connId).length + 1;
-    setTabs(prev => [
-      ...prev,
-      {
-        id: newId,
-        title: `${serverLabel} (${nextNum})`,
-        shell: '/bin/bash',
-        connId,
-        serverName: serverLabel
-      }
-    ]);
-    setActiveTab(newId);
-    setShowServerMenu(false);
-  };
-
   const removeTab = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (tabs.length === 1) return;
@@ -224,6 +329,7 @@ export default function TerminalApp() {
     const inst = tabInstances.current.get(id);
     if (inst) {
       inst.disposed = true;
+      inst.cleanup?.();
       inst.term.dispose();
       tabInstances.current.delete(id);
     }
@@ -399,6 +505,30 @@ export default function TerminalApp() {
           <span className="text-gray-500">Session: {activeTab}</span>
         </div>
         <div className="flex items-center space-x-3">
+          {/* Font Zoom Indicator & Controls */}
+          <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded px-1.5 py-0.5 space-x-1 text-gray-300">
+            <button
+              onClick={() => updateZoom(fontSizeRef.current - 1)}
+              className="hover:text-white transition-colors cursor-pointer p-0.5"
+              title="Zoom out (Ctrl + - or Ctrl + Scroll Down)"
+            >
+              <ZoomOut className="w-3 h-3 text-gray-400 hover:text-white" />
+            </button>
+            <button
+              onClick={() => updateZoom(14)}
+              className="hover:text-blue-400 transition-colors cursor-pointer text-[10px] font-mono px-1 hover:bg-white/[0.06] rounded"
+              title="Reset zoom to 100% / 14px (Ctrl + 0 or Click)"
+            >
+              {fontSize}px ({Math.round((fontSize / 14) * 100)}%)
+            </button>
+            <button
+              onClick={() => updateZoom(fontSizeRef.current + 1)}
+              className="hover:text-white transition-colors cursor-pointer p-0.5"
+              title="Zoom in (Ctrl + + or Ctrl + Scroll Up)"
+            >
+              <ZoomIn className="w-3 h-3 text-blue-400 hover:text-blue-300" />
+            </button>
+          </div>
           <span>{activeServer?.username || 'root'}@{activeServer?.host || 'server'}</span>
           <span>/bin/bash</span>
         </div>

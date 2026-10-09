@@ -34,7 +34,7 @@ const DOCK_APPS: DockAppConfig[] = [
 ];
 
 export default function Dock({ onToggleLauncher }: { onToggleLauncher: () => void }) {
-  const { openApp, windows } = useWindowManager();
+  const { openApp, windows, launchingAppId } = useWindowManager();
 
   return (
     <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-50">
@@ -42,7 +42,7 @@ export default function Dock({ onToggleLauncher }: { onToggleLauncher: () => voi
         initial={{ y: 80, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         transition={{ type: 'spring', damping: 22, stiffness: 280 }}
-        className="bg-white/10 dark:bg-black/35 backdrop-blur-3xl rounded-[24px] px-2.5 py-2 flex items-end space-x-1.5 border border-white/20 shadow-[0_25px_50px_rgba(0,0,0,0.5),inset_0_1px_1px_rgba(255,255,255,0.3)] ring-1 ring-black/10"
+        className="dock-bar bg-white/10 dark:bg-black/35 backdrop-blur-3xl rounded-[24px] px-2.5 py-2 flex items-end space-x-1.5 border border-white/20 shadow-[0_25px_50px_rgba(0,0,0,0.5),inset_0_1px_1px_rgba(255,255,255,0.3)] ring-1 ring-black/10"
       >
         {/* Launcher Button (macOS authentic Launchpad Rocket) */}
         <DockSquircleItem
@@ -66,6 +66,7 @@ export default function Dock({ onToggleLauncher }: { onToggleLauncher: () => voi
             iconColor={app.iconColor}
             isActive={windows.some(w => w.appId === app.id && !w.minimized)}
             hasMinimized={windows.some(w => w.appId === app.id && w.minimized)}
+            isLaunching={launchingAppId === app.id}
             onClick={() => openApp(app.id, app.label)}
           />
         ))}
@@ -80,6 +81,7 @@ export default function Dock({ onToggleLauncher }: { onToggleLauncher: () => voi
           tileBg="from-[#94a3b8] via-[#64748b] to-[#475569]"
           iconColor="#ffffff"
           isActive={windows.some(w => w.appId === 'settings' && !w.minimized)}
+          isLaunching={launchingAppId === 'settings'}
           onClick={() => openApp('settings', 'System Settings')}
         />
 
@@ -103,6 +105,7 @@ function DockSquircleItem({
   iconColor = '#ffffff',
   isActive, 
   hasMinimized,
+  isLaunching,
   onClick 
 }: { 
   icon: React.ElementType;
@@ -111,6 +114,7 @@ function DockSquircleItem({
   iconColor?: string;
   isActive?: boolean;
   hasMinimized?: boolean;
+  isLaunching?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -119,7 +123,9 @@ function DockSquircleItem({
       whileTap={{ scale: 0.92 }}
       transition={{ type: 'spring', stiffness: 450, damping: 18 }}
       onClick={onClick}
-      className="relative p-1 rounded-2xl group flex flex-col items-center justify-center cursor-pointer select-none"
+      className={`relative p-1 rounded-2xl group flex flex-col items-center justify-center cursor-pointer select-none ${
+        isLaunching ? 'animate-dock-bounce' : ''
+      }`}
       title={label}
     >
       {/* Authentic macOS Squircle Tile */}

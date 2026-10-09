@@ -1,7 +1,15 @@
-import React, { useState, useRef } from 'react';
-import { useSettingsStore } from '../../lib/store';
-import { Palette, Terminal, FileCode, Sliders, Info, ShieldCheck, Check, Upload, Plus, Image as ImageIcon } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useSettingsStore, useConnectionStore } from '../../lib/store';
+import { 
+  Palette, Terminal, FileCode, Sliders, Info, ShieldCheck, Check, 
+  Upload, Plus, Image as ImageIcon, Clock, Globe2, Calendar, 
+  RefreshCw, CheckCircle2, AlertCircle, Laptop, ArrowRight, 
+  Monitor, Volume2, Bell, Cpu, HardDrive, Wifi, Lock, Moon, 
+  Sun, Search, Sparkles, SlidersHorizontal, RotateCcw, ChevronRight, 
+  User, CheckCheck, X
+} from 'lucide-react';
 import { WALLPAPERS } from '../../shell/Desktop';
+import { sshExec } from '../../lib/tauri-bridge';
 
 const ACCENT_COLORS = [
   { name: 'Sapphire Blue', value: '#89B4FA' },
@@ -12,11 +20,199 @@ const ACCENT_COLORS = [
   { name: 'Teal Cyan', value: '#94E2D5' }
 ];
 
+const COMMON_TIMEZONES = [
+  { label: 'UTC (Coordinated Universal Time)', value: 'UTC' },
+  { label: 'America/New_York (Eastern)', value: 'America/New_York' },
+  { label: 'America/Chicago (Central)', value: 'America/Chicago' },
+  { label: 'America/Denver (Mountain)', value: 'America/Denver' },
+  { label: 'America/Los_Angeles (Pacific)', value: 'America/Los_Angeles' },
+  { label: 'Europe/London (GMT/BST)', value: 'Europe/London' },
+  { label: 'Europe/Paris (CET)', value: 'Europe/Paris' },
+  { label: 'Europe/Berlin (CET)', value: 'Europe/Berlin' },
+  { label: 'Asia/Dubai (GST)', value: 'Asia/Dubai' },
+  { label: 'Asia/Kolkata (IST)', value: 'Asia/Kolkata' },
+  { label: 'Asia/Singapore (SGT)', value: 'Asia/Singapore' },
+  { label: 'Asia/Tokyo (JST)', value: 'Asia/Tokyo' },
+  { label: 'Australia/Sydney (AEST)', value: 'Australia/Sydney' },
+];
+
 export default function AppSettings() {
-  const { theme, updateSettings, terminalFontSize, accentColor, wallpaper } = useSettingsStore();
-  const [activeTab, setActiveTab] = useState<'appearance' | 'terminal' | 'editor' | 'ssh' | 'about'>('appearance');
+  const { 
+    theme, updateSettings, terminalFontSize, accentColor, wallpaper, 
+    dockPosition, showHiddenFiles, pollingInterval 
+  } = useSettingsStore();
+
+  const [activeTab, setActiveTab] = useState<
+    'appearance' | 'wallpaper' | 'datetime' | 'terminal' | 'editor' | 'dock' | 'ssh' | 'about'
+  >('appearance');
+  const [navSearch, setNavSearch] = useState('');
   const [customUrl, setCustomUrl] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Active server info for Date & Time
+  const activeConnectionId = useConnectionStore(s => s.activeConnectionId);
+  const activeServer = useConnectionStore(s => {
+    const id = s.activeConnectionId;
+    return id ? s.connections.find(c => c.id === id) : null;
+  });
+
+  // Server Date & Time States
+  const [serverLocalTime, setServerLocalTime] = useState<string>('Loading...');
+  const [serverTimezone, setServerTimezone] = useState<string>('UTC');
+  const [selectedTz, setSelectedTz] = useState<string>('UTC');
+  const [ntpActive, setNtpActive] = useState<boolean>(true);
+  const [manualDate, setManualDate] = useState<string>('');
+  const [manualTime, setManualTime] = useState<string>('');
+  const [isTimeLoading, setIsTimeLoading] = useState(false);
+  const [timeMessage, setTimeMessage] = useState<{ text: string; isError: boolean } | null>(null);
+
+  // Terminal & Editor Preferences
+  const [termCursor, setTermCursor] = useState<'block' | 'line' | 'underline'>('block');
+  const [termScrollback, setTermScrollback] = useState<number>(5000);
+  const [editorTabSize, setEditorTabSize] = useState<number>(2);
+  const [editorMinimap, setEditorMinimap] = useState<boolean>(true);
+  const [editorWordWrap, setEditorWordWrap] = useState<boolean>(true);
+  const [editorLineNumbers, setEditorLineNumbers] = useState<boolean>(true);
+
+  // Host Specs for "About" Tab
+  const [hostUname, setHostUname] = useState<string>('—');
+  const [hostUptime, setHostUptime] = useState<string>('—');
+  const [hostMemory, setHostMemory] = useState<string>('—');
+
+  const fetchServerTimeInfo = useCallback(async () => {
+    if (!activeConnectionId) {
+      setServerLocalTime('No active server connected');
+      return;
+    }
+    setIsTimeLoading(true);
+    try {
+      const res = await sshExec(activeConnectionId, 'timedatectl status 2>/dev/null || date +"%Y-%m-%d %H:%M:%S %Z"');
+      const out = res.stdout || '';
+
+      const timeMatch = out.match(/Local time:\s*(.+)/i);
+      if (timeMatch && timeMatch[1]) {
+        setServerLocalTime(timeMatch[1].trim());
+      } else {
+        setServerLocalTime(out.split('\n')[0]?.trim() || new Date().toUTCString());
+      }
+
+      const tzMatch = out.match(/Time zone:\s*([^\s(]+)/i);
+      if (tzMatch && tzMatch[1]) {
+        setServerTimezone(tzMatch[1].trim());
+        setSelectedTz(tzMatch[1].trim());
+      }
+
+      const ntpMatch = out.match(/NTP service:\s*(active|yes)/i);
+      setNtpActive(!!ntpMatch);
+
+      const now = new Date();
+      setManualDate(now.toISOString().split('T')[0]);
+      setManualTime(now.toTimeString().split(' ')[0]);
+
+      // Also grab basic host info for About tab
+      const unameRes = await sshExec(activeConnectionId, 'uname -srm 2>/dev/null || uname -a');
+      if (unameRes.stdout) setHostUname(unameRes.stdout.trim());
+
+      const upRes = await sshExec(activeConnectionId, 'uptime -p 2>/dev/null || uptime');
+      if (upRes.stdout) setHostUptime(upRes.stdout.trim());
+
+      const memRes = await sshExec(activeConnectionId, "free -h 2>/dev/null | awk '/Mem:/ {print $2}'");
+      if (memRes.stdout) setHostMemory(`${memRes.stdout.trim()} Total RAM`);
+
+    } catch (err: any) {
+      console.warn('Error fetching server time:', err);
+      setServerLocalTime('timedatectl not available');
+    } finally {
+      setIsTimeLoading(false);
+    }
+  }, [activeConnectionId]);
+
+  useEffect(() => {
+    if (['datetime', 'about'].includes(activeTab)) {
+      fetchServerTimeInfo();
+    }
+  }, [activeTab, fetchServerTimeInfo]);
+
+  // Set Timezone Handler
+  const handleSetTimezone = async () => {
+    if (!activeConnectionId || !selectedTz) return;
+    setIsTimeLoading(true);
+    setTimeMessage(null);
+    try {
+      const res = await sshExec(activeConnectionId, `sudo timedatectl set-timezone "${selectedTz}" || timedatectl set-timezone "${selectedTz}"`);
+      if (res.exit_code === 0 || !res.stderr) {
+        setTimeMessage({ text: `Timezone updated to ${selectedTz} successfully!`, isError: false });
+        await fetchServerTimeInfo();
+      } else {
+        setTimeMessage({ text: res.stderr || 'Permission denied: Please grant sudo permissions.', isError: true });
+      }
+    } catch (err: any) {
+      setTimeMessage({ text: err?.message || String(err), isError: true });
+    } finally {
+      setIsTimeLoading(false);
+    }
+  };
+
+  // Set Manual Date & Time Handler
+  const handleSetManualTime = async () => {
+    if (!activeConnectionId || !manualDate || !manualTime) return;
+    setIsTimeLoading(true);
+    setTimeMessage(null);
+    try {
+      const formatted = `${manualDate} ${manualTime}`;
+      const cmd = `sudo timedatectl set-ntp false; sudo timedatectl set-time "${formatted}" || timedatectl set-time "${formatted}"`;
+      const res = await sshExec(activeConnectionId, cmd);
+      if (res.exit_code === 0 || !res.stderr) {
+        setTimeMessage({ text: `Server time successfully set to ${formatted}`, isError: false });
+        await fetchServerTimeInfo();
+      } else {
+        setTimeMessage({ text: res.stderr || 'Failed to set time. Ensure sudo permissions are available.', isError: true });
+      }
+    } catch (err: any) {
+      setTimeMessage({ text: err?.message || String(err), isError: true });
+    } finally {
+      setIsTimeLoading(false);
+    }
+  };
+
+  // Toggle NTP Sync Handler
+  const handleToggleNtp = async (enable: boolean) => {
+    if (!activeConnectionId) return;
+    setIsTimeLoading(true);
+    setTimeMessage(null);
+    try {
+      const cmd = `sudo timedatectl set-ntp ${enable ? 'true' : 'false'} || timedatectl set-ntp ${enable ? 'true' : 'false'}`;
+      await sshExec(activeConnectionId, cmd);
+      setTimeMessage({ text: `Network Time Protocol (NTP) ${enable ? 'enabled' : 'disabled'}!`, isError: false });
+      await fetchServerTimeInfo();
+    } catch (err: any) {
+      setTimeMessage({ text: err?.message || String(err), isError: true });
+    } finally {
+      setIsTimeLoading(false);
+    }
+  };
+
+  // Sync with Local Computer (Browser) Time
+  const handleSyncWithBrowserTime = async () => {
+    if (!activeConnectionId) return;
+    setIsTimeLoading(true);
+    setTimeMessage(null);
+    try {
+      const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const formattedTime = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+      const cmd = `sudo timedatectl set-timezone "${localTz}"; sudo timedatectl set-ntp false; sudo timedatectl set-time "${formattedTime}"`;
+      await sshExec(activeConnectionId, cmd);
+      setTimeMessage({ text: `Server synced with local computer time (${formattedTime} ${localTz})!`, isError: false });
+      await fetchServerTimeInfo();
+    } catch (err: any) {
+      setTimeMessage({ text: err?.message || String(err), isError: true });
+    } finally {
+      setIsTimeLoading(false);
+    }
+  };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
@@ -37,313 +233,648 @@ export default function AppSettings() {
     setCustomUrl('');
   };
 
+  // Sidebar navigation items
+  const navItems = [
+    { id: 'appearance', label: 'Appearance', icon: Palette, color: 'text-pink-400' },
+    { id: 'wallpaper', label: 'Wallpaper (4K)', icon: ImageIcon, color: 'text-blue-400' },
+    { id: 'datetime', label: 'Date & Time (Server)', icon: Clock, color: 'text-emerald-400' },
+    { id: 'terminal', label: 'Terminal Emulator', icon: Terminal, color: 'text-sky-400' },
+    { id: 'editor', label: 'Code Editor', icon: FileCode, color: 'text-purple-400' },
+    { id: 'dock', label: 'Desktop & Dock', icon: Monitor, color: 'text-amber-400' },
+    { id: 'ssh', label: 'SSH & Network', icon: Sliders, color: 'text-cyan-400' },
+    { id: 'about', label: 'About CloudDesk', icon: Info, color: 'text-gray-400' },
+  ];
+
+  const filteredNavItems = navItems.filter(item => 
+    item.label.toLowerCase().includes(navSearch.toLowerCase())
+  );
+
   return (
-    <div className="flex h-full bg-[#181825] text-[#cdd6f4]">
-      {/* Settings Navigation Sidebar */}
-      <div className="w-52 bg-[#1e1e2e] border-r border-white/[0.08] p-3 flex flex-col space-y-1 shrink-0 select-none">
-        <div className="text-[11px] font-bold text-gray-500 uppercase px-2 mb-2">Preferences</div>
-
-        <button
-          onClick={() => setActiveTab('appearance')}
-          className={`flex items-center space-x-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-            activeTab === 'appearance' ? 'bg-[var(--accent)] text-white' : 'text-gray-400 hover:text-white hover:bg-white/5'
-          }`}
-        >
-          <Palette className="w-4 h-4" />
-          <span>Appearance</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('terminal')}
-          className={`flex items-center space-x-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-            activeTab === 'terminal' ? 'bg-[var(--accent)] text-white' : 'text-gray-400 hover:text-white hover:bg-white/5'
-          }`}
-        >
-          <Terminal className="w-4 h-4" />
-          <span>Terminal</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('editor')}
-          className={`flex items-center space-x-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-            activeTab === 'editor' ? 'bg-[var(--accent)] text-white' : 'text-gray-400 hover:text-white hover:bg-white/5'
-          }`}
-        >
-          <FileCode className="w-4 h-4" />
-          <span>Code Editor</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('ssh')}
-          className={`flex items-center space-x-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-            activeTab === 'ssh' ? 'bg-[var(--accent)] text-white' : 'text-gray-400 hover:text-white hover:bg-white/5'
-          }`}
-        >
-          <Sliders className="w-4 h-4" />
-          <span>SSH Defaults</span>
-        </button>
-
-        <div className="flex-1" />
-
-        <button
-          onClick={() => setActiveTab('about')}
-          className={`flex items-center space-x-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${
-            activeTab === 'about' ? 'bg-[var(--accent)] text-white' : 'text-gray-400 hover:text-white hover:bg-white/5'
-          }`}
-        >
-          <Info className="w-4 h-4" />
-          <span>About CloudDesk</span>
-        </button>
-      </div>
-
-      {/* Main Settings Panel */}
-      <div className="flex-1 p-6 overflow-y-auto space-y-6">
-        {activeTab === 'appearance' && (
-          <div className="space-y-6 max-w-xl">
-            <div>
-              <h3 className="text-base font-bold text-white mb-1">Color Palette & Theme</h3>
-              <p className="text-xs text-gray-400">Choose the theme scheme for desktop windows and controls.</p>
+    <div className="flex h-full bg-[#181825] text-[#cdd6f4] select-none font-sans overflow-hidden">
+      
+      {/* 1. macOS System Settings Left Navigation Sidebar */}
+      <aside className="w-64 bg-[#14141e]/90 backdrop-blur-2xl border-r border-white/[0.08] p-3 flex flex-col shrink-0">
+        
+        {/* User / Host Profile Card */}
+        <div className="p-3 bg-[#1e1e2e]/70 rounded-2xl border border-white/10 mb-3 flex items-center space-x-3 shadow-inner">
+          <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-bold text-white shadow-md text-sm border border-white/20">
+            {activeServer?.username ? activeServer.username.slice(0, 2).toUpperCase() : 'CD'}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-bold text-white truncate">
+              {activeServer?.username || 'root'}@{activeServer?.host || 'localhost'}
             </div>
+            <div className="text-[10px] text-emerald-400 flex items-center space-x-1 mt-0.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Connected · SSH2</span>
+            </div>
+          </div>
+        </div>
 
-            <div className="space-y-4">
+        {/* Search Settings Input */}
+        <div className="relative mb-2 px-1">
+          <Search className="w-3.5 h-3.5 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            type="text"
+            placeholder="Search settings..."
+            value={navSearch}
+            onChange={e => setNavSearch(e.target.value)}
+            className="w-full bg-[#1e1e2e] border border-white/10 rounded-xl pl-8 pr-7 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-all font-sans"
+          />
+          {navSearch && (
+            <button
+              onClick={() => setNavSearch('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+
+        {/* Navigation List */}
+        <div className="flex-1 overflow-y-auto space-y-0.5">
+          <div className="text-[10px] font-bold text-gray-500 uppercase px-3 py-1.5 tracking-wider">
+            System Preferences
+          </div>
+
+          {filteredNavItems.map(item => {
+            const Icon = item.icon;
+            const isActive = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() => setActiveTab(item.id as any)}
+                className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-all active:scale-95 ${
+                  isActive 
+                    ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30 font-semibold' 
+                    : 'text-gray-400 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                <div className="flex items-center space-x-2.5">
+                  <Icon className={`w-4 h-4 ${isActive ? 'text-white' : item.color}`} />
+                  <span>{item.label}</span>
+                </div>
+                <ChevronRight className={`w-3.5 h-3.5 ${isActive ? 'text-white/80' : 'text-gray-600'}`} />
+              </button>
+            );
+          })}
+        </div>
+      </aside>
+
+      {/* 2. Main Settings Panel */}
+      <main className="flex-1 p-6 overflow-y-auto">
+        <div className="max-w-2xl mx-auto space-y-6 animate-in fade-in duration-200">
+          
+          {/* TAB 1: APPEARANCE */}
+          {activeTab === 'appearance' && (
+            <div className="space-y-6">
               <div>
-                <label className="block text-xs font-medium text-gray-300 mb-2">Base Theme</label>
+                <h2 className="text-lg font-bold text-white tracking-tight">Appearance</h2>
+                <p className="text-xs text-gray-400">Choose your desktop look and customize accent highlights.</p>
+              </div>
+
+              {/* Theme Selector */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-4 shadow-xl backdrop-blur-md">
+                <span className="text-xs font-bold text-white block">Theme Mode</span>
+                
                 <div className="grid grid-cols-3 gap-3">
                   {[
-                    { id: 'dark', label: 'Catppuccin Mocha', desc: 'Dark theme (default)' },
-                    { id: 'light', label: 'Catppuccin Latte', desc: 'Light clean theme' },
-                    { id: 'auto', label: 'System Automatic', desc: 'Match OS setting' },
-                  ].map(t => (
-                    <div
-                      key={t.id}
-                      onClick={() => updateSettings({ theme: t.id as any })}
-                      className={`p-3 rounded-xl border cursor-pointer transition-all ${
-                        theme === t.id
-                          ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-white'
-                          : 'border-white/10 hover:border-white/20 text-gray-400'
-                      }`}
-                    >
-                      <div className="font-bold text-xs text-white">{t.label}</div>
-                      <div className="text-[10px] text-gray-500 mt-1">{t.desc}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-300 mb-2">Accent Highlight Color</label>
-                <div className="flex items-center space-x-3">
-                  {ACCENT_COLORS.map(c => (
-                    <button
-                      key={c.name}
-                      onClick={() => updateSettings({ accentColor: c.value })}
-                      style={{ backgroundColor: c.value }}
-                      className="w-7 h-7 rounded-full flex items-center justify-center transition-transform hover:scale-110 shadow-lg"
-                      title={c.name}
-                    >
-                      {accentColor === c.value && <Check className="w-4 h-4 text-black stroke-[3]" />}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-200">Desktop 4K Wallpaper</label>
-                    <p className="text-[11px] text-gray-400">Authentic Apple 4K dynamic wallpapers or upload custom photography</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-medium flex items-center space-x-1.5 transition-colors shadow-sm"
-                  >
-                    <Upload className="w-3.5 h-3.5" />
-                    <span>Upload Image</span>
-                  </button>
-                </div>
-
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={handleFileUpload}
-                  accept="image/*"
-                  className="hidden"
-                />
-
-                {/* Direct Image URL input */}
-                <form onSubmit={handleApplyUrl} className="flex items-center space-x-2">
-                  <input
-                    type="text"
-                    placeholder="Or paste direct 4K image URL..."
-                    value={customUrl}
-                    onChange={(e) => setCustomUrl(e.target.value)}
-                    className="bg-[#12121e] border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder-gray-500 flex-1 focus:outline-none focus:border-blue-400"
-                  />
-                  <button
-                    type="submit"
-                    className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white text-xs font-medium rounded-xl transition-colors shrink-0"
-                  >
-                    Apply URL
-                  </button>
-                </form>
-
-                <div className="grid grid-cols-2 gap-3 pt-1">
-                  {WALLPAPERS.map(w => {
-                    const isSelected = wallpaper === w.id;
+                    { id: 'dark', label: 'Dark Mode', desc: 'Catppuccin Mocha', icon: Moon },
+                    { id: 'light', label: 'Light Mode', desc: 'Catppuccin Latte', icon: Sun },
+                    { id: 'auto', label: 'Auto (System)', desc: 'Matches device setting', icon: Monitor },
+                  ].map(t => {
+                    const Icon = t.icon;
+                    const isSelected = theme === t.id;
                     return (
                       <div
-                        key={w.id}
-                        onClick={() => updateSettings({ wallpaper: w.id })}
-                        className={`group relative overflow-hidden rounded-2xl border p-2 cursor-pointer transition-all ${
+                        key={t.id}
+                        onClick={() => updateSettings({ theme: t.id as any })}
+                        className={`p-4 rounded-2xl border cursor-pointer transition-all active:scale-95 flex flex-col items-center text-center space-y-2 ${
                           isSelected
-                            ? 'border-blue-500 ring-2 ring-blue-500/40 bg-blue-500/10'
-                            : 'border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
+                            ? 'border-blue-500 bg-blue-600/15 text-white shadow-lg ring-1 ring-blue-500/50'
+                            : 'border-white/10 hover:border-white/20 text-gray-400 bg-white/[0.02]'
                         }`}
                       >
-                        <div className="relative h-20 w-full rounded-xl overflow-hidden mb-2 bg-black/40">
-                          <img
-                            src={w.thumbnail}
-                            alt={w.name}
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                            loading="lazy"
-                          />
-                          <span className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-md text-[9px] font-bold text-white tracking-wider border border-white/10">
-                            4K
-                          </span>
-                          {isSelected && (
-                            <span className="absolute bottom-1 right-1 p-1 rounded-full bg-blue-600 text-white shadow-md">
-                              <Check className="w-3.5 h-3.5 stroke-[3]" />
-                            </span>
-                          )}
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${isSelected ? 'bg-blue-600 text-white' : 'bg-white/5 text-gray-400'}`}>
+                          <Icon className="w-5 h-5" />
                         </div>
-                        <div className="text-xs font-semibold text-white truncate">{w.name}</div>
-                        <div className="text-[10px] text-gray-400 truncate">{w.subtitle}</div>
+                        <div className="font-bold text-xs text-white">{t.label}</div>
+                        <div className="text-[10px] text-gray-500">{t.desc}</div>
                       </div>
                     );
                   })}
                 </div>
               </div>
-            </div>
-          </div>
-        )}
 
-        {activeTab === 'terminal' && (
-          <div className="space-y-6 max-w-xl">
-            <div>
-              <h3 className="text-base font-bold text-white mb-1">Terminal Emulator</h3>
-              <p className="text-xs text-gray-400">Customize xterm font styling and shell behaviors.</p>
-            </div>
-
-            <div className="space-y-4 text-xs">
-              <div>
-                <label className="block text-gray-300 mb-1.5 font-medium">Font Size: {terminalFontSize || 14}px</label>
-                <input
-                  type="range"
-                  min="11"
-                  max="22"
-                  value={terminalFontSize || 14}
-                  onChange={e => updateSettings({ terminalFontSize: parseInt(e.target.value) })}
-                  className="w-64 accent-blue-500 cursor-pointer"
-                />
-              </div>
-
-              <div>
-                <label className="block text-gray-300 mb-1.5 font-medium">Default Shell</label>
-                <select className="bg-[#1e1e2e] border border-white/10 rounded-lg px-3 py-2 text-white w-64 focus:outline-none">
-                  <option value="/bin/bash">/bin/bash</option>
-                  <option value="/bin/zsh">/bin/zsh</option>
-                  <option value="/bin/sh">/bin/sh</option>
-                </select>
+              {/* Accent Color Picker */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3 shadow-xl backdrop-blur-md">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-white block">Accent Highlight Color</span>
+                    <p className="text-[11px] text-gray-400">Controls selection badges, active buttons, and focus rings.</p>
+                  </div>
+                  <div className="flex items-center space-x-2.5">
+                    {ACCENT_COLORS.map(c => (
+                      <button
+                        key={c.name}
+                        onClick={() => updateSettings({ accentColor: c.value })}
+                        style={{ backgroundColor: c.value }}
+                        className="w-7 h-7 rounded-full flex items-center justify-center transition-transform hover:scale-110 shadow-lg active:scale-95 ring-2 ring-white/10"
+                        title={c.name}
+                      >
+                        {accentColor === c.value && <Check className="w-4 h-4 text-black stroke-[3]" />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {activeTab === 'editor' && (
-          <div className="space-y-6 max-w-xl">
-            <div>
-              <h3 className="text-base font-bold text-white mb-1">Monaco Code Editor</h3>
-              <p className="text-xs text-gray-400">Editor tab sizes and syntax viewing options.</p>
-            </div>
+          {/* TAB 2: WALLPAPER (4K) */}
+          {activeTab === 'wallpaper' && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-bold text-white tracking-tight">Desktop Wallpaper</h2>
+                  <p className="text-xs text-gray-400">Apple 4K dynamic desktop wallpapers and custom background images.</p>
+                </div>
 
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="block text-gray-300 mb-1 font-medium">Tab Size</label>
-                <select className="bg-[#1e1e2e] border border-white/10 rounded-lg px-3 py-2 text-white w-40 focus:outline-none">
-                  <option value="4">4 spaces</option>
-                  <option value="2">2 spaces</option>
-                </select>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-md active:scale-95"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Upload Photo</span>
+                </button>
               </div>
 
-              <div className="flex items-center space-x-2 pt-2">
-                <input type="checkbox" id="minimap" defaultChecked className="rounded bg-[#1e1e2e] text-blue-500" />
-                <label htmlFor="minimap" className="text-gray-300">Show code minimap sidebar</label>
-              </div>
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileUpload}
+                accept="image/*"
+                className="hidden"
+              />
 
-              <div className="flex items-center space-x-2">
-                <input type="checkbox" id="wordwrap" defaultChecked className="rounded bg-[#1e1e2e] text-blue-500" />
-                <label htmlFor="wordwrap" className="text-gray-300">Wrap long lines</label>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'ssh' && (
-          <div className="space-y-6 max-w-xl">
-            <div>
-              <h3 className="text-base font-bold text-white mb-1">SSH Connection Parameters</h3>
-              <p className="text-xs text-gray-400">Default network timeouts and encryption algorithms.</p>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="block text-gray-300 mb-1 font-medium">Keepalive Interval</label>
+              {/* Direct Image URL Form */}
+              <form onSubmit={handleApplyUrl} className="flex items-center space-x-2">
                 <input
                   type="text"
-                  defaultValue="30 seconds"
-                  className="bg-[#1e1e2e] border border-white/10 rounded-lg px-3 py-2 text-white w-48 focus:outline-none"
+                  placeholder="Or paste direct 4K image URL..."
+                  value={customUrl}
+                  onChange={(e) => setCustomUrl(e.target.value)}
+                  className="bg-[#12121e] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white placeholder-gray-500 flex-1 focus:outline-none focus:border-blue-400 font-mono"
                 />
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-semibold rounded-xl transition-all active:scale-95 shrink-0"
+                >
+                  Apply URL
+                </button>
+              </form>
+
+              {/* Wallpaper Grid */}
+              <div className="grid grid-cols-2 gap-3.5">
+                {WALLPAPERS.map(w => {
+                  const isSelected = wallpaper === w.id;
+                  return (
+                    <div
+                      key={w.id}
+                      onClick={() => updateSettings({ wallpaper: w.id })}
+                      className={`group relative overflow-hidden rounded-2xl border p-2 cursor-pointer transition-all active:scale-95 ${
+                        isSelected
+                          ? 'border-blue-500 ring-2 ring-blue-500/40 bg-blue-500/10 shadow-lg'
+                          : 'border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
+                      }`}
+                    >
+                      <div className="relative h-24 w-full rounded-xl overflow-hidden mb-2 bg-black/40">
+                        <img
+                          src={w.thumbnail}
+                          alt={w.name}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                          loading="lazy"
+                        />
+                        <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-md text-[9px] font-bold text-white tracking-wider border border-white/10">
+                          4K
+                        </span>
+                        {isSelected && (
+                          <span className="absolute bottom-1.5 right-1.5 p-1 rounded-full bg-blue-600 text-white shadow-md">
+                            <Check className="w-3.5 h-3.5 stroke-[3]" />
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs font-bold text-white truncate px-1">{w.name}</div>
+                      <div className="text-[10px] text-gray-400 truncate px-1">{w.subtitle}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 3: SERVER DATE & TIME */}
+          {activeTab === 'datetime' && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-bold text-white tracking-tight">Date & Time (Server)</h2>
+                  <p className="text-xs text-gray-400">
+                    Manage timezone, manual system clock, and NTP synchronization for {activeServer?.name || 'Remote Server'}.
+                  </p>
+                </div>
+                <button
+                  onClick={fetchServerTimeInfo}
+                  disabled={isTimeLoading}
+                  className="px-3.5 py-1.5 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-medium flex items-center space-x-1.5 transition-all active:scale-95 disabled:opacity-50"
+                  title="Refresh from server"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isTimeLoading ? 'animate-spin text-blue-400' : ''}`} />
+                  <span>Refresh</span>
+                </button>
               </div>
 
+              {timeMessage && (
+                <div className={`p-3.5 rounded-2xl text-xs flex items-start space-x-2.5 ${
+                  timeMessage.isError 
+                    ? 'bg-red-500/15 border border-red-500/30 text-red-300' 
+                    : 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-300'
+                }`}>
+                  {timeMessage.isError ? (
+                    <AlertCircle className="w-4 h-4 shrink-0 text-red-400 mt-0.5" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400 mt-0.5" />
+                  )}
+                  <span className="font-mono">{timeMessage.text}</span>
+                </div>
+              )}
+
+              {/* Current Server Time Status Card */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3 shadow-xl backdrop-blur-md">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-gray-300 flex items-center space-x-2">
+                    <Clock className="w-4 h-4 text-blue-400" />
+                    <span>Remote System Clock</span>
+                  </span>
+                  <span className={`text-[10px] px-2.5 py-0.5 rounded-full font-bold ${
+                    ntpActive ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                  }`}>
+                    {ntpActive ? 'NTP Synchronized' : 'Manual Clock Mode'}
+                  </span>
+                </div>
+
+                <div className="font-mono text-xl font-bold text-white tracking-wide">
+                  {serverLocalTime}
+                </div>
+
+                <div className="text-[11px] text-gray-400 flex items-center space-x-3 pt-2 border-t border-white/[0.06]">
+                  <span>Active Timezone: <b className="text-blue-300 font-mono">{serverTimezone}</b></span>
+                </div>
+              </div>
+
+              {/* Sync with Local Computer Time Action */}
+              <div className="bg-gradient-to-r from-blue-600/15 via-indigo-600/15 to-purple-600/15 border border-blue-500/30 rounded-2xl p-5 flex items-center justify-between">
+                <div>
+                  <div className="text-xs font-bold text-white flex items-center space-x-1.5">
+                    <Laptop className="w-4 h-4 text-blue-400" />
+                    <span>Sync with My Local Computer Time</span>
+                  </div>
+                  <div className="text-[11px] text-gray-400 mt-0.5">
+                    Quickly sets Linux server timezone & time to match your computer clock.
+                  </div>
+                </div>
+                <button
+                  onClick={handleSyncWithBrowserTime}
+                  disabled={isTimeLoading}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md transition-all active:scale-95 disabled:opacity-50 flex items-center space-x-1.5 shrink-0"
+                >
+                  <span>Sync Now</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Change Timezone Row */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3 shadow-xl backdrop-blur-md">
+                <label className="block text-xs font-bold text-white flex items-center space-x-1.5">
+                  <Globe2 className="w-4 h-4 text-blue-400" />
+                  <span>Change Server Timezone</span>
+                </label>
+
+                <div className="flex items-center space-x-2">
+                  <select
+                    value={selectedTz}
+                    onChange={e => setSelectedTz(e.target.value)}
+                    className="bg-[#12121e] border border-white/10 rounded-xl px-3 py-2 text-xs text-white flex-1 focus:outline-none focus:border-blue-400 font-mono"
+                  >
+                    {COMMON_TIMEZONES.map(tz => (
+                      <option key={tz.value} value={tz.value}>{tz.label}</option>
+                    ))}
+                    {!COMMON_TIMEZONES.some(tz => tz.value === selectedTz) && (
+                      <option value={selectedTz}>{selectedTz} (Current)</option>
+                    )}
+                  </select>
+
+                  <button
+                    onClick={handleSetTimezone}
+                    disabled={isTimeLoading || selectedTz === serverTimezone}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold transition-all active:scale-95 disabled:opacity-40 shrink-0"
+                  >
+                    Apply
+                  </button>
+                </div>
+              </div>
+
+              {/* Manual Adjustment */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3 shadow-xl backdrop-blur-md">
+                <label className="block text-xs font-bold text-white flex items-center space-x-1.5">
+                  <Calendar className="w-4 h-4 text-emerald-400" />
+                  <span>Manual Date & Time Adjustment</span>
+                </label>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] text-gray-400 mb-1">Date (YYYY-MM-DD)</label>
+                    <input
+                      type="date"
+                      value={manualDate}
+                      onChange={e => setManualDate(e.target.value)}
+                      className="w-full bg-[#12121e] border border-white/10 rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-blue-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-gray-400 mb-1">Time (HH:MM:SS)</label>
+                    <input
+                      type="time"
+                      step="1"
+                      value={manualTime}
+                      onChange={e => setManualTime(e.target.value)}
+                      className="w-full bg-[#12121e] border border-white/10 rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-blue-400"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-2">
+                  <button
+                    onClick={() => handleToggleNtp(!ntpActive)}
+                    disabled={isTimeLoading}
+                    className="text-xs text-gray-400 hover:text-white underline transition-colors"
+                  >
+                    {ntpActive ? 'Turn Off NTP Sync to allow manual edit' : 'Turn On Auto NTP Sync'}
+                  </button>
+
+                  <button
+                    onClick={handleSetManualTime}
+                    disabled={isTimeLoading}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold transition-all active:scale-95 disabled:opacity-40"
+                  >
+                    Save Time
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 4: TERMINAL EMULATOR */}
+          {activeTab === 'terminal' && (
+            <div className="space-y-6">
               <div>
-                <label className="block text-gray-300 mb-1 font-medium">Connection Timeout</label>
-                <input
-                  type="text"
-                  defaultValue="15 seconds"
-                  className="bg-[#1e1e2e] border border-white/10 rounded-lg px-3 py-2 text-white w-48 focus:outline-none"
-                />
+                <h2 className="text-lg font-bold text-white tracking-tight">Terminal Preferences</h2>
+                <p className="text-xs text-gray-400">Configure xterm terminal typography, cursor style, and buffer sizes.</p>
+              </div>
+
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl divide-y divide-white/5 shadow-xl backdrop-blur-md overflow-hidden">
+                {/* Font Size Row */}
+                <div className="p-4 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">Font Size</span>
+                    <span className="text-[11px] text-gray-400">Terminal typography size in pixels ({terminalFontSize || 14}px)</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="11"
+                    max="22"
+                    value={terminalFontSize || 14}
+                    onChange={e => updateSettings({ terminalFontSize: parseInt(e.target.value) })}
+                    className="w-48 accent-blue-500 cursor-pointer"
+                  />
+                </div>
+
+                {/* Cursor Style Row */}
+                <div className="p-4 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">Cursor Style</span>
+                    <span className="text-[11px] text-gray-400">Visual presentation of the terminal prompt cursor</span>
+                  </div>
+                  <div className="flex bg-[#12121e] p-1 rounded-xl border border-white/10 text-xs">
+                    {(['block', 'line', 'underline'] as const).map(style => (
+                      <button
+                        key={style}
+                        onClick={() => setTermCursor(style)}
+                        className={`px-3 py-1 rounded-lg capitalize transition-all ${
+                          termCursor === style ? 'bg-blue-600 text-white font-semibold' : 'text-gray-400 hover:text-white'
+                        }`}
+                      >
+                        {style}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Scrollback Buffer */}
+                <div className="p-4 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">Scrollback History Buffer</span>
+                    <span className="text-[11px] text-gray-400">Number of lines preserved in memory per tab</span>
+                  </div>
+                  <select
+                    value={termScrollback}
+                    onChange={e => setTermScrollback(Number(e.target.value))}
+                    className="bg-[#12121e] border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none"
+                  >
+                    <option value={1000}>1,000 lines</option>
+                    <option value={5000}>5,000 lines</option>
+                    <option value={10000}>10,000 lines</option>
+                  </select>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {activeTab === 'about' && (
-          <div className="space-y-4 max-w-xl">
-            <div className="flex items-center space-x-3">
-              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-blue-500 to-purple-500 flex items-center justify-center font-bold text-white text-xl shadow-lg">
-                ☁
-              </div>
+          {/* TAB 5: CODE EDITOR */}
+          {activeTab === 'editor' && (
+            <div className="space-y-6">
               <div>
-                <h3 className="font-bold text-lg text-white">CloudDesk</h3>
-                <div className="text-xs text-gray-400">Version 1.0.0 (Release)</div>
+                <h2 className="text-lg font-bold text-white tracking-tight">Code Editor Settings</h2>
+                <p className="text-xs text-gray-400">Configure Monaco editor indentation, minimap, and word wrapping.</p>
               </div>
-            </div>
 
-            <div className="bg-[#1e1e2e] p-4 rounded-xl border border-white/[0.08] space-y-2 text-xs text-gray-300">
-              <p>
-                Agentless, lightweight, cross-platform remote Linux desktop client. Connects directly over standard SSH (port 22) with zero software installed on the server.
-              </p>
-              <div className="pt-2 border-t border-white/[0.05] grid grid-cols-2 gap-2 text-gray-400 font-mono text-[11px]">
-                <div>Backend: Rust / russh</div>
-                <div>Runtime: Tauri 2.0</div>
-                <div>Frontend: React 19 + TypeScript</div>
-                <div>Styling: TailwindCSS 4</div>
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl divide-y divide-white/5 shadow-xl backdrop-blur-md overflow-hidden">
+                <div className="p-4 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">Tab Indentation</span>
+                    <span className="text-[11px] text-gray-400">Spaces inserted per indentation tab</span>
+                  </div>
+                  <select
+                    value={editorTabSize}
+                    onChange={e => setEditorTabSize(Number(e.target.value))}
+                    className="bg-[#12121e] border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none"
+                  >
+                    <option value={2}>2 spaces</option>
+                    <option value={4}>4 spaces</option>
+                  </select>
+                </div>
+
+                <div className="p-4 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">Code Minimap</span>
+                    <span className="text-[11px] text-gray-400">Display mini overview navigator on the right</span>
+                  </div>
+                  <button
+                    onClick={() => setEditorMinimap(!editorMinimap)}
+                    className={`w-11 h-6 rounded-full transition-colors relative ${editorMinimap ? 'bg-blue-600' : 'bg-white/10'}`}
+                  >
+                    <span className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${editorMinimap ? 'left-5.5' : 'left-0.5'}`} />
+                  </button>
+                </div>
+
+                <div className="p-4 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">Soft Word Wrap</span>
+                    <span className="text-[11px] text-gray-400">Wrap long lines to fit editor viewport</span>
+                  </div>
+                  <button
+                    onClick={() => setEditorWordWrap(!editorWordWrap)}
+                    className={`w-11 h-6 rounded-full transition-colors relative ${editorWordWrap ? 'bg-blue-600' : 'bg-white/10'}`}
+                  >
+                    <span className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${editorWordWrap ? 'left-5.5' : 'left-0.5'}`} />
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+
+          {/* TAB 6: DESKTOP & DOCK */}
+          {activeTab === 'dock' && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-lg font-bold text-white tracking-tight">Desktop & Dock</h2>
+                <p className="text-xs text-gray-400">Configure dock position and file explorer viewing preferences.</p>
+              </div>
+
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl divide-y divide-white/5 shadow-xl backdrop-blur-md overflow-hidden">
+                <div className="p-4 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">Dock Screen Position</span>
+                    <span className="text-[11px] text-gray-400">Screen edge where application dock is docked</span>
+                  </div>
+                  <div className="flex bg-[#12121e] p-1 rounded-xl border border-white/10 text-xs">
+                    {(['bottom', 'left'] as const).map(pos => (
+                      <button
+                        key={pos}
+                        onClick={() => updateSettings({ dockPosition: pos })}
+                        className={`px-3 py-1 rounded-lg capitalize transition-all ${
+                          dockPosition === pos ? 'bg-blue-600 text-white font-semibold' : 'text-gray-400 hover:text-white'
+                        }`}
+                      >
+                        {pos}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="p-4 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">Show Hidden Dotfiles</span>
+                    <span className="text-[11px] text-gray-400">Show dotfiles (.bashrc, .ssh, .config) in Finder</span>
+                  </div>
+                  <button
+                    onClick={() => updateSettings({ showHiddenFiles: !showHiddenFiles })}
+                    className={`w-11 h-6 rounded-full transition-colors relative ${showHiddenFiles ? 'bg-blue-600' : 'bg-white/10'}`}
+                  >
+                    <span className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${showHiddenFiles ? 'left-5.5' : 'left-0.5'}`} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 7: SSH & NETWORK */}
+          {activeTab === 'ssh' && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-lg font-bold text-white tracking-tight">SSH & Network Engine</h2>
+                <p className="text-xs text-gray-400">Default protocol timeouts and socket keepalive settings.</p>
+              </div>
+
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl divide-y divide-white/5 shadow-xl backdrop-blur-md overflow-hidden">
+                <div className="p-4 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">TCP Keepalive Interval</span>
+                    <span className="text-[11px] text-gray-400">Sends probe packets to prevent remote disconnection</span>
+                  </div>
+                  <span className="text-xs font-mono text-gray-300 bg-[#12121e] px-3 py-1.5 rounded-xl border border-white/10">
+                    30 seconds
+                  </span>
+                </div>
+
+                <div className="p-4 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">SSH Handshake Timeout</span>
+                    <span className="text-[11px] text-gray-400">Maximum wait time for SSH2 banner authentication</span>
+                  </div>
+                  <span className="text-xs font-mono text-gray-300 bg-[#12121e] px-3 py-1.5 rounded-xl border border-white/10">
+                    15 seconds
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 8: ABOUT CLOUDDESK */}
+          {activeTab === 'about' && (
+            <div className="space-y-6">
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-3xl p-6 shadow-2xl backdrop-blur-md flex flex-col items-center text-center space-y-4">
+                <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-blue-500 via-indigo-600 to-purple-600 flex items-center justify-center font-bold text-white text-3xl shadow-2xl border border-white/20">
+                  ☁
+                </div>
+
+                <div>
+                  <h2 className="text-xl font-bold text-white tracking-tight">CloudDesk 2.0</h2>
+                  <div className="text-xs text-gray-400 mt-1">macOS Edition for Linux Remote Administration</div>
+                </div>
+
+                <div className="w-full bg-[#14141e] p-4 rounded-2xl border border-white/10 text-xs text-gray-300 space-y-2 text-left font-mono">
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Connected Server:</span>
+                    <span className="text-white font-bold">{activeServer?.name || activeServer?.host || 'localhost'}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Remote Kernel:</span>
+                    <span className="text-sky-400">{hostUname}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Host Uptime:</span>
+                    <span className="text-emerald-400">{hostUptime}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Memory Allocation:</span>
+                    <span className="text-purple-400">{hostMemory}</span>
+                  </div>
+                </div>
+
+                <div className="text-[11px] text-gray-500 leading-relaxed max-w-md">
+                  Built with Tauri 2.0, Rust SSH2 Engine, and React 19. Designed with authentic macOS glassmorphism, micro-animations, and zero server agent requirements.
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
+      </main>
     </div>
   );
 }
+
+export { AppSettings };

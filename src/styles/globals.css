@@ -62,3 +62,700 @@
   background: var(--accent);
   color: white;
 }
+
+/* macOS Cursor Loading & Wait Effects */
+.cursor-mac-wait,
+.is-loading-folder,
+.is-loading-folder * {
+  cursor: wait !important;
+}
+
+.is-app-launching,
+.is-app-launching * {
+  cursor: progress !important;
+}
+
+/* macOS Dock App Launch Bounce */
+@keyframes macDockBounce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  25% {
+    transform: translateY(-20px) scale(1.08);
+  }
+  50% {
+    transform: translateY(0) scale(0.96);
+  }
+  75% {
+    transform: translateY(-9px) scale(1.03);
+  }
+}
+
+.animate-dock-bounce {
+  animation: macDockBounce 0.8s ease-in-out infinite;
+}
+
+/* Finder & Breadcrumbs Location Glow Effect */
+@keyframes locationPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);
+    transform: scale(0.98);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(59, 130, 246, 0);
+    transform: scale(1.02);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+    transform: scale(1);
+  }
+}
+
+.animate-location-pulse {
+  animation: locationPulse 1.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* Top Indeterminate Loading Progress Bar (Finder / Apps) */
+@keyframes topIndeterminateProgress {
+  0% {
+    transform: translateX(-100%);
+    width: 30%;
+  }
+  50% {
+    transform: translateX(100%);
+    width: 60%;
+  }
+  100% {
+    transform: translateX(300%);
+    width: 30%;
+  }
+}
+
+.animate-top-progress {
+  animation: topIndeterminateProgress 1.3s ease-in-out infinite;
+}
+
+/* Folder Opening Animation */
+@keyframes folderOpenPop {
+  0% {
+    transform: scale(1);
+  }
+  30% {
+    transform: scale(0.9);
+  }
+  60% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.animate-folder-open {
+  animation: folderOpenPop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ==========================================================================
+   macOS Authentic Button Styles, Animations & Clickdown Physics
+   ========================================================================== */
+
+/* Universal tactile button press physics for all application buttons */
+button:not(.no-mac-style) {
+  transition: transform 0.12s cubic-bezier(0.16, 1, 0.3, 1),
+              filter 0.15s ease,
+              background-color 0.18s ease,
+              border-color 0.18s ease,
+              box-shadow 0.18s ease,
+              color 0.18s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+button:not(.no-mac-style):hover {
+  filter: brightness(1.08);
+}
+
+button:not(.no-mac-style):active {
+  transform: scale(0.95) !important;
+  filter: brightness(0.9) !important;
+}
+
+button:not(.no-mac-style):disabled {
+  opacity: 0.45 !important;
+  cursor: not-allowed !important;
+  transform: none !important;
+  filter: none !important;
+}
+
+/* Standard macOS Push Button (Base) */
+.mac-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1rem;
+  padding: 0.375rem 0.75rem;
+  border-radius: 0.625rem;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+.mac-btn:hover {
+  filter: brightness(1.1);
+  transform: translateY(-0.5px);
+}
+
+.mac-btn:active {
+  transform: translateY(0.5px) scale(0.96) !important;
+  filter: brightness(0.9) !important;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.5) !important;
+}
+
+/* Primary Action Button (macOS System Accent Blue) */
+.mac-btn-primary {
+  background: linear-gradient(180deg, #3b82f6 0%, #1d4ed8 100%);
+  border: 1px solid rgba(147, 197, 253, 0.4);
+  border-top-color: rgba(255, 255, 255, 0.5);
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.mac-btn-primary:hover {
+  background: linear-gradient(180deg, #60a5fa 0%, #2563eb 100%);
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+/* Secondary Acrylic / Frosted Button */
+.mac-btn-secondary {
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-top-color: rgba(255, 255, 255, 0.22);
+  color: #e2e8f0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.mac-btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Destructive / Danger Red Button */
+.mac-btn-danger {
+  background: linear-gradient(180deg, #f43f5e 0%, #be123c 100%);
+  border: 1px solid rgba(253, 164, 175, 0.4);
+  border-top-color: rgba(255, 255, 255, 0.45);
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(225, 29, 72, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.mac-btn-danger:hover {
+  background: linear-gradient(180deg, #fb7185 0%, #e11d48 100%);
+  box-shadow: 0 4px 14px rgba(225, 29, 72, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+/* Success Green Action Button */
+.mac-btn-success {
+  background: linear-gradient(180deg, #10b981 0%, #047857 100%);
+  border: 1px solid rgba(110, 231, 183, 0.4);
+  border-top-color: rgba(255, 255, 255, 0.45);
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(5, 150, 105, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.mac-btn-success:hover {
+  background: linear-gradient(180deg, #34d399 0%, #059669 100%);
+  box-shadow: 0 4px 14px rgba(5, 150, 105, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+/* Icon Squircle Button */
+.mac-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.375rem;
+  border-radius: 0.625rem;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #cbd5e1;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.mac-btn-icon:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.22);
+  transform: scale(1.06);
+}
+
+.mac-btn-icon:active {
+  transform: scale(0.92) !important;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* macOS Segmented Control Tabs */
+.mac-segmented-container {
+  background: rgba(20, 20, 30, 0.85);
+  backdrop-filter: blur(16px);
+  padding: 0.25rem;
+  border-radius: 0.875rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.mac-segmented-item {
+  padding: 0.25rem 0.625rem;
+  border-radius: 0.625rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #94a3b8;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  cursor: pointer;
+  border: none;
+  background: transparent;
+}
+
+.mac-segmented-item:hover {
+  color: #f1f5f9;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.mac-segmented-item.active {
+  background: #2563eb;
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+/* Specular Light Sheen Animation on Button Hover */
+@keyframes macButtonSheen {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
+}
+
+.mac-btn-sheen::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 50%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+  transform: translateX(-100%);
+  pointer-events: none;
+}
+
+.mac-btn-sheen:hover::after {
+  animation: macButtonSheen 0.75s ease-out;
+}
+
+/* Authentic traffic light click physics */
+.mac-traffic-light {
+  transition: transform 0.1s cubic-bezier(0.16, 1, 0.3, 1), filter 0.1s ease !important;
+}
+
+.mac-traffic-light:active {
+  transform: scale(0.86) !important;
+  filter: brightness(0.85) !important;
+}
+
+/* ==========================================================================
+   macOS Light Mode Comprehensive Engine (Catppuccin Latte & Apple Light)
+   ========================================================================== */
+html:not(.dark),
+html.light,
+html[data-theme="light"],
+.theme-light {
+  color-scheme: light;
+  --bg: #EFF1F5;
+  --surface: #FFFFFF;
+  --text: #4C4F69;
+  --accent: #1E66F5;
+  color: #4C4F69;
+}
+
+/* 1. Window Frame & Titlebar */
+html:not(.dark) .window-shell .window-inner-frame,
+html.light .window-shell .window-inner-frame,
+.theme-light .window-shell .window-inner-frame {
+  background-color: rgba(255, 255, 255, 0.96) !important;
+  border-color: rgba(0, 0, 0, 0.12) !important;
+  box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.22), 0 0 0 1px rgba(0, 0, 0, 0.08) !important;
+}
+
+html:not(.dark) .window-shell .window-titlebar,
+html.light .window-shell .window-titlebar,
+.theme-light .window-shell .window-titlebar {
+  background-color: rgba(246, 246, 248, 0.98) !important;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08) !important;
+}
+
+html:not(.dark) .window-shell .window-titlebar .window-title-text,
+html:not(.dark) .window-shell .window-titlebar span:not(.animate-location-pulse),
+html.light .window-shell .window-titlebar .window-title-text,
+html.light .window-shell .window-titlebar span:not(.animate-location-pulse),
+.theme-light .window-shell .window-titlebar .window-title-text,
+.theme-light .window-shell .window-titlebar span:not(.animate-location-pulse) {
+  color: #1D1D1F !important;
+}
+
+html:not(.dark) .window-content-canvas,
+html.light .window-content-canvas,
+.theme-light .window-content-canvas {
+  background-color: #FFFFFF !important;
+}
+
+/* 2. Application Background Surfaces (Main Canvas, Panels, Sidebars, Insets) */
+/* Group A: Main Canvas & Large App Panels */
+html:not(.dark) [class*="181825"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="1e1e2e"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="1c1d2e"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="1a1d2e"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="181a2c"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="161622"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="20243a"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="181825"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="1e1e2e"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="1c1d2e"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="1a1d2e"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="181a2c"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="161622"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="20243a"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="181825"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="1e1e2e"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="1c1d2e"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="1a1d2e"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="181a2c"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="161622"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="20243a"]:not(.terminal-container):not(.terminal-container *) {
+  background-color: #FFFFFF !important;
+}
+
+/* Group B: Sidebars, Headers, Toolbars, Modal dialog cards */
+html:not(.dark) [class*="14141e"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="141422"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="141624"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="13131c"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="12121a"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="12121c"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="12121e"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="121422"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="14141e"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="141422"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="141624"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="13131c"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="12121a"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="12121c"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="12121e"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="121422"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="14141e"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="141422"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="141624"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="13131c"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="12121a"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="12121c"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="12121e"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="121422"]:not(.terminal-container):not(.terminal-container *) {
+  background-color: #F4F4F7 !important;
+}
+
+/* Group C: Insets, Chart backgrounds, Code runners, Sub-canvases */
+html:not(.dark) [class*="11111a"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="11111b"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="101018"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="0f0f18"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="0e0f17"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="0d0d15"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="0d0e15"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="0d0f18"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="0c0c14"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="0a0a0f"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="08080e"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="11111a"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="11111b"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="101018"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="0f0f18"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="0e0f17"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="0d0d15"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="0d0e15"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="0d0f18"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="0c0c14"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="0a0a0f"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="08080e"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="11111a"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="11111b"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="101018"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="0f0f18"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="0e0f17"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="0d0d15"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="0d0e15"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="0d0f18"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="0c0c14"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="0a0a0f"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="08080e"]:not(.terminal-container):not(.terminal-container *) {
+  background-color: #EBECEF !important;
+}
+
+html:not(.dark) [class*="black/40"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="black/50"]:not(.terminal-container):not(.terminal-container *),
+html:not(.dark) [class*="black/60"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="black/40"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="black/50"]:not(.terminal-container):not(.terminal-container *),
+html.light [class*="black/60"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="black/40"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="black/50"]:not(.terminal-container):not(.terminal-container *),
+.theme-light [class*="black/60"]:not(.terminal-container):not(.terminal-container *) {
+  background-color: rgba(0, 0, 0, 0.05) !important;
+}
+
+/* Recharts Tooltip in Light Mode */
+html:not(.dark) .recharts-default-tooltip,
+html.light .recharts-default-tooltip,
+.theme-light .recharts-default-tooltip {
+  background-color: #FFFFFF !important;
+  color: #1D1D1F !important;
+  border-color: rgba(0, 0, 0, 0.12) !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* 3. Text Colors in Light Mode */
+html:not(.dark) .text-white:not(.mac-btn-primary):not(.mac-btn-danger):not(.mac-btn-success):not(.mac-btn-primary *):not(.mac-btn-danger *):not(.mac-btn-success *):not(.terminal-container *):not([class*="bg-blue"]):not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-red"]),
+html:not(.dark) [class*="cdd6f4"]:not(.terminal-container *),
+html.light .text-white:not(.mac-btn-primary):not(.mac-btn-danger):not(.mac-btn-success):not(.mac-btn-primary *):not(.mac-btn-danger *):not(.mac-btn-success *):not(.terminal-container *):not([class*="bg-blue"]):not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-red"]),
+html.light [class*="cdd6f4"]:not(.terminal-container *),
+.theme-light .text-white:not(.mac-btn-primary):not(.mac-btn-danger):not(.mac-btn-success):not(.mac-btn-primary *):not(.mac-btn-danger *):not(.mac-btn-success *):not(.terminal-container *):not([class*="bg-blue"]):not([class*="bg-emerald"]):not([class*="bg-rose"]):not([class*="bg-red"]),
+.theme-light [class*="cdd6f4"]:not(.terminal-container *) {
+  color: #1D1D1F !important;
+}
+
+html:not(.dark) .text-gray-200:not(.terminal-container *),
+html:not(.dark) .text-gray-300:not(.terminal-container *),
+html.light .text-gray-200:not(.terminal-container *),
+html.light .text-gray-300:not(.terminal-container *),
+.theme-light .text-gray-200:not(.terminal-container *),
+.theme-light .text-gray-300:not(.terminal-container *) {
+  color: #2D3139 !important;
+}
+
+html:not(.dark) .text-gray-400:not(.terminal-container *),
+html.light .text-gray-400:not(.terminal-container *),
+.theme-light .text-gray-400:not(.terminal-container *) {
+  color: #5C606C !important;
+}
+
+html:not(.dark) .text-gray-500:not(.terminal-container *),
+html.light .text-gray-500:not(.terminal-container *),
+.theme-light .text-gray-500:not(.terminal-container *) {
+  color: #7D818F !important;
+}
+
+/* 4. Borders & Dividers in Light Mode */
+html:not(.dark) [class*="border-white"]:not(.mac-btn-primary):not(.mac-btn-danger):not(.mac-btn-success),
+html.light [class*="border-white"]:not(.mac-btn-primary):not(.mac-btn-danger):not(.mac-btn-success),
+.theme-light [class*="border-white"]:not(.mac-btn-primary):not(.mac-btn-danger):not(.mac-btn-success) {
+  border-color: rgba(0, 0, 0, 0.09) !important;
+}
+
+html:not(.dark) [class*="divide-white"] > :not([hidden]) ~ :not([hidden]),
+html.light [class*="divide-white"] > :not([hidden]) ~ :not([hidden]),
+.theme-light [class*="divide-white"] > :not([hidden]) ~ :not([hidden]) {
+  border-color: rgba(0, 0, 0, 0.07) !important;
+}
+
+/* 5. Translucent Cards, Rows and Insets */
+html:not(.dark) [class*="bg-white/"]:not(.dock-bar):not(.terminal-container *):not([class*="rounded-full.bg-white"]),
+html.light [class*="bg-white/"]:not(.dock-bar):not(.terminal-container *):not([class*="rounded-full.bg-white"]),
+.theme-light [class*="bg-white/"]:not(.dock-bar):not(.terminal-container *):not([class*="rounded-full.bg-white"]) {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+}
+
+html:not(.dark) [class*="hover:bg-white/"]:hover:not(.terminal-container *),
+html.light [class*="hover:bg-white/"]:hover:not(.terminal-container *),
+.theme-light [class*="hover:bg-white/"]:hover:not(.terminal-container *) {
+  background-color: rgba(0, 0, 0, 0.065) !important;
+}
+
+/* 6. Form Inputs, Textareas, Selects */
+html:not(.dark) input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+html:not(.dark) textarea,
+html:not(.dark) select,
+html.light input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+html.light textarea,
+html.light select,
+.theme-light input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+.theme-light textarea,
+.theme-light select {
+  background-color: #FFFFFF !important;
+  border-color: rgba(0, 0, 0, 0.16) !important;
+  color: #1D1D1F !important;
+}
+
+html:not(.dark) input::placeholder,
+html:not(.dark) textarea::placeholder,
+html.light input::placeholder,
+html.light textarea::placeholder,
+.theme-light input::placeholder,
+.theme-light textarea::placeholder {
+  color: #8C8FA1 !important;
+}
+
+/* 7. Table Headers and Rows */
+html:not(.dark) thead,
+html:not(.dark) thead th,
+html:not(.dark) thead tr,
+html.light thead,
+html.light thead th,
+html.light thead tr,
+.theme-light thead,
+.theme-light thead th,
+.theme-light thead tr {
+  background-color: #F0F1F4 !important;
+  color: #4C4F69 !important;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08) !important;
+}
+
+html:not(.dark) tbody tr:hover,
+html.light tbody tr:hover,
+.theme-light tbody tr:hover {
+  background-color: rgba(0, 0, 0, 0.035) !important;
+}
+
+/* 8. macOS Segmented Controls in Light Mode */
+html:not(.dark) .mac-segmented-container,
+html.light .mac-segmented-container,
+.theme-light .mac-segmented-container {
+  background: rgba(0, 0, 0, 0.06) !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+}
+
+html:not(.dark) .mac-segmented-item,
+html.light .mac-segmented-item,
+.theme-light .mac-segmented-item {
+  color: #55555C !important;
+}
+
+html:not(.dark) .mac-segmented-item:hover,
+html.light .mac-segmented-item:hover,
+.theme-light .mac-segmented-item:hover {
+  color: #1D1D1F !important;
+  background: rgba(0, 0, 0, 0.04) !important;
+}
+
+html:not(.dark) .mac-segmented-item.active,
+html.light .mac-segmented-item.active,
+.theme-light .mac-segmented-item.active {
+  background: #FFFFFF !important;
+  color: #1D1D1F !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 0 1px rgba(0, 0, 0, 0.08) !important;
+}
+
+/* 9. macOS Buttons in Light Mode */
+html:not(.dark) .mac-btn-secondary,
+html.light .mac-btn-secondary,
+.theme-light .mac-btn-secondary {
+  background: rgba(255, 255, 255, 0.92) !important;
+  border: 1px solid rgba(0, 0, 0, 0.14) !important;
+  color: #1D1D1F !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+}
+
+html:not(.dark) .mac-btn-secondary:hover,
+html.light .mac-btn-secondary:hover,
+.theme-light .mac-btn-secondary:hover {
+  background: #FFFFFF !important;
+  border-color: rgba(0, 0, 0, 0.22) !important;
+}
+
+html:not(.dark) .mac-btn-icon,
+html.light .mac-btn-icon,
+.theme-light .mac-btn-icon {
+  background: rgba(0, 0, 0, 0.04) !important;
+  border-color: rgba(0, 0, 0, 0.08) !important;
+  color: #4C4F69 !important;
+}
+
+html:not(.dark) .mac-btn-icon:hover,
+html.light .mac-btn-icon:hover,
+.theme-light .mac-btn-icon:hover {
+  background: rgba(0, 0, 0, 0.08) !important;
+  color: #1D1D1F !important;
+  border-color: rgba(0, 0, 0, 0.16) !important;
+}
+
+/* 10. Taskbar in Light Mode */
+html:not(.dark) .taskbar-bar,
+html.light .taskbar-bar,
+.theme-light .taskbar-bar {
+  background-color: rgba(255, 255, 255, 0.88) !important;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.09) !important;
+  color: #1D1D1F !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04) !important;
+}
+
+html:not(.dark) .taskbar-bar button,
+html:not(.dark) .taskbar-bar span,
+html:not(.dark) .taskbar-bar div,
+html.light .taskbar-bar button,
+html.light .taskbar-bar span,
+html.light .taskbar-bar div,
+.theme-light .taskbar-bar button,
+.theme-light .taskbar-bar span,
+.theme-light .taskbar-bar div {
+  color: #1D1D1F !important;
+}
+
+/* 11. Dock in Light Mode */
+html:not(.dark) .dock-bar,
+html.light .dock-bar,
+.theme-light .dock-bar {
+  background-color: rgba(255, 255, 255, 0.65) !important;
+  border-color: rgba(255, 255, 255, 0.85) !important;
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.16), inset 0 1px 1px rgba(255, 255, 255, 0.8) !important;
+}
+
+/* 12. Desktop Widgets in Light Mode */
+html:not(.dark) .desktop-widget > div,
+html.light .desktop-widget > div,
+.theme-light .desktop-widget > div {
+  background-color: rgba(255, 255, 255, 0.88) !important;
+  border-color: rgba(0, 0, 0, 0.1) !important;
+  color: #1D1D1F !important;
+  box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1) !important;
+}
+
+html:not(.dark) .desktop-widget span,
+html:not(.dark) .desktop-widget div,
+html.light .desktop-widget span,
+html.light .desktop-widget div,
+.theme-light .desktop-widget span,
+.theme-light .desktop-widget div {
+  color: #1D1D1F !important;
+}
+
+/* 13. Terminal Preservation (keeps high contrast dark CLI) */
+html:not(.dark) .terminal-container,
+html.light .terminal-container,
+.theme-light .terminal-container {
+  background-color: #1e1e2e !important;
+}
+html:not(.dark) .terminal-container *,
+html.light .terminal-container *,
+.theme-light .terminal-container * {
+  color: inherit;
+}

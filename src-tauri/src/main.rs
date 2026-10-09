@@ -8,10 +8,12 @@ use parking_lot::Mutex;
 mod ssh;
 mod system;
 mod store;
+mod database;
 
 pub struct AppState {
     pub connections: Arc<Mutex<HashMap<String, ssh::connection::SshConnection>>>,
     pub terminals: Arc<Mutex<HashMap<String, ssh::terminal::TerminalSession>>>,
+    pub sessions: Arc<tokio::sync::Mutex<HashMap<String, Arc<ssh::session::ClientHandle>>>>,
 }
 
 fn main() {
@@ -20,10 +22,14 @@ fn main() {
     let state = AppState {
         connections: Arc::new(Mutex::new(HashMap::new())),
         terminals: Arc::new(Mutex::new(HashMap::new())),
+        sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     };
+
+    let db_manager = Arc::new(database::DatabaseManager::new());
 
     tauri::Builder::default()
         .manage(state)
+        .manage(db_manager)
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_fs::init())
@@ -51,7 +57,10 @@ fn main() {
             ssh::sftp::sftp_chown,
             ssh::sftp::sftp_stat,
             ssh::sftp::sftp_download,
+            ssh::sftp::sftp_download_to_downloads,
             ssh::sftp::sftp_upload,
+            ssh::sftp::sftp_read_file_base64,
+            ssh::sftp::sftp_folder_size,
             ssh::exec::ssh_exec,
             ssh::exec::ssh_exec_stream,
             ssh::exec::ssh_exec_stop,
@@ -73,6 +82,7 @@ fn main() {
             system::docker::docker_images,
             system::docker::docker_exec,
             system::docker::docker_stats,
+            system::docker::docker_image_remove,
             system::network::network_ports,
             system::network::network_connections,
             system::network::network_interfaces,
@@ -84,6 +94,7 @@ fn main() {
             system::package::package_remove,
             system::package::package_update,
             system::package::package_upgradable,
+            system::package::package_detect_manager,
             system::user::user_list,
             system::user::user_add,
             system::user::user_delete,
@@ -119,6 +130,21 @@ fn main() {
             store::connections::store_update_connection,
             store::settings::settings_get,
             store::settings::settings_save,
+
+            // Database commands (Native Drivers + SSH Tunnels)
+            database::db_connect,
+            database::db_disconnect,
+            database::db_test_connection,
+            database::db_execute_query,
+            database::db_list_tables,
+            database::db_get_table_columns,
+            database::redis_scan_keys,
+            database::redis_get_value,
+            database::redis_set_value,
+            database::redis_delete_key,
+            database::mongodb_list_collections,
+            database::mongodb_find_documents,
+            database::mongodb_insert_document,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
