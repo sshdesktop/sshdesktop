@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use crate::AppState;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -20,126 +20,418 @@ pub struct StreamChunk {
     pub exit_code: Option<i32>,
 }
 
-/// Helper function to execute a command on the remote server via SSH, or fall back to high-fidelity output.
+/// Helper: run a command on the remote server via SSH (plink or openssh).
+/// Returns (stdout, exit_code). exit_code = -1 means no connection / spawn error.
 pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String, i32) {
-    // Get specified connection or first active connection in pool
-    let conn_opt = {
-        let lock = state.connections.lock();
-        lock.get(conn_id).cloned().or_else(|| lock.values().next().cloned())
+    // 0. Primary Fast Path: Execute directly over active persistent in-memory SSH transport
+    {
+        let handle_opt = {
+            let sessions = state.sessions.lock().await;
+            sessions.get(conn_id).cloned().or_else(|| sessions.get("default").cloned())
+        };
+        if let Some(handle) = handle_opt {
+            match crate::ssh::session::run_exec_channel(&handle, command).await {
+                Ok((stdout, code)) => {
+                    return (stdout, code);
+                }
+                Err(e) => {
+                    log::warn!("CloudDesk: Persistent channel failed for cmd '{}': {}, falling back...", command, e);
+                }
+            }
+        }
+    }
+
+    // Resolve connection (exact id, saved connection on disk, or fallback)
+    let conn = match crate::ssh::connection::resolve_connection(state, conn_id) {
+        Some(c) => c,
+        None => return (String::new(), -1),
     };
 
-    if let Some(conn) = conn_opt {
-        let host = &conn.config.host;
-        let port = conn.config.port.to_string();
-        let user = &conn.config.username;
-        let destination = format!("{}@{}", user, host);
+    // Attempt lazy persistent session establishment for future instantaneous calls
+    if state.sessions.lock().await.get(conn_id).is_none() {
+        let conn_clone = conn.clone();
+        let state_sessions = state.sessions.clone();
+        let cid = conn_id.to_string();
+        tokio::spawn(async move {
+            if let Ok(handle) = crate::ssh::session::connect_session(
+                &conn_clone.config.host,
+                conn_clone.config.port,
+                &conn_clone.config.username,
+                conn_clone.config.password.as_deref(),
+                conn_clone.config.private_key_path.as_deref(),
+            ).await {
+                let mut map = state_sessions.lock().await;
+                let arc = std::sync::Arc::new(handle);
+                map.insert(cid, arc.clone());
+                map.insert("default".to_string(), arc);
+                log::info!("CloudDesk: Lazily established persistent SSH transport for {}", conn_clone.config.host);
+            }
+        });
+    }
 
-        // 1. If password is provided, try plink (PuTTY CLI - installed on Windows)
-        if let Some(pwd) = &conn.config.password {
-            if !pwd.is_empty() {
+
+    let host = conn.config.host.clone();
+    let port = conn.config.port.to_string();
+    let user = conn.config.username.clone();
+    let destination = format!("{}@{}", user, host);
+
+    // ── 1. Password auth via plink ──────────────────────────────────────────
+    if let Some(pwd) = &conn.config.password {
+        if !pwd.is_empty() {
+            for attempt in 0..2 {
                 let mut cmd = tokio::process::Command::new("plink");
                 #[cfg(windows)]
-                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                cmd.creation_flags(0x08000000);
 
                 cmd.arg("-ssh")
-                    .arg("-P")
-                    .arg(&port)
-                    .arg("-l")
-                    .arg(user)
-                    .arg("-pw")
-                    .arg(pwd)
-                    .arg(host)
+                    .arg("-batch")          // never prompt for host key
+                    .arg("-P").arg(&port)
+                    .arg("-l").arg(&user)
+                    .arg("-pw").arg(pwd)
+                    .arg(&host)
                     .arg(command)
-                    .stdin(std::process::Stdio::piped())
+                    .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
 
-                if let Ok(mut child) = cmd.spawn() {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
+                if let Ok(child) = cmd.spawn() {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(35),
+                        child.wait_with_output(),
+                    ).await {
+                        Ok(Ok(output)) => {
+                            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                            let raw_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                            let stderr = raw_stderr
+                                .lines()
+                                .filter(|l| !l.contains("Server refused our key"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                                .trim()
+                                .to_string();
+                            let exit_code = output.status.code().unwrap_or(-1);
+
+                            // Retry once if transient handshake dropped due to concurrency / rate-limit
+                            if !output.status.success() && stdout.is_empty() && attempt == 0 {
+                                if raw_stderr.contains("Server refused our key")
+                                    || raw_stderr.contains("Connection reset")
+                                    || raw_stderr.contains("fatal")
+                                    || exit_code == -1
+                                {
+                                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                    continue;
+                                }
+                            }
+
+                            if !stdout.is_empty() || output.status.success() {
+                                return (stdout, exit_code);
+                            }
+                            if !stderr.is_empty() {
+                                return (stderr, exit_code);
+                            }
+                            return (String::new(), exit_code);
+                        }
+                        Ok(Err(e)) => {
+                            log::warn!("CloudDesk: plink wait error for {}: {}", host, e);
+                            if attempt == 0 {
+                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                                continue;
+                            }
+                        }
+                        Err(_) => {
+                            log::warn!("CloudDesk: plink timed out for {} on command: {}", host, command);
+                            return (String::new(), -1);
+                        }
                     }
-                    if let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(15), child.wait_with_output()).await {
+                } else if attempt == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+            }
+        }
+    }
+
+    // ── 2. Key auth via Plink (for PPK) or OpenSSH (for PEM) ────────────────
+    let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    if is_ppk {
+        let plink_bin = crate::ssh::connection::get_plink_path();
+        for attempt in 0..2 {
+            let mut cmd = tokio::process::Command::new(plink_bin);
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000);
+
+            cmd.arg("-ssh")
+                .arg("-batch")
+                .arg("-P").arg(&port)
+                .arg("-l").arg(&user);
+
+            if let Some(key_path) = &conn.config.private_key_path {
+                if crate::ssh::connection::resolve_key_path(key_path).is_some() {
+                    cmd.arg("-i").arg(key_path);
+                }
+            }
+
+            cmd.arg(&host)
+                .arg(command)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+
+            if let Ok(child) = cmd.spawn() {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(35),
+                    child.wait_with_output(),
+                ).await {
+                    Ok(Ok(output)) => {
                         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                        let exit_code = output.status.code().unwrap_or(0);
-                        if output.status.success() || !stdout.is_empty() {
+                        let raw_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                        let stderr = raw_stderr
+                            .lines()
+                            .filter(|l| !l.contains("Server refused our key"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                            .trim()
+                            .to_string();
+                        let exit_code = output.status.code().unwrap_or(-1);
+
+                        if !stdout.is_empty() || output.status.success() {
                             return (stdout, exit_code);
-                        } else if !stderr.is_empty() {
+                        }
+                        if !stderr.is_empty() {
                             return (stderr, exit_code);
                         }
+                        return (String::new(), exit_code);
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("CloudDesk: plink ppk wait error for {}: {}", host, e);
+                        if attempt == 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                            continue;
+                        }
+                    }
+                    Err(_) => {
+                        log::warn!("CloudDesk: plink ppk timed out for {} on command: {}", host, command);
+                        return (String::new(), -1);
                     }
                 }
             }
         }
+    }
 
-        // 2. Try OpenSSH client
-        let mut ssh_cmd = tokio::process::Command::new("ssh");
-        #[cfg(windows)]
-        ssh_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    // ── 3. PEM / OpenSSH key auth via OpenSSH ──────────────────────────────
+    let mut ssh_cmd = tokio::process::Command::new("ssh");
+    #[cfg(windows)]
+    ssh_cmd.creation_flags(0x08000000);
 
-        ssh_cmd
-            .arg("-p")
-            .arg(&port)
-            .arg("-o")
-            .arg("StrictHostKeyChecking=no")
-            .arg("-o")
-            .arg("ConnectTimeout=5");
+    ssh_cmd
+        .arg("-p").arg(&port)
+        .arg("-o").arg("StrictHostKeyChecking=no")
+        .arg("-o").arg("BatchMode=yes")
+        .arg("-o").arg("ConnectTimeout=8")
+        .arg("-o").arg("ServerAliveInterval=10")
+        .arg("-o").arg("ServerAliveCountMax=2");
 
-        if let Some(key_path) = &conn.config.private_key_path {
-            if !key_path.is_empty() {
-                ssh_cmd.arg("-i").arg(key_path);
-            }
+    if let Some(key_path) = &conn.config.private_key_path {
+        if crate::ssh::connection::resolve_key_path(key_path).is_some() {
+            ssh_cmd.arg("-i").arg(key_path);
         }
+    }
 
-        ssh_cmd.arg(&destination).arg(command);
+    ssh_cmd
+        .arg(&destination)
+        .arg(command)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
 
-        if let Ok(output) = ssh_cmd.output().await {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        ssh_cmd.output(),
+    ).await {
+        Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let exit_code = output.status.code().unwrap_or(0);
-            if output.status.success() || !stdout.is_empty() {
+            let exit_code = output.status.code().unwrap_or(-1);
+            if !stdout.is_empty() || output.status.success() {
                 return (stdout, exit_code);
-            } else if !stderr.is_empty() {
+            }
+            if !stderr.is_empty() {
                 return (stderr, exit_code);
             }
+            return (String::new(), exit_code);
+        }
+        Ok(Err(e)) => {
+            log::warn!("CloudDesk: ssh spawn error for {}: {}", host, e);
+        }
+        Err(_) => {
+            log::warn!("CloudDesk: ssh timed out for {} on command: {}", host, command);
         }
     }
 
     (String::new(), -1)
 }
 
-#[tauri::command]
-pub async fn ssh_exec(state: tauri::State<'_, AppState>, conn_id: String, command: String) -> Result<CommandResult, String> {
-    let start = Instant::now();
-    let (stdout, exit_code) = run_cmd(&state, &conn_id, &command).await;
+/// Helper: run a privileged command on the remote server following the 3 priority conditions:
+/// 1st Condition: If user is root (or username is root), run directly without sudo (strip any sudo prefix).
+/// 2nd Condition: If user has passwordless sudo, run with `sudo -n`.
+/// 3rd Condition: If user requires password, run with `sudo -S` using session password. If not in sudoers, return clean error.
+pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (String, i32) {
+    let conn_opt = crate::ssh::connection::resolve_connection(state, conn_id);
+    let trimmed_cmd = command.trim();
+    let raw_cmd = trimmed_cmd.strip_prefix("sudo ").unwrap_or(trimmed_cmd).trim();
 
-    if exit_code != -1 {
-        return Ok(CommandResult {
-            stdout,
-            stderr: String::new(),
-            exit_code,
-            duration_ms: start.elapsed().as_millis() as u64,
-        });
-    }
-
-    // High fidelity fallback simulation for offline/demo environments
-    let fallback_out = match command.as_str() {
-        cmd if cmd.contains("uname") => "Linux clouddesk-node 6.8.0-45-generic #45-Ubuntu SMP PREEMPT_DYNAMIC x86_64 GNU/Linux\n".into(),
-        cmd if cmd.contains("uptime") => " 20:25:01 up 32 days,  4:55,  2 users,  load average: 0.14, 0.08, 0.05\n".into(),
-        cmd if cmd.contains("whoami") => "root\n".into(),
-        cmd if cmd.contains("pwd") => "/root\n".into(),
-        cmd if cmd.contains("ls") => "Desktop  Documents  Downloads  app.py  docker-compose.yml  README.md\n".into(),
-        cmd if cmd.contains("hostname") => "clouddesk-node\n".into(),
-        cmd if cmd.contains("cat /proc/meminfo") => "MemTotal:       16365568 kB\nMemFree:         7182900 kB\nMemAvailable:   13441024 kB\nBuffers:          341200 kB\nCached:          3412890 kB\n".into(),
-        cmd if cmd.contains("df -h") => "Filesystem      Size  Used Avail Use% Mounted on\n/dev/nvme0n1p2  240G   42G  186G  19% /\n/dev/nvme0n1p1  512M  6.1M  506M   2% /boot/efi\n/dev/sdb1       1.8T  1.2T  512G  71% /data\n".into(),
-        cmd if cmd.contains("docker ps") => "CONTAINER ID   IMAGE          COMMAND                  CREATED         STATUS         PORTS                    NAMES\n7c1a84f3e2b1   nginx:alpine   \"/docker-entrypoint.…\"   2 days ago      Up 2 days      0.0.0.0:80->80/tcp       web-proxy\n9e3b4a2f8c0d   postgres:16    \"docker-entrypoint.s…\"   3 weeks ago     Up 3 weeks     0.0.0.0:5432->5432/tcp   prod-db\n3d2a1b9e8f7c   redis:7-alpine \"docker-entrypoint.s…\"   3 weeks ago     Up 3 weeks     0.0.0.0:6379->6379/tcp   redis-cache\n".into(),
-        _ => format!("Command '{}' executed on remote host.\n", command),
+    let conn = match conn_opt {
+        Some(c) => c,
+        None => return run_cmd(state, conn_id, raw_cmd).await,
     };
 
+    let username = &conn.config.username;
+
+    // ── 1st Condition: Is the user root? ────────────────────────────────────
+    // If username is "root", execute directly without sudo (never needs sudo, avoids "sudo: command not found")
+    if username == "root" {
+        return run_cmd(state, conn_id, raw_cmd).await;
+    }
+
+    // ── 2nd Condition: Does the user have Passwordless Sudo? (sudo -n) ─────
+    let escaped_raw = raw_cmd.replace('\'', r"'\''");
+    let sudo_n_cmd = format!("sudo -n -- sh -c '{}' 2>&1", escaped_raw);
+    let (n_out, n_code) = run_cmd(state, conn_id, &sudo_n_cmd).await;
+
+    // If sudo -n succeeded, return immediately!
+    if n_code == 0 {
+        return (n_out, n_code);
+    }
+
+    // ── 3rd Condition: Evaluate why sudo -n failed ──────────────────────────
+    let lower_out = n_out.to_lowercase();
+
+    // 3A. User is NOT in the sudoers file (No sudo permission)
+    if lower_out.contains("not in the sudoers file")
+        || lower_out.contains("is not allowed to execute")
+        || lower_out.contains("not in sudoers")
+    {
+        let msg = format!(
+            "Permission Denied: User '{}' does not have administrator (sudo) privileges on this server.\n{}",
+            username,
+            n_out.trim()
+        );
+        log::warn!("CloudDesk: {}", msg);
+        return (msg, n_code);
+    }
+
+    // 3B. User requires a password for sudo (sudo -S)
+    if let Some(ref pwd) = conn.config.password {
+        if !pwd.is_empty() {
+            let escaped_pwd = pwd.replace('\'', r"'\''");
+            // Use printf to pipe the password securely to sudo -S
+            let sudo_s_cmd = format!(
+                "printf '%s\\n' '{}' | sudo -S -p '' -- sh -c '{}' 2>&1",
+                escaped_pwd,
+                escaped_raw
+            );
+            let (s_out, s_code) = run_cmd(state, conn_id, &sudo_s_cmd).await;
+
+            if s_code == 0 {
+                return (s_out, s_code);
+            }
+
+            let s_lower = s_out.to_lowercase();
+            if s_lower.contains("not in the sudoers file")
+                || s_lower.contains("is not allowed to execute")
+            {
+                let msg = format!(
+                    "Permission Denied: User '{}' does not have administrator (sudo) privileges on this server.\n{}",
+                    username,
+                    s_out.trim()
+                );
+                return (msg, s_code);
+            }
+
+            if s_lower.contains("incorrect password")
+                || s_lower.contains("authentication failure")
+                || s_lower.contains("sorry, try again")
+            {
+                let msg = format!(
+                    "Authentication Failed: Sudo password for user '{}' was rejected.\n{}",
+                    username,
+                    s_out.trim()
+                );
+                return (msg, s_code);
+            }
+
+            return (s_out, s_code);
+        }
+    }
+
+    // If user has no password stored (e.g. key auth) and sudo -n required a password
+    if lower_out.contains("password is required") || lower_out.contains("terminal is required") {
+        let msg = format!(
+            "Permission Denied: Sudo password required for user '{}', but no password is saved in session.",
+            username
+        );
+        return (msg, n_code);
+    }
+
+    // Fallback: return the output of sudo -n
+    (n_out, n_code)
+}
+
+#[tauri::command]
+pub async fn ssh_exec(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    command: String,
+) -> Result<CommandResult, String> {
+    let start = Instant::now();
+    let trimmed = command.trim();
+    
+    // First, verify that a connection exists or can be resolved
+    if crate::ssh::connection::resolve_connection(&state, &conn_id).is_none() {
+        return Err(format!(
+            "No active SSH connection for id '{}'. Please connect to a server first.",
+            conn_id
+        ));
+    }
+
+    // If command explicitly starts with sudo, execute via run_cmd_priv
+    let (stdout, exit_code) = if trimmed.starts_with("sudo ") {
+        run_cmd_priv(&state, &conn_id, trimmed).await
+    } else {
+        // Run direct command first
+        let (direct_out, direct_code) = run_cmd(&state, &conn_id, &command).await;
+
+        // Smart auto-elevation: if direct execution failed with permission/polkit error
+        let is_permission_denial = direct_code != 0 && (
+            direct_out.contains("Interactive authentication required")
+            || direct_out.contains("Permission denied")
+            || direct_out.contains("Access denied")
+            || direct_out.contains("Operation not permitted")
+            || direct_out.contains("must be root")
+            || direct_out.contains("You need to be root")
+        );
+
+        if is_permission_denial {
+            log::info!("CloudDesk: Detected permission denial for '{}', attempting auto-elevation", command);
+            let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &command).await;
+            if priv_code == 0 || !priv_out.is_empty() {
+                (priv_out, priv_code)
+            } else {
+                (direct_out, direct_code)
+            }
+        } else {
+            (direct_out, direct_code)
+        }
+    };
+
+    if exit_code == -1 && stdout.is_empty() {
+        return Err("Remote command execution timed out or failed on server.".to_string());
+    }
+
     Ok(CommandResult {
-        stdout: fallback_out,
         stderr: String::new(),
-        exit_code: 0,
+        stdout,
+        exit_code,
         duration_ms: start.elapsed().as_millis() as u64,
     })
 }
@@ -154,18 +446,91 @@ pub async fn ssh_exec_stream(
 ) -> Result<(), String> {
     let app_clone = app.clone();
     let stream_id_clone = stream_id.clone();
-    let (out, code) = run_cmd(&state, &conn_id, &command).await;
+    let conn_id_clone = conn_id.clone();
+    let command_clone = command.clone();
 
-    // Stream output back via Tauri Emitter
     tokio::spawn(async move {
-        let chunk_finish = StreamChunk {
+        // 0. Fast Path: Real-time streaming channel over persistent session
+        let handle_opt = {
+            let state_ref = app_clone.state::<AppState>();
+            let sessions = state_ref.sessions.lock().await;
+            sessions.get(&conn_id_clone).cloned().or_else(|| sessions.get("default").cloned())
+        };
+
+        if let Some(handle) = handle_opt {
+            let cmd_to_run = if command_clone.trim().starts_with("sudo ") {
+                let trimmed = command_clone.trim();
+                trimmed.strip_prefix("sudo ").unwrap_or(trimmed).trim().to_string()
+            } else {
+                command_clone.clone()
+            };
+            if let Ok(_) = crate::ssh::session::run_stream_channel(&app_clone, &handle, &stream_id_clone, &cmd_to_run).await {
+                return;
+            }
+        }
+
+        let has_conn = crate::ssh::connection::resolve_connection(
+            &app_clone.state::<AppState>(),
+            &conn_id_clone,
+        ).is_some();
+
+        let (out, code) = if !has_conn {
+            (String::new(), -1)
+        } else if command_clone.trim().starts_with("sudo ") {
+            run_cmd_priv(
+                &app_clone.state::<AppState>(),
+                &conn_id_clone,
+                &command_clone,
+            ).await
+        } else {
+            let (direct_out, direct_code) = run_cmd(
+                &app_clone.state::<AppState>(),
+                &conn_id_clone,
+                &command_clone,
+            ).await;
+
+            let is_permission_denial = direct_code != 0 && (
+                direct_out.contains("Interactive authentication required")
+                || direct_out.contains("Permission denied")
+                || direct_out.contains("Access denied")
+                || direct_out.contains("Operation not permitted")
+            );
+
+            if is_permission_denial {
+                run_cmd_priv(
+                    &app_clone.state::<AppState>(),
+                    &conn_id_clone,
+                    &command_clone,
+                ).await
+            } else {
+                (direct_out, direct_code)
+            }
+        };
+
+        let (data, done_exit) = if code == -1 && out.is_empty() {
+            if !has_conn {
+                (
+                    format!("$ {}\r\n[No connection — not connected to any server]\r\n", command_clone),
+                    1,
+                )
+            } else {
+                (
+                    format!("$ {}\r\n[Command timed out or remote connection error]\r\n", command_clone),
+                    1,
+                )
+            }
+        } else {
+            (if !out.is_empty() { out } else { format!("$ {}\r\n[Command completed with no output]\r\n", command_clone) }, code)
+        };
+
+        let chunk = StreamChunk {
             stream_id: stream_id_clone,
-            data: if !out.is_empty() { out } else { format!("$ {}\r\n[Completed]\r\n", command) },
+            data,
             is_stderr: false,
             is_done: true,
-            exit_code: Some(if code != -1 { code } else { 0 }),
+            exit_code: Some(if done_exit != -1 { done_exit } else { 0 }),
         };
-        let _ = app_clone.emit("exec-output", chunk_finish);
+        let _ = app_clone.emit("exec-output", chunk);
     });
 
     Ok(())

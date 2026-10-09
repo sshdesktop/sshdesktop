@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::AppState;
-use crate::ssh::exec::run_cmd;
+use crate::ssh::exec::{run_cmd, run_cmd_priv};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PackageInfo {
@@ -12,128 +12,307 @@ pub struct PackageInfo {
     pub status: String,
 }
 
-#[tauri::command]
-pub async fn package_list(state: tauri::State<'_, AppState>, conn_id: String) -> Result<Vec<PackageInfo>, String> {
-    let (stdout, code) = run_cmd(&state, &conn_id, "dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\t${Architecture}\t${binary:Summary}\n' 2>/dev/null | head -n 40").await;
-    if code == 0 && !stdout.is_empty() {
-        let mut list = Vec::new();
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 4 {
-                let name = parts[0].to_string();
-                let version = parts[1].to_string();
-                let size_kb = parts[2].parse::<u64>().unwrap_or(0);
-                let arch = parts[3].to_string();
-                let description = if parts.len() > 4 { parts[4].to_string() } else { name.clone() };
-                let size = if size_kb > 1024 {
-                    format!("{:.1} MB", size_kb as f64 / 1024.0)
-                } else {
-                    format!("{} KB", size_kb)
-                };
+/// Detect the package manager available on the remote system.
+/// Returns: "apt" | "dnf" | "yum" | "pacman" | "unknown"
+async fn detect_pkg_manager(state: &AppState, conn_id: &str) -> String {
+    let (out, _) = run_cmd(
+        state,
+        conn_id,
+        "command -v apt-get dpkg dnf yum pacman 2>/dev/null | head -n 1",
+    ).await;
+    let out = out.trim().to_lowercase();
+    if out.contains("apt") || out.contains("dpkg") { return "apt".into(); }
+    if out.contains("dnf")  { return "dnf".into(); }
+    if out.contains("yum")  { return "yum".into(); }
+    if out.contains("pacman") { return "pacman".into(); }
+    "unknown".into()
+}
 
+#[tauri::command]
+pub async fn package_list(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+) -> Result<Vec<PackageInfo>, String> {
+    let pm = detect_pkg_manager(&state, &conn_id).await;
+
+    let (stdout, code) = match pm.as_str() {
+        "apt" => run_cmd(
+            &state,
+            &conn_id,
+            "dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\t${Architecture}\t${binary:Summary}\n' 2>/dev/null",
+        ).await,
+        "dnf" | "yum" => run_cmd(
+            &state,
+            &conn_id,
+            "rpm -qa --queryformat '%{NAME}\t%{VERSION}-%{RELEASE}\t%{SIZE}\t%{ARCH}\t%{SUMMARY}\n' 2>/dev/null",
+        ).await,
+        "pacman" => run_cmd(
+            &state,
+            &conn_id,
+            r#"pacman -Q 2>/dev/null | awk '{print $1"\t"$2"\t0\tall\tpacman package"}'"#,
+        ).await,
+        _ => return Err("No supported package manager found (apt/dnf/yum/pacman).".into()),
+    };
+
+    if code == -1 && stdout.is_empty() {
+        return Err("No active SSH connection.".into());
+    }
+
+    let mut list = Vec::new();
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 4 {
+            let name    = parts[0].trim().to_string();
+            let version = parts[1].trim().to_string();
+            let size_kb = parts[2].trim().parse::<u64>().unwrap_or(0);
+            let arch    = parts[3].trim().to_string();
+            let description = if parts.len() > 4 { parts[4].trim().to_string() } else { name.clone() };
+            let size = if size_kb > 1024 * 1024 {
+                format!("{:.1} GB", size_kb as f64 / 1024.0 / 1024.0)
+            } else if size_kb > 1024 {
+                format!("{:.1} MB", size_kb as f64 / 1024.0)
+            } else {
+                format!("{} KB", size_kb)
+            };
+
+            if !name.is_empty() {
                 list.push(PackageInfo {
-                    name,
-                    version,
-                    size,
-                    description,
-                    arch,
+                    name, version, size, description, arch,
                     status: "installed".into(),
                 });
             }
         }
-        if !list.is_empty() {
-            return Ok(list);
-        }
     }
 
-    Ok(vec![
-        PackageInfo { name: "openssh-server".into(), version: "1:9.6p1-3ubuntu13".into(), size: "1.2 MB".into(), description: "secure shell (SSH) server".into(), arch: "amd64".into(), status: "installed".into() },
-        PackageInfo { name: "nginx".into(), version: "1.24.0-2ubuntu7".into(), size: "2.8 MB".into(), description: "small, powerful, scalable web/proxy server".into(), arch: "amd64".into(), status: "installed".into() },
-        PackageInfo { name: "docker-ce".into(), version: "5:27.1.1".into(), size: "94 MB".into(), description: "Docker application container engine".into(), arch: "amd64".into(), status: "installed".into() },
-        PackageInfo { name: "python3".into(), version: "3.12.3".into(), size: "108 KB".into(), description: "high-level object-oriented language".into(), arch: "amd64".into(), status: "installed".into() },
-        PackageInfo { name: "postgresql-16".into(), version: "16.3-1".into(), size: "18.4 MB".into(), description: "object-relational SQL database".into(), arch: "amd64".into(), status: "installed".into() },
-        PackageInfo { name: "git".into(), version: "1:2.43.0".into(), size: "24.1 MB".into(), description: "fast, scalable, distributed revision control system".into(), arch: "amd64".into(), status: "installed".into() },
-        PackageInfo { name: "curl".into(), version: "8.5.0".into(), size: "480 KB".into(), description: "command line tool for transferring data with URL syntax".into(), arch: "amd64".into(), status: "installed".into() },
-        PackageInfo { name: "htop".into(), version: "3.3.0".into(), size: "360 KB".into(), description: "interactive processes viewer".into(), arch: "amd64".into(), status: "installed".into() },
-        PackageInfo { name: "ufw".into(), version: "0.36.2".into(), size: "820 KB".into(), description: "program for managing a netfilter firewall".into(), arch: "all".into(), status: "installed".into() },
-    ])
+    if list.is_empty() {
+        return Err("No installed packages found.".into());
+    }
+
+    Ok(list)
 }
 
 #[tauri::command]
-pub async fn package_search(state: tauri::State<'_, AppState>, conn_id: String, query: String) -> Result<Vec<PackageInfo>, String> {
-    let (stdout, code) = run_cmd(&state, &conn_id, &format!("apt-cache search '{}' | head -n 10", query)).await;
-    if code == 0 && !stdout.is_empty() {
-        let mut list = Vec::new();
-        for line in stdout.lines() {
-            if let Some(dash) = line.find(" - ") {
-                let name = line[..dash].trim().to_string();
-                let desc = line[dash + 3..].trim().to_string();
+pub async fn package_search(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    query: String,
+) -> Result<Vec<PackageInfo>, String> {
+    // Validate query
+    if query.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')')) {
+        return Err("Invalid search query.".into());
+    }
+
+    let pm = detect_pkg_manager(&state, &conn_id).await;
+
+    let (stdout, code) = match pm.as_str() {
+        "apt" => run_cmd(
+            &state,
+            &conn_id,
+            &format!("apt-cache search '{}' 2>/dev/null | head -n 20", query),
+        ).await,
+        "dnf" => run_cmd(
+            &state,
+            &conn_id,
+            &format!("dnf search '{}' 2>/dev/null | grep -v '^=\\|^Last' | head -n 20", query),
+        ).await,
+        "yum" => run_cmd(
+            &state,
+            &conn_id,
+            &format!("yum search '{}' 2>/dev/null | head -n 20", query),
+        ).await,
+        _ => return Err("No supported package manager found.".into()),
+    };
+
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+
+    let mut list = Vec::new();
+    for line in stdout.lines() {
+        if let Some(dash) = line.find(" - ") {
+            let name = line[..dash].trim().to_string();
+            let desc = line[dash + 3..].trim().to_string();
+            if !name.is_empty() {
                 list.push(PackageInfo {
-                    name,
-                    version: "latest".into(),
-                    size: "auto".into(),
-                    description: desc,
-                    arch: "all".into(),
-                    status: "available".into(),
+                    name, version: "latest".into(), size: "—".into(),
+                    description: desc, arch: "all".into(), status: "available".into(),
                 });
             }
-        }
-        if !list.is_empty() {
-            return Ok(list);
-        }
-    }
-
-    Ok(vec![
-        PackageInfo { name: query.clone(), version: "latest".into(), size: "4.2 MB".into(), description: format!("Package matching query: {}", query), arch: "amd64".into(), status: "available".into() }
-    ])
-}
-
-#[tauri::command]
-pub async fn package_install(state: tauri::State<'_, AppState>, conn_id: String, name: String) -> Result<String, String> {
-    let (stdout, _code) = run_cmd(&state, &conn_id, &format!("apt-get install -y '{}'", name)).await;
-    log::info!("CloudDesk: apt-get install {}", name);
-    Ok(if !stdout.is_empty() { stdout } else { format!("Successfully installed package {}", name) })
-}
-
-#[tauri::command]
-pub async fn package_remove(state: tauri::State<'_, AppState>, conn_id: String, name: String) -> Result<String, String> {
-    let (stdout, _code) = run_cmd(&state, &conn_id, &format!("apt-get remove -y '{}'", name)).await;
-    log::info!("CloudDesk: apt-get remove {}", name);
-    Ok(if !stdout.is_empty() { stdout } else { format!("Successfully removed package {}", name) })
-}
-
-#[tauri::command]
-pub async fn package_update(state: tauri::State<'_, AppState>, conn_id: String) -> Result<String, String> {
-    let (stdout, _code) = run_cmd(&state, &conn_id, "apt-get update").await;
-    Ok(if !stdout.is_empty() { stdout } else { "Package repositories updated successfully".into() })
-}
-
-#[tauri::command]
-pub async fn package_upgradable(state: tauri::State<'_, AppState>, conn_id: String) -> Result<Vec<PackageInfo>, String> {
-    let (stdout, code) = run_cmd(&state, &conn_id, "apt list --upgradable 2>/dev/null").await;
-    if code == 0 && !stdout.is_empty() {
-        let mut list = Vec::new();
-        for line in stdout.lines().skip(1) {
-            let parts: Vec<&str> = line.split('/').collect();
-            if !parts.is_empty() {
-                let name = parts[0].to_string();
-                list.push(PackageInfo {
-                    name,
-                    version: "upgradable".into(),
-                    size: "auto".into(),
-                    description: "Upgradable system package".into(),
-                    arch: "all".into(),
-                    status: "upgradable".into(),
-                });
+        } else if line.contains(':') {
+            // dnf/yum format: "name.arch : description"
+            let parts: Vec<&str> = line.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                let name = parts[0].trim().trim_end_matches(".noarch").trim_end_matches(".x86_64").to_string();
+                let desc = parts[1].trim().to_string();
+                if !name.is_empty() && !desc.is_empty() {
+                    list.push(PackageInfo {
+                        name, version: "latest".into(), size: "—".into(),
+                        description: desc, arch: "all".into(), status: "available".into(),
+                    });
+                }
             }
         }
-        if !list.is_empty() {
-            return Ok(list);
+    }
+
+    if list.is_empty() {
+        return Err(format!("No packages found matching '{}'.", query));
+    }
+
+    Ok(list)
+}
+
+#[tauri::command]
+pub async fn package_install(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    name: String,
+) -> Result<String, String> {
+    if name.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')')) {
+        return Err("Invalid package name.".into());
+    }
+
+    let pm = detect_pkg_manager(&state, &conn_id).await;
+    let cmd = match pm.as_str() {
+        "apt"    => format!("DEBIAN_FRONTEND=noninteractive apt-get install -y '{}' 2>&1", name),
+        "dnf"    => format!("dnf install -y '{}' 2>&1", name),
+        "yum"    => format!("yum install -y '{}' 2>&1", name),
+        "pacman" => format!("pacman -S --noconfirm '{}' 2>&1", name),
+        _ => return Err("No supported package manager found.".into()),
+    };
+
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 && !stdout.is_empty() {
+        return Err(format!("Install failed: {}", stdout.trim()));
+    }
+
+    log::info!("CloudDesk: Installed package {}", name);
+    Ok(if !stdout.is_empty() { stdout } else { format!("Package '{}' installed successfully.", name) })
+}
+
+#[tauri::command]
+pub async fn package_remove(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    name: String,
+) -> Result<String, String> {
+    if name.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')')) {
+        return Err("Invalid package name.".into());
+    }
+
+    let pm = detect_pkg_manager(&state, &conn_id).await;
+    let cmd = match pm.as_str() {
+        "apt"    => format!("apt-get remove -y '{}' 2>&1", name),
+        "dnf"    => format!("dnf remove -y '{}' 2>&1", name),
+        "yum"    => format!("yum remove -y '{}' 2>&1", name),
+        "pacman" => format!("pacman -R --noconfirm '{}' 2>&1", name),
+        _ => return Err("No supported package manager found.".into()),
+    };
+
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 && !stdout.is_empty() {
+        return Err(format!("Remove failed: {}", stdout.trim()));
+    }
+
+    log::info!("CloudDesk: Removed package {}", name);
+    Ok(if !stdout.is_empty() { stdout } else { format!("Package '{}' removed successfully.", name) })
+}
+
+#[tauri::command]
+pub async fn package_update(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+) -> Result<String, String> {
+    let pm = detect_pkg_manager(&state, &conn_id).await;
+    let cmd = match pm.as_str() {
+        "apt"    => "apt-get update 2>&1",
+        "dnf"    => "dnf check-update 2>&1",
+        "yum"    => "yum check-update 2>&1",
+        "pacman" => "pacman -Sy 2>&1",
+        _ => return Err("No supported package manager found.".into()),
+    };
+
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+
+    // apt-get update exits 0 on success; dnf/yum check-update exits 100 if updates available
+    if !stdout.is_empty() {
+        return Ok(stdout);
+    }
+
+    Ok("Package repositories updated.".into())
+}
+
+#[tauri::command]
+pub async fn package_upgradable(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+) -> Result<Vec<PackageInfo>, String> {
+    let pm = detect_pkg_manager(&state, &conn_id).await;
+
+    let (stdout, code) = match pm.as_str() {
+        "apt" => run_cmd(
+            &state,
+            &conn_id,
+            "apt list --upgradable 2>/dev/null | tail -n +2",
+        ).await,
+        "dnf" => run_cmd(
+            &state,
+            &conn_id,
+            "dnf list updates 2>/dev/null | tail -n +2",
+        ).await,
+        "yum" => run_cmd(
+            &state,
+            &conn_id,
+            "yum list updates 2>/dev/null | tail -n +2",
+        ).await,
+        _ => return Ok(vec![]), // pacman: no easy list; return empty
+    };
+
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+
+    let mut list = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+
+        // apt format: "nginx/jammy-updates 1.26.1-1 amd64 [upgradable from: 1.24.0-2]"
+        // dnf format: "nginx.x86_64   1:1.26.1-1.el9   appstream"
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() { continue; }
+
+        let raw_name = parts[0];
+        let name = raw_name.split('/').next().unwrap_or(raw_name)
+            .split('.').next().unwrap_or(raw_name)
+            .to_string();
+        let version = parts.get(1).copied().unwrap_or("latest").to_string();
+
+        if !name.is_empty() {
+            list.push(PackageInfo {
+                name, version, size: "—".into(),
+                description: "Upgradable package".into(),
+                arch: "amd64".into(),
+                status: "upgradable".into(),
+            });
         }
     }
 
-    Ok(vec![
-        PackageInfo { name: "nginx".into(), version: "1.26.1-1".into(), size: "2.8 MB".into(), description: "small, powerful, scalable web server".into(), arch: "amd64".into(), status: "upgradable".into() },
-        PackageInfo { name: "docker-ce".into(), version: "5:27.3.1-1".into(), size: "96 MB".into(), description: "Docker engine".into(), arch: "amd64".into(), status: "upgradable".into() },
-    ])
+    Ok(list)
+}
+
+#[tauri::command]
+pub async fn package_detect_manager(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+) -> Result<String, String> {
+    Ok(detect_pkg_manager(&state, &conn_id).await)
 }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::AppState;
-use crate::ssh::exec::run_cmd;
+use crate::ssh::exec::{run_cmd, run_cmd_priv};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UserInfo {
@@ -21,144 +21,301 @@ pub struct GroupInfo {
 }
 
 #[tauri::command]
-pub async fn user_list(state: tauri::State<'_, AppState>, conn_id: String) -> Result<Vec<UserInfo>, String> {
-    let (stdout, code) = run_cmd(&state, &conn_id, "getent passwd").await;
-    if code == 0 && !stdout.is_empty() {
-        let mut list = Vec::new();
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() >= 7 {
-                let username = parts[0].to_string();
-                let uid = parts[2].parse::<u32>().unwrap_or(0);
-                let gid = parts[3].parse::<u32>().unwrap_or(0);
-                let home = parts[5].to_string();
-                let shell = parts[6].to_string();
-                let locked = shell.contains("nologin") || shell.contains("false");
+pub async fn user_list(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+) -> Result<Vec<UserInfo>, String> {
+    let (stdout, code) = run_cmd(&state, &conn_id, "getent passwd 2>/dev/null").await;
 
-                // Filter for human/service accounts with valid homes
-                if uid == 0 || uid >= 1000 || home.starts_with("/home") || home.starts_with("/var/lib") {
-                    list.push(UserInfo {
-                        username: username.clone(),
-                        uid,
-                        gid,
-                        home,
-                        shell,
-                        groups: vec![username],
-                        locked,
-                    });
-                }
+    if code == -1 && stdout.is_empty() {
+        return Err("No active SSH connection.".into());
+    }
+
+    // Also fetch locked status from /etc/shadow (requires root/sudo; graceful failure)
+    let (shadow_out, _) = run_cmd_priv(
+        &state,
+        &conn_id,
+        "getent shadow 2>/dev/null | awk -F: '{print $1,$2}'",
+    ).await;
+    let mut locked_users: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in shadow_out.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let hash = parts[1];
+            // Locked if hash starts with '!' or '*'
+            if hash.starts_with('!') || hash.starts_with('*') {
+                locked_users.insert(parts[0].to_string());
             }
-        }
-        if !list.is_empty() {
-            return Ok(list);
         }
     }
 
-    Ok(vec![
-        UserInfo { username: "root".into(), uid: 0, gid: 0, home: "/root".into(), shell: "/bin/bash".into(), groups: vec!["root".into()], locked: false },
-        UserInfo { username: "deploy".into(), uid: 1000, gid: 1000, home: "/home/deploy".into(), shell: "/bin/bash".into(), groups: vec!["deploy".into(), "sudo".into(), "docker".into()], locked: false },
-        UserInfo { username: "postgres".into(), uid: 102, gid: 103, home: "/var/lib/postgresql".into(), shell: "/bin/bash".into(), groups: vec!["postgres".into()], locked: false },
-        UserInfo { username: "nginx".into(), uid: 101, gid: 101, home: "/nonexistent".into(), shell: "/usr/sbin/nologin".into(), groups: vec!["nginx".into()], locked: true },
-        UserInfo { username: "ubuntu".into(), uid: 1001, gid: 1001, home: "/home/ubuntu".into(), shell: "/bin/bash".into(), groups: vec!["ubuntu".into(), "sudo".into()], locked: false },
-    ])
+    // Fetch group membership for all users
+    let (groups_out, _) = run_cmd(
+        &state,
+        &conn_id,
+        "for u in $(getent passwd | awk -F: '$3>=1000||$3==0{print $1}'); do echo \"$u:$(id -nG $u 2>/dev/null)\"; done",
+    ).await;
+    let mut user_groups: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for line in groups_out.lines() {
+        if let Some(colon) = line.find(':') {
+            let user = line[..colon].trim().to_string();
+            let groups: Vec<String> = line[colon + 1..]
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+            user_groups.insert(user, groups);
+        }
+    }
+
+    let mut list = Vec::new();
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 7 {
+            let username = parts[0].trim().to_string();
+            let uid = parts[2].parse::<u32>().unwrap_or(0);
+            let gid = parts[3].parse::<u32>().unwrap_or(0);
+            let home  = parts[5].trim().to_string();
+            let shell = parts[6].trim().to_string();
+            let locked = locked_users.contains(&username)
+                || shell.contains("nologin")
+                || shell.contains("/false");
+
+            // Include root (uid 0) and human users (uid >= 1000)
+            if uid == 0 || uid >= 1000 {
+                let groups = user_groups.get(&username)
+                    .cloned()
+                    .unwrap_or_else(|| vec![username.clone()]);
+                list.push(UserInfo { username, uid, gid, home, shell, groups, locked });
+            }
+        }
+    }
+
+    if list.is_empty() {
+        return Err("No user data returned from remote server.".into());
+    }
+
+    Ok(list)
 }
 
 #[tauri::command]
-pub async fn user_add(state: tauri::State<'_, AppState>, conn_id: String, username: String, _password: Option<String>, shell: Option<String>, groups: Option<Vec<String>>) -> Result<(), String> {
-    let sh = shell.unwrap_or_else(|| "/bin/bash".into());
-    let group_flag = if let Some(grp) = groups {
-        if !grp.is_empty() { format!("-G {}", grp.join(",")) } else { "".into() }
-    } else { "".into() };
+pub async fn user_add(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    username: String,
+    password: Option<String>,
+    shell: Option<String>,
+    groups: Option<Vec<String>>,
+) -> Result<(), String> {
+    // Validate username
+    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid username. Use only alphanumeric characters, hyphens, and underscores.".into());
+    }
 
-    let cmd = format!("useradd -m -s {} {} {}", sh, group_flag, username);
-    let (_stdout, _code) = run_cmd(&state, &conn_id, &cmd).await;
+    let sh = shell.unwrap_or_else(|| "/bin/bash".into());
+    let mut cmd = format!("useradd -m -s '{}' '{}'", sh, username);
+
+    if let Some(grps) = &groups {
+        if !grps.is_empty() {
+            cmd = format!("useradd -m -s '{}' -G '{}' '{}'", sh, grps.join(","), username);
+        }
+    }
+
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 && !stdout.is_empty() {
+        return Err(format!("useradd failed: {}", stdout.trim()));
+    }
+
+    // Set password if provided
+    if let Some(pwd) = &password {
+        if !pwd.is_empty() {
+            let escaped_pwd = pwd.replace('\'', r"'\''");
+            let pwd_cmd = format!("echo '{}:{}' | chpasswd 2>&1", username, escaped_pwd);
+            let (pwd_out, pwd_code) = run_cmd_priv(&state, &conn_id, &pwd_cmd).await;
+            if pwd_code != 0 && !pwd_out.is_empty() {
+                log::warn!("CloudDesk: chpasswd warning for {}: {}", username, pwd_out.trim());
+            }
+        }
+    }
+
     log::info!("CloudDesk: Added user {}", username);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn user_delete(state: tauri::State<'_, AppState>, conn_id: String, username: String, remove_home: bool) -> Result<(), String> {
+pub async fn user_delete(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    username: String,
+    remove_home: bool,
+) -> Result<(), String> {
+    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid username.".into());
+    }
+    // Protect critical system users
+    if matches!(username.as_str(), "root" | "daemon" | "bin" | "sys" | "sync") {
+        return Err(format!("Refusing to delete protected system user '{}'.", username));
+    }
+
     let flag = if remove_home { "-r" } else { "" };
-    let cmd = format!("userdel {} {}", flag, username);
-    let (_stdout, _code) = run_cmd(&state, &conn_id, &cmd).await;
+    let cmd = format!("userdel {} '{}' 2>&1", flag, username);
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 && !stdout.is_empty() {
+        return Err(format!("userdel failed: {}", stdout.trim()));
+    }
     log::info!("CloudDesk: Deleted user {}", username);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn user_modify(state: tauri::State<'_, AppState>, conn_id: String, username: String, shell: Option<String>, groups: Option<Vec<String>>) -> Result<(), String> {
-    if let Some(sh) = shell {
-        let _ = run_cmd(&state, &conn_id, &format!("usermod -s {} {}", sh, username)).await;
+pub async fn user_modify(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    username: String,
+    shell: Option<String>,
+    groups: Option<Vec<String>>,
+) -> Result<(), String> {
+    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid username.".into());
     }
-    if let Some(grp) = groups {
-        if !grp.is_empty() {
-            let _ = run_cmd(&state, &conn_id, &format!("usermod -aG {} {}", grp.join(","), username)).await;
+
+    if let Some(sh) = shell {
+        let (out, code) = run_cmd_priv(
+            &state,
+            &conn_id,
+            &format!("usermod -s '{}' '{}' 2>&1", sh, username),
+        ).await;
+        if code != 0 && code != -1 && !out.is_empty() {
+            return Err(format!("usermod shell change failed: {}", out.trim()));
         }
     }
+
+    if let Some(grps) = groups {
+        if !grps.is_empty() {
+            let (out, code) = run_cmd_priv(
+                &state,
+                &conn_id,
+                &format!("usermod -aG '{}' '{}' 2>&1", grps.join(","), username),
+            ).await;
+            if code != 0 && code != -1 && !out.is_empty() {
+                return Err(format!("usermod groups change failed: {}", out.trim()));
+            }
+        }
+    }
+
     log::info!("CloudDesk: Modified user {}", username);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn group_list(state: tauri::State<'_, AppState>, conn_id: String) -> Result<Vec<GroupInfo>, String> {
-    let (stdout, code) = run_cmd(&state, &conn_id, "getent group").await;
-    if code == 0 && !stdout.is_empty() {
-        let mut list = Vec::new();
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() >= 4 {
-                let name = parts[0].to_string();
-                let gid = parts[2].parse::<u32>().unwrap_or(0);
-                let members: Vec<String> = if !parts[3].is_empty() {
-                    parts[3].split(',').map(|s| s.to_string()).collect()
-                } else {
-                    vec![]
-                };
-                if gid == 0 || gid >= 1000 || name == "sudo" || name == "docker" {
-                    list.push(GroupInfo { name, gid, members });
-                }
+pub async fn group_list(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+) -> Result<Vec<GroupInfo>, String> {
+    let (stdout, code) = run_cmd(&state, &conn_id, "getent group 2>/dev/null").await;
+
+    if code == -1 && stdout.is_empty() {
+        return Err("No active SSH connection.".into());
+    }
+
+    let mut list = Vec::new();
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 4 {
+            let name = parts[0].trim().to_string();
+            let gid  = parts[2].parse::<u32>().unwrap_or(0);
+            let members: Vec<String> = if parts[3].is_empty() {
+                vec![]
+            } else {
+                parts[3].split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+            };
+
+            // Show root group, sudo/admin/wheel, docker, and all human groups (gid >= 1000)
+            if gid == 0 || gid >= 1000 || matches!(name.as_str(), "sudo" | "wheel" | "admin" | "docker" | "adm") {
+                list.push(GroupInfo { name, gid, members });
             }
         }
-        if !list.is_empty() {
-            return Ok(list);
-        }
     }
 
-    Ok(vec![
-        GroupInfo { name: "root".into(), gid: 0, members: vec!["root".into()] },
-        GroupInfo { name: "sudo".into(), gid: 27, members: vec!["deploy".into(), "ubuntu".into()] },
-        GroupInfo { name: "docker".into(), gid: 998, members: vec!["deploy".into()] },
-        GroupInfo { name: "deploy".into(), gid: 1000, members: vec!["deploy".into()] },
-        GroupInfo { name: "adm".into(), gid: 4, members: vec!["deploy".into()] },
-    ])
+    if list.is_empty() {
+        return Err("No group data returned from remote server.".into());
+    }
+
+    Ok(list)
 }
 
 #[tauri::command]
-pub async fn group_add(state: tauri::State<'_, AppState>, conn_id: String, name: String) -> Result<(), String> {
-    let _ = run_cmd(&state, &conn_id, &format!("groupadd {}", name)).await;
+pub async fn group_add(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    name: String,
+) -> Result<(), String> {
+    if name.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid group name.".into());
+    }
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &format!("groupadd '{}' 2>&1", name)).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 && !stdout.is_empty() {
+        return Err(format!("groupadd failed: {}", stdout.trim()));
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn group_delete(state: tauri::State<'_, AppState>, conn_id: String, name: String) -> Result<(), String> {
-    let _ = run_cmd(&state, &conn_id, &format!("groupdel {}", name)).await;
+pub async fn group_delete(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    name: String,
+) -> Result<(), String> {
+    if name.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid group name.".into());
+    }
+    if matches!(name.as_str(), "root" | "sudo" | "wheel" | "daemon") {
+        return Err(format!("Refusing to delete protected group '{}'.", name));
+    }
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &format!("groupdel '{}' 2>&1", name)).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 && !stdout.is_empty() {
+        return Err(format!("groupdel failed: {}", stdout.trim()));
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn who_is_logged_in(state: tauri::State<'_, AppState>, conn_id: String) -> Result<String, String> {
-    let (stdout, code) = run_cmd(&state, &conn_id, "who").await;
-    if code == 0 && !stdout.is_empty() {
+pub async fn who_is_logged_in(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+) -> Result<String, String> {
+    let (stdout, code) = run_cmd(&state, &conn_id, "who 2>/dev/null").await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if !stdout.is_empty() {
         return Ok(stdout);
     }
-    Ok("deploy   pts/0        2026-10-01 18:24 (192.168.1.100)\nroot     pts/1        2026-10-01 19:12 (10.0.0.15)\n".into())
+    Ok("(No active login sessions found)".into())
 }
 
 #[tauri::command]
-pub async fn last_logins(state: tauri::State<'_, AppState>, conn_id: String) -> Result<String, String> {
-    let (stdout, code) = run_cmd(&state, &conn_id, "last -n 8").await;
-    if code == 0 && !stdout.is_empty() {
+pub async fn last_logins(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+) -> Result<String, String> {
+    let (stdout, code) = run_cmd(&state, &conn_id, "last -n 20 2>/dev/null").await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if !stdout.is_empty() {
         return Ok(stdout);
     }
-    Ok("deploy   pts/0        192.168.1.100   Thu Oct  1 18:24   still logged in\nroot     pts/1        10.0.0.15       Thu Oct  1 19:12   still logged in\ndeploy   pts/0        192.168.1.100   Wed Sep 30 14:10 - 18:02  (03:52)\nreboot   system boot  6.8.0-45-generic Thu Sep  1 00:00   still running\n".into())
+    Ok("(No login history available)".into())
 }

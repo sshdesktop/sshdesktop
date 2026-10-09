@@ -34,13 +34,8 @@ pub async fn terminal_create(
 ) -> Result<String, String> {
     let term_id = terminal_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    // Find connection config
-    let conn_opt = {
-        let lock = state.connections.lock();
-        lock.get(&conn_id).cloned().or_else(|| lock.values().next().cloned())
-    };
-
-    let conn = match conn_opt {
+    // Find connection config (RAM, disk auto-restore, or fallback)
+    let conn = match crate::ssh::connection::resolve_connection(&state, &conn_id) {
         Some(c) => c,
         None => return Err(format!("Connection {} not found", conn_id)),
     };
@@ -59,6 +54,7 @@ pub async fn terminal_create(
     };
 
     // Prepare interactive command
+    let is_ppk = private_key.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
     let mut cmd = if password.is_some() && !password.as_ref().unwrap().is_empty() {
         let mut c = tokio::process::Command::new(plink_path);
         c.arg("-ssh")
@@ -71,6 +67,21 @@ pub async fn terminal_create(
             .arg(password.as_ref().unwrap())
             .arg(&host);
         c
+    } else if is_ppk {
+        let mut c = tokio::process::Command::new(plink_path);
+        c.arg("-ssh")
+            .arg("-t")
+            .arg("-P")
+            .arg(&port)
+            .arg("-l")
+            .arg(&user);
+        if let Some(ref k) = private_key {
+            if crate::ssh::connection::resolve_key_path(k).is_some() {
+                c.arg("-i").arg(k);
+            }
+        }
+        c.arg(&host);
+        c
     } else {
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-tt")
@@ -81,7 +92,7 @@ pub async fn terminal_create(
             .arg("-o")
             .arg("ConnectTimeout=10");
         if let Some(ref k) = private_key {
-            if !k.is_empty() {
+            if crate::ssh::connection::resolve_key_path(k).is_some() {
                 c.arg("-i").arg(k);
             }
         }
@@ -245,13 +256,9 @@ pub async fn terminal_close(
 pub async fn ssh_launch_putty(
     state: tauri::State<'_, AppState>,
     conn_id: String,
+    remote_dir: Option<String>,
 ) -> Result<(), String> {
-    let conn_opt = {
-        let lock = state.connections.lock();
-        lock.get(&conn_id).cloned().or_else(|| lock.values().next().cloned())
-    };
-
-    let conn = match conn_opt {
+    let conn = match crate::ssh::connection::resolve_connection(&state, &conn_id) {
         Some(c) => c,
         None => return Err(format!("Connection {} not found", conn_id)),
     };
@@ -272,6 +279,24 @@ pub async fn ssh_launch_putty(
     if let Some(ref pwd) = conn.config.password {
         if !pwd.is_empty() {
             cmd.arg("-pw").arg(pwd);
+        }
+    }
+
+    if let Some(ref key) = conn.config.private_key_path {
+        if !key.is_empty() {
+            cmd.arg("-i").arg(key);
+        }
+    }
+
+    // If remote directory specified, create startup script to cd to that location
+    if let Some(ref dir) = remote_dir {
+        if !dir.is_empty() && dir != "/" {
+            let temp_dir = std::env::temp_dir();
+            let script_file = temp_dir.join(format!("clouddesk_dir_{}.sh", uuid::Uuid::new_v4()));
+            let script_body = format!("cd '{}' 2>/dev/null || cd ~; exec $SHELL -l\n", dir.replace('\'', r"'\''"));
+            if std::fs::write(&script_file, script_body).is_ok() {
+                cmd.arg("-m").arg(&script_file);
+            }
         }
     }
 
