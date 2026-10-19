@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { WALLPAPERS } from '../../shell/Desktop';
 import { sshExec } from '../../lib/tauri-bridge';
+import { useWindowManager } from '../../lib/hooks/useWindowManager';
 
 const ACCENT_COLORS = [
   { name: 'Sapphire Blue', value: '#89B4FA' },
@@ -39,8 +40,9 @@ const COMMON_TIMEZONES = [
 export default function AppSettings() {
   const { 
     theme, updateSettings, terminalFontSize, accentColor, wallpaper, 
-    dockPosition, showHiddenFiles, pollingInterval 
+    dockPosition, showHiddenFiles, pollingInterval, autoHideDock 
   } = useSettingsStore();
+  const { openApp } = useWindowManager();
 
   const [activeTab, setActiveTab] = useState<
     'appearance' | 'wallpaper' | 'datetime' | 'terminal' | 'editor' | 'dock' | 'ssh' | 'about'
@@ -791,9 +793,22 @@ export default function AppSettings() {
                   </div>
                   <button
                     onClick={() => updateSettings({ showHiddenFiles: !showHiddenFiles })}
-                    className={`w-11 h-6 rounded-full transition-colors relative ${showHiddenFiles ? 'bg-blue-600' : 'bg-white/10'}`}
+                    className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${showHiddenFiles ? 'bg-blue-600' : 'bg-white/10'}`}
                   >
                     <span className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${showHiddenFiles ? 'left-5.5' : 'left-0.5'}`} />
+                  </button>
+                </div>
+
+                <div className="p-4 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">Auto-Hide Dock (Start Bar)</span>
+                    <span className="text-[11px] text-gray-400">Automatically hide dock until mouse hovers bottom edge</span>
+                  </div>
+                  <button
+                    onClick={() => updateSettings({ autoHideDock: !autoHideDock })}
+                    className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${autoHideDock ? 'bg-blue-600' : 'bg-white/10'}`}
+                  >
+                    <span className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${autoHideDock ? 'left-5.5' : 'left-0.5'}`} />
                   </button>
                 </div>
               </div>
@@ -821,11 +836,11 @@ export default function AppSettings() {
 
                 <div className="p-4 flex items-center justify-between">
                   <div>
-                    <span className="text-xs font-semibold text-white block">SSH Handshake Timeout</span>
-                    <span className="text-[11px] text-gray-400">Maximum wait time for SSH2 banner authentication</span>
+                    <span className="text-xs font-semibold text-white block">Default SSH Port</span>
+                    <span className="text-[11px] text-gray-400">Standard port for SSH server connections</span>
                   </div>
-                  <span className="text-xs font-mono text-gray-300 bg-[#12121e] px-3 py-1.5 rounded-xl border border-white/10">
-                    15 seconds
+                  <span className="text-xs font-mono font-bold text-gray-300 bg-[#12121e] px-3 py-1.5 rounded-xl border border-white/10">
+                    22
                   </span>
                 </div>
               </div>

@@ -1,12 +1,30 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { 
+import {
   HardDrive, Server, Layers, PieChart, Activity, Folder, RefreshCw,
   ShieldCheck, ShieldAlert, Wrench, AlertCircle, CheckCircle2, ChevronRight,
   Info, Database, Trash2, X, Play, Sparkles, Terminal, FileText,
-  Sliders, Search, ArrowUpRight, Zap, Check, RotateCw
+  Sliders, Search, ArrowUpRight, ArrowDownRight, Zap, Check, RotateCw, Plus, Disc,
+  Lock, Shield, Tag, Flag, AlertTriangle
 } from 'lucide-react';
-import { diskList, diskUsage, diskSmart, diskLargestDirs, sshExec } from '../../lib/tauri-bridge';
+import {
+  diskList, diskUsage, diskSmart, diskLargestDirs, sshExec,
+  BlockDeviceInfo, diskDeletePartition
+} from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
+
+// Subcomponents and Modals
+import DiskVisualizer from './components/DiskVisualizer';
+import DiskContextMenu, { ContextMenuTarget } from './components/DiskContextMenu';
+import FstabViewer from './components/FstabViewer';
+import MountModal from './modals/MountModal';
+import UnmountModal from './modals/UnmountModal';
+import FormatModal from './modals/FormatModal';
+import CreatePartitionModal from './modals/CreatePartitionModal';
+import PartitionTableModal from './modals/PartitionTableModal';
+import ResizePartitionModal from './modals/ResizePartitionModal';
+import PartitionFlagsModal from './modals/PartitionFlagsModal';
+import CheckFsModal from './modals/CheckFsModal';
+import SwapTmpManager from './components/SwapTmpManager';
 
 interface MountPoint {
   id: string;
@@ -23,15 +41,6 @@ interface MountPoint {
   isRoot: boolean;
 }
 
-interface BlockDevice {
-  name: string;
-  size: string;
-  type: string;
-  fstype: string;
-  mount: string;
-  children?: BlockDevice[];
-}
-
 interface DirSizeItem {
   path: string;
   size: string;
@@ -40,10 +49,27 @@ interface DirSizeItem {
 
 export default function DiskManager() {
   const [mounts, setMounts] = useState<MountPoint[]>([]);
-  const [devices, setDevices] = useState<BlockDevice[]>([]);
+  const [devices, setDevices] = useState<BlockDeviceInfo[]>([]);
+  const [selectedDiskName, setSelectedDiskName] = useState<string>('');
+  const [selectedPartition, setSelectedPartition] = useState<BlockDeviceInfo | null>(null);
   const [selectedMount, setSelectedMount] = useState<string>('/');
-  const [activeTab, setActiveTab] = useState<'overview' | 'partitions' | 'smart' | 'spacehogs'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'partitions' | 'swap_tmp' | 'fstab' | 'smart' | 'spacehogs'>('partitions');
   const [isLoading, setIsLoading] = useState(false);
+  const [statusToast, setStatusToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  // Context Menu State
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: ContextMenuTarget } | null>(null);
+
+  // Modal States
+  const [modalMount, setModalMount] = useState<{ partition: BlockDeviceInfo; isRemount?: boolean } | null>(null);
+  const [modalUnmount, setModalUnmount] = useState<BlockDeviceInfo | null>(null);
+  const [modalFormat, setModalFormat] = useState<BlockDeviceInfo | null>(null);
+  const [modalCreatePart, setModalCreatePart] = useState<BlockDeviceInfo | null>(null);
+  const [modalInitTable, setModalInitTable] = useState<BlockDeviceInfo | null>(null);
+  const [modalResizePart, setModalResizePart] = useState<{ partition: BlockDeviceInfo; diskDev: string; initialMode?: 'increase' | 'decrease' | 'custom' } | null>(null);
+  const [modalFlags, setModalFlags] = useState<{ partition: BlockDeviceInfo; diskDev: string } | null>(null);
+  const [modalCheckFs, setModalCheckFs] = useState<BlockDeviceInfo | null>(null);
+  const [modalDeleteConfirm, setModalDeleteConfirm] = useState<{ partition: BlockDeviceInfo; diskDev: string } | null>(null);
 
   // First Aid Modal State
   const [showFirstAid, setShowFirstAid] = useState(false);
@@ -56,7 +82,6 @@ export default function DiskManager() {
   const [spaceHogs, setSpaceHogs] = useState<DirSizeItem[]>([]);
   const [scanningHogs, setScanningHogs] = useState(false);
   const [cleanupActionRunning, setCleanupActionRunning] = useState<string | null>(null);
-  const [cleanupToast, setCleanupToast] = useState<string | null>(null);
 
   // SMART Diagnostics State
   const [smartData, setSmartData] = useState<{
@@ -70,10 +95,11 @@ export default function DiskManager() {
   const [loadingSmart, setLoadingSmart] = useState(false);
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
-  const activeServer = useConnectionStore(s => {
-    const id = s.activeConnectionId;
-    return id ? s.connections.find(c => c.id === id) : null;
-  });
+
+  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+    setStatusToast({ message, type });
+    setTimeout(() => setStatusToast(null), 4000);
+  };
 
   // Fetch disk usage & block devices
   const loadData = useCallback(async () => {
@@ -112,24 +138,35 @@ export default function DiskManager() {
       }
 
       if (d && Array.isArray(d)) {
-        setDevices(d.map((dev: any) => ({
-          name: dev.name,
-          size: dev.size,
-          type: dev.type_name || 'disk',
-          fstype: dev.fstype || 'ext4',
-          mount: dev.mountpoint || '—',
-        })));
+        // Disks list (filter main disk devices or display all)
+        const diskDevices = d.filter(item => item.type_name === 'disk' || !item.type_name.includes('loop'));
+        setDevices(diskDevices.length > 0 ? diskDevices : d);
+
+        // Auto select first disk if none selected
+        if ((!selectedDiskName || !diskDevices.some(dev => dev.name === selectedDiskName)) && diskDevices.length > 0) {
+          setSelectedDiskName(diskDevices[0].name);
+          if (diskDevices[0].children && diskDevices[0].children.length > 0) {
+            setSelectedPartition(diskDevices[0].children[0]);
+          } else {
+            setSelectedPartition(null);
+          }
+        }
       }
-    } catch (err) {
-      console.warn('Disk load fallback notice:', err);
+    } catch (err: any) {
+      console.warn('Disk load notice:', err);
     } finally {
       setIsLoading(false);
     }
-  }, [activeConnId, selectedMount]);
+  }, [activeConnId, selectedDiskName, selectedMount]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // Selected disk object
+  const currentDisk = useMemo(() => {
+    return devices.find(d => d.name === selectedDiskName) || devices[0];
+  }, [devices, selectedDiskName]);
 
   // Scan top largest directories
   const handleScanHogs = async () => {
@@ -158,11 +195,12 @@ export default function DiskManager() {
   };
 
   // Run SMART Diagnostics
-  const handleScanSmart = async () => {
+  const handleScanSmart = async (targetDevice?: BlockDeviceInfo) => {
     setLoadingSmart(true);
     try {
-      const devName = devices[0]?.name || 'sda';
-      const res = await sshExec(activeConnId, `sudo smartctl -H -A /dev/${devName} 2>/dev/null || smartctl -H -A /dev/${devName} 2>/dev/null || echo "UNKNOWN"`);
+      const devName = targetDevice?.name || currentDisk?.name || 'sda';
+      const cleanDev = devName.replace(/^\/dev\//, '');
+      const res = await sshExec(activeConnId, `sudo smartctl -H -A /dev/${cleanDev} 2>/dev/null || smartctl -H -A /dev/${cleanDev} 2>/dev/null || echo "UNKNOWN"`);
       const out = res.stdout || '';
       if (out.includes('PASSED') || out.includes('OK')) {
         const tempMatch = out.match(/Temperature_Celsius.*?(\d+)/i);
@@ -228,35 +266,52 @@ export default function DiskManager() {
     try {
       if (action === 'apt-clean') {
         await sshExec(activeConnId, 'sudo apt-get clean && sudo apt-get autoremove -y');
-        setCleanupToast('APT package cache cleaned successfully!');
+        showToast('APT package cache cleaned successfully!');
       } else if (action === 'docker-prune') {
         await sshExec(activeConnId, 'docker system prune -f 2>/dev/null || echo "Done"');
-        setCleanupToast('Unused Docker images & build cache pruned!');
+        showToast('Unused Docker images & build cache pruned!');
       } else if (action === 'vacuum-logs') {
         await sshExec(activeConnId, 'sudo journalctl --vacuum-size=100M 2>/dev/null || echo "Done"');
-        setCleanupToast('Journalctl logs vacuumed below 100MB!');
+        showToast('Journalctl logs vacuumed below 100MB!');
       }
       loadData();
       handleScanHogs();
     } catch (err: any) {
-      setCleanupToast(`Notice: ${err?.message || err}`);
+      showToast(`Notice: ${err?.message || err}`, 'error');
     } finally {
       setCleanupActionRunning(null);
-      setTimeout(() => setCleanupToast(null), 3500);
+    }
+  };
+
+  // Delete partition handler
+  const handleDeletePartition = async () => {
+    if (!modalDeleteConfirm) return;
+    const { partition, diskDev } = modalDeleteConfirm;
+    const partNumMatch = partition.name.match(/(\d+)$/);
+    const partNumber = partNumMatch ? parseInt(partNumMatch[1], 10) : 1;
+
+    try {
+      const res = await diskDeletePartition(
+        activeConnId,
+        diskDev,
+        partNumber,
+        partition.path || `/dev/${partition.name}`
+      );
+      showToast(res || `Deleted partition #${partNumber}`);
+      setModalDeleteConfirm(null);
+      loadData();
+    } catch (err: any) {
+      showToast(err?.message || String(err), 'error');
     }
   };
 
   const activeMount = mounts.find(m => m.mount === selectedMount) || mounts[0];
 
-  // Storage breakdown for the selected mount based on real df metrics
   const breakdown = useMemo(() => {
     if (!activeMount) return { used: 0, free: 100 };
     const usedPct = Math.min(100, Math.max(0, activeMount.percent));
     const freePct = Math.max(0, 100 - usedPct);
-    return {
-      used: usedPct,
-      free: freePct
-    };
+    return { used: usedPct, free: freePct };
   }, [activeMount]);
 
   return (
@@ -264,9 +319,62 @@ export default function DiskManager() {
       {(isLoading || scanningHogs || firstAidRunning) && (
         <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-blue-500 via-indigo-400 to-blue-500 animate-top-progress z-30 pointer-events-none" />
       )}
+
       {/* Top macOS Disk Utility Toolbar */}
-      <div className="h-12 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/10 px-4 flex items-center justify-between shrink-0">
-        <div className="flex items-center space-x-2">
+      <div className="h-12 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/10 px-4 flex items-center justify-between shrink-0 overflow-x-auto no-scrollbar gap-2">
+        <div className="flex items-center space-x-2 shrink-0">
+          {/* Partitions & Disks Manager */}
+          <button
+            onClick={() => setActiveTab('partitions')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
+              activeTab === 'partitions'
+                ? 'bg-blue-600 text-white border-blue-400/50 shadow'
+                : 'bg-white/5 hover:bg-white/10 text-gray-300 border-white/10'
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5 text-blue-400" />
+            <span>Partition Manager</span>
+          </button>
+
+          {/* Swap & /tmp Memory Tab */}
+          <button
+            onClick={() => setActiveTab('swap_tmp')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
+              activeTab === 'swap_tmp'
+                ? 'bg-blue-600 text-white border-blue-400/50 shadow'
+                : 'bg-white/5 hover:bg-white/10 text-gray-300 border-white/10'
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5 text-amber-400" />
+            <span>Swap & /tmp Memory</span>
+          </button>
+
+          {/* Mounts & Fstab Tab */}
+          <button
+            onClick={() => setActiveTab('fstab')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
+              activeTab === 'fstab'
+                ? 'bg-blue-600 text-white border-blue-400/50 shadow'
+                : 'bg-white/5 hover:bg-white/10 text-gray-300 border-white/10'
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5 text-purple-400" />
+            <span>Mounts & /etc/fstab</span>
+          </button>
+
+          {/* Volume Storage Overview */}
+          <button
+            onClick={() => setActiveTab('overview')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
+              activeTab === 'overview'
+                ? 'bg-blue-600 text-white border-blue-400/50 shadow'
+                : 'bg-white/5 hover:bg-white/10 text-gray-300 border-white/10'
+            }`}
+          >
+            <PieChart className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Volume Overview</span>
+          </button>
+
           {/* First Aid Button */}
           <button
             onClick={handleRunFirstAid}
@@ -278,51 +386,41 @@ export default function DiskManager() {
             <span>First Aid</span>
           </button>
 
-          {/* Partition Map Switcher */}
-          <button
-            onClick={() => setActiveTab('partitions')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
-              activeTab === 'partitions' 
-                ? 'bg-blue-600 text-white border-blue-400/50 shadow' 
-                : 'bg-white/5 hover:bg-white/10 text-gray-300 border-white/10'
-            }`}
-          >
-            <PieChart className="w-3.5 h-3.5 text-indigo-400" />
-            <span>Partition Map</span>
-          </button>
-
-          {/* Space Hogs Analyzer */}
-          <button
-            onClick={() => {
-              setActiveTab('spacehogs');
-              if (spaceHogs.length === 0) handleScanHogs();
-            }}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
-              activeTab === 'spacehogs' 
-                ? 'bg-blue-600 text-white border-blue-400/50 shadow' 
-                : 'bg-white/5 hover:bg-white/10 text-gray-300 border-white/10'
-            }`}
-          >
-            <Folder className="w-3.5 h-3.5 text-amber-400" />
-            <span>Clean Storage</span>
-          </button>
-
           {/* SMART Diagnostics */}
           <button
-            onClick={() => setActiveTab('smart')}
+            onClick={() => {
+              setActiveTab('smart');
+              if (!smartData) handleScanSmart();
+            }}
             className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
-              activeTab === 'smart' 
-                ? 'bg-blue-600 text-white border-blue-400/50 shadow' 
+              activeTab === 'smart'
+                ? 'bg-blue-600 text-white border-blue-400/50 shadow'
                 : 'bg-white/5 hover:bg-white/10 text-gray-300 border-white/10'
             }`}
           >
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
             <span>SMART Health</span>
           </button>
+
+          {/* Clean Storage */}
+          <button
+            onClick={() => {
+              setActiveTab('spacehogs');
+              if (spaceHogs.length === 0) handleScanHogs();
+            }}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
+              activeTab === 'spacehogs'
+                ? 'bg-blue-600 text-white border-blue-400/50 shadow'
+                : 'bg-white/5 hover:bg-white/10 text-gray-300 border-white/10'
+            }`}
+          >
+            <Folder className="w-3.5 h-3.5 text-amber-400" />
+            <span>Clean Storage</span>
+          </button>
         </div>
 
         {/* Right Info & Refresh */}
-        <div className="flex items-center space-x-2 text-xs">
+        <div className="flex items-center space-x-2 text-xs shrink-0">
           <button
             onClick={loadData}
             disabled={isLoading}
@@ -336,22 +434,34 @@ export default function DiskManager() {
 
       {/* Main 2-Pane Master Detail Layout */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar: Disks & Volumes Tree */}
+        {/* Left Sidebar: Disks & Mounts Tree */}
         <div className="w-64 border-r border-white/10 bg-[#12121a]/90 flex flex-col shrink-0 p-3 space-y-4 overflow-y-auto scrollbar-thin">
-          {/* Internal Disks Section */}
+          {/* Physical Disks Section */}
           <div>
-            <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-2 mb-1.5">
-              Internal Storage
+            <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-2 mb-1.5 flex items-center justify-between">
+              <span>Physical Disks ({devices.length})</span>
+              <span className="text-[9px] text-gray-500 font-normal">GPT / MBR</span>
             </div>
             <div className="space-y-1">
-              {mounts.map(m => {
-                const isSelected = selectedMount === m.mount;
+              {devices.map(d => {
+                const isSelected = selectedDiskName === d.name;
+                const partCount = d.children?.length || 0;
                 return (
                   <div
-                    key={m.id}
+                    key={d.name}
                     onClick={() => {
-                      setSelectedMount(m.mount);
-                      setActiveTab('overview');
+                      setSelectedDiskName(d.name);
+                      if (d.children && d.children.length > 0) {
+                        setSelectedPartition(d.children[0]);
+                      } else {
+                        setSelectedPartition(null);
+                      }
+                      if (activeTab === 'overview') setActiveTab('partitions');
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setSelectedDiskName(d.name);
+                      setContextMenu({ x: e.clientX, y: e.clientY, target: { type: 'disk', item: d } });
                     }}
                     className={`flex items-center justify-between px-2.5 py-2 rounded-xl cursor-pointer transition-all ${
                       isSelected
@@ -366,58 +476,361 @@ export default function DiskManager() {
                         <HardDrive className={`w-4 h-4 ${isSelected ? 'text-white' : 'text-blue-400'}`} />
                       </div>
                       <div className="truncate text-left">
-                        <div className="text-xs font-semibold truncate leading-tight">
-                          {m.isRoot ? 'Macintosh HD' : m.mount}
+                        <div className="text-xs font-semibold truncate leading-tight font-mono">
+                          {d.name}
                         </div>
                         <div className={`text-[10px] truncate ${isSelected ? 'text-blue-100' : 'text-gray-400'}`}>
-                          {m.type} • {m.size}
+                          {d.size} • {d.pttype ? d.pttype.toUpperCase() : 'Disk'}
                         </div>
                       </div>
                     </div>
 
-                    <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${
-                      isSelected ? 'bg-white/20 text-white' : 'bg-white/5 text-gray-400'
-                    }`}>
-                      {m.percent}%
-                    </span>
+                    <div className="flex items-center space-x-1">
+                      {d.is_system && (
+                        <span title="OS System Disk" className="p-0.5 rounded bg-rose-500/30 text-rose-300">
+                          <Shield className="w-3 h-3 text-rose-300" />
+                        </span>
+                      )}
+                      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${
+                        isSelected ? 'bg-white/20 text-white' : 'bg-white/5 text-gray-400'
+                      }`}>
+                        {partCount}
+                      </span>
+                    </div>
                   </div>
                 );
               })}
             </div>
           </div>
 
-          {/* Physical Block Devices (lsblk) */}
-          {devices.length > 0 && (
-            <div>
-              <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-2 mb-1.5">
-                Physical Devices ({devices.length})
-              </div>
-              <div className="space-y-1">
-                {devices.map(d => (
-                  <div
-                    key={d.name}
-                    className="flex items-center space-x-2 px-2.5 py-1.5 rounded-lg text-gray-400 text-xs font-mono hover:text-white hover:bg-white/5 transition-colors"
-                  >
-                    <Layers className="w-3.5 h-3.5 text-gray-500 shrink-0" />
-                    <span className="truncate">{d.name}</span>
-                    <span className="text-[10px] text-gray-500">({d.size})</span>
-                  </div>
-                ))}
-              </div>
+          {/* Mounted Volumes Section */}
+          <div>
+            <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-2 mb-1.5">
+              Active Mount Points ({mounts.length})
             </div>
-          )}
+            <div className="space-y-1">
+              {mounts.map(m => {
+                const isSelected = selectedMount === m.mount;
+                return (
+                  <div
+                    key={m.id}
+                    onClick={() => {
+                      setSelectedMount(m.mount);
+                      setActiveTab('overview');
+                    }}
+                    className={`flex items-center justify-between px-2.5 py-1.5 rounded-xl cursor-pointer transition-all ${
+                      isSelected && activeTab === 'overview'
+                        ? 'bg-blue-600 text-white font-medium shadow-md'
+                        : 'hover:bg-white/5 text-gray-300 hover:text-white'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-2 truncate">
+                      <Folder className={`w-3.5 h-3.5 shrink-0 ${isSelected && activeTab === 'overview' ? 'text-white' : 'text-blue-400'}`} />
+                      <span className="text-xs truncate font-mono">{m.mount}</span>
+                    </div>
+                    <span className="text-[10px] font-mono text-gray-400">{m.size}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </div>
 
         {/* Right Detail Pane */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {/* Action Toasts */}
-          {cleanupToast && (
-            <div className="p-3 bg-emerald-500/20 border border-emerald-500/40 rounded-2xl text-xs text-emerald-300 flex items-center space-x-2 animate-in fade-in duration-200">
-              <Check className="w-4 h-4 text-emerald-400 shrink-0" />
-              <span>{cleanupToast}</span>
+          {statusToast && (
+            <div className={`p-3 rounded-2xl text-xs flex items-center space-x-2 animate-in fade-in duration-200 ${
+              statusToast.type === 'error'
+                ? 'bg-rose-500/20 border border-rose-500/40 text-rose-300'
+                : 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300'
+            }`}>
+              {statusToast.type === 'error' ? (
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              ) : (
+                <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+              )}
+              <span>{statusToast.message}</span>
             </div>
           )}
 
+          {/* ========================================================= */}
+          {/* TAB: PARTITIONS MANAGER (GParted Style)                    */}
+          {/* ========================================================= */}
+          {activeTab === 'partitions' && currentDisk && (
+            <div className="space-y-6 animate-in fade-in duration-200">
+              {/* Graphical Partition Bar */}
+              <DiskVisualizer
+                disk={currentDisk}
+                selectedPartition={selectedPartition}
+                onSelectPartition={(p) => setSelectedPartition(p)}
+                onCreatePartitionClick={() => setModalCreatePart(currentDisk)}
+                onContextMenu={(e, target) => {
+                  setContextMenu({ x: e.clientX, y: e.clientY, target });
+                }}
+              />
+
+              {/* Action Toolbar */}
+              <div className="bg-[#1e1e2e]/80 border border-white/10 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 shadow-lg">
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Create Partition */}
+                  <button
+                    onClick={() => setModalCreatePart(currentDisk)}
+                    className="flex items-center space-x-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md active:scale-95 transition-all"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>New Partition</span>
+                  </button>
+
+                  {/* Init Table (GPT / MBR) */}
+                  <button
+                    onClick={() => setModalInitTable(currentDisk)}
+                    className="flex items-center space-x-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 text-amber-300 border border-amber-500/30 rounded-xl text-xs font-semibold active:scale-95 transition-all"
+                    title="Initialize GPT or MBR partition table"
+                  >
+                    <Disc className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Partition Table (GPT/MBR)</span>
+                  </button>
+
+                  {/* Partition specific buttons */}
+                  {selectedPartition && (
+                    <>
+                      {/* Mount / Unmount */}
+                      {!selectedPartition.mountpoint || selectedPartition.mountpoint === '—' ? (
+                        <button
+                          onClick={() => setModalMount({ partition: selectedPartition })}
+                          className="flex items-center space-x-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-md active:scale-95 transition-all"
+                        >
+                          <ArrowUpRight className="w-3.5 h-3.5" />
+                          <span>Mount</span>
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => setModalUnmount(selectedPartition)}
+                          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30"
+                          title="Unmount partition"
+                        >
+                          <Sliders className="w-3.5 h-3.5" />
+                          <span>Unmount</span>
+                        </button>
+                      )}
+
+                      {/* Format */}
+                      <button
+                        onClick={() => setModalFormat(selectedPartition)}
+                        className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all bg-white/5 hover:bg-white/10 text-indigo-300 border border-indigo-500/30"
+                        title="Format filesystem"
+                      >
+                        <Disc className="w-3.5 h-3.5 text-indigo-400" />
+                        <span>Format</span>
+                      </button>
+
+                      {/* Increase Partition */}
+                      <button
+                        onClick={() => {
+                          setModalResizePart({ partition: selectedPartition, diskDev: currentDisk.path || `/dev/${currentDisk.name}`, initialMode: 'increase' });
+                        }}
+                        className="flex items-center space-x-1.5 px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/25 rounded-xl text-xs font-medium transition-colors"
+                        title="Increase (expand) partition size"
+                      >
+                        <ArrowUpRight className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Increase</span>
+                      </button>
+
+                      {/* Decrease Partition */}
+                      <button
+                        onClick={() => {
+                          setModalResizePart({ partition: selectedPartition, diskDev: currentDisk.path || `/dev/${currentDisk.name}`, initialMode: 'decrease' });
+                        }}
+                        className="flex items-center space-x-1.5 px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/25 rounded-xl text-xs font-medium transition-colors"
+                        title="Decrease (shrink) partition size"
+                      >
+                        <ArrowDownRight className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Decrease</span>
+                      </button>
+
+                      {/* Resize Custom */}
+                      <button
+                        onClick={() => {
+                          setModalResizePart({ partition: selectedPartition, diskDev: currentDisk.path || `/dev/${currentDisk.name}`, initialMode: 'custom' });
+                        }}
+                        className="flex items-center space-x-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 text-gray-300 border border-white/10 rounded-xl text-xs font-medium transition-colors"
+                        title="Custom resize boundary"
+                      >
+                        <Sliders className="w-3.5 h-3.5 text-gray-400" />
+                        <span>Resize</span>
+                      </button>
+
+                      {/* Check & Repair */}
+                      <button
+                        onClick={() => setModalCheckFs(selectedPartition)}
+                        className="flex items-center space-x-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 text-emerald-300 border border-emerald-500/20 rounded-xl text-xs font-medium transition-colors"
+                      >
+                        <Wrench className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Check (fsck)</span>
+                      </button>
+
+                      {/* Label & Flags */}
+                      <button
+                        onClick={() => setModalFlags({ partition: selectedPartition, diskDev: currentDisk.path || `/dev/${currentDisk.name}` })}
+                        className="flex items-center space-x-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 text-yellow-300 border border-yellow-500/20 rounded-xl text-xs font-medium transition-colors"
+                      >
+                        <Flag className="w-3.5 h-3.5 text-yellow-400" />
+                        <span>Flags / Label</span>
+                      </button>
+
+                      {/* Delete Partition */}
+                      <button
+                        onClick={() => {
+                          setModalDeleteConfirm({ partition: selectedPartition, diskDev: currentDisk.path || `/dev/${currentDisk.name}` });
+                        }}
+                        className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30"
+                        title="Delete partition"
+                      >
+                        <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                        <span>Delete</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                <div className="text-xs text-gray-400 font-mono">
+                  {selectedPartition ? (
+                    <span>Target: <strong className="text-white">{selectedPartition.path || selectedPartition.name}</strong></span>
+                  ) : (
+                    <span>Select a partition to view actions</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Partitions Table */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl overflow-hidden shadow-xl">
+                <table className="w-full text-left text-xs font-mono">
+                  <thead className="bg-black/30 text-gray-400 border-b border-white/10 font-sans">
+                    <tr>
+                      <th className="py-3 px-4">Partition Device</th>
+                      <th className="py-3 px-4">Filesystem</th>
+                      <th className="py-3 px-4">Size</th>
+                      <th className="py-3 px-4">Label</th>
+                      <th className="py-3 px-4">Mount Point</th>
+                      <th className="py-3 px-4">UUID</th>
+                      <th className="py-3 px-4 text-right">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {(!currentDisk.children || currentDisk.children.length === 0) ? (
+                      <tr>
+                        <td colSpan={7} className="py-12 text-center text-gray-500 font-sans text-xs">
+                          No partitions configured on this disk. Click "New Partition" or "Initialize Table (GPT/MBR)" to get started.
+                        </td>
+                      </tr>
+                    ) : (
+                      currentDisk.children.map(part => {
+                        const isSelected = selectedPartition?.name === part.name;
+                        const isMounted = !!part.mountpoint && part.mountpoint !== '—';
+
+                        return (
+                          <tr
+                            key={part.name}
+                            onClick={() => setSelectedPartition(part)}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              setSelectedPartition(part);
+                              setContextMenu({ x: e.clientX, y: e.clientY, target: { type: 'partition', item: part } });
+                            }}
+                            className={`cursor-pointer transition-colors ${
+                              isSelected ? 'bg-blue-600/15 font-semibold' : 'hover:bg-white/[0.03]'
+                            }`}
+                          >
+                            <td className="py-3 px-4 text-white flex items-center space-x-2">
+                              <Layers className={`w-3.5 h-3.5 ${isSelected ? 'text-blue-400' : 'text-gray-400'}`} />
+                              <span>{part.path || `/dev/${part.name}`}</span>
+                            </td>
+                            <td className="py-3 px-4 uppercase text-purple-300 font-bold text-[11px]">
+                              {part.fstype || '—'}
+                            </td>
+                            <td className="py-3 px-4 text-gray-200">{part.size}</td>
+                            <td className="py-3 px-4 text-teal-300 text-[11px] truncate max-w-[120px]">
+                              {part.label || '—'}
+                            </td>
+                            <td className="py-3 px-4 text-blue-300 truncate max-w-[150px]">
+                              {part.mountpoint || '—'}
+                            </td>
+                            <td className="py-3 px-4 text-gray-500 text-[10px] truncate max-w-[140px]" title={part.uuid}>
+                              {part.uuid || '—'}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              {isMounted ? (
+                                <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[10px] font-sans font-medium inline-flex items-center space-x-1">
+                                  <Check className="w-2.5 h-2.5" />
+                                  <span>Mounted</span>
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-full bg-white/5 text-gray-400 text-[10px] font-sans font-medium">
+                                  Unmounted
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB: SWAP & TMP SPACE MANAGEMENT                           */}
+          {/* ========================================================= */}
+          {activeTab === 'swap_tmp' && (
+            <SwapTmpManager
+              connId={activeConnId}
+              onNotify={showToast}
+            />
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB: FSTAB & PERSISTENT MOUNT TABLE                        */}
+          {/* ========================================================= */}
+          {activeTab === 'fstab' && (
+            <FstabViewer
+              connId={activeConnId}
+              onMountClick={() => {
+                if (selectedPartition) {
+                  setModalMount({ partition: selectedPartition });
+                } else if (currentDisk?.children && currentDisk.children.length > 0) {
+                  setModalMount({ partition: currentDisk.children[0] });
+                } else {
+                  showToast('Please select a partition first to mount.', 'error');
+                }
+              }}
+              onRemountClick={(entry) => {
+                // Find matching partition
+                const matched = currentDisk?.children?.find(p => (p.path || `/dev/${p.name}`) === entry.spec || p.mountpoint === entry.file);
+                if (matched) {
+                  setModalMount({ partition: matched, isRemount: true });
+                } else {
+                  setModalMount({
+                    partition: {
+                      name: entry.file,
+                      path: entry.spec,
+                      size: '—',
+                      type_name: 'part',
+                      mountpoint: entry.file,
+                      fstype: entry.vfstype,
+                    },
+                    isRemount: true
+                  });
+                }
+              }}
+            />
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB: OVERVIEW (macOS Disk Utility Hero View)              */}
+          {/* ========================================================= */}
           {activeTab === 'overview' && activeMount && (
             <div className="space-y-6 animate-in fade-in duration-200">
               {/* Hero Volume Card */}
@@ -436,7 +849,7 @@ export default function DiskManager() {
                     <div className="flex items-center space-x-2 mt-2">
                       <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[10px] font-semibold flex items-center space-x-1">
                         <Check className="w-3 h-3" />
-                        <span>SMART Status: Verified</span>
+                        <span>Status: Verified & Online</span>
                       </span>
                       <span className="px-2 py-0.5 rounded-full bg-blue-500/15 border border-blue-500/30 text-blue-300 text-[10px] font-mono">
                         Mount: {activeMount.mount}
@@ -455,20 +868,18 @@ export default function DiskManager() {
                 </div>
               </div>
 
-              {/* macOS Storage Breakdown Bar */}
+              {/* Storage Allocation Bar */}
               <div className="bg-[#1e1e2e]/80 border border-white/10 rounded-3xl p-5 shadow-xl space-y-4">
                 <div className="flex items-center justify-between text-xs font-semibold text-white">
                   <span>Storage Allocation</span>
                   <span className="font-mono text-gray-400">{activeMount.percent}% Used</span>
                 </div>
 
-                {/* Capacity Bar */}
                 <div className="w-full h-4 bg-white/10 rounded-full overflow-hidden flex shadow-inner">
-                  <div style={{ width: `${breakdown.used}%` }} className="bg-gradient-to-r from-blue-600 to-indigo-500 h-full transition-all duration-500" title={`Used Space: ${activeMount.used}`} />
-                  <div style={{ width: `${breakdown.free}%` }} className="bg-white/10 h-full transition-all duration-500" title={`Available: ${activeMount.avail}`} />
+                  <div style={{ width: `${breakdown.used}%` }} className="bg-gradient-to-r from-blue-600 to-indigo-500 h-full transition-all duration-500" />
+                  <div style={{ width: `${breakdown.free}%` }} className="bg-white/10 h-full transition-all duration-500" />
                 </div>
 
-                {/* Legend Pills */}
                 <div className="grid grid-cols-2 gap-4 pt-2 text-xs">
                   <div className="flex items-center space-x-2.5 bg-white/[0.02] p-2 rounded-xl border border-white/5">
                     <span className="w-3 h-3 rounded-full bg-blue-500 shrink-0" />
@@ -486,112 +897,18 @@ export default function DiskManager() {
                   </div>
                 </div>
               </div>
-
-              {/* Hardware & Mount Technical Specs Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                <div className="bg-[#1e1e2e]/80 border border-white/10 rounded-2xl p-4 space-y-2.5">
-                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Mount Properties</div>
-                  <div className="flex justify-between py-1 border-b border-white/5">
-                    <span className="text-gray-400">Mount Point:</span>
-                    <span className="font-mono text-white">{activeMount.mount}</span>
-                  </div>
-                  <div className="flex justify-between py-1 border-b border-white/5">
-                    <span className="text-gray-400">File System:</span>
-                    <span className="font-mono text-purple-300">{activeMount.type}</span>
-                  </div>
-                  <div className="flex justify-between py-1 border-b border-white/5">
-                    <span className="text-gray-400">Physical Source:</span>
-                    <span className="font-mono text-blue-300 truncate max-w-[180px]">{activeMount.fs}</span>
-                  </div>
-                  <div className="flex justify-between py-1">
-                    <span className="text-gray-400">Access Mode:</span>
-                    <span className="text-emerald-400 font-semibold">Read / Write (rw)</span>
-                  </div>
-                </div>
-
-                <div className="bg-[#1e1e2e]/80 border border-white/10 rounded-2xl p-4 space-y-2.5">
-                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Volume Integrity</div>
-                  <div className="flex justify-between py-1 border-b border-white/5">
-                    <span className="text-gray-400">Connection State:</span>
-                    <span className="text-emerald-400 font-medium">Online & Mounted</span>
-                  </div>
-                  <div className="flex justify-between py-1 border-b border-white/5">
-                    <span className="text-gray-400">Write Cache:</span>
-                    <span className="text-white font-mono">Write-Back Enabled</span>
-                  </div>
-                  <div className="flex justify-between py-1 border-b border-white/5">
-                    <span className="text-gray-400">TRIM Optimization:</span>
-                    <span className="text-blue-300 font-mono">Supported (fstrim)</span>
-                  </div>
-                  <div className="flex justify-between py-1">
-                    <span className="text-gray-400">First Aid Status:</span>
-                    <span className="text-emerald-400 font-semibold">Passed Checks</span>
-                  </div>
-                </div>
-              </div>
             </div>
           )}
 
-          {/* Partitions & Devices Tab */}
-          {activeTab === 'partitions' && (
-            <div className="space-y-4 animate-in fade-in duration-200">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-base font-bold text-white">Physical Storage Devices & Partitions</h3>
-                  <p className="text-xs text-gray-400">Block devices queried directly via Linux kernel /sys/block & lsblk</p>
-                </div>
-                <button
-                  onClick={loadData}
-                  className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-medium flex items-center space-x-1.5 transition-colors"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Rescan Disks</span>
-                </button>
-              </div>
-
-              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl overflow-hidden shadow-xl">
-                <table className="w-full text-left text-xs font-mono">
-                  <thead className="bg-black/30 text-gray-400 border-b border-white/10 font-sans">
-                    <tr>
-                      <th className="py-3 px-4">Device</th>
-                      <th className="py-3 px-4">Type</th>
-                      <th className="py-3 px-4">Size</th>
-                      <th className="py-3 px-4">Filesystem</th>
-                      <th className="py-3 px-4">Mountpoint</th>
-                      <th className="py-3 px-4 text-right">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/5">
-                    {devices.map(d => (
-                      <tr key={d.name} className="hover:bg-white/[0.03] transition-colors">
-                        <td className="py-3 px-4 font-bold text-white flex items-center space-x-2">
-                          <HardDrive className="w-4 h-4 text-blue-400" />
-                          <span>{d.name}</span>
-                        </td>
-                        <td className="py-3 px-4 uppercase text-[10px] text-gray-400">{d.type}</td>
-                        <td className="py-3 px-4 text-gray-300">{d.size}</td>
-                        <td className="py-3 px-4 text-purple-400">{d.fstype}</td>
-                        <td className="py-3 px-4 text-gray-400">{d.mount}</td>
-                        <td className="py-3 px-4 text-right">
-                          <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 text-[10px] font-sans font-medium">
-                            Active
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {/* SMART Health Diagnostics Tab */}
+          {/* ========================================================= */}
+          {/* TAB: SMART HEALTH DIAGNOSTICS                             */}
+          {/* ========================================================= */}
           {activeTab === 'smart' && (
             <div className="space-y-4 animate-in fade-in duration-200">
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-base font-bold text-white">S.M.A.R.T. Drive Health & Diagnostics</h3>
-                  <p className="text-xs text-gray-400">Self-Monitoring, Analysis and Reporting Technology indicators</p>
+                  <p className="text-xs text-gray-400">Self-Monitoring, Analysis and Reporting Technology indicators for {currentDisk?.name || 'Drive'}</p>
                 </div>
                 {smartData && (
                   <div className="flex items-center space-x-1.5 px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
@@ -609,7 +926,7 @@ export default function DiskManager() {
                   <div className="text-gray-300 font-medium text-sm">No S.M.A.R.T. Telemetry Queried</div>
                   <p className="text-xs text-gray-500 max-w-sm">Query Linux kernel smartctl to evaluate disk health, temperature, and reallocated bad block sectors.</p>
                   <button
-                    onClick={handleScanSmart}
+                    onClick={() => handleScanSmart(currentDisk)}
                     disabled={loadingSmart}
                     className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 shadow-md active:scale-95 transition-all"
                   >
@@ -618,33 +935,44 @@ export default function DiskManager() {
                   </button>
                 </div>
               ) : (
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-                  <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 text-center space-y-1">
-                    <div className="text-gray-400 text-[10px]">Drive Temperature</div>
-                    <div className="text-2xl font-bold text-white font-mono">{smartData.temperature}</div>
-                    <div className="text-[10px] text-emerald-400 font-medium">Nominal Operating Range</div>
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                    <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 text-center space-y-1">
+                      <div className="text-gray-400 text-[10px]">Drive Temperature</div>
+                      <div className="text-2xl font-bold text-white font-mono">{smartData.temperature}</div>
+                      <div className="text-[10px] text-emerald-400 font-medium">Nominal Operating Range</div>
+                    </div>
+                    <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 text-center space-y-1">
+                      <div className="text-gray-400 text-[10px]">Drive Health Score</div>
+                      <div className="text-2xl font-bold text-emerald-400 font-mono">{smartData.healthPct}%</div>
+                      <div className="text-[10px] text-gray-400 font-medium">Hardware Integrity</div>
+                    </div>
+                    <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 text-center space-y-1">
+                      <div className="text-gray-400 text-[10px]">Reallocated Sectors</div>
+                      <div className="text-2xl font-bold text-white font-mono">{smartData.reallocatedSectors}</div>
+                      <div className="text-[10px] text-emerald-400 font-medium">0 Bad Blocks Detected</div>
+                    </div>
+                    <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 text-center space-y-1">
+                      <div className="text-gray-400 text-[10px]">Power On Lifetime</div>
+                      <div className="text-2xl font-bold text-white font-mono">{smartData.powerOnHours}</div>
+                      <div className="text-[10px] text-gray-400 font-medium">Continuous Run Duration</div>
+                    </div>
                   </div>
-                  <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 text-center space-y-1">
-                    <div className="text-gray-400 text-[10px]">Drive Health Score</div>
-                    <div className="text-2xl font-bold text-emerald-400 font-mono">{smartData.healthPct}%</div>
-                    <div className="text-[10px] text-gray-400 font-medium">Hardware Integrity</div>
-                  </div>
-                  <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 text-center space-y-1">
-                    <div className="text-gray-400 text-[10px]">Reallocated Sectors</div>
-                    <div className="text-2xl font-bold text-white font-mono">{smartData.reallocatedSectors}</div>
-                    <div className="text-[10px] text-emerald-400 font-medium">0 Bad Blocks Detected</div>
-                  </div>
-                  <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 text-center space-y-1">
-                    <div className="text-gray-400 text-[10px]">Power On Lifetime</div>
-                    <div className="text-2xl font-bold text-white font-mono">{smartData.powerOnHours}</div>
-                    <div className="text-[10px] text-gray-400 font-medium">Continuous Run Duration</div>
-                  </div>
+
+                  {/* Raw Output Preview */}
+                  {smartData.rawText && (
+                    <div className="bg-black/50 border border-white/10 rounded-2xl p-4 font-mono text-[11px] text-gray-400 max-h-56 overflow-y-auto">
+                      <pre className="whitespace-pre-wrap">{smartData.rawText}</pre>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           )}
 
-          {/* Space Hogs & Storage Clean Tab */}
+          {/* ========================================================= */}
+          {/* TAB: STORAGE CLEAN & SPACE HOGS                           */}
+          {/* ========================================================= */}
           {activeTab === 'spacehogs' && (
             <div className="space-y-4 animate-in fade-in duration-200">
               <div className="flex items-center justify-between">
@@ -740,6 +1068,185 @@ export default function DiskManager() {
           )}
         </div>
       </div>
+
+      {/* ========================================================= */}
+      {/* CONTEXT MENU                                              */}
+      {/* ========================================================= */}
+      {contextMenu && (
+        <DiskContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          target={contextMenu.target}
+          onClose={() => setContextMenu(null)}
+          onMount={(part) => setModalMount({ partition: part })}
+          onUnmount={(part) => setModalUnmount(part)}
+          onRemount={(part) => setModalMount({ partition: part, isRemount: true })}
+          onCreatePartition={(disk) => setModalCreatePart(disk)}
+          onDeletePartition={(part) => {
+            const diskDev = currentDisk?.path || `/dev/${currentDisk?.name}`;
+            setModalDeleteConfirm({ partition: part, diskDev });
+          }}
+          onFormat={(part) => setModalFormat(part)}
+          onInitPartitionTable={(disk) => setModalInitTable(disk)}
+          onResize={(part, mode) => {
+            const diskDev = currentDisk?.path || `/dev/${currentDisk?.name}`;
+            setModalResizePart({ partition: part, diskDev, initialMode: mode || 'increase' });
+          }}
+          onSetLabel={(part) => {
+            const diskDev = currentDisk?.path || `/dev/${currentDisk?.name}`;
+            setModalFlags({ partition: part, diskDev });
+          }}
+          onSetFlags={(part) => {
+            const diskDev = currentDisk?.path || `/dev/${currentDisk?.name}`;
+            setModalFlags({ partition: part, diskDev });
+          }}
+          onCheckFs={(part) => setModalCheckFs(part)}
+          onSmartHealth={(dev) => {
+            setActiveTab('smart');
+            handleScanSmart(dev);
+          }}
+        />
+      )}
+
+      {/* ========================================================= */}
+      {/* MODALS                                                    */}
+      {/* ========================================================= */}
+      {modalMount && (
+        <MountModal
+          partition={modalMount.partition}
+          isRemount={modalMount.isRemount}
+          connId={activeConnId}
+          onClose={() => setModalMount(null)}
+          onSuccess={(msg) => {
+            showToast(msg);
+            loadData();
+          }}
+        />
+      )}
+
+      {modalUnmount && (
+        <UnmountModal
+          partition={modalUnmount}
+          connId={activeConnId}
+          onClose={() => setModalUnmount(null)}
+          onSuccess={(msg) => {
+            showToast(msg);
+            loadData();
+          }}
+        />
+      )}
+
+      {modalFormat && (
+        <FormatModal
+          partition={modalFormat}
+          connId={activeConnId}
+          onClose={() => setModalFormat(null)}
+          onSuccess={(msg) => {
+            showToast(msg);
+            loadData();
+          }}
+        />
+      )}
+
+      {modalCreatePart && (
+        <CreatePartitionModal
+          disk={modalCreatePart}
+          connId={activeConnId}
+          onClose={() => setModalCreatePart(null)}
+          onSuccess={(msg) => {
+            showToast(msg);
+            loadData();
+          }}
+        />
+      )}
+
+      {modalInitTable && (
+        <PartitionTableModal
+          disk={modalInitTable}
+          connId={activeConnId}
+          onClose={() => setModalInitTable(null)}
+          onSuccess={(msg) => {
+            showToast(msg);
+            loadData();
+          }}
+        />
+      )}
+
+      {modalResizePart && (
+        <ResizePartitionModal
+          partition={modalResizePart.partition}
+          diskDev={modalResizePart.diskDev}
+          connId={activeConnId}
+          initialMode={modalResizePart.initialMode}
+          onClose={() => setModalResizePart(null)}
+          onSuccess={(msg) => {
+            showToast(msg);
+            loadData();
+          }}
+        />
+      )}
+
+      {modalFlags && (
+        <PartitionFlagsModal
+          partition={modalFlags.partition}
+          diskDev={modalFlags.diskDev}
+          connId={activeConnId}
+          onClose={() => setModalFlags(null)}
+          onSuccess={(msg) => {
+            showToast(msg);
+            loadData();
+          }}
+        />
+      )}
+
+      {modalCheckFs && (
+        <CheckFsModal
+          partition={modalCheckFs}
+          connId={activeConnId}
+          onClose={() => setModalCheckFs(null)}
+        />
+      )}
+
+      {/* Delete Partition Confirmation Modal */}
+      {modalDeleteConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-[#181825]/95 border border-white/20 rounded-3xl max-w-md w-full shadow-2xl p-6 space-y-4">
+            <div className="flex items-center space-x-3 pb-3 border-b border-white/10">
+              <div className="w-10 h-10 rounded-2xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-sm text-white">Delete Partition</h3>
+                <p className="text-xs text-gray-400 font-mono">
+                  {modalDeleteConfirm.partition.path || `/dev/${modalDeleteConfirm.partition.name}`}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3.5 bg-rose-500/15 border border-rose-500/30 rounded-2xl text-rose-200 text-xs space-y-1">
+              <div className="font-bold text-rose-300">Permanent Partition Deletion:</div>
+              <p>
+                Are you sure you want to delete partition <strong className="font-mono text-white">{modalDeleteConfirm.partition.name}</strong> ({modalDeleteConfirm.partition.size})? All data on this partition will be permanently destroyed.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-white/10">
+              <button
+                onClick={() => setModalDeleteConfirm(null)}
+                className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-gray-300 font-medium transition-colors text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeletePartition}
+                className="px-5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-semibold shadow-md active:scale-95 transition-all text-xs"
+              >
+                Delete Partition
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* First Aid Diagnostic Sheet / Modal */}
       {showFirstAid && (

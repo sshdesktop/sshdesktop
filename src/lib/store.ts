@@ -1,7 +1,10 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { SavedConnection, WindowState, Notification } from './types';
-import { sshConnect, sshDisconnect, settingsGet, settingsSave, storeSaveConnection, storeDeleteConnection } from './tauri-bridge';
+import { 
+  sshConnect, sshDisconnect, settingsGet, settingsSave, 
+  storeSaveConnection, storeDeleteConnection, storeListConnections 
+} from './tauri-bridge';
 
 interface ConnectionState {
   connections: SavedConnection[];
@@ -12,15 +15,19 @@ interface ConnectionState {
   isReconnecting: boolean;
   reconnectAttempts: number;
   reconnectError: string | null;
+  disconnectedServerId: string | null;
   addConnection: (conn: SavedConnection) => void;
   updateConnection: (id: string, updates: Partial<SavedConnection>) => void;
   removeConnection: (id: string) => void;
   setActive: (id: string | null) => void;
-  setDisconnected: (isDisconnected: boolean, reason?: string) => void;
-  triggerDisconnectAlert: (reason?: string) => void;
+  setDisconnected: (isDisconnected: boolean, reason?: string | null, serverId?: string | null) => void;
+  triggerDisconnectAlert: (reason?: string, serverId?: string | null) => void;
   connect: (id: string, overrideConfig?: Partial<SavedConnection>) => Promise<void>;
-  reconnect: () => Promise<void>;
+  reconnect: (targetServerId?: string) => Promise<void>;
   disconnect: (id: string) => Promise<void>;
+  closeServer: (id: string) => Promise<void>;
+  switchToOtherServer: (targetId: string) => Promise<void>;
+  returnToServersList: () => void;
 }
 
 export const useConnectionStore = create<ConnectionState>()(
@@ -34,28 +41,42 @@ export const useConnectionStore = create<ConnectionState>()(
       isReconnecting: false,
       reconnectAttempts: 0,
       reconnectError: null,
+      disconnectedServerId: null,
       addConnection: (conn) => {
-        set((state) => ({ connections: [...state.connections.filter(c => c.id !== conn.id), conn] }));
-        storeSaveConnection({
-          id: conn.id,
+        const fullConn: SavedConnection = {
+          ...conn,
+          authMethod: conn.authMethod || (conn as any).auth_method || ((conn as any).privateKeyPath || (conn as any).private_key_path ? 'key' : 'password'),
+          privateKeyPath: (conn as any).privateKeyPath || (conn as any).private_key_path,
           created_at: conn.created_at || Date.now(),
-          last_connected_at: conn.last_connected_at || conn.lastConnected || Date.now(),
-          name: conn.name,
-          host: conn.host,
-          port: Number(conn.port) || 22,
-          username: conn.username,
-          password: conn.password,
-          private_key_path: (conn as any).privateKeyPath || (conn as any).private_key_path,
-          auth_method: (conn as any).authMethod || (conn as any).auth_method,
-          color: conn.color,
-          group: conn.group,
-          tags: conn.tags || [],
-        }).catch(() => {});
+        };
+        set((state) => ({ connections: [...state.connections.filter(c => c.id !== conn.id), fullConn] }));
+        storeSaveConnection({
+          id: fullConn.id,
+          created_at: fullConn.created_at || Date.now(),
+          last_connected_at: fullConn.last_connected_at || fullConn.lastConnected || Date.now(),
+          name: fullConn.name,
+          host: fullConn.host,
+          port: Number(fullConn.port) || 22,
+          username: fullConn.username,
+          password: fullConn.password,
+          private_key_path: (fullConn as any).privateKeyPath || (fullConn as any).private_key_path,
+          auth_method: (fullConn as any).authMethod || (fullConn as any).auth_method,
+          color: fullConn.color,
+          group: fullConn.group,
+          tags: fullConn.tags || [],
+        }).catch((err) => {
+          console.error('[CloudDesk Store] Failed to save connection:', err);
+        });
       },
       updateConnection: (id, updates) => {
         const existing = get().connections.find(c => c.id === id);
         if (!existing) return;
-        const updated: SavedConnection = { ...existing, ...updates };
+        const updated: SavedConnection = { 
+          ...existing, 
+          ...updates,
+          authMethod: updates.authMethod || (updates as any).auth_method || existing.authMethod || 'password',
+          privateKeyPath: (updates as any).privateKeyPath !== undefined ? (updates as any).privateKeyPath : (existing as any).privateKeyPath,
+        };
         set((state) => ({ connections: state.connections.map(c => c.id === id ? updated : c) }));
         storeSaveConnection({
           id: updated.id,
@@ -71,28 +92,44 @@ export const useConnectionStore = create<ConnectionState>()(
           color: updated.color,
           group: updated.group,
           tags: updated.tags || [],
-        }).catch(() => {});
+        }).catch((err) => {
+          console.error('[CloudDesk Store] Failed to update connection:', err);
+        });
       },
       removeConnection: (id) => {
         storeDeleteConnection(id).catch(() => {});
         set((state) => ({
           connections: state.connections.filter((c) => c.id !== id),
-          activeConnectionId: state.activeConnectionId === id ? null : state.activeConnectionId
+          activeConnectionId: state.activeConnectionId === id ? null : state.activeConnectionId,
+          disconnectedServerId: state.disconnectedServerId === id ? null : state.disconnectedServerId
         }));
       },
       setActive: (id) => set({ activeConnectionId: id }),
-      setDisconnected: (isDisconnected, reason) => set({
-        isDisconnected,
-        disconnectReason: reason || (isDisconnected ? 'Connection to remote server was lost or timed out.' : null),
-        isReconnecting: false,
-        reconnectError: null,
-      }),
-      triggerDisconnectAlert: (reason) => set({
-        isDisconnected: true,
-        disconnectReason: reason || 'Connection to remote server was disconnected.',
-        isReconnecting: false,
-        reconnectError: null,
-      }),
+      setDisconnected: (isDisconnected, reason, serverId) => {
+        const targetId = serverId || get().activeConnectionId || get().disconnectedServerId;
+        set({
+          isDisconnected,
+          disconnectReason: reason || (isDisconnected ? 'Connection to remote server was lost or stopped.' : null),
+          disconnectedServerId: isDisconnected ? (targetId || null) : null,
+          isReconnecting: false,
+          reconnectError: null,
+        });
+      },
+      triggerDisconnectAlert: (reason, serverId) => {
+        const targetId = serverId || get().activeConnectionId || get().disconnectedServerId;
+        const newMap = new Map(get().connectedServers);
+        if (targetId) {
+          newMap.delete(targetId);
+        }
+        set({
+          isDisconnected: true,
+          disconnectReason: reason || 'Connection to remote server was disconnected or stopped.',
+          disconnectedServerId: targetId || null,
+          connectedServers: newMap,
+          isReconnecting: false,
+          reconnectError: null,
+        });
+      },
       connect: async (id, overrideConfig) => {
         const conn = get().connections.find(c => c.id === id);
         const target: any = { ...conn, ...overrideConfig };
@@ -148,17 +185,24 @@ export const useConnectionStore = create<ConnectionState>()(
           activeConnectionId: id,
           isDisconnected: false,
           disconnectReason: null,
+          disconnectedServerId: null,
           isReconnecting: false,
           reconnectAttempts: 0,
           reconnectError: null,
         });
       },
-      reconnect: async () => {
-        const activeId = get().activeConnectionId;
-        if (!activeId) return;
+      reconnect: async (targetServerId) => {
+        const targetId = targetServerId || get().disconnectedServerId || get().activeConnectionId;
+        if (!targetId) return;
         set((s) => ({ isReconnecting: true, reconnectError: null, reconnectAttempts: s.reconnectAttempts + 1 }));
         try {
-          await get().connect(activeId);
+          await get().connect(targetId);
+          set({
+            isDisconnected: false,
+            disconnectReason: null,
+            disconnectedServerId: null,
+            activeConnectionId: targetId,
+          });
         } catch (err: any) {
           set({ isReconnecting: false, reconnectError: err?.message || String(err) });
           throw err;
@@ -175,6 +219,80 @@ export const useConnectionStore = create<ConnectionState>()(
           activeConnectionId: get().activeConnectionId === id ? null : get().activeConnectionId,
           isDisconnected: false,
           disconnectReason: null,
+          disconnectedServerId: null,
+          isReconnecting: false,
+          reconnectAttempts: 0,
+          reconnectError: null,
+        });
+      },
+      closeServer: async (id) => {
+        try {
+          await sshDisconnect(id);
+        } catch {}
+        const newMap = new Map(get().connectedServers);
+        newMap.delete(id);
+
+        const remainingConnected = Array.from(newMap.keys());
+        const nextActiveId = remainingConnected.length > 0 ? remainingConnected[0] : null;
+
+        set({
+          connectedServers: newMap,
+          activeConnectionId: nextActiveId,
+          isDisconnected: false,
+          disconnectReason: null,
+          disconnectedServerId: null,
+          isReconnecting: false,
+          reconnectAttempts: 0,
+          reconnectError: null,
+        });
+      },
+      switchToOtherServer: async (targetId) => {
+        const failedId = get().disconnectedServerId || get().activeConnectionId;
+        if (failedId && failedId !== targetId) {
+          try {
+            await sshDisconnect(failedId);
+          } catch {}
+        }
+        const newMap = new Map(get().connectedServers);
+        if (failedId && failedId !== targetId) {
+          newMap.delete(failedId);
+        }
+        set({
+          isDisconnected: false,
+          disconnectReason: null,
+          disconnectedServerId: null,
+          activeConnectionId: targetId,
+          connectedServers: newMap,
+          isReconnecting: false,
+          reconnectAttempts: 0,
+          reconnectError: null,
+        });
+        const targetConn = get().connections.find(c => c.id === targetId);
+        if (targetConn && !newMap.has(targetId)) {
+          try {
+            await get().connect(targetId, targetConn);
+          } catch (err) {
+            console.warn('Switch connect notice:', err);
+          }
+        }
+      },
+      returnToServersList: () => {
+        const failedId = get().disconnectedServerId || get().activeConnectionId;
+        if (failedId) {
+          try {
+            sshDisconnect(failedId).catch(() => {});
+          } catch {}
+        }
+        const newMap = new Map(get().connectedServers);
+        if (failedId) {
+          newMap.delete(failedId);
+        }
+        set({
+          isDisconnected: false,
+          disconnectReason: null,
+          disconnectedServerId: null,
+          activeConnectionId: null,
+          connectedServers: newMap,
           isReconnecting: false,
           reconnectAttempts: 0,
           reconnectError: null,
@@ -184,6 +302,23 @@ export const useConnectionStore = create<ConnectionState>()(
     {
       name: 'connection-storage',
       partialize: (state) => ({ connections: state.connections, activeConnectionId: state.activeConnectionId }),
+      onRehydrateStorage: () => (state) => {
+        storeListConnections().then((saved) => {
+          if (saved && Array.isArray(saved) && saved.length > 0 && state) {
+            const diskItems: SavedConnection[] = saved.map((s: any) => ({
+              ...s,
+              authMethod: s.auth_method || s.authMethod || (s.private_key_path ? 'key' : 'password'),
+              privateKeyPath: s.private_key_path || s.privateKeyPath,
+              created_at: s.created_at || Date.now(),
+            }));
+            const map = new Map<string, SavedConnection>();
+            state.connections.forEach(c => map.set(c.id, c));
+            diskItems.forEach(c => map.set(c.id, c));
+            const merged = Array.from(map.values());
+            useConnectionStore.setState({ connections: merged });
+          }
+        }).catch(() => {});
+      }
     }
   )
 );
@@ -209,6 +344,7 @@ interface WindowStoreState {
   bringToFront: (id: string) => void;
   minimizeAllWindows: () => void;
   restoreAllWindows: () => void;
+  restoreToNormal: (id: string, x: number, y: number) => void;
 }
 
 export const useWindowStore = create<WindowStoreState>((set, get) => ({
@@ -281,12 +417,18 @@ export const useWindowStore = create<WindowStoreState>((set, get) => ({
     windows: state.windows.map(w => ({ ...w, minimized: false }))
   })),
   maximizeWindow: (id) => set((state) => ({
-    windows: state.windows.map(w => w.id === id ? { 
-      ...w, 
-      maximized: !w.maximized,
-      snapState: !w.maximized ? 'maximize' : 'none',
-      fullscreen: false
-    } : w)
+    windows: state.windows.map(w => {
+      if (w.id !== id) return w;
+      const isCurrentlyMax = !!w.maximized || w.snapState === 'maximize' || !!w.fullscreen;
+      return { 
+        ...w, 
+        maximized: !isCurrentlyMax,
+        snapState: !isCurrentlyMax ? 'maximize' : 'none',
+        fullscreen: false,
+        minimized: false,
+        focused: true
+      };
+    })
   })),
   snapWindow: (id, snap) => set((state) => ({
     windows: state.windows.map(w => w.id === id ? {
@@ -305,6 +447,18 @@ export const useWindowStore = create<WindowStoreState>((set, get) => ({
       snapState: 'none',
       minimized: false,
       focused: true
+    } : w)
+  })),
+  restoreToNormal: (id, x, y) => set((state) => ({
+    windows: state.windows.map(w => w.id === id ? {
+      ...w,
+      fullscreen: false,
+      maximized: false,
+      snapState: 'none',
+      minimized: false,
+      focused: true,
+      x,
+      y,
     } : w)
   })),
   updatePosition: (id, x, y) => set((state) => ({
@@ -331,6 +485,18 @@ export interface PinnedItem {
   type: 'dir' | 'file';
 }
 
+export interface DockerTerminalRequest {
+  containerId: string;
+  containerName: string;
+  initialCmd?: string;
+}
+
+export interface TerminalCommandRequest {
+  cmd: string;
+  title?: string;
+  newTab?: boolean;
+}
+
 interface EditorStoreState {
   pendingFilePath: string | null;
   openFileInEditor: (path: string) => void;
@@ -338,12 +504,15 @@ interface EditorStoreState {
   finderTargetPath: string | null;
   navigateFinder: (path: string) => void;
   clearFinderTarget: () => void;
-  pendingTerminalCommand: string | null;
-  runTerminalCommand: (cmd: string) => void;
+  pendingTerminalCommand: TerminalCommandRequest | null;
+  runTerminalCommand: (cmd: string | TerminalCommandRequest, options?: { title?: string; newTab?: boolean }) => void;
   clearTerminalCommand: () => void;
   pendingTerminalDir: string | null;
   openTerminalInDir: (dir: string) => void;
   clearPendingTerminalDir: () => void;
+  pendingDockerTerminal: DockerTerminalRequest | null;
+  openDockerTerminalInApp: (containerId: string, containerName: string, initialCmd?: string) => void;
+  clearPendingDockerTerminal: () => void;
 }
 
 export const useEditorStore = create<EditorStoreState>((set) => ({
@@ -354,11 +523,21 @@ export const useEditorStore = create<EditorStoreState>((set) => ({
   navigateFinder: (path) => set({ finderTargetPath: path }),
   clearFinderTarget: () => set({ finderTargetPath: null }),
   pendingTerminalCommand: null,
-  runTerminalCommand: (cmd) => set({ pendingTerminalCommand: cmd }),
+  runTerminalCommand: (cmd, options) => {
+    const req: TerminalCommandRequest = typeof cmd === 'string'
+      ? { cmd, title: options?.title, newTab: options?.newTab }
+      : cmd;
+    set({ pendingTerminalCommand: req });
+  },
   clearTerminalCommand: () => set({ pendingTerminalCommand: null }),
   pendingTerminalDir: null,
   openTerminalInDir: (dir) => set({ pendingTerminalDir: dir }),
   clearPendingTerminalDir: () => set({ pendingTerminalDir: null }),
+  pendingDockerTerminal: null,
+  openDockerTerminalInApp: (containerId, containerName, initialCmd) => set({
+    pendingDockerTerminal: { containerId, containerName, initialCmd }
+  }),
+  clearPendingDockerTerminal: () => set({ pendingDockerTerminal: null }),
 }));
 
 interface SettingsState {
@@ -371,6 +550,7 @@ interface SettingsState {
   wallpaper: string;
   desktopIconSize: 'small' | 'medium' | 'large';
   autoFullScreen: boolean;
+  autoHideDock: boolean;
   favorites: string[];
   pinnedDesktopItems: PinnedItem[];
   pinToDesktop: (item: PinnedItem) => void;
@@ -392,6 +572,7 @@ export const useSettingsStore = create<SettingsState>()(
       wallpaper: 'sonoma',
       desktopIconSize: 'medium',
       autoFullScreen: false,
+      autoHideDock: false,
       favorites: ['/', '/home', '/etc', '/var/log', '/tmp'],
       pinnedDesktopItems: [],
       pinToDesktop: (item) => set((state) => ({
@@ -400,9 +581,22 @@ export const useSettingsStore = create<SettingsState>()(
       unpinFromDesktop: (id) => set((state) => ({
         pinnedDesktopItems: state.pinnedDesktopItems.filter(p => p.id !== id)
       })),
-      addFavorite: (path) => set((state) => ({
-        favorites: Array.from(new Set([...state.favorites, path]))
-      })),
+      addFavorite: (path) => set((state) => {
+        const nextFavs = Array.from(new Set([...state.favorites, path]));
+        settingsSave({
+          theme: state.theme,
+          accent_color: state.accentColor,
+          terminal_font_size: state.terminalFontSize,
+          terminal_color_scheme: 'catppuccin-mocha',
+          editor_font_size: 14,
+          dock_position: state.dockPosition,
+          polling_interval_ms: (state.pollingInterval || 15) * 1000,
+          show_hidden_files: state.showHiddenFiles,
+          wallpaper: state.wallpaper,
+          favorites: nextFavs,
+        }).catch(() => {});
+        return { favorites: nextFavs };
+      }),
       removeFavorite: (path) => set((state) => {
         const nextFavs = state.favorites.filter(p => p !== path);
         settingsSave({
@@ -513,5 +707,29 @@ export const useTelemetryStore = create<TelemetryStoreState>((set) => ({
   pingMs: 0,
   lastUpdated: 0,
   updateTelemetry: (data) => set((state) => ({ ...state, ...data, lastUpdated: Date.now() })),
+}));
+
+export interface FileClipboardItem {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+export interface FileClipboardState {
+  items: FileClipboardItem[];
+  isCut: boolean;
+  sourceDir: string;
+}
+
+interface FileClipboardStoreState {
+  clipboard: FileClipboardState | null;
+  setClipboard: (cb: FileClipboardState | null) => void;
+  clearClipboard: () => void;
+}
+
+export const useFileClipboardStore = create<FileClipboardStoreState>((set) => ({
+  clipboard: null,
+  setClipboard: (cb) => set({ clipboard: cb }),
+  clearClipboard: () => set({ clipboard: null }),
 }));
 

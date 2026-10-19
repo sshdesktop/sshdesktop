@@ -3,15 +3,25 @@ use std::fs;
 use std::path::PathBuf;
 use crate::AppState;
 
+fn default_port() -> u16 { 22 }
+fn default_username() -> String { "root".to_string() }
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SavedConnection {
     pub id: String,
+    #[serde(default)]
     pub created_at: i64,
+    #[serde(default)]
     pub last_connected_at: Option<i64>,
+    #[serde(default)]
     pub notes: Option<String>,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub host: String,
+    #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default = "default_username")]
     pub username: String,
     #[serde(default)]
     pub password: Option<String>,

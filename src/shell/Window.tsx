@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Rnd } from 'react-rnd';
-import { useWindowStore } from '../lib/store';
+import { useWindowStore, useSettingsStore } from '../lib/store';
 import { WindowState } from '../lib/types';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
@@ -11,12 +11,17 @@ import {
 export default function Window({ window: win, children }: { window: WindowState; children: React.ReactNode }) {
   const { 
     focusWindow, closeWindow, minimizeWindow, maximizeWindow, 
-    snapWindow, toggleFullscreen, updatePosition, updateSize, bringToFront 
+    snapWindow, toggleFullscreen, updatePosition, updateSize, bringToFront,
+    restoreToNormal
   } = useWindowStore();
   const launchingAppId = useWindowStore((state) => state.launchingAppId);
+  const { theme, autoHideDock } = useSettingsStore();
+  const isLight = theme === 'light';
+
   const [controlsHovered, setControlsHovered] = useState(false);
   const [showSnapMenu, setShowSnapMenu] = useState(false);
   const snapMenuTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dragStartPos = useRef<{ x: number; y: number } | null>(null);
 
   // Viewport tracking for precise pixel math
   const [viewport, setViewport] = useState({
@@ -38,11 +43,23 @@ export default function Window({ window: win, children }: { window: WindowState;
   const isSnapped = !!win.snapState && win.snapState !== 'none';
   const isFixedLayout = isFullScreen || isMaximized || isSnapped;
 
+  // Listen for Escape to exit full screen
+  useEffect(() => {
+    if (!win.focused || !isFullScreen) return;
+    const handleWindowKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        toggleFullscreen(win.id);
+      }
+    };
+    window.addEventListener('keydown', handleWindowKeyDown);
+    return () => window.removeEventListener('keydown', handleWindowKeyDown);
+  }, [win.focused, isFullScreen, win.id, toggleFullscreen]);
+
   // Exact desktop boundary geometry:
   // Top Taskbar is 32px height.
-  // Bottom Dock takes ~76px reservation.
+  // When Dock is auto-hidden, application layout expands to full bottom edge (0px dock reservation)
   const topBarH = 32;
-  const bottomDockH = 76;
+  const bottomDockH = autoHideDock ? 0 : 76;
   const usableH = Math.max(200, viewport.h - topBarH - bottomDockH);
   const halfW = Math.floor(viewport.w / 2);
   const halfH = Math.floor(usableH / 2);
@@ -120,11 +137,31 @@ export default function Window({ window: win, children }: { window: WindowState;
         data-window="true"
         size={currentSize}
         position={currentPos}
+        bounds={undefined}
+        cancel=".mac-traffic-light, .window-controls, button, input, textarea, select, .no-drag, [data-no-drag]"
+        dragHandleClassName="drag-handle"
+        disableDragging={isFullScreen}
+        enableResizing={!isFullScreen && !isMaximized}
+        onDragStart={(e: any, d) => {
+          dragStartPos.current = { x: e.clientX ?? d.x, y: e.clientY ?? d.y };
+        }}
         onDrag={(e: any, d) => {
-          // If dragging a maximized or snapped window, instantly break out into floating normal size
+          if (isFullScreen) return;
+
+          // If dragging a fullscreen, maximized or snapped window, break out cleanly into normal floating size only when dragged > 10px
           if (isMaximized || isSnapped) {
-            snapWindow(win.id, 'none');
-            if (win.maximized) maximizeWindow(win.id);
+            const startX = dragStartPos.current?.x ?? d.x;
+            const startY = dragStartPos.current?.y ?? d.y;
+            const mouseX = e.clientX ?? d.x;
+            const mouseY = e.clientY ?? d.y;
+            const dist = Math.hypot(mouseX - startX, mouseY - startY);
+            if (dist > 10) {
+              const restoredWidth = win.width || 850;
+              const newX = mouseX - Math.floor(restoredWidth / 2);
+              const newY = Math.max(topBarH, mouseY - 15);
+              restoreToNormal(win.id, newX, newY);
+            }
+            return;
           }
 
           const mouseX = e.clientX ?? d.x;
@@ -146,6 +183,7 @@ export default function Window({ window: win, children }: { window: WindowState;
           }
         }}
         onDragStop={(e: any, d) => {
+          dragStartPos.current = null;
           const preview = snapPreview;
           setSnapPreview('none');
 
@@ -172,27 +210,32 @@ export default function Window({ window: win, children }: { window: WindowState;
             return;
           }
 
-          // Strict boundary limit: Titlebar MUST NOT go underneath the top Taskbar (start bar limit)
-          const clampedY = Math.max(topBarH, Math.min(viewport.h - 90, d.y));
-          const clampedX = Math.max(0, Math.min(viewport.w - 100, d.x));
+          // Allow window to freely move partially outside left, bottom, and right edges
+          // Keep titlebar below top bar (topBarH) and titlebar visible on screen (maxAllowedY)
+          const currentW = win.width || 850;
+          const minAllowedX = -(currentW - 80);
+          const maxAllowedX = viewport.w - 80;
+          const minAllowedY = topBarH;
+          const maxAllowedY = viewport.h - 40;
+          const clampedX = Math.max(minAllowedX, Math.min(maxAllowedX, d.x));
+          const clampedY = Math.max(minAllowedY, Math.min(maxAllowedY, d.y));
           updatePosition(win.id, clampedX, clampedY);
         }}
         onResizeStop={(e, direction, ref, delta, position) => {
           if (!isFixedLayout) {
-            updateSize(win.id, parseInt(ref.style.width, 10), parseInt(ref.style.height, 10));
-            updatePosition(win.id, position.x, Math.max(topBarH, position.y));
+            const newW = parseInt(ref.style.width, 10);
+            const newH = parseInt(ref.style.height, 10);
+            updateSize(win.id, newW, newH);
+            updatePosition(win.id, position.x, position.y);
           }
         }}
-        minWidth={360}
-        minHeight={240}
-        dragHandleClassName="drag-handle"
-        disableDragging={isFullScreen}
-        enableResizing={!isFullScreen && !isMaximized}
+        minWidth={Math.min(500, viewport.w - 20)}
+        minHeight={Math.min(320, viewport.h - 60)}
         onMouseDown={() => { focusWindow(win.id); bringToFront(win.id); }}
         onContextMenu={(e: any) => e.stopPropagation()}
         className={`absolute window-shell select-none ${win.minimized ? 'pointer-events-none' : 'pointer-events-auto'}`}
         style={{ 
-          zIndex: isFullScreen ? 99999 : win.zIndex,
+          zIndex: isFullScreen ? 1000001 : win.zIndex,
           display: win.minimized ? 'none' : 'block'
         }}
       >
@@ -202,76 +245,108 @@ export default function Window({ window: win, children }: { window: WindowState;
           animate={{ opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 0.96 }}
           transition={{ duration: 0.15, ease: 'easeOut' }}
-          className={`window-inner-frame w-full h-full flex flex-col bg-[#1e1e2e]/95 backdrop-blur-3xl overflow-hidden transition-all duration-200 border ${
+          className={`window-inner-frame w-full h-full flex flex-col backdrop-blur-3xl overflow-hidden transition-all duration-200 border ${
             isFullScreen ? 'rounded-none border-none' : 'rounded-2xl'
           } ${
-            win.focused 
-              ? 'border-white/15 shadow-[0_30px_80px_-15px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.15)] ring-1 ring-white/10' 
-              : 'border-white/[0.08] shadow-[0_15px_40px_rgba(0,0,0,0.5)] opacity-95'
+            isLight
+              ? win.focused
+                ? 'bg-white/95 border-black/15 shadow-[0_30px_80px_-15px_rgba(0,0,0,0.25)] text-slate-800 ring-1 ring-black/10'
+                : 'bg-white/90 border-black/10 shadow-[0_15px_40px_rgba(0,0,0,0.15)] text-slate-700 opacity-95'
+              : win.focused 
+                ? 'bg-[#1e1e2e]/95 border-white/15 shadow-[0_30px_80px_-15px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.15)] ring-1 ring-white/10 text-gray-200' 
+                : 'bg-[#1e1e2e]/90 border-white/[0.08] shadow-[0_15px_40px_rgba(0,0,0,0.5)] opacity-95 text-gray-300'
           }`}
         >
-          {/* Titlebar - Drag Handle Always Active */}
+          {/* Titlebar - Drag Handle Always Active, double click restores fullscreen or maximizes */}
           <div 
-            onDoubleClick={() => maximizeWindow(win.id)}
-            className="window-titlebar h-10 bg-[#181825]/90 border-b border-white/[0.08] flex items-center px-4 shrink-0 select-none relative drag-handle cursor-move"
+            onDoubleClick={() => {
+              if (win.fullscreen) {
+                toggleFullscreen(win.id);
+              } else {
+                maximizeWindow(win.id);
+              }
+            }}
+            className={`window-titlebar h-10 border-b flex items-center px-4 shrink-0 select-none relative drag-handle cursor-move ${
+              isLight ? 'bg-[#f1f5f9]/95 border-black/[0.08] text-slate-800' : 'bg-[#181825]/90 border-white/[0.08] text-gray-200'
+            }`}
           >
           {/* Authentic macOS Traffic Lights */}
           <div 
-            className="flex items-center space-x-2 mr-4 relative"
+            className="flex items-center space-x-2.5 mr-4 relative py-1 window-controls no-drag"
+            onMouseDown={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
             onMouseEnter={() => setControlsHovered(true)}
             onMouseLeave={() => setControlsHovered(false)}
           >
             {/* Close */}
             <button 
-              onClick={(e) => { e.stopPropagation(); closeWindow(win.id); }} 
-              className={`mac-traffic-light w-3 h-3 rounded-full flex items-center justify-center transition-all border border-black/20 ${
+              type="button"
+              onMouseDown={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => { 
+                e.stopPropagation(); 
+                closeWindow(win.id); 
+              }} 
+              className={`mac-traffic-light w-3.5 h-3.5 rounded-full flex items-center justify-center transition-all border border-black/20 shadow-sm cursor-pointer ${
                 !win.focused && !controlsHovered 
                   ? 'bg-[#5a5a68]' 
-                  : 'bg-[#FF5F56] hover:brightness-110 active:brightness-90 shadow-sm'
+                  : 'bg-[#FF5F56] hover:brightness-110 active:brightness-90 hover:scale-105'
               }`}
               title="Close (⌘W)"
             >
-              <span className={`text-[9px] font-bold text-black/60 leading-none transition-opacity ${controlsHovered ? 'opacity-100' : 'opacity-0'}`}>
+              <span className={`text-[10px] font-bold text-black/70 leading-none transition-opacity ${controlsHovered ? 'opacity-100' : 'opacity-0'}`}>
                 ✕
               </span>
             </button>
 
             {/* Minimize */}
             <button 
-              onClick={(e) => { e.stopPropagation(); minimizeWindow(win.id); }} 
-              className={`mac-traffic-light w-3 h-3 rounded-full flex items-center justify-center transition-all border border-black/20 ${
+              type="button"
+              onMouseDown={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => { 
+                e.stopPropagation(); 
+                minimizeWindow(win.id); 
+              }} 
+              className={`mac-traffic-light w-3.5 h-3.5 rounded-full flex items-center justify-center transition-all border border-black/20 shadow-sm cursor-pointer ${
                 !win.focused && !controlsHovered 
                   ? 'bg-[#5a5a68]' 
-                  : 'bg-[#FFBD2E] hover:brightness-110 active:brightness-90 shadow-sm'
+                  : 'bg-[#FFBD2E] hover:brightness-110 active:brightness-90 hover:scale-105'
               }`}
               title="Minimize (⌘M)"
             >
-              <span className={`text-[10px] font-bold text-black/60 leading-none transition-opacity pb-0.5 ${controlsHovered ? 'opacity-100' : 'opacity-0'}`}>
+              <span className={`text-[11px] font-bold text-black/70 leading-none transition-opacity pb-0.5 ${controlsHovered ? 'opacity-100' : 'opacity-0'}`}>
                 −
               </span>
             </button>
 
             {/* Maximize / Zoom & Snap Controls Menu Trigger */}
             <div 
-              className="relative"
+              className="relative window-controls no-drag"
+              onMouseDown={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
               onMouseEnter={handleGreenButtonHoverEnter}
               onMouseLeave={handleGreenButtonHoverLeave}
             >
               <button 
+                type="button"
+                onMouseDown={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => { 
                   e.stopPropagation(); 
                   setShowSnapMenu(false);
                   maximizeWindow(win.id); 
                 }} 
-                className={`mac-traffic-light w-3 h-3 rounded-full flex items-center justify-center transition-all border border-black/20 ${
+                className={`mac-traffic-light w-3.5 h-3.5 rounded-full flex items-center justify-center transition-all border border-black/20 shadow-sm cursor-pointer ${
                   !win.focused && !controlsHovered 
                     ? 'bg-[#5a5a68]' 
-                    : 'bg-[#27C93F] hover:brightness-110 active:brightness-90 shadow-sm'
+                    : 'bg-[#27C93F] hover:brightness-110 active:brightness-90 hover:scale-105'
                 }`}
-                title="Hover for Split & Snapping Options | Click to Maximize"
+                title={isMaximized || isFullScreen ? "Click to Restore Window Size | Hover for Snap Options" : "Click to Maximize | Hover for Snap Options"}
               >
-                <span className={`text-[8px] font-bold text-black/60 leading-none transition-opacity ${controlsHovered ? 'opacity-100' : 'opacity-0'}`}>
-                  +
+                <span className={`text-[9px] font-bold text-black/70 leading-none transition-opacity ${controlsHovered ? 'opacity-100' : 'opacity-0'}`}>
+                  {isMaximized || isFullScreen ? '−' : '+'}
                 </span>
               </button>
 
@@ -394,18 +469,28 @@ export default function Window({ window: win, children }: { window: WindowState;
           </div>
 
           {/* Window Title & Location Indicator */}
-          <div className="window-title-text flex-1 flex items-center justify-center space-x-1.5 font-medium text-xs text-gray-200 tracking-tight truncate drop-shadow-sm select-none">
+          <div className={`window-title-text flex-1 flex items-center justify-center space-x-1.5 font-medium text-xs tracking-tight truncate drop-shadow-sm select-none ${
+            isLight ? 'text-slate-800 font-semibold' : 'text-gray-200'
+          }`}>
             <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-location-pulse shrink-0" title="Active Server Process" />
             <span className="truncate">{win.title}</span>
             {isBusy && <RefreshCw className="w-3 h-3 text-blue-400 animate-spin ml-1 shrink-0" />}
           </div>
 
           {/* Window status indicators / Fullscreen button */}
-          <div className="flex items-center space-x-1">
+          <div className="flex items-center space-x-1 window-controls no-drag" onMouseDown={(e) => e.stopPropagation()}>
             {isFullScreen && (
               <button
-                onClick={() => toggleFullscreen(win.id)}
-                className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-[10px] text-white flex items-center space-x-1 transition-colors"
+                type="button"
+                onMouseDown={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleFullscreen(win.id);
+                }}
+                className={`px-2 py-0.5 rounded text-[10px] flex items-center space-x-1 transition-colors cursor-pointer ${
+                  isLight ? 'bg-slate-200 hover:bg-slate-300 text-slate-800' : 'bg-white/10 hover:bg-white/20 text-white'
+                }`}
                 title="Exit Full Screen (Esc / F11)"
               >
                 <Minimize2 className="w-3 h-3" />
@@ -417,7 +502,9 @@ export default function Window({ window: win, children }: { window: WindowState;
         </div>
 
         {/* Content Area */}
-        <div className="window-content-canvas flex-1 overflow-hidden relative bg-[#181825]/90">
+        <div className={`window-content-canvas flex-1 overflow-auto relative ${
+          isLight ? 'bg-white text-slate-900' : 'bg-[#181825]/90 text-gray-200'
+        }`}>
           {children}
         </div>
       </motion.div>

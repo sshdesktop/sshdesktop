@@ -1,6 +1,6 @@
 [package]
 name = "clouddesk"
-version = "0.1.0"
+version = "2.4.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -14,6 +14,10 @@ tauri-plugin-shell = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
+notify = "6"
+walkdir = "2"
+zip = "2"
+flate2 = "1.0"
 russh = "0.46"
 russh-keys = "0.46"
 russh-sftp = "2.0"
@@ -32,7 +36,8 @@ directories = "5"
 lazy_static = "1.5"
 url = "2"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "mysql", "postgres", "sqlite", "chrono", "uuid", "json"] }
-tiberius = { version = "0.12", default-features = false, features = ["tds73", "tokio"] }
+tiberius = { version = "0.12", default-features = false, features = ["tds73", "tokio", "rustls"] }
 redis = { version = "0.27", features = ["tokio-comp"] }
 mongodb = { version = "2.8", features = ["tokio-runtime"] }
 futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }

@@ -21,6 +21,7 @@ interface Tab {
   shell: string;
   connId: string;
   serverName: string;
+  dockerContainerId?: string;
 }
 
 interface TabInstance {
@@ -48,6 +49,7 @@ export default function TerminalApp() {
   const [showServerMenu, setShowServerMenu] = useState(false);
   const tabInstances = useRef<Map<string, TabInstance>>(new Map());
   const containersRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const pendingInitialCommandsRef = useRef<Map<string, string>>(new Map());
   const [fontSize, setFontSize] = useState<number>(14);
   const fontSizeRef = useRef<number>(14);
   fontSizeRef.current = fontSize;
@@ -92,6 +94,32 @@ export default function TerminalApp() {
       if (unlistenFn) unlistenFn();
     };
   }, []);
+
+  // Listen for environment variable sync events to immediately update active shells
+  useEffect(() => {
+    const handleEnvSync = (e: any) => {
+      const { key, value, action } = e.detail || {};
+      if (!key) return;
+      const encoder = new TextEncoder();
+      tabs.forEach(tab => {
+        let cmd = '';
+        if (action === 'delete') {
+          cmd = `unset ${key}; hash -r\n`;
+        } else {
+          const escapedVal = (value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+          cmd = `export ${key}="${escapedVal}"; hash -r\n`;
+        }
+        terminalWrite(tab.id, Array.from(encoder.encode(cmd))).catch(err => {
+          console.warn('Failed to sync env to terminal tab:', err);
+        });
+      });
+    };
+
+    window.addEventListener('clouddesk:env-sync', handleEnvSync);
+    return () => {
+      window.removeEventListener('clouddesk:env-sync', handleEnvSync);
+    };
+  }, [tabs]);
 
   const setupTabInstance = useCallback(async (tabId: string, el: HTMLDivElement) => {
     if (tabInstances.current.has(tabId)) {
@@ -210,6 +238,24 @@ export default function TerminalApp() {
     const connId = tab?.connId || activeConnectionId;
     try {
       await terminalCreate(connId, term.rows || 24, term.cols || 80, tabId);
+      // Backend PTY is confirmed ready - dispatch queued initial command if present
+      const initialCmd = pendingInitialCommandsRef.current.get(tabId);
+      if (initialCmd) {
+        pendingInitialCommandsRef.current.delete(tabId);
+        setTimeout(async () => {
+          const encoder = new TextEncoder();
+          const bytes = Array.from(encoder.encode(initialCmd));
+          for (let attempt = 0; attempt < 4; attempt++) {
+            try {
+              await terminalWrite(tabId, bytes);
+              break;
+            } catch (e) {
+              if (attempt === 3) console.warn('Failed to send initial tab command:', e);
+              await new Promise(r => setTimeout(r, 250));
+            }
+          }
+        }, 300);
+      }
     } catch (err: any) {
       term.writeln(`\r\n\x1b[31m[Failed to initialize PTY: ${err?.message || err}]\x1b[0m\r\n`);
     }
@@ -307,19 +353,139 @@ export default function TerminalApp() {
 
   useEffect(() => {
     if (!pendingTerminalCommand) return;
-    const cmd = pendingTerminalCommand;
+    const req = pendingTerminalCommand;
     clearTerminalCommand();
 
-    const timer = setTimeout(() => {
-      const encoder = new TextEncoder();
-      const bytes = Array.from(encoder.encode(cmd));
-      terminalWrite(activeTab, bytes).catch(err => {
-        console.warn('Failed to send pending terminal command:', err);
-      });
-    }, 400);
+    const cmdStr = req.cmd.endsWith('\n') || req.cmd.endsWith('\r') ? req.cmd : req.cmd + '\n';
 
-    return () => clearTimeout(timer);
-  }, [pendingTerminalCommand, activeTab, clearTerminalCommand]);
+    // If a new tab is requested or if Terminal already has an active tab and newTab is specified
+    if (req.newTab && (!isFirstMount.current || tabInstances.current.has('tab-1'))) {
+      const newId = `tab-cmd-${Date.now()}`;
+      const connId = activeConnectionId || 'default';
+      const s = connections.find(c => c.id === connId) || activeServer;
+      const serverLabel = s?.name || s?.host || 'Server';
+      const tabTitle = req.title || 'terminal';
+
+      pendingInitialCommandsRef.current.set(newId, cmdStr);
+
+      setTabs(prev => [
+        ...prev,
+        {
+          id: newId,
+          title: tabTitle,
+          shell: '/bin/bash',
+          connId,
+          serverName: serverLabel,
+        }
+      ]);
+      setActiveTab(newId);
+      return;
+    }
+
+    // If this is the initial mount and tab-1 has not connected yet:
+    if (!tabInstances.current.has('tab-1')) {
+      if (req.title) {
+        setTabs(prev => prev.map(t => t.id === 'tab-1' ? { ...t, title: req.title! } : t));
+      }
+      pendingInitialCommandsRef.current.set('tab-1', cmdStr);
+      return;
+    }
+
+    // Otherwise target activeTab with retries
+    const targetTabId = activeTab;
+    const sendWithRetry = async (attempts = 6) => {
+      const encoder = new TextEncoder();
+      const bytes = Array.from(encoder.encode(cmdStr));
+      for (let i = 0; i < attempts; i++) {
+        try {
+          await terminalWrite(targetTabId, bytes);
+          return;
+        } catch (err) {
+          if (i === attempts - 1) {
+            console.warn('Failed terminalWrite after retries:', err);
+          }
+          await new Promise(r => setTimeout(r, 250));
+        }
+      }
+    };
+    sendWithRetry();
+  }, [pendingTerminalCommand, activeTab, activeConnectionId, clearTerminalCommand, connections, activeServer]);
+
+  // Also listen for direct window event dispatch for terminal commands
+  useEffect(() => {
+    const handleRunCmdEvent = (e: any) => {
+      const detail = e.detail;
+      if (!detail || !detail.cmd) return;
+      const cmdStr = detail.cmd.endsWith('\n') || detail.cmd.endsWith('\r') ? detail.cmd : detail.cmd + '\n';
+      if (detail.newTab) {
+        const newId = `tab-cmd-${Date.now()}`;
+        const connId = activeConnectionId || 'default';
+        const s = connections.find(c => c.id === connId) || activeServer;
+        const serverLabel = s?.name || s?.host || 'Server';
+        const tabTitle = detail.title || 'terminal';
+        pendingInitialCommandsRef.current.set(newId, cmdStr);
+        setTabs(prev => [
+          ...prev,
+          {
+            id: newId,
+            title: tabTitle,
+            shell: '/bin/bash',
+            connId,
+            serverName: serverLabel,
+          }
+        ]);
+        setActiveTab(newId);
+      } else {
+        const encoder = new TextEncoder();
+        terminalWrite(activeTab, Array.from(encoder.encode(cmdStr))).catch(() => {});
+      }
+    };
+
+    window.addEventListener('clouddesk:terminal-run-command', handleRunCmdEvent);
+    return () => window.removeEventListener('clouddesk:terminal-run-command', handleRunCmdEvent);
+  }, [activeTab, activeConnectionId, connections, activeServer]);
+
+  const pendingDockerTerminal = useEditorStore(s => s.pendingDockerTerminal);
+  const clearPendingDockerTerminal = useEditorStore(s => s.clearPendingDockerTerminal);
+
+  useEffect(() => {
+    if (!pendingDockerTerminal) return;
+    const req = pendingDockerTerminal;
+    clearPendingDockerTerminal();
+
+    // Check if an existing tab is already running this container
+    const existing = tabs.find(t => t.dockerContainerId === req.containerId);
+    if (existing) {
+      setActiveTab(existing.id);
+      setTimeout(() => {
+        const inst = tabInstances.current.get(existing.id);
+        inst?.term.focus();
+      }, 50);
+      return;
+    }
+
+    const newId = `tab-docker-${Date.now()}`;
+    const connId = activeConnectionId || 'default';
+    const s = connections.find(c => c.id === connId) || activeServer;
+    const serverLabel = s?.name || s?.host || 'Server';
+    const execCmd = req.initialCmd || `docker exec -it ${req.containerId} sh -c "if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi"\n`;
+
+    // Queue command for execution right after terminalCreate finishes
+    pendingInitialCommandsRef.current.set(newId, execCmd);
+
+    setTabs(prev => [
+      ...prev,
+      {
+        id: newId,
+        title: `🐳 ${req.containerName}`,
+        shell: 'docker exec',
+        connId,
+        serverName: serverLabel,
+        dockerContainerId: req.containerId,
+      }
+    ]);
+    setActiveTab(newId);
+  }, [pendingDockerTerminal, tabs, activeConnectionId, clearPendingDockerTerminal, connections, activeServer]);
 
   const removeTab = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -363,13 +529,13 @@ export default function TerminalApp() {
   return (
     <div className="flex flex-col h-full bg-[#14141e] text-gray-200 select-none">
       {/* macOS Terminal Tab Bar & Quick Tools */}
-      <div className="flex items-center justify-between bg-[#11111a] border-b border-white/[0.08] px-2 pt-1.5 space-x-1 shrink-0 overflow-x-auto">
-        <div className="flex items-center space-x-1 overflow-x-auto">
+      <div className="flex items-center justify-between bg-[#11111a] border-b border-white/[0.08] px-2 pt-1.5 space-x-1 shrink-0 overflow-x-auto no-scrollbar gap-2">
+        <div className="flex items-center space-x-1 overflow-x-auto no-scrollbar shrink-0">
           {tabs.map(tab => (
             <div
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center space-x-2 px-3 py-1.5 rounded-t-xl text-xs font-mono transition-colors cursor-pointer group ${
+              className={`flex items-center space-x-2 px-3 py-1.5 rounded-t-xl text-xs font-mono transition-colors cursor-pointer group shrink-0 ${
                 activeTab === tab.id
                   ? 'bg-[#14141e] text-blue-400 font-semibold border-t-2 border-t-blue-500 shadow-sm'
                   : 'text-gray-400 hover:bg-white/[0.05] hover:text-gray-200'
@@ -389,7 +555,7 @@ export default function TerminalApp() {
             </div>
           ))}
 
-          <div className="relative">
+          <div className="relative shrink-0">
             <div className="flex items-center bg-white/[0.04] rounded-lg">
               <button
                 onClick={() => addTab()}
@@ -433,7 +599,7 @@ export default function TerminalApp() {
         </div>
 
         {/* Quick Commands & PuTTY Launcher */}
-        <div className="flex items-center space-x-1.5 pb-1">
+        <div className="flex items-center space-x-1.5 pb-1 shrink-0">
           <button
             onClick={() => sendQuickCommand('sudo su -')}
             className="px-2.5 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/20 rounded-lg text-xs font-mono flex items-center space-x-1 transition-colors"

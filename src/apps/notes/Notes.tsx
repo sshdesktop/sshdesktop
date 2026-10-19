@@ -324,9 +324,9 @@ export default function Notes() {
       {/* Pane 3: Apple Note Editor & Split Markdown */}
       <div className="flex-1 flex flex-col overflow-hidden bg-[#181825]">
         {/* Apple Notes Top Toolbar */}
-        <div className="h-10 bg-[#1e1e2e]/90 backdrop-blur-md border-b border-white/[0.08] px-3.5 flex items-center justify-between shrink-0">
+        <div className="h-10 bg-[#1e1e2e]/90 backdrop-blur-md border-b border-white/[0.08] px-3.5 flex items-center justify-between shrink-0 overflow-x-auto no-scrollbar gap-2">
           {/* Format Quick Controls */}
-          <div className="flex items-center space-x-1">
+          <div className="flex items-center space-x-1 shrink-0">
             <button
               onClick={() => insertFormatting('# ')}
               title="Heading 1"
@@ -365,7 +365,7 @@ export default function Notes() {
           </div>
 
           {/* View Toggles & Actions */}
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center space-x-2 shrink-0">
             <div className="bg-[#11111b] p-0.5 rounded-lg border border-white/10 flex items-center">
               <button
                 onClick={() => setViewMode('edit')}

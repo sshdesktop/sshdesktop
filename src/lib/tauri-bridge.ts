@@ -11,14 +11,32 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
     } catch (err: any) {
       console.error(`[CloudDesk Tauri] Command '${cmd}' failed:`, err);
       const errMsg = String(err?.message || err);
-      if (
+      const isConnectionLoss = 
         errMsg.includes('No active SSH connection') || 
         errMsg.includes('Connection closed') || 
         errMsg.includes('connection reset') || 
-        errMsg.includes('broken pipe')
-      ) {
+        errMsg.includes('broken pipe') ||
+        errMsg.includes('Connection refused') ||
+        errMsg.includes('Connection timed out') ||
+        errMsg.includes('timed out') ||
+        errMsg.includes('Host is down') ||
+        errMsg.includes('No route to host') ||
+        errMsg.includes('Network is unreachable') ||
+        errMsg.includes('closed by remote host') ||
+        errMsg.includes('failed to send channel request') ||
+        errMsg.includes('channel EOF') ||
+        errMsg.includes('Socket closed') ||
+        errMsg.includes('transport error');
+
+      if (isConnectionLoss && cmd !== 'ssh_test_connection' && cmd !== 'ssh_disconnect' && cmd !== 'store_delete_connection') {
         if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('clouddesk-ssh-disconnected', { detail: { reason: errMsg } }));
+          window.dispatchEvent(new CustomEvent('clouddesk-ssh-disconnected', { 
+            detail: { 
+              connId: args?.connId,
+              command: cmd,
+              reason: errMsg 
+            } 
+          }));
         }
       }
       throw err;
@@ -66,6 +84,14 @@ export async function sshLaunchPutty(connId: string, remoteDir?: string): Promis
   return safeInvoke<void>('ssh_launch_putty', { connId, remoteDir: remoteDir || null }, undefined);
 }
 
+export async function sshExecStream(connId: string, command: string, streamId: string): Promise<void> {
+  return safeInvoke<void>('ssh_exec_stream', { connId, command, streamId }, undefined);
+}
+
+export async function sshExecStop(streamId: string): Promise<void> {
+  return safeInvoke<void>('ssh_exec_stop', { streamId }, undefined);
+}
+
 // ----------------- Terminal Commands -----------------
 export async function terminalCreate(connId: string, rows: number = 24, cols: number = 80, terminalId?: string): Promise<string> {
   return safeInvoke<string>('terminal_create', { connId, rows, cols, terminalId }, terminalId || 'term-1');
@@ -98,6 +124,10 @@ export async function sftpReadFileBase64(connId: string, path: string): Promise<
 
 export async function sftpWriteTextFile(connId: string, path: string, content: string): Promise<void> {
   return safeInvoke<void>('sftp_write_text_file', { connId, path, content }, undefined);
+}
+
+export async function sftpWriteFile(connId: string, path: string, content: number[]): Promise<void> {
+  return safeInvoke<void>('sftp_write_file', { connId, path, content }, undefined);
 }
 
 export async function sftpMkdir(connId: string, path: string): Promise<void> {
@@ -268,6 +298,59 @@ export async function networkDnsLookup(connId: string, domain: string): Promise<
   return safeInvoke<string>('network_dns_lookup', { connId, domain }, '');
 }
 
+export interface BandwidthStatInfo {
+  name: string;
+  ip: string;
+  mac: string;
+  rx_bytes: number;
+  tx_bytes: number;
+  rx_packets: number;
+  tx_packets: number;
+  rx_errors: number;
+  tx_errors: number;
+  rx_drops: number;
+  tx_drops: number;
+  rx_speed_bps: number;
+  tx_speed_bps: number;
+  operstate: string;
+  mtu?: number;
+  speed_mbit?: number;
+}
+
+export interface NetworkBandwidthSummary {
+  total_rx_bytes: number;
+  total_tx_bytes: number;
+  total_rx_speed_bps: number;
+  total_tx_speed_bps: number;
+  total_rx_packets: number;
+  total_tx_packets: number;
+  interfaces: BandwidthStatInfo[];
+  timestamp: number;
+}
+
+export async function networkKillPort(
+  connId: string,
+  port: number,
+  protocol: string = 'tcp',
+  pid?: number,
+  signal: string = 'KILL'
+): Promise<string> {
+  return safeInvoke<string>('network_kill_port', { connId, port, protocol, pid, signal }, '');
+}
+
+export async function networkBandwidthStats(connId: string): Promise<NetworkBandwidthSummary> {
+  return safeInvoke<NetworkBandwidthSummary>('network_bandwidth_stats', { connId }, {
+    total_rx_bytes: 0,
+    total_tx_bytes: 0,
+    total_rx_speed_bps: 0,
+    total_tx_speed_bps: 0,
+    total_rx_packets: 0,
+    total_tx_packets: 0,
+    interfaces: [],
+    timestamp: Math.floor(Date.now() / 1000),
+  });
+}
+
 export async function packageList(connId: string): Promise<any[]> {
   try {
     return await safeInvoke<any[]>('package_list', { connId }, []);
@@ -332,6 +415,26 @@ export async function groupList(connId: string): Promise<any[]> {
   }
 }
 
+export async function groupAdd(connId: string, name: string): Promise<void> {
+  return safeInvoke<void>('group_add', { connId, name }, undefined);
+}
+
+export async function groupDelete(connId: string, name: string): Promise<void> {
+  return safeInvoke<void>('group_delete', { connId, name }, undefined);
+}
+
+export async function groupAddUser(connId: string, group: string, username: string): Promise<void> {
+  return safeInvoke<void>('group_add_user', { connId, group, username }, undefined);
+}
+
+export async function groupRemoveUser(connId: string, group: string, username: string): Promise<void> {
+  return safeInvoke<void>('group_remove_user', { connId, group, username }, undefined);
+}
+
+export async function whoIsLoggedIn(connId: string): Promise<string> {
+  return safeInvoke<string>('who_is_logged_in', { connId }, '');
+}
+
 export async function cronList(connId: string): Promise<any[]> {
   try {
     return await safeInvoke<any[]>('cron_list', { connId }, []);
@@ -360,13 +463,69 @@ export async function logsDmesg(connId: string): Promise<string> {
   return safeInvoke<string>('logs_dmesg', { connId }, '');
 }
 
+export interface FirewallStatusInfo {
+  backend: 'ufw' | 'firewalld' | 'iptables' | 'none';
+  installed: boolean;
+  active: boolean;
+  ufw_installed: boolean;
+  ufw_active: boolean;
+  firewalld_installed: boolean;
+  firewalld_active: boolean;
+  default_incoming: string;
+  default_outgoing: string;
+  default_routed: string;
+  active_zone?: string;
+  all_zones: string[];
+  raw_status: string;
+}
+
+export interface FirewallRuleItem {
+  id: string;
+  number: number;
+  action: 'ALLOW' | 'DENY' | 'REJECT' | 'LIMIT';
+  direction: 'IN' | 'OUT' | 'BOTH';
+  from_ip: string;
+  to_port: string;
+  protocol: string;
+  zone?: string;
+  comment: string;
+}
+
+export interface AddRuleRequest {
+  port: string;
+  protocol: string;
+  action: string;
+  direction?: string;
+  from_ip?: string;
+  backend?: string;
+  zone?: string;
+  comment?: string;
+}
+
+export async function firewallDetectBackend(connId: string): Promise<FirewallStatusInfo> {
+  return safeInvoke<FirewallStatusInfo>('firewall_detect_backend', { connId }, {
+    backend: 'ufw',
+    installed: true,
+    active: true,
+    ufw_installed: true,
+    ufw_active: true,
+    firewalld_installed: false,
+    firewalld_active: false,
+    default_incoming: 'deny',
+    default_outgoing: 'allow',
+    default_routed: 'disabled',
+    all_zones: [],
+    raw_status: '',
+  });
+}
+
 export async function firewallStatus(connId: string): Promise<string> {
   return safeInvoke<string>('firewall_status', { connId }, 'Status: active');
 }
 
-export async function firewallRules(connId: string): Promise<any[]> {
+export async function firewallRules(connId: string): Promise<FirewallRuleItem[]> {
   try {
-    return await safeInvoke<any[]>('firewall_rules', { connId }, []);
+    return await safeInvoke<FirewallRuleItem[]>('firewall_rules', { connId }, []);
   } catch {
     return [];
   }
@@ -376,17 +535,80 @@ export async function firewallAddRule(connId: string, port: string, protocol: st
   return safeInvoke<string>('firewall_add_rule', { connId, port, protocol, action }, '');
 }
 
+export async function firewallAddRuleAdvanced(connId: string, payload: AddRuleRequest): Promise<string> {
+  return safeInvoke<string>('firewall_add_rule_advanced', { connId, payload }, '');
+}
+
 export async function firewallDeleteRule(connId: string, ruleNumber: number): Promise<string> {
   return safeInvoke<string>('firewall_delete_rule', { connId, ruleNumber }, '');
+}
+
+export async function firewallDeleteRuleAdvanced(
+  connId: string,
+  ruleNumber: number,
+  port?: string,
+  protocol?: string,
+  backend?: string,
+  zone?: string
+): Promise<string> {
+  return safeInvoke<string>('firewall_delete_rule_advanced', { connId, ruleNumber, port, protocol, backend, zone }, '');
 }
 
 export async function firewallToggle(connId: string, enable: boolean): Promise<string> {
   return safeInvoke<string>('firewall_toggle', { connId, enable }, '');
 }
 
-export async function diskList(connId: string): Promise<any[]> {
+export async function firewallInstall(connId: string, tool: 'ufw' | 'firewalld'): Promise<string> {
+  return safeInvoke<string>('firewall_install', { connId, tool }, '');
+}
+
+export async function firewallSetDefaultPolicy(
+  connId: string,
+  direction: 'incoming' | 'outgoing',
+  policy: 'allow' | 'deny'
+): Promise<string> {
+  return safeInvoke<string>('firewall_set_default_policy', { connId, direction, policy }, '');
+}
+
+export async function firewallReset(connId: string): Promise<string> {
+  return safeInvoke<string>('firewall_reset', { connId }, '');
+}
+
+export async function firewallReload(connId: string): Promise<string> {
+  return safeInvoke<string>('firewall_reload', { connId }, '');
+}
+
+export interface BlockDeviceInfo {
+  name: string;
+  kname?: string;
+  path?: string;
+  size: string;
+  size_bytes?: number;
+  type_name: string;
+  fstype?: string;
+  label?: string;
+  uuid?: string;
+  mountpoint?: string;
+  model?: string;
+  ro?: boolean;
+  pttype?: string;
+  parttype?: string;
+  children?: BlockDeviceInfo[];
+  is_system?: boolean;
+}
+
+export interface FstabEntry {
+  spec: string;
+  file: string;
+  vfstype: string;
+  mntops: string;
+  freq: number;
+  passno: number;
+}
+
+export async function diskList(connId: string): Promise<BlockDeviceInfo[]> {
   try {
-    return await safeInvoke<any[]>('disk_list', { connId }, []);
+    return await safeInvoke<BlockDeviceInfo[]>('disk_list', { connId }, []);
   } catch {
     return [];
   }
@@ -406,6 +628,188 @@ export async function diskSmart(connId: string, device: string): Promise<string>
 
 export async function diskLargestDirs(connId: string, path: string): Promise<string> {
   return safeInvoke<string>('disk_largest_dirs', { connId, path }, '');
+}
+
+export async function diskMount(
+  connId: string,
+  device: string,
+  mountPoint: string,
+  fstype?: string,
+  options?: string,
+  persistFstab: boolean = false
+): Promise<string> {
+  return safeInvoke<string>('disk_mount', { connId, device, mountPoint, fstype, options, persistFstab }, '');
+}
+
+export async function diskUnmount(
+  connId: string,
+  target: string,
+  force: boolean = false,
+  lazy: boolean = false,
+  removeFromFstab: boolean = false
+): Promise<string> {
+  return safeInvoke<string>('disk_unmount', { connId, target, force, lazy, removeFromFstab }, '');
+}
+
+export async function diskRemount(
+  connId: string,
+  mountPoint: string,
+  options: string
+): Promise<string> {
+  return safeInvoke<string>('disk_remount', { connId, mountPoint, options }, '');
+}
+
+export async function diskGetFstab(connId: string): Promise<FstabEntry[]> {
+  try {
+    return await safeInvoke<FstabEntry[]>('disk_get_fstab', { connId }, []);
+  } catch {
+    return [];
+  }
+}
+
+export async function diskCreateLabel(
+  connId: string,
+  device: string,
+  labelType: 'gpt' | 'msdos'
+): Promise<string> {
+  return safeInvoke<string>('disk_create_label', { connId, device, labelType }, '');
+}
+
+export async function diskCreatePartition(
+  connId: string,
+  device: string,
+  partType: string,
+  start: string,
+  end: string,
+  fstype?: string,
+  label?: string
+): Promise<string> {
+  return safeInvoke<string>('disk_create_partition', { connId, device, partType, start, end, fstype, label }, '');
+}
+
+export async function diskDeletePartition(
+  connId: string,
+  device: string,
+  partNumber: number,
+  partDevice?: string
+): Promise<string> {
+  return safeInvoke<string>('disk_delete_partition', { connId, device, partNumber, partDevice }, '');
+}
+
+export async function diskResizePartition(
+  connId: string,
+  device: string,
+  partNumber: number,
+  newEnd: string,
+  partDevice?: string,
+  fstype?: string
+): Promise<string> {
+  return safeInvoke<string>('disk_resize_partition', { connId, device, partNumber, newEnd, partDevice, fstype }, '');
+}
+
+export async function diskSetPartitionFlag(
+  connId: string,
+  device: string,
+  partNumber: number,
+  flag: string,
+  stateOn: boolean
+): Promise<string> {
+  return safeInvoke<string>('disk_set_partition_flag', { connId, device, partNumber, flag, stateOn }, '');
+}
+
+export async function diskFormatFilesystem(
+  connId: string,
+  device: string,
+  fstype: string,
+  label?: string,
+  quick: boolean = true
+): Promise<string> {
+  return safeInvoke<string>('disk_format_filesystem', { connId, device, fstype, label, quick }, '');
+}
+
+export async function diskSetLabel(
+  connId: string,
+  device: string,
+  fstype: string,
+  label: string
+): Promise<string> {
+  return safeInvoke<string>('disk_set_label', { connId, device, fstype, label }, '');
+}
+
+export async function diskCheckFilesystem(
+  connId: string,
+  device: string,
+  fstype?: string,
+  repair: boolean = false
+): Promise<string> {
+  return safeInvoke<string>('disk_check_filesystem', { connId, device, fstype, repair }, '');
+}
+
+export interface SwapInfo {
+  total_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  total_formatted: string;
+  used_formatted: string;
+  free_formatted: string;
+  active_file?: string;
+  is_enabled: boolean;
+}
+
+export interface TmpInfo {
+  mount_point: string;
+  filesystem: string;
+  is_tmpfs: boolean;
+  total_bytes: number;
+  used_bytes: number;
+  avail_bytes: number;
+  size_formatted: string;
+  used_formatted: string;
+  avail_formatted: string;
+  percent: number;
+}
+
+export async function diskGetSwapInfo(connId: string): Promise<SwapInfo> {
+  return safeInvoke<SwapInfo>('disk_get_swap_info', { connId }, {
+    total_bytes: 0,
+    used_bytes: 0,
+    free_bytes: 0,
+    total_formatted: '0 B',
+    used_formatted: '0 B',
+    free_formatted: '0 B',
+    is_enabled: false,
+  });
+}
+
+export async function diskManageSwap(
+  connId: string,
+  action: 'set_size' | 'enable' | 'disable',
+  sizeMb?: number
+): Promise<string> {
+  return safeInvoke<string>('disk_manage_swap', { connId, action, sizeMb }, '');
+}
+
+export async function diskGetTmpInfo(connId: string): Promise<TmpInfo> {
+  return safeInvoke<TmpInfo>('disk_get_tmp_info', { connId }, {
+    mount_point: '/tmp',
+    filesystem: 'tmpfs',
+    is_tmpfs: true,
+    total_bytes: 0,
+    used_bytes: 0,
+    avail_bytes: 0,
+    size_formatted: '0 B',
+    used_formatted: '0 B',
+    avail_formatted: '0 B',
+    percent: 0,
+  });
+}
+
+export async function diskManageTmp(
+  connId: string,
+  size: string,
+  persist: boolean = true
+): Promise<string> {
+  return safeInvoke<string>('disk_manage_tmp', { connId, size, persist }, '');
 }
 
 // ----------------- Store Commands -----------------
@@ -438,8 +842,8 @@ export async function pickKeyFile(): Promise<string | null> {
         directory: false,
         filters: [
           {
-            name: 'SSH Private Keys (*.pem, *.ppk, id_rsa, id_ed25519)',
-            extensions: ['pem', 'ppk', 'key', 'id_rsa', 'id_ed25519', '*']
+            name: 'OpenSSH Private Keys (*.pem, id_rsa, id_ed25519)',
+            extensions: ['pem', 'key', 'id_rsa', 'id_ed25519', 'id_ecdsa', '*']
           }
         ]
       });
@@ -457,13 +861,15 @@ export async function pickKeyFile(): Promise<string | null> {
 export interface DatabaseConnectionConfig {
   id: string;
   name: string;
-  engine: 'mysql' | 'mariadb' | 'postgresql' | 'sqlite' | 'mssql' | 'mongodb' | 'redis' | string;
+  engine: 'mysql' | 'mariadb' | 'postgresql' | 'sqlite' | 'mssql' | 'mongodb' | 'redis' | 'dynamodb' | 'cosmos' | 'cassandra' | 'oracle' | 'db2' | string;
   host: string;
   port: number;
   username: string;
   password?: string;
   database: string;
   schema?: string;
+  use_ssl?: boolean;
+  ssl_verify?: boolean;
   use_ssh?: boolean;
   ssh_connection_id?: string;
   ssh_host?: string;
@@ -472,6 +878,12 @@ export interface DatabaseConnectionConfig {
   ssh_password?: string;
   ssh_key_path?: string;
   sqlite_path?: string;
+  access_key_id?: string;
+  secret_access_key?: string;
+  region?: string;
+  endpoint_url?: string;
+  keyspace?: string;
+  sid?: string;
   read_only?: boolean;
   timeout_seconds?: number;
 }
@@ -488,6 +900,16 @@ export interface ColumnMeta {
   extra?: string | null;
 }
 
+export interface BatchStatementResult {
+  statement: string;
+  columns: ColumnMeta[];
+  rows: any[];
+  affected_rows: number;
+  last_insert_id?: number | null;
+  execution_time_ms: number;
+  error?: string | null;
+}
+
 export interface QueryResult {
   columns: ColumnMeta[];
   rows: any[];
@@ -497,6 +919,7 @@ export interface QueryResult {
   command_type: string;
   server_version?: string | null;
   warnings: string[];
+  all_results?: BatchStatementResult[] | null;
 }
 
 export interface ServerCapabilities {
@@ -513,6 +936,36 @@ export interface ServerCapabilities {
   supports_explain: boolean;
   supports_process_list: boolean;
   read_only: boolean;
+  supports_rename_table?: boolean;
+  supports_alter_column?: boolean;
+}
+
+export interface ColumnSpec {
+  name: string;
+  data_type: string;
+  nullable?: boolean;
+  primary_key?: boolean;
+  auto_increment?: boolean;
+  default_value?: string;
+}
+
+export type DatabaseOperation =
+  | { operation: 'create_table'; database?: string; schema?: string; table: string; columns: ColumnSpec[] }
+  | { operation: 'rename_object'; database?: string; schema?: string; object_type: string; old_name: string; new_name: string }
+  | { operation: 'drop_object'; database?: string; schema?: string; object_type: string; name: string }
+  | { operation: 'truncate_table'; database?: string; schema?: string; table: string }
+  | { operation: 'add_column'; database?: string; schema?: string; table: string; column: ColumnSpec }
+  | { operation: 'drop_column'; database?: string; schema?: string; table: string; column_name: string }
+  | { operation: 'create_index'; database?: string; schema?: string; table: string; index_name: string; columns: string[]; is_unique: boolean }
+  | { operation: 'drop_index'; database?: string; schema?: string; table: string; index_name: string };
+
+export interface OperationResult {
+  success: boolean;
+  message: string;
+  affected_rows: number;
+  execution_time_ms: number;
+  generated_sql?: string;
+  definition?: string;
 }
 
 export interface DatabaseObject {
@@ -593,8 +1046,8 @@ export async function dbListTables(connectionId: string, schema?: string): Promi
   return safeInvoke<DatabaseObject[]>('db_list_tables', { connectionId, schema: schema || null }, []);
 }
 
-export async function dbGetTableColumns(connectionId: string, tableName: string): Promise<ColumnMeta[]> {
-  return safeInvoke<ColumnMeta[]>('db_get_table_columns', { connectionId, tableName }, []);
+export async function dbGetTableColumns(connectionId: string, tableName: string, schema?: string): Promise<ColumnMeta[]> {
+  return safeInvoke<ColumnMeta[]>('db_get_table_columns', { connectionId, tableName, schema: schema || null }, []);
 }
 
 export async function redisScanKeys(connectionId: string, pattern?: string, count?: number): Promise<RedisKeyItem[]> {
@@ -618,8 +1071,8 @@ export async function redisDeleteKey(connectionId: string, key: string): Promise
   return safeInvoke<boolean>('redis_delete_key', { connectionId, key }, true);
 }
 
-export async function mongodbListCollections(connectionId: string): Promise<string[]> {
-  return safeInvoke<string[]>('mongodb_list_collections', { connectionId }, []);
+export async function mongodbListCollections(connectionId: string, database?: string): Promise<string[]> {
+  return safeInvoke<string[]>('mongodb_list_collections', { connectionId, database: database || null }, []);
 }
 
 export async function mongodbFindDocuments(
@@ -646,7 +1099,187 @@ export async function mongodbFindDocuments(
 export async function mongodbInsertDocument(
   connectionId: string,
   collection: string,
-  docJson: string
+  docJson: string | object
 ): Promise<string> {
-  return safeInvoke<string>('mongodb_insert_document', { connectionId, collection, docJson }, '');
+  const jsonStr = typeof docJson === 'string' ? docJson : JSON.stringify(docJson);
+  return safeInvoke<string>('mongodb_insert_document', { connectionId, collection, docJson: jsonStr }, '');
 }
+
+export async function sendDesktopNotification(title: string, body: string): Promise<void> {
+  return safeInvoke<void>('send_desktop_notification', { title, body }, undefined);
+}
+
+export async function sftpCreateZipPure(
+  connId: string,
+  baseDir: string,
+  items: string[],
+  outputFilename: string
+): Promise<string> {
+  return safeInvoke<string>('sftp_create_zip_pure', { connId, baseDir, items, outputFilename }, '');
+}
+
+export async function sftpExtractArchivePure(
+  connId: string,
+  archivePath: string,
+  destDir: string
+): Promise<string> {
+  return safeInvoke<string>('sftp_extract_archive_pure', { connId, archivePath, destDir }, '');
+}
+
+export async function dbExecuteOperation(
+  connectionId: string,
+  operation: DatabaseOperation
+): Promise<OperationResult> {
+  return safeInvoke<OperationResult>('db_execute_operation', { connectionId, operation }, {
+    success: false,
+    message: 'Operation not executed',
+    affected_rows: 0,
+    execution_time_ms: 0,
+  });
+}
+
+export async function dbGetObjectDefinition(
+  connectionId: string,
+  objectType: string,
+  name: string,
+  schema?: string
+): Promise<string> {
+  return safeInvoke<string>('db_get_object_definition', { connectionId, objectType, name, schema: schema || null }, '');
+}
+
+export async function dbGetCapabilities(connectionId: string): Promise<ServerCapabilities> {
+  return safeInvoke<ServerCapabilities>('db_get_capabilities', { connectionId }, {
+    engine: 'mysql',
+    server_version: '',
+    supports_transactions: true,
+    supports_schemas: false,
+    supports_procedures: true,
+    supports_functions: true,
+    supports_triggers: true,
+    supports_views: true,
+    supports_indexes: true,
+    supports_foreign_keys: true,
+    supports_explain: true,
+    supports_process_list: true,
+    read_only: false,
+    supports_rename_table: true,
+    supports_alter_column: true,
+  });
+}
+
+// ----------------- SSH Port Forwarding Tunnel Commands -----------------
+export interface SshTunnelInfo {
+  tunnel_id: string;
+  conn_id: string;
+  local_port: number;
+  remote_host: string;
+  remote_port: number;
+  created_at: number;
+}
+
+export async function sshStartTunnel(
+  connId: string,
+  localPort: number = 0,
+  remoteHost: string = '127.0.0.1',
+  remotePort: number
+): Promise<number> {
+  return safeInvoke<number>(
+    'ssh_start_tunnel',
+    {
+      connId,
+      localPort: Number(localPort) || 0,
+      remoteHost: remoteHost || '127.0.0.1',
+      remotePort: Number(remotePort)
+    },
+    0
+  );
+}
+
+export async function sshStopTunnel(tunnelId: string): Promise<void> {
+  return safeInvoke<void>('ssh_stop_tunnel', { tunnelId }, undefined);
+}
+
+export async function sshListTunnels(): Promise<SshTunnelInfo[]> {
+  return safeInvoke<SshTunnelInfo[]>('ssh_list_tunnels', {}, []);
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  try {
+    if (isTauri()) {
+      const { open } = await import('@tauri-apps/plugin-shell');
+      await open(url);
+      return;
+    }
+  } catch (err) {
+    console.warn('openExternalUrl plugin-shell failed:', err);
+  }
+  window.open(url, '_blank');
+}
+
+// ----------------- API Studio (Native HTTP over SSH Tunnel) -----------------
+export interface ApiHeader {
+  key: string;
+  value: string;
+  enabled: boolean;
+}
+
+export interface ApiQueryParam {
+  key: string;
+  value: string;
+  enabled: boolean;
+}
+
+export interface ApiFormDataItem {
+  key: string;
+  value: string;
+  item_type: 'text' | 'file';
+  enabled: boolean;
+}
+
+export interface ApiRequestPayload {
+  id?: string;
+  conn_id?: string;
+  use_ssh_tunnel: boolean;
+  method: string;
+  url: string;
+  headers: ApiHeader[];
+  query_params: ApiQueryParam[];
+  body_type: 'none' | 'json' | 'text' | 'form-data' | 'x-www-form-urlencoded' | 'raw';
+  raw_body?: string;
+  form_data?: ApiFormDataItem[];
+  timeout_seconds?: number;
+  follow_redirects?: boolean;
+  verify_ssl?: boolean;
+}
+
+export interface ApiResponsePayload {
+  status: number;
+  status_text: string;
+  headers: Record<string, string>;
+  body: string;
+  is_json: boolean;
+  is_binary: boolean;
+  size_bytes: number;
+  duration_ms: number;
+  tunnel_used: boolean;
+  tunneled_target?: string;
+  effective_url: string;
+}
+
+export async function apiSendRequest(req: ApiRequestPayload): Promise<ApiResponsePayload> {
+  return safeInvoke<ApiResponsePayload>('api_send_request', { req }, {
+    status: 0,
+    status_text: 'Failed to send request',
+    headers: {},
+    body: 'Error: Request could not be sent. Please ensure the backend is running.',
+    is_json: false,
+    is_binary: false,
+    size_bytes: 0,
+    duration_ms: 0,
+    tunnel_used: false,
+    effective_url: req.url,
+  });
+}
+
+
+

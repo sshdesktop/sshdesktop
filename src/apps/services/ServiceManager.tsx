@@ -1,13 +1,15 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { 
   Server, Play, Square, RotateCw, CheckCircle, AlertTriangle, XCircle, 
   Search, ScrollText, RefreshCw, X, ShieldAlert, Sliders, Copy, Terminal, 
   Layers, Check, ExternalLink, Power, Eye, Filter, ArrowUpRight, FileCode,
-  Flame, Lock, Unlock, PlayCircle, StopCircle
+  Flame, Lock, Unlock, PlayCircle, StopCircle, ArrowUp, ArrowDown, 
+  ChevronsUp, ChevronsDown, ArrowDownToLine, Pause, Download, Trash2
 } from 'lucide-react';
 import { serviceList, serviceAction, serviceLogs, serviceStatus, sshExec } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
+import EditServiceModal from './modals/EditServiceModal';
 
 interface ServiceItem {
   name: string;
@@ -33,15 +35,21 @@ export default function ServiceManager() {
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
   const [selectedServiceName, setSelectedServiceName] = useState<string | null>(null);
 
-  // Modals & Sheets
+  // Modals & Panels
   const [selectedLogsService, setSelectedLogsService] = useState<string | null>(null);
   const [logContent, setLogContent] = useState<string>('');
   const [logLinesCount, setLogLinesCount] = useState<number>(100);
   const [logFilterQuery, setLogFilterQuery] = useState<string>('');
+  const [logSeverityFilter, setLogSeverityFilter] = useState<'all' | 'error' | 'warn' | 'info'>('all');
   const [isLogRefreshing, setIsLogRefreshing] = useState(false);
+  const [isLiveStreaming, setIsLiveStreaming] = useState<boolean>(true);
+  const [autoScroll, setAutoScroll] = useState<boolean>(true);
+  const logsContainerRef = useRef<HTMLDivElement>(null);
+  const liveIntervalRef = useRef<any>(null);
 
   const [inspectService, setInspectService] = useState<ServiceItem | null>(null);
   const [serviceStatusOutput, setServiceStatusOutput] = useState<string>('');
+  const [editingService, setEditingService] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
   const [isLoading, setIsLoading] = useState(false);
@@ -104,6 +112,8 @@ export default function ServiceManager() {
   const handleViewLogs = async (name: string, lines: number = logLinesCount) => {
     setSelectedLogsService(name);
     setIsLogRefreshing(true);
+    setIsLiveStreaming(true);
+    setAutoScroll(true);
     setLogContent('Fetching journalctl output...');
     try {
       const logs = await serviceLogs(activeConnId, name, lines);
@@ -114,6 +124,42 @@ export default function ServiceManager() {
       setIsLogRefreshing(false);
     }
   };
+
+  // Live journalctl log streaming interval
+  useEffect(() => {
+    if (!selectedLogsService || !isLiveStreaming) {
+      if (liveIntervalRef.current) {
+        clearInterval(liveIntervalRef.current);
+        liveIntervalRef.current = null;
+      }
+      return;
+    }
+
+    liveIntervalRef.current = setInterval(async () => {
+      try {
+        const logs = await serviceLogs(activeConnId, selectedLogsService, logLinesCount);
+        if (logs) {
+          setLogContent(logs);
+        }
+      } catch (err) {
+        console.warn('Live log stream poll error:', err);
+      }
+    }, 2000);
+
+    return () => {
+      if (liveIntervalRef.current) {
+        clearInterval(liveIntervalRef.current);
+        liveIntervalRef.current = null;
+      }
+    };
+  }, [selectedLogsService, isLiveStreaming, activeConnId, logLinesCount]);
+
+  // Auto-scroll log container to bottom on new log content if autoScroll is enabled
+  useEffect(() => {
+    if (autoScroll && logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+    }
+  }, [logContent, autoScroll]);
 
   const handleInspect = async (service: ServiceItem) => {
     setInspectService(service);
@@ -126,9 +172,20 @@ export default function ServiceManager() {
     }
   };
 
+  const handleEditServiceFile = (name: string) => {
+    setContextMenu(null);
+    setEditingService(name);
+  };
+
+  // Stream Live in Terminal: Open fresh terminal tab and immediately execute live journalctl
   const handleOpenTerminalLogs = (name: string) => {
     setContextMenu(null);
-    runTerminalCommand(`journalctl -u ${name} -f -n 50\n`);
+    const cmd = `journalctl -u ${name} -f -n 50\n`;
+    const title = `journalctl: ${name}`;
+    runTerminalCommand({ cmd, title, newTab: true });
+    window.dispatchEvent(new CustomEvent('clouddesk:terminal-run-command', {
+      detail: { cmd, title, newTab: true }
+    }));
     openApp('terminal', 'Terminal');
   };
 
@@ -148,12 +205,88 @@ export default function ServiceManager() {
   const failedCount = useMemo(() => services.filter(s => s.status === 'failed').length, [services]);
   const inactiveCount = useMemo(() => services.filter(s => s.status === 'inactive').length, [services]);
 
+  // Navigate rows (Up, Down, Start, End) and auto-scroll target element into view
+  const navigateRow = useCallback((direction: 'up' | 'down' | 'start' | 'end') => {
+    if (filtered.length === 0) return;
+    const currentIndex = filtered.findIndex(s => s.name === selectedServiceName);
+    let nextIndex = 0;
+
+    if (direction === 'down') {
+      nextIndex = currentIndex < 0 ? 0 : Math.min(filtered.length - 1, currentIndex + 1);
+    } else if (direction === 'up') {
+      nextIndex = currentIndex < 0 ? filtered.length - 1 : Math.max(0, currentIndex - 1);
+    } else if (direction === 'start') {
+      nextIndex = 0;
+    } else if (direction === 'end') {
+      nextIndex = filtered.length - 1;
+    }
+
+    const target = filtered[nextIndex];
+    if (target) {
+      setSelectedServiceName(target.name);
+      requestAnimationFrame(() => {
+        const el = document.getElementById(`service-row-${target.name}`) || document.getElementById(`service-card-${target.name}`);
+        if (el) {
+          el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        }
+      });
+    }
+  }, [filtered, selectedServiceName]);
+
+  // Keyboard Navigation: ArrowUp/ArrowDown, Home/End, Enter to inspect, Ctrl+E to edit, Space to start/stop
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      if (selectedLogsService || inspectService || editingService) {
+        return;
+      }
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        navigateRow('down');
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        navigateRow('up');
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        navigateRow('start');
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        navigateRow('end');
+      } else if (e.key === 'Enter') {
+        if (selectedServiceName) {
+          const s = services.find(x => x.name === selectedServiceName);
+          if (s) handleInspect(s);
+        }
+      } else if (e.key === 'e' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        if (selectedServiceName) {
+          handleEditServiceFile(selectedServiceName);
+        }
+      } else if (e.key === ' ') {
+        e.preventDefault();
+        if (selectedServiceName) {
+          const s = services.find(x => x.name === selectedServiceName);
+          if (s) {
+            handleAction(s.name, s.status === 'active' ? 'stop' : 'start');
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [navigateRow, selectedLogsService, inspectService, editingService, selectedServiceName, services]);
+
   return (
-    <div className="flex flex-col h-full bg-[#181825] text-[#cdd6f4] select-none font-sans overflow-hidden">
+    <div className="flex flex-col h-full bg-[#181825] text-[#cdd6f4] select-none font-sans overflow-hidden relative">
       {/* macOS Top Toolbar & Segmented View Bar */}
-      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3">
+      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto no-scrollbar">
         {/* Left: macOS Segmented Filter Buttons */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           <div className="mac-segmented-container">
             <button
               onClick={() => setFilter('all')}
@@ -200,10 +333,47 @@ export default function ServiceManager() {
               Cards
             </button>
           </div>
+
+          {/* Up / Down Row Selection & Auto-Scroll Navigation Controls */}
+          <div className="flex items-center space-x-1 bg-[#101018] border border-white/10 rounded-xl px-1.5 py-0.5 text-xs text-gray-400">
+            <span className="text-[10px] px-1 font-mono text-gray-500 hidden xl:inline">Row:</span>
+            <button
+              onClick={() => navigateRow('start')}
+              disabled={filtered.length === 0}
+              className="p-1 hover:bg-white/10 rounded-lg hover:text-white transition-colors disabled:opacity-30"
+              title="Jump to Start of List (Home)"
+            >
+              <ChevronsUp className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => navigateRow('up')}
+              disabled={filtered.length === 0}
+              className="p-1 hover:bg-white/10 rounded-lg hover:text-white transition-colors disabled:opacity-30"
+              title="Select Previous Row (Arrow Up)"
+            >
+              <ArrowUp className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => navigateRow('down')}
+              disabled={filtered.length === 0}
+              className="p-1 hover:bg-white/10 rounded-lg hover:text-white transition-colors disabled:opacity-30"
+              title="Select Next Row (Arrow Down)"
+            >
+              <ArrowDown className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => navigateRow('end')}
+              disabled={filtered.length === 0}
+              className="p-1 hover:bg-white/10 rounded-lg hover:text-white transition-colors disabled:opacity-30"
+              title="Jump to End of List (End)"
+            >
+              <ChevronsDown className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
 
         {/* Right: Search Pill & Refresh */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           <div className="relative">
             <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
@@ -262,7 +432,7 @@ export default function ServiceManager() {
                   <th className="py-2.5 px-3 w-28">Status</th>
                   <th className="py-2.5 px-3 w-24">Substate</th>
                   <th className="py-2.5 px-3 w-28 text-center">Autostart</th>
-                  <th className="py-2.5 px-3 text-right w-44">Actions</th>
+                  <th className="py-2.5 px-3 text-right w-52">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">
@@ -279,6 +449,7 @@ export default function ServiceManager() {
 
                     return (
                       <tr
+                        id={`service-row-${service.name}`}
                         key={service.name}
                         onClick={() => setSelectedServiceName(service.name)}
                         onDoubleClick={() => handleInspect(service)}
@@ -289,7 +460,7 @@ export default function ServiceManager() {
                         }}
                         className={`cursor-pointer transition-colors ${
                           isSelected
-                            ? 'bg-blue-600/25 border-l-2 border-l-blue-500 text-white font-medium'
+                            ? 'bg-blue-600/25 border-l-2 border-l-blue-500 text-white font-medium shadow-[inset_0_0_12px_rgba(59,130,246,0.15)]'
                             : isZebra
                             ? 'bg-white/[0.015] hover:bg-white/[0.04]'
                             : 'bg-transparent hover:bg-white/[0.04]'
@@ -349,7 +520,7 @@ export default function ServiceManager() {
                           <button
                             onClick={(e) => { e.stopPropagation(); handleInspect(service); }}
                             className="p-1 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
-                            title="Inspect Service Status"
+                            title="Inspect Service Status (Enter)"
                           >
                             <Eye className="w-3.5 h-3.5" />
                           </button>
@@ -357,10 +528,19 @@ export default function ServiceManager() {
                           {/* Logs Button */}
                           <button
                             onClick={(e) => { e.stopPropagation(); handleViewLogs(service.name); }}
-                            className="p-1 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
-                            title="View Journalctl Logs"
+                            className="p-1 rounded-lg hover:bg-white/10 text-gray-400 hover:text-blue-400 transition-colors"
+                            title="View Journalctl Live Logs"
                           >
                             <ScrollText className="w-3.5 h-3.5 text-blue-400" />
+                          </button>
+
+                          {/* Edit Service Unit File Button */}
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleEditServiceFile(service.name); }}
+                            className="p-1 rounded-lg hover:bg-white/10 text-gray-400 hover:text-cyan-400 transition-colors"
+                            title="Edit Service Unit File (Ctrl+E)"
+                          >
+                            <FileCode className="w-3.5 h-3.5 text-cyan-400" />
                           </button>
 
                           {/* Start / Stop Toggle */}
@@ -369,7 +549,7 @@ export default function ServiceManager() {
                               onClick={(e) => { e.stopPropagation(); handleAction(service.name, 'stop'); }}
                               disabled={actionInProgress === `${service.name}-stop`}
                               className="p-1 rounded-lg hover:bg-rose-500/20 text-gray-400 hover:text-rose-400 transition-colors"
-                              title="Stop Service"
+                              title="Stop Service (Space)"
                             >
                               <Square className="w-3.5 h-3.5" />
                             </button>
@@ -378,7 +558,7 @@ export default function ServiceManager() {
                               onClick={(e) => { e.stopPropagation(); handleAction(service.name, 'start'); }}
                               disabled={actionInProgress === `${service.name}-start`}
                               className="p-1 rounded-lg hover:bg-emerald-500/20 text-gray-400 hover:text-emerald-400 transition-colors"
-                              title="Start Service"
+                              title="Start Service (Space)"
                             >
                               <Play className="w-3.5 h-3.5" />
                             </button>
@@ -407,6 +587,7 @@ export default function ServiceManager() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
               {filtered.map(service => (
                 <div
+                  id={`service-card-${service.name}`}
                   key={service.name}
                   onClick={() => setSelectedServiceName(service.name)}
                   onDoubleClick={() => handleInspect(service)}
@@ -474,6 +655,13 @@ export default function ServiceManager() {
                         <ScrollText className="w-3.5 h-3.5 text-blue-400" />
                       </button>
                       <button
+                        onClick={(e) => { e.stopPropagation(); handleEditServiceFile(service.name); }}
+                        className="p-1 rounded-lg hover:bg-white/10 text-gray-400 hover:text-cyan-400"
+                        title="Edit Service Unit File"
+                      >
+                        <FileCode className="w-3.5 h-3.5 text-cyan-400" />
+                      </button>
+                      <button
                         onClick={(e) => { e.stopPropagation(); handleAction(service.name, service.status === 'active' ? 'stop' : 'start'); }}
                         className="p-1 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white"
                         title={service.status === 'active' ? 'Stop' : 'Start'}
@@ -500,33 +688,45 @@ export default function ServiceManager() {
           <div className="flex items-center space-x-4">
             <span className="flex items-center space-x-1.5">
               <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span>{activeCount} Running Units</span>
+              <span>{activeCount} Running</span>
             </span>
             <span>·</span>
             <span className="flex items-center space-x-1.5">
               <span className="w-2 h-2 rounded-full bg-rose-400" />
-              <span>{failedCount} Failed Units</span>
+              <span>{failedCount} Failed</span>
             </span>
             <span>·</span>
-            <span>Total Units: <b className="text-white font-mono">{services.length}</b></span>
+            <span>Total: <b className="text-white font-mono">{services.length}</b></span>
+            {selectedServiceName && (
+              <>
+                <span>·</span>
+                <span className="text-blue-400 font-mono truncate max-w-xs font-semibold">
+                  Selected: {selectedServiceName}
+                </span>
+              </>
+            )}
           </div>
 
-          <div className="flex items-center space-x-3 text-[11px]">
-            <span>Double click to Inspect</span>
+          <div className="flex items-center space-x-3 text-[11px] text-gray-500 hidden sm:flex">
+            <span>[↑ / ↓] Select Row</span>
             <span>·</span>
-            <span>Right-click for full Systemd actions</span>
+            <span>[Enter] Inspect</span>
+            <span>·</span>
+            <span>[Ctrl+E] Edit File</span>
+            <span>·</span>
+            <span>[Space] Start/Stop</span>
           </div>
         </div>
       </div>
 
-      {/* macOS Live Journalctl Logs Modal */}
+      {/* macOS Live Journalctl Logs Modal with Auto-Scroll & Start/Stop */}
       {selectedLogsService && (
         <div 
-          className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-150"
+          className="absolute inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-2 sm:p-4 md:p-6 animate-in fade-in duration-150"
           onClick={() => setSelectedLogsService(null)}
         >
           <div 
-            className="bg-[#181a2c] border border-white/20 rounded-3xl w-full max-w-3xl h-[520px] flex flex-col shadow-2xl overflow-hidden font-sans"
+            className="bg-[#181a2c] border border-white/20 rounded-2xl w-full max-w-4xl h-full max-h-[calc(100%-1rem)] flex flex-col shadow-2xl overflow-hidden font-sans"
             onClick={e => e.stopPropagation()}
           >
             {/* Modal Header */}
@@ -534,11 +734,60 @@ export default function ServiceManager() {
               <div className="flex items-center space-x-2.5">
                 <ScrollText className="w-4 h-4 text-blue-400" />
                 <span className="font-mono text-xs font-bold text-white">
-                  journalctl -u {selectedLogsService} -n {logLinesCount}
+                  journalctl -u {selectedLogsService}
                 </span>
+                {/* Live Streaming Badge */}
+                {isLiveStreaming ? (
+                  <span className="flex items-center space-x-1 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px] font-mono font-bold animate-pulse">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                    <span>LIVE (2s)</span>
+                  </span>
+                ) : (
+                  <span className="flex items-center space-x-1 px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-mono font-bold">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                    <span>PAUSED</span>
+                  </span>
+                )}
               </div>
 
               <div className="flex items-center space-x-2">
+                {/* Start / Stop Toggle Button */}
+                <button
+                  onClick={() => setIsLiveStreaming(!isLiveStreaming)}
+                  className={`px-2.5 py-1 rounded-xl text-xs font-medium flex items-center space-x-1.5 border transition-all ${
+                    isLiveStreaming
+                      ? 'bg-amber-500/15 border-amber-500/30 text-amber-300 hover:bg-amber-500/25'
+                      : 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25'
+                  }`}
+                  title={isLiveStreaming ? 'Pause live log stream' : 'Resume live log stream'}
+                >
+                  {isLiveStreaming ? (
+                    <>
+                      <Pause className="w-3.5 h-3.5" />
+                      <span>Pause Live</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-3.5 h-3.5" />
+                      <span>Start Live</span>
+                    </>
+                  )}
+                </button>
+
+                {/* Auto-Scroll Toggle Button */}
+                <button
+                  onClick={() => setAutoScroll(!autoScroll)}
+                  className={`px-2.5 py-1 rounded-xl text-xs font-medium flex items-center space-x-1.5 border transition-all ${
+                    autoScroll
+                      ? 'bg-blue-600/20 border-blue-500/40 text-blue-300'
+                      : 'bg-white/5 border-white/10 text-gray-400 hover:text-white'
+                  }`}
+                  title="Toggle automatic scrolling to latest log entries"
+                >
+                  <ArrowDownToLine className="w-3.5 h-3.5" />
+                  <span>Auto-Scroll: {autoScroll ? 'ON' : 'OFF'}</span>
+                </button>
+
                 {/* Lines Selector */}
                 <select
                   value={logLinesCount}
@@ -560,7 +809,7 @@ export default function ServiceManager() {
                   onClick={() => handleViewLogs(selectedLogsService)}
                   disabled={isLogRefreshing}
                   className="p-1.5 hover:bg-white/10 rounded-xl text-gray-400 hover:text-white transition-colors"
-                  title="Reload Logs"
+                  title="Reload Logs Now"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isLogRefreshing ? 'animate-spin text-blue-400' : ''}`} />
                 </button>
@@ -569,7 +818,8 @@ export default function ServiceManager() {
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(logContent);
-                    alert('Logs copied to clipboard!');
+                    setActionNotice({ text: 'Logs copied to clipboard!', isError: false });
+                    setTimeout(() => setActionNotice(null), 3000);
                   }}
                   className="p-1.5 hover:bg-white/10 rounded-xl text-gray-400 hover:text-white transition-colors"
                   title="Copy to Clipboard"
@@ -586,34 +836,84 @@ export default function ServiceManager() {
               </div>
             </div>
 
-            {/* Filter Search within Logs */}
-            <div className="px-4 py-2 bg-[#141624] border-b border-white/[0.06] flex items-center space-x-2 shrink-0">
-              <Search className="w-3.5 h-3.5 text-gray-500" />
-              <input
-                type="text"
-                placeholder="Filter logs for errors, timestamps, warnings..."
-                value={logFilterQuery}
-                onChange={e => setLogFilterQuery(e.target.value)}
-                className="bg-transparent text-xs text-white placeholder-gray-500 focus:outline-none flex-1 font-mono"
-              />
-              {logFilterQuery && (
-                <button onClick={() => setLogFilterQuery('')} className="text-gray-500 hover:text-white text-xs">
-                  Clear
+            {/* Filter Search & Severity Toolbar */}
+            <div className="px-4 py-2 bg-[#141624] border-b border-white/[0.06] flex items-center justify-between shrink-0 gap-3">
+              <div className="flex items-center space-x-2 flex-1">
+                <Search className="w-3.5 h-3.5 text-gray-500 shrink-0" />
+                <input
+                  type="text"
+                  placeholder="Filter logs by keywords, timestamps, exit codes..."
+                  value={logFilterQuery}
+                  onChange={e => setLogFilterQuery(e.target.value)}
+                  className="bg-transparent text-xs text-white placeholder-gray-500 focus:outline-none w-full font-mono"
+                />
+                {logFilterQuery && (
+                  <button onClick={() => setLogFilterQuery('')} className="text-gray-500 hover:text-white text-xs">
+                    Clear
+                  </button>
+                )}
+              </div>
+
+              {/* Severity Quick Filters */}
+              <div className="flex items-center space-x-1 shrink-0 text-xs">
+                <button
+                  onClick={() => setLogSeverityFilter('all')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold ${
+                    logSeverityFilter === 'all' ? 'bg-white/20 text-white' : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  All
                 </button>
-              )}
+                <button
+                  onClick={() => setLogSeverityFilter('error')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold ${
+                    logSeverityFilter === 'error' ? 'bg-rose-500/25 text-rose-300 border border-rose-500/40' : 'text-gray-400 hover:text-rose-300'
+                  }`}
+                >
+                  Errors
+                </button>
+                <button
+                  onClick={() => setLogSeverityFilter('warn')}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold ${
+                    logSeverityFilter === 'warn' ? 'bg-amber-500/25 text-amber-300 border border-amber-500/40' : 'text-gray-400 hover:text-amber-300'
+                  }`}
+                >
+                  Warnings
+                </button>
+              </div>
             </div>
 
-            {/* Logs Body */}
-            <div className="flex-1 p-4 bg-[#0d0f18] font-mono text-[11px] text-gray-300 overflow-y-auto whitespace-pre-wrap select-text leading-relaxed scrollbar-thin">
+            {/* Logs Body with Auto-Scroll ref */}
+            <div 
+              ref={logsContainerRef}
+              className="flex-1 p-4 bg-[#0d0f18] font-mono text-[11px] text-gray-300 overflow-y-auto whitespace-pre-wrap select-text leading-relaxed scrollbar-thin"
+            >
               {logContent.split('\n')
-                .filter(line => !logFilterQuery || line.toLowerCase().includes(logFilterQuery.toLowerCase()))
+                .filter(line => {
+                  if (logFilterQuery && !line.toLowerCase().includes(logFilterQuery.toLowerCase())) {
+                    return false;
+                  }
+                  if (logSeverityFilter === 'error') {
+                    return /error|failed|failure|crit|alert|emerg|exception/i.test(line);
+                  }
+                  if (logSeverityFilter === 'warn') {
+                    return /warn|warning|notice/i.test(line);
+                  }
+                  return true;
+                })
                 .map((line, i) => {
-                  const isError = line.includes('error') || line.includes('Error') || line.includes('failed') || line.includes('Failed');
-                  const isWarn = line.includes('warn') || line.includes('Warn');
+                  const isError = /error|failed|failure|crit|alert|emerg|exception/i.test(line);
+                  const isWarn = /warn|warning|notice/i.test(line);
                   return (
                     <div 
                       key={i} 
-                      className={`${isError ? 'text-rose-400 font-semibold' : isWarn ? 'text-amber-300' : 'text-gray-300'}`}
+                      className={`py-0.5 px-1 rounded transition-colors ${
+                        isError 
+                          ? 'bg-rose-500/10 text-rose-300 font-medium border-l-2 border-rose-500' 
+                          : isWarn 
+                          ? 'bg-amber-500/5 text-amber-300 border-l-2 border-amber-500' 
+                          : 'text-gray-300 hover:bg-white/[0.02]'
+                      }`}
                     >
                       {line}
                     </div>
@@ -621,15 +921,26 @@ export default function ServiceManager() {
                 })}
             </div>
 
-            {/* Logs Footer */}
+            {/* Logs Footer with Stream Live in Terminal action */}
             <div className="px-4 py-2.5 bg-[#121422] border-t border-white/[0.08] flex items-center justify-between text-xs text-gray-400 shrink-0">
-              <button
-                onClick={() => handleOpenTerminalLogs(selectedLogsService)}
-                className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded-xl flex items-center space-x-1.5 transition-colors"
-              >
-                <Terminal className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Stream Live in Terminal (journalctl -f)</span>
-              </button>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => handleOpenTerminalLogs(selectedLogsService)}
+                  className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded-xl flex items-center space-x-1.5 transition-colors border border-white/10"
+                  title="Open live journalctl in interactive terminal tab"
+                >
+                  <Terminal className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Stream Live in Terminal (journalctl -f)</span>
+                </button>
+                <button
+                  onClick={() => handleEditServiceFile(selectedLogsService)}
+                  className="px-3 py-1 bg-white/5 hover:bg-white/15 text-cyan-300 rounded-xl flex items-center space-x-1.5 transition-colors border border-cyan-500/20"
+                  title="Edit service unit configuration"
+                >
+                  <FileCode className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Edit Unit File</span>
+                </button>
+              </div>
 
               <button
                 onClick={() => setSelectedLogsService(null)}
@@ -645,11 +956,11 @@ export default function ServiceManager() {
       {/* macOS Detailed Service Inspector Modal */}
       {inspectService && (
         <div 
-          className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-150"
+          className="absolute inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-2 sm:p-4 animate-in fade-in duration-150"
           onClick={() => setInspectService(null)}
         >
           <div 
-            className="bg-[#1c1d2e] border border-white/20 rounded-3xl w-full max-w-lg p-6 shadow-2xl space-y-4 font-sans"
+            className="bg-[#1c1d2e] border border-white/20 rounded-2xl w-full max-w-lg max-h-[calc(100%-1rem)] overflow-y-auto p-5 sm:p-6 shadow-2xl space-y-4 font-sans scrollbar-thin"
             onClick={e => e.stopPropagation()}
           >
             {/* Header */}
@@ -681,13 +992,22 @@ export default function ServiceManager() {
 
             {/* Quick Actions inside Inspector */}
             <div className="flex items-center justify-between pt-3 border-t border-white/10">
-              <button
-                onClick={() => handleViewLogs(inspectService.name)}
-                className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs flex items-center space-x-1.5 transition-colors"
-              >
-                <ScrollText className="w-3.5 h-3.5 text-blue-400" />
-                <span>View Full Logs</span>
-              </button>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => handleViewLogs(inspectService.name)}
+                  className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs flex items-center space-x-1.5 transition-colors"
+                >
+                  <ScrollText className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Logs</span>
+                </button>
+                <button
+                  onClick={() => handleEditServiceFile(inspectService.name)}
+                  className="px-3 py-1.5 bg-cyan-600/20 hover:bg-cyan-600/30 text-cyan-300 border border-cyan-500/30 rounded-xl text-xs flex items-center space-x-1.5 transition-colors"
+                >
+                  <FileCode className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Edit File</span>
+                </button>
+              </div>
 
               <div className="flex items-center space-x-2">
                 <button
@@ -717,12 +1037,25 @@ export default function ServiceManager() {
         </div>
       )}
 
+      {/* Edit Service Unit File Modal */}
+      {editingService && (
+        <EditServiceModal
+          serviceName={editingService}
+          activeConnId={activeConnId}
+          onClose={() => setEditingService(null)}
+          onRestartService={async (name) => {
+            await handleAction(name, 'restart');
+          }}
+          onReloadServices={loadServices}
+        />
+      )}
+
       {/* macOS Right-Click Context Menu */}
       {contextMenu && (
         <div
           className="fixed z-50 bg-[#1e1e2e]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl py-1.5 w-60 text-xs text-gray-200 font-sans select-none animate-in fade-in duration-100"
           style={{
-            top: Math.min(contextMenu.y, window.innerHeight - 320),
+            top: Math.min(contextMenu.y, window.innerHeight - 340),
             left: Math.min(contextMenu.x, window.innerWidth - 260)
           }}
           onClick={e => e.stopPropagation()}
@@ -745,6 +1078,14 @@ export default function ServiceManager() {
           >
             <ScrollText className="w-3.5 h-3.5 text-blue-400" />
             <span>View Logs (journalctl)</span>
+          </div>
+
+          <div
+            onClick={() => { handleEditServiceFile(contextMenu.service.name); }}
+            className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer text-cyan-300"
+          >
+            <FileCode className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Edit Service Unit File...</span>
           </div>
 
           <div className="my-1 border-t border-white/10" />

@@ -3,14 +3,18 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Terminal, Folder, FileCode, Monitor, Activity, Settings,
   Container, Server, ScrollText, Globe, Package, Users,
-  Clock, Database, Shield, HardDrive, Flame, StickyNote, Search, X
+  Clock, Database, Shield, HardDrive, Flame, StickyNote, Search, X, Variable, KeyRound, Compass, Send
 } from 'lucide-react';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
 
 const ALL_APPS = [
+  { id: 'api', icon: Send, label: 'API Studio (SSH Tunnel)', category: 'Core', gradient: 'from-[#6366f1] to-[#d946ef]' },
+  { id: 'browser', icon: Compass, label: 'Private Web Browser', category: 'Core', gradient: 'from-[#06b6d4] to-[#1e40af]' },
+  { id: 'ssh', icon: KeyRound, label: 'SSH Studio', category: 'Core', gradient: 'from-[#0ea5e9] to-[#1e40af]' },
   { id: 'terminal', icon: Terminal, label: 'Terminal', category: 'Core', gradient: 'from-[#334155] to-[#0f172a]' },
-  { id: 'files', icon: Folder, label: 'Finder', category: 'Core', gradient: 'from-[#0ea5e9] to-[#0284c7]' },
+  { id: 'files', icon: Folder, label: 'File Manager', category: 'Core', gradient: 'from-[#0ea5e9] to-[#0284c7]' },
   { id: 'editor', icon: FileCode, label: 'Code Editor', category: 'Core', gradient: 'from-[#a855f7] to-[#7e22ce]' },
+  { id: 'env', icon: Variable, label: 'Environment Variables', category: 'DevOps', gradient: 'from-[#ec4899] to-[#6366f1]' },
   { id: 'monitor', icon: Monitor, label: 'Activity Monitor', category: 'System', gradient: 'from-[#06b6d4] to-[#0e7490]' },
   { id: 'processes', icon: Activity, label: 'Process Manager', category: 'System', gradient: 'from-[#f43f5e] to-[#be123c]' },
   { id: 'services', icon: Server, label: 'Services', category: 'System', gradient: 'from-[#8b5cf6] to-[#6d28d9]' },

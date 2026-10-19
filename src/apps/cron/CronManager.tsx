@@ -348,10 +348,10 @@ export default function CronManager() {
       )}
 
       {/* 1. macOS Top Header Toolbar */}
-      <header className="px-5 py-3.5 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between shrink-0">
+      <header className="px-5 py-3.5 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between shrink-0 overflow-x-auto no-scrollbar gap-3">
         
         {/* Left: App Identity */}
-        <div className="flex items-center space-x-3.5">
+        <div className="flex items-center space-x-3.5 shrink-0">
           <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg shadow-orange-500/25 border border-white/20">
             <Clock className="w-5 h-5 text-white" />
           </div>
@@ -368,7 +368,7 @@ export default function CronManager() {
         </div>
 
         {/* Center: Segmented Navigation Switcher */}
-        <div className="flex items-center bg-[#1e1e2e]/90 p-1 rounded-2xl border border-white/10 shadow-inner">
+        <div className="flex items-center bg-[#1e1e2e]/90 p-1 rounded-2xl border border-white/10 shadow-inner shrink-0">
           <button
             onClick={() => setActiveTab('tasks')}
             className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-all ${
@@ -422,7 +422,7 @@ export default function CronManager() {
         </div>
 
         {/* Right: Actions */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           <button
             onClick={() => setShowAddModal(true)}
             className="flex items-center space-x-1.5 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 active:scale-95 text-white rounded-xl text-xs font-semibold shadow-md shadow-blue-600/25 transition-all border border-blue-400/30"
@@ -443,10 +443,10 @@ export default function CronManager() {
       </header>
 
       {/* 2. Sub-Toolbar Metrics & Filter */}
-      <div className="px-5 py-3 bg-[#161622] border-b border-white/[0.06] flex items-center justify-between shrink-0 gap-4">
+      <div className="px-5 py-3 bg-[#161622] border-b border-white/[0.06] flex items-center justify-between shrink-0 gap-4 overflow-x-auto no-scrollbar">
         
         {/* Metric Summary Pill Cards */}
-        <div className="flex items-center space-x-3 overflow-x-auto py-0.5">
+        <div className="flex items-center space-x-3 overflow-x-auto py-0.5 shrink-0">
           <div className="flex items-center space-x-2.5 px-3 py-1.5 bg-[#1e1e2e] rounded-xl border border-white/10 shadow-sm">
             <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
             <span className="text-[11px] text-gray-400">Total Tasks:</span>

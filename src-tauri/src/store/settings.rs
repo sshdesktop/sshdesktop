@@ -95,7 +95,11 @@ pub async fn settings_get(_state: tauri::State<'_, AppState>) -> Result<AppSetti
             }
         }
     }
-    Ok(AppSettings::default())
+    let default_settings = AppSettings::default();
+    if let Ok(serialized) = serde_json::to_string_pretty(&default_settings) {
+        let _ = fs::write(&path, serialized);
+    }
+    Ok(default_settings)
 }
 
 #[tauri::command]

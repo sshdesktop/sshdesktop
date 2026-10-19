@@ -21,8 +21,15 @@ const DiskManager = lazy(() => import('../apps/disk/DiskManager'));
 const SecurityAuditor = lazy(() => import('../apps/security/SecurityAuditor'));
 const Notes = lazy(() => import('../apps/notes/Notes'));
 const AppSettings = lazy(() => import('../apps/settings/AppSettings'));
+const EnvManager = lazy(() => import('../apps/env/EnvManager'));
+const SshApp = lazy(() => import('../apps/ssh/SshApp'));
+const BrowserApp = lazy(() => import('../apps/browser/BrowserApp'));
+const ApiApp = lazy(() => import('../apps/api/ApiApp'));
 
 const APP_COMPONENTS: Record<string, React.LazyExoticComponent<React.FC>> = {
+  api: ApiApp,
+  ssh: SshApp,
+  browser: BrowserApp,
   terminal: TerminalApp,
   files: FileManager,
   editor: CodeEditor,
@@ -41,6 +48,7 @@ const APP_COMPONENTS: Record<string, React.LazyExoticComponent<React.FC>> = {
   security: SecurityAuditor,
   notes: Notes,
   settings: AppSettings,
+  env: EnvManager,
 };
 
 function AppLoader() {
