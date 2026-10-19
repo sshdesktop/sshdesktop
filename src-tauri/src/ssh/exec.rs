@@ -320,6 +320,18 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
         return (msg, n_code);
     }
 
+    // 3B. /usr/bin/sudo SUID permission broken on server (effective UID is not 0 / nosuid)
+    if lower_out.contains("effective uid is not 0") || lower_out.contains("nosuid") {
+        let msg = format!(
+            "Server Permission Error: /usr/bin/sudo has lost its setuid root permissions on the server.\n\
+             Fix on your server by running as root:\n\
+               chown root:root /usr/bin/sudo && chmod 4755 /usr/bin/sudo\n\
+             Or connect in CloudDesk as 'root' using your PEM key."
+        );
+        log::error!("CloudDesk: {}", msg);
+        return (msg, n_code);
+    }
+
     // 3B. User requires a password for sudo (sudo -S)
     if let Some(ref pwd) = conn.config.password {
         if !pwd.is_empty() {
@@ -337,6 +349,17 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
             }
 
             let s_lower = s_out.to_lowercase();
+            if s_lower.contains("effective uid is not 0") || s_lower.contains("nosuid") {
+                let msg = format!(
+                    "Server Permission Error: /usr/bin/sudo has lost its setuid root permissions on the server.\n\
+                     Fix on your server by running as root:\n\
+                       chown root:root /usr/bin/sudo && chmod 4755 /usr/bin/sudo\n\
+                     Or connect in CloudDesk as 'root' using your PEM key."
+                );
+                log::error!("CloudDesk: {}", msg);
+                return (msg, s_code);
+            }
+
             if s_lower.contains("not in the sudoers file")
                 || s_lower.contains("is not allowed to execute")
             {
