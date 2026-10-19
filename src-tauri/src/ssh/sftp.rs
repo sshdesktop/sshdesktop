@@ -49,6 +49,13 @@ pub async fn sftp_list_dir(
         return Err(format!("Permission denied: You do not have permission to access '{}'.", clean_path));
     }
 
+    if stdout.contains("No such file or directory")
+        || stdout.contains("cannot access")
+        || stdout.contains("Not a directory")
+    {
+        return Err(format!("Directory not found: '{}'. The specified directory does not exist or cannot be accessed.", clean_path));
+    }
+
     let mut entries = Vec::new();
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -162,7 +169,7 @@ fn to_base64(bytes: &[u8]) -> String {
     result
 }
 
-async fn sftp_write_bytes(
+pub async fn sftp_write_bytes(
     state: &AppState,
     conn_id: &str,
     path: &str,
@@ -178,11 +185,18 @@ async fn sftp_write_bytes(
         return Err("No active SSH connection.".into());
     }
     if code != 0 {
-        // If regular user (e.g. sharuk) gets permission denied in /var/www or /etc, elevate with sudo
+        // If regular user gets permission denied in /var/www or /etc, elevate with sudo
         let sudo_cmd = format!("printf '%s' '{}' | base64 -d > '{}'", b64, escaped_path);
-        let (_s_out, s_code) = crate::ssh::exec::run_cmd_priv(state, conn_id, &sudo_cmd).await;
+        let (s_out, s_code) = crate::ssh::exec::run_cmd_priv(state, conn_id, &sudo_cmd).await;
         if s_code != 0 {
-            return Err(format!("Failed to write remote file '{}': {}", path, stdout.trim()));
+            let detail = if !s_out.trim().is_empty() {
+                s_out.trim().to_string()
+            } else if !stdout.trim().is_empty() {
+                stdout.trim().to_string()
+            } else {
+                "Permission Denied: Administrator (sudo) privileges required to write to this file.".to_string()
+            };
+            return Err(format!("Failed to write remote file '{}': {}", path, detail));
         }
     }
     log::info!("CloudDesk: Saved remote file {}", path);
@@ -216,14 +230,17 @@ pub async fn sftp_mkdir(
     path: String,
 ) -> Result<(), String> {
     let escaped = shell_escape(&path);
-    let (_stdout, code) = run_cmd(&state, &conn_id, &format!("mkdir -p '{}'", escaped)).await;
-    if code == -1 {
-        return Err("No active SSH connection.".into());
+    let (stdout, code) = run_cmd(&state, &conn_id, &format!("mkdir -p '{}' 2>&1", escaped)).await;
+    if code == 0 {
+        return Ok(());
     }
-    if code != 0 {
-        return Err(format!("Failed to create remote directory '{}'", path));
+    // Fallback to elevated execution if permission denied
+    let (s_out, s_code) = crate::ssh::exec::run_cmd_priv(&state, &conn_id, &format!("mkdir -p '{}' 2>&1", escaped)).await;
+    if s_code == 0 {
+        return Ok(());
     }
-    Ok(())
+    let err = if !s_out.trim().is_empty() { s_out.trim() } else { stdout.trim() };
+    Err(format!("Failed to create directory '{}': {}", path, err))
 }
 
 #[tauri::command]
@@ -232,19 +249,22 @@ pub async fn sftp_delete(
     conn_id: String,
     path: String,
 ) -> Result<(), String> {
-    // Prevent deleting root or home root by mistake
-    if path == "/" || path == "/home" || path == "/etc" || path == "/usr" {
-        return Err(format!("Refusing to delete protected path '{}'", path));
+    // Prevent deleting root or protected system roots by mistake
+    if path == "/" || path == "/home" || path == "/etc" || path == "/usr" || path == "/boot" || path == "/sys" {
+        return Err(format!("System protection active: Refusing to delete protected path '{}'", path));
     }
     let escaped = shell_escape(&path);
-    let (_stdout, code) = run_cmd(&state, &conn_id, &format!("rm -rf '{}'", escaped)).await;
-    if code == -1 {
-        return Err("No active SSH connection.".into());
+    let (stdout, code) = run_cmd(&state, &conn_id, &format!("rm -rf '{}' 2>&1", escaped)).await;
+    if code == 0 {
+        return Ok(());
     }
-    if code != 0 {
-        return Err(format!("Failed to delete '{}'", path));
+    // Fallback to elevated execution if permission denied
+    let (s_out, s_code) = crate::ssh::exec::run_cmd_priv(&state, &conn_id, &format!("rm -rf '{}' 2>&1", escaped)).await;
+    if s_code == 0 {
+        return Ok(());
     }
-    Ok(())
+    let err = if !s_out.trim().is_empty() { s_out.trim() } else { stdout.trim() };
+    Err(format!("Failed to delete '{}': {}", path, err))
 }
 
 #[tauri::command]
@@ -256,14 +276,17 @@ pub async fn sftp_rename(
 ) -> Result<(), String> {
     let old_escaped = shell_escape(&old_path);
     let new_escaped = shell_escape(&new_path);
-    let (_stdout, code) = run_cmd(&state, &conn_id, &format!("mv '{}' '{}'", old_escaped, new_escaped)).await;
-    if code == -1 {
-        return Err("No active SSH connection.".into());
+    let (stdout, code) = run_cmd(&state, &conn_id, &format!("mv '{}' '{}' 2>&1", old_escaped, new_escaped)).await;
+    if code == 0 {
+        return Ok(());
     }
-    if code != 0 {
-        return Err(format!("Failed to move '{}' to '{}'", old_path, new_path));
+    // Fallback to elevated execution if permission denied
+    let (s_out, s_code) = crate::ssh::exec::run_cmd_priv(&state, &conn_id, &format!("mv '{}' '{}' 2>&1", old_escaped, new_escaped)).await;
+    if s_code == 0 {
+        return Ok(());
     }
-    Ok(())
+    let err = if !s_out.trim().is_empty() { s_out.trim() } else { stdout.trim() };
+    Err(format!("Failed to move '{}' to '{}': {}", old_path, new_path, err))
 }
 
 #[tauri::command]

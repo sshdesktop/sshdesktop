@@ -1,11 +1,15 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { 
   Users, UserPlus, Shield, Trash2, Lock, Unlock, Search, RefreshCw, 
   Terminal, Key, X, Check, Plus, Folder, UserCheck, ShieldAlert, 
   LogOut, Layers, AlertCircle, CheckCircle2, ChevronRight, UserX,
-  Settings, ExternalLink, HardDrive, ShieldCheck
+  Settings, ExternalLink, HardDrive, ShieldCheck, Copy, MoreHorizontal,
+  UserMinus
 } from 'lucide-react';
-import { userList, groupList, userAdd, userDelete, sshExec } from '../../lib/tauri-bridge';
+import { 
+  userList, groupList, userAdd, userDelete, sshExec,
+  groupAdd, groupDelete, groupAddUser, groupRemoveUser, whoIsLoggedIn 
+} from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
 
@@ -44,6 +48,7 @@ const AVATAR_COLORS = [
 ];
 
 export default function UserManager() {
+  const containerRef = useRef<HTMLDivElement>(null);
   const [tab, setTab] = useState<'users' | 'groups' | 'sessions'>('users');
   const [users, setUsers] = useState<UserEntry[]>([]);
   const [groups, setGroups] = useState<GroupEntry[]>([]);
@@ -51,8 +56,10 @@ export default function UserManager() {
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
   
-  // Selected user for Master-Detail macOS view
+  // Selected user, group, and session for keyboard navigation and inspection
   const [selectedUsername, setSelectedUsername] = useState<string | null>(null);
+  const [selectedGroupName, setSelectedGroupName] = useState<string | null>(null);
+  const [selectedSessionIndex, setSelectedSessionIndex] = useState<number | null>(null);
 
   // Modals
   const [showAddModal, setShowAddModal] = useState(false);
@@ -62,6 +69,21 @@ export default function UserManager() {
   const [showAddGroupModal, setShowAddGroupModal] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [addGroupError, setAddGroupError] = useState<string | null>(null);
+
+  // Edit Group Modal
+  const [editGroupModal, setEditGroupModal] = useState<GroupEntry | null>(null);
+  const [selectedUserToAdd, setSelectedUserToAdd] = useState<string>('');
+  const [editGroupError, setEditGroupError] = useState<string | null>(null);
+  const [editGroupLoading, setEditGroupLoading] = useState(false);
+
+  // Context Menu
+  const [contextMenu, setContextMenu] = useState<{
+    visible: boolean;
+    x: number;
+    y: number;
+    type: 'user' | 'group' | 'session';
+    data: any;
+  } | null>(null);
 
   // Password & Group Management Modals
   const [passwordModalUser, setPasswordModalUser] = useState<string | null>(null);
@@ -82,10 +104,10 @@ export default function UserManager() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [uList, gList, whoRes] = await Promise.all([
-        userList(activeConnId),
-        groupList(activeConnId),
-        sshExec(activeConnId, 'who')
+      const [uList, gList, whoOutput] = await Promise.all([
+        userList(activeConnId).catch(() => []),
+        groupList(activeConnId).catch(() => []),
+        whoIsLoggedIn(activeConnId).catch(() => '')
       ]);
 
       if (uList && uList.length > 0) {
@@ -114,20 +136,59 @@ export default function UserManager() {
         })));
       }
 
-      if (whoRes && whoRes.stdout) {
-        const lines = whoRes.stdout.trim().split('\n').filter(Boolean);
-        const parsed = lines.map(line => {
-          const parts = line.trim().split(/\s+/);
-          return {
-            user: parts[0] || 'unknown',
-            tty: parts[1] || 'tty',
-            from: parts.length > 4 ? parts.slice(4).join(' ').replace(/[()]/g, '') : 'local/pty',
-            loginAt: `${parts[2] || ''} ${parts[3] || ''}`.trim(),
-            idle: 'Active Now'
-          };
-        });
-        setSessions(parsed);
+      // Active login sessions: parse whoIsLoggedIn output with fallback
+      let rawWho = whoOutput || '';
+      if (!rawWho || !rawWho.trim()) {
+        try {
+          const res = await sshExec(activeConnId, 'who 2>/dev/null || w -h 2>/dev/null || loginctl list-sessions --no-legend 2>/dev/null');
+          rawWho = res?.stdout || '';
+        } catch {
+          // fallback
+        }
       }
+
+      const parsedSessions: ActiveSession[] = [];
+      if (rawWho && rawWho.trim()) {
+        const lines = rawWho.trim().split('\n').filter(Boolean);
+        for (const line of lines) {
+          if (line.includes('(No active login sessions found)')) continue;
+          const parts = line.includes('\t')
+            ? line.split('\t').map(s => s.trim())
+            : line.trim().split(/\s+/);
+          if (parts.length >= 2) {
+            parsedSessions.push({
+              user: parts[0] || 'unknown',
+              tty: parts[1] || 'pty',
+              from: parts.length > 4 ? parts.slice(4).join(' ').replace(/[()]/g, '') : (parts[2] || 'local/pty').replace(/[()]/g, ''),
+              loginAt: parts.length > 3 ? `${parts[2] || ''} ${parts[3] || ''}`.trim() : (parts[2] || 'Active Now'),
+              idle: 'Active Now'
+            });
+          }
+        }
+      }
+
+      // If still empty, check active user via whoami
+      if (parsedSessions.length === 0) {
+        try {
+          const whoamiRes = await sshExec(activeConnId, 'whoami 2>/dev/null; tty 2>/dev/null; date "+%Y-%m-%d %H:%M" 2>/dev/null');
+          if (whoamiRes && whoamiRes.stdout) {
+            const [me, myTty, myDate] = whoamiRes.stdout.trim().split('\n').map(s => s.trim());
+            if (me) {
+              parsedSessions.push({
+                user: me,
+                tty: myTty && myTty.startsWith('/dev/') ? myTty.replace('/dev/', '') : (myTty || 'pts/0'),
+                from: 'CloudDesk (SSH Session)',
+                loginAt: myDate || 'Active Now',
+                idle: 'Active Now'
+              });
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      setSessions(parsedSessions);
     } catch (err) {
       console.warn('Failed to load user data:', err);
     } finally {
@@ -229,7 +290,7 @@ export default function UserManager() {
     if (!newGroupName.trim()) return;
     setAddGroupError(null);
     try {
-      await sshExec(activeConnId, `sudo groupadd ${newGroupName.trim()}`);
+      await groupAdd(activeConnId, newGroupName.trim());
       setShowAddGroupModal(false);
       setAddGroupError(null);
       setNewGroupName('');
@@ -264,7 +325,7 @@ export default function UserManager() {
     if (!groupModalUser || !groupName) return;
     try {
       setGroupStatus(`Adding to ${groupName}...`);
-      await sshExec(activeConnId, `sudo usermod -aG ${groupName} ${groupModalUser.username}`);
+      await groupAddUser(activeConnId, groupName, groupModalUser.username);
       setGroupStatus(`User joined group '${groupName}'!`);
       await loadData();
       setGroupModalUser(prev => prev ? { ...prev, groups: [...prev.groups, groupName] } : null);
@@ -277,12 +338,88 @@ export default function UserManager() {
     if (!groupModalUser || !groupName) return;
     try {
       setGroupStatus(`Removing from ${groupName}...`);
-      await sshExec(activeConnId, `sudo gpasswd -d ${groupModalUser.username} ${groupName}`);
+      await groupRemoveUser(activeConnId, groupName, groupModalUser.username);
       setGroupStatus(`User removed from group '${groupName}'!`);
       await loadData();
       setGroupModalUser(prev => prev ? { ...prev, groups: prev.groups.filter(g => g !== groupName) } : null);
     } catch (err: any) {
       setGroupStatus(`Failed: ${err?.message || err}`);
+    }
+  };
+
+  // Helper to compute all effective member users for a group
+  const getGroupMembers = useCallback((grp: GroupEntry) => {
+    const directMembers = grp.members || [];
+    const inferredMembers = users
+      .filter(u => (u.groups || []).includes(grp.name) || u.gid === grp.gid)
+      .map(u => u.username);
+    return Array.from(new Set([...directMembers, ...inferredMembers]));
+  }, [users]);
+
+  // Safe group delete with active user prevention
+  const handleDeleteGroup = async (grp: GroupEntry) => {
+    const mems = getGroupMembers(grp);
+    if (mems.length > 0) {
+      alert(`Cannot delete group '${grp.name}':\n\nThis group currently contains ${mems.length} active member user(s):\n${mems.join(', ')}\n\nTo safely delete this group, please edit the group and remove all member users first.`);
+      return;
+    }
+    if (['root', 'sudo', 'wheel', 'daemon', 'admin'].includes(grp.name)) {
+      alert(`Cannot delete system protected group '${grp.name}'.`);
+      return;
+    }
+    if (!confirm(`Are you sure you want to permanently delete group '${grp.name}' (GID: ${grp.gid})?`)) return;
+    try {
+      await groupDelete(activeConnId, grp.name);
+      setNotice({ text: `Group '${grp.name}' deleted.`, isError: false });
+      setTimeout(() => setNotice(null), 3500);
+      setGroups(prev => prev.filter(g => g.name !== grp.name));
+      if (selectedGroupName === grp.name) setSelectedGroupName(null);
+      await loadData();
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      alert(`Delete group failed:\n${msg}`);
+      setNotice({ text: `Failed to delete group: ${msg}`, isError: true });
+    }
+  };
+
+  const handleAddUserToGroup = async (groupName: string, username: string) => {
+    if (!groupName || !username) return;
+    setEditGroupLoading(true);
+    setEditGroupError(null);
+    try {
+      await groupAddUser(activeConnId, groupName, username);
+      setNotice({ text: `Added user '${username}' to group '${groupName}'.`, isError: false });
+      setTimeout(() => setNotice(null), 3500);
+      setEditGroupModal(prev => prev ? {
+        ...prev,
+        members: Array.from(new Set([...prev.members, username]))
+      } : null);
+      setSelectedUserToAdd('');
+      await loadData();
+    } catch (err: any) {
+      setEditGroupError(`Failed to add user: ${err?.message || err}`);
+    } finally {
+      setEditGroupLoading(false);
+    }
+  };
+
+  const handleRemoveUserFromGroup = async (groupName: string, username: string) => {
+    if (!groupName || !username) return;
+    setEditGroupLoading(true);
+    setEditGroupError(null);
+    try {
+      await groupRemoveUser(activeConnId, groupName, username);
+      setNotice({ text: `Removed user '${username}' from group '${groupName}'.`, isError: false });
+      setTimeout(() => setNotice(null), 3500);
+      setEditGroupModal(prev => prev ? {
+        ...prev,
+        members: prev.members.filter(m => m !== username)
+      } : null);
+      await loadData();
+    } catch (err: any) {
+      setEditGroupError(`Failed to remove user: ${err?.message || err}`);
+    } finally {
+      setEditGroupLoading(false);
     }
   };
 
@@ -296,6 +433,40 @@ export default function UserManager() {
     } catch (err: any) {
       setNotice({ text: `Failed to disconnect session: ${err?.message || err}`, isError: true });
     }
+  };
+
+  // Clamped Right-Click Context Menu inside window boundaries
+  const openContextMenu = (e: React.MouseEvent, type: 'user' | 'group' | 'session', data: any) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (type === 'user') setSelectedUsername(data.username);
+    if (type === 'group') setSelectedGroupName(data.name);
+    if (type === 'session') {
+      const idx = sessions.findIndex(s => s === data);
+      if (idx >= 0) setSelectedSessionIndex(idx);
+    }
+
+    const container = containerRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+
+    const menuWidth = 220;
+    const menuHeight = type === 'user' ? 240 : type === 'group' ? 190 : 140;
+
+    const rawX = e.clientX - rect.left;
+    const rawY = e.clientY - rect.top;
+
+    const clampedX = Math.max(8, Math.min(rawX, rect.width - menuWidth - 8));
+    const clampedY = Math.max(8, Math.min(rawY, rect.height - menuHeight - 8));
+
+    setContextMenu({
+      visible: true,
+      x: clampedX,
+      y: clampedY,
+      type,
+      data
+    });
   };
 
   const filteredUsers = useMemo(() => {
@@ -315,15 +486,74 @@ export default function UserManager() {
     );
   }, [groups, search]);
 
+  // Arrow Up / Down selection navigation
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (showAddModal || showAddGroupModal || passwordModalUser || groupModalUser || editGroupModal) return;
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (tab === 'users' && filteredUsers.length > 0) {
+        const curIdx = filteredUsers.findIndex(u => u.username === selectedUsername);
+        const nextIdx = curIdx < 0 ? 0 : Math.min(curIdx + 1, filteredUsers.length - 1);
+        setSelectedUsername(filteredUsers[nextIdx].username);
+        const el = document.getElementById(`user-row-${filteredUsers[nextIdx].username}`);
+        el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      } else if (tab === 'groups' && filteredGroups.length > 0) {
+        const curIdx = filteredGroups.findIndex(g => g.name === selectedGroupName);
+        const nextIdx = curIdx < 0 ? 0 : Math.min(curIdx + 1, filteredGroups.length - 1);
+        setSelectedGroupName(filteredGroups[nextIdx].name);
+        const el = document.getElementById(`group-row-${filteredGroups[nextIdx].name}`);
+        el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      } else if (tab === 'sessions' && sessions.length > 0) {
+        const curIdx = selectedSessionIndex === null ? -1 : selectedSessionIndex;
+        const nextIdx = curIdx < 0 ? 0 : Math.min(curIdx + 1, sessions.length - 1);
+        setSelectedSessionIndex(nextIdx);
+        const el = document.getElementById(`session-row-${nextIdx}`);
+        el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (tab === 'users' && filteredUsers.length > 0) {
+        const curIdx = filteredUsers.findIndex(u => u.username === selectedUsername);
+        const prevIdx = curIdx <= 0 ? 0 : curIdx - 1;
+        setSelectedUsername(filteredUsers[prevIdx].username);
+        const el = document.getElementById(`user-row-${filteredUsers[prevIdx].username}`);
+        el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      } else if (tab === 'groups' && filteredGroups.length > 0) {
+        const curIdx = filteredGroups.findIndex(g => g.name === selectedGroupName);
+        const prevIdx = curIdx <= 0 ? 0 : curIdx - 1;
+        setSelectedGroupName(filteredGroups[prevIdx].name);
+        const el = document.getElementById(`group-row-${filteredGroups[prevIdx].name}`);
+        el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      } else if (tab === 'sessions' && sessions.length > 0) {
+        const curIdx = selectedSessionIndex === null ? 0 : selectedSessionIndex;
+        const prevIdx = curIdx <= 0 ? 0 : curIdx - 1;
+        setSelectedSessionIndex(prevIdx);
+        const el = document.getElementById(`session-row-${prevIdx}`);
+        el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    } else if (e.key === 'Escape') {
+      setContextMenu(null);
+    }
+  }, [tab, filteredUsers, selectedUsername, filteredGroups, selectedGroupName, sessions, selectedSessionIndex, showAddModal, showAddGroupModal, passwordModalUser, groupModalUser, editGroupModal]);
+
   return (
-    <div className={`flex flex-col h-full bg-[#181825] text-[#cdd6f4] select-none font-sans overflow-hidden relative ${loading ? 'cursor-mac-wait' : ''}`}>
+    <div 
+      ref={containerRef}
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      onClick={() => setContextMenu(null)}
+      className={`flex flex-col h-full bg-[#181825] text-[#cdd6f4] select-none font-sans overflow-hidden relative outline-none ${loading ? 'cursor-mac-wait' : ''}`}
+    >
       {loading && (
         <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-blue-500 via-indigo-400 to-blue-500 animate-top-progress z-30 pointer-events-none" />
       )}
       {/* macOS Top Navigation Toolbar */}
-      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3">
+      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto no-scrollbar">
         {/* Segmented Tab Controls */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           <div className="flex items-center bg-white/[0.06] rounded-xl p-0.5 border border-white/10">
             <button
               onClick={() => setTab('users')}
@@ -356,7 +586,7 @@ export default function UserManager() {
         </div>
 
         {/* Right Tools: Add User, Add Group, Search, Refresh */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           {tab === 'users' && (
             <button
               onClick={() => setShowAddModal(true)}
@@ -437,8 +667,10 @@ export default function UserManager() {
                   return (
                     <div
                       key={user.username}
+                      id={`user-row-${user.username}`}
                       onClick={() => setSelectedUsername(user.username)}
-                      className={`p-2.5 rounded-2xl cursor-pointer transition-all flex items-center justify-between ${
+                      onContextMenu={e => openContextMenu(e, 'user', user)}
+                      className={`p-2.5 rounded-2xl cursor-pointer transition-all flex items-center justify-between select-none ${
                         isSelected
                           ? 'bg-blue-600 text-white shadow-md'
                           : 'hover:bg-white/[0.05] text-gray-200'
@@ -661,46 +893,75 @@ export default function UserManager() {
                     </td>
                   </tr>
                 ) : (
-                  filteredGroups.map(grp => (
-                    <tr key={grp.name} className="hover:bg-white/[0.04] transition-colors">
-                      <td className="py-2 px-3 font-mono font-bold text-white flex items-center space-x-2">
-                        <Layers className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                        <span>{grp.name}</span>
-                      </td>
-                      <td className="py-2 px-3 text-gray-400 font-mono">{grp.gid}</td>
-                      <td className="py-2 px-3 text-gray-300 font-sans">
-                        {grp.members.length > 0 ? (
-                          <div className="flex flex-wrap gap-1">
-                            {grp.members.map(m => (
-                              <span key={m} className="px-2 py-0.5 rounded bg-white/10 text-white font-mono text-[10px]">
-                                {m}
-                              </span>
-                            ))}
+                  filteredGroups.map(grp => {
+                    const isSelected = selectedGroupName === grp.name;
+                    const mems = getGroupMembers(grp);
+                    const hasMembers = mems.length > 0;
+                    return (
+                      <tr 
+                        key={grp.name} 
+                        id={`group-row-${grp.name}`}
+                        onClick={() => setSelectedGroupName(grp.name)}
+                        onContextMenu={e => openContextMenu(e, 'group', grp)}
+                        className={`hover:bg-white/[0.04] transition-colors cursor-pointer select-none ${
+                          isSelected ? 'bg-blue-600/25 ring-1 ring-blue-500/50 text-white font-medium' : ''
+                        }`}
+                      >
+                        <td className="py-2 px-3 font-mono font-bold text-white flex items-center space-x-2">
+                          <Layers className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                          <span>{grp.name}</span>
+                        </td>
+                        <td className="py-2 px-3 text-gray-400 font-mono">{grp.gid}</td>
+                        <td className="py-2 px-3 text-gray-300 font-sans">
+                          {mems.length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              {mems.map(m => (
+                                <span key={m} className="px-2 py-0.5 rounded bg-white/10 text-white font-mono text-[10px]">
+                                  {m}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-gray-500">—</span>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 text-right">
+                          <div className="flex items-center justify-end space-x-1.5">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditGroupModal(grp);
+                                setEditGroupError(null);
+                                setSelectedUserToAdd('');
+                              }}
+                              className="p-1 rounded-lg bg-blue-500/15 hover:bg-blue-500 text-blue-300 hover:text-white transition-all shadow-sm"
+                              title="Edit Group (Add / Remove Users)"
+                            >
+                              <UserPlus className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteGroup(grp);
+                              }}
+                              className={`p-1 rounded-lg transition-colors ${
+                                hasMembers
+                                  ? 'text-gray-500 hover:bg-white/5 cursor-not-allowed opacity-60'
+                                  : 'hover:bg-rose-500/20 text-gray-400 hover:text-rose-400'
+                              }`}
+                              title={
+                                hasMembers
+                                  ? `Cannot delete: group has ${mems.length} member user(s). Remove users first.`
+                                  : "Delete Group"
+                              }
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
-                        ) : (
-                          <span className="text-gray-500">—</span>
-                        )}
-                      </td>
-                      <td className="py-2 px-3 text-right">
-                        <button
-                          onClick={async () => {
-                            if (!confirm(`Delete group '${grp.name}'?`)) return;
-                            try {
-                              await sshExec(activeConnId, `sudo groupdel ${grp.name}`);
-                              setNotice({ text: `Group '${grp.name}' deleted.`, isError: false });
-                              await loadData();
-                            } catch (err: any) {
-                              setNotice({ text: `Failed to delete group: ${err?.message || err}`, isError: true });
-                            }
-                          }}
-                          className="p-1 rounded-lg hover:bg-rose-500/20 text-gray-400 hover:text-rose-400 transition-colors"
-                          title="Delete Group"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -729,31 +990,45 @@ export default function UserManager() {
                     </td>
                   </tr>
                 ) : (
-                  sessions.map((sess, idx) => (
-                    <tr key={idx} className="hover:bg-white/[0.04] transition-colors">
-                      <td className="py-2 px-3 font-mono font-bold text-emerald-400 flex items-center space-x-2">
-                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                        <span>{sess.user}</span>
-                      </td>
-                      <td className="py-2 px-3 text-gray-300">{sess.tty}</td>
-                      <td className="py-2 px-3 text-gray-400">{sess.from}</td>
-                      <td className="py-2 px-3 text-gray-300 font-sans">{sess.loginAt}</td>
-                      <td className="py-2 px-3">
-                        <span className="px-2 py-0.5 rounded-full text-[10px] bg-emerald-500/20 text-emerald-300 font-sans font-semibold">
-                          {sess.idle}
-                        </span>
-                      </td>
-                      <td className="py-2 px-3 text-right">
-                        <button
-                          onClick={() => handleKickSession(sess)}
-                          className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-medium transition-colors"
-                          title="Disconnect Session"
-                        >
-                          Kick
-                        </button>
-                      </td>
-                    </tr>
-                  ))
+                  sessions.map((sess, idx) => {
+                    const isSelected = selectedSessionIndex === idx;
+                    return (
+                      <tr 
+                        key={idx} 
+                        id={`session-row-${idx}`}
+                        onClick={() => setSelectedSessionIndex(idx)}
+                        onContextMenu={e => openContextMenu(e, 'session', sess)}
+                        className={`hover:bg-white/[0.04] transition-colors cursor-pointer select-none ${
+                          isSelected ? 'bg-blue-600/25 ring-1 ring-blue-500/50 text-white font-medium' : ''
+                        }`}
+                      >
+                        <td className="py-2 px-3 font-mono font-bold text-emerald-400 flex items-center space-x-2">
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                          <span>{sess.user}</span>
+                        </td>
+                        <td className="py-2 px-3 text-gray-300">{sess.tty}</td>
+                        <td className="py-2 px-3 text-gray-400">{sess.from}</td>
+                        <td className="py-2 px-3 text-gray-300 font-sans">{sess.loginAt}</td>
+                        <td className="py-2 px-3">
+                          <span className="px-2 py-0.5 rounded-full text-[10px] bg-emerald-500/20 text-emerald-300 font-sans font-semibold">
+                            {sess.idle}
+                          </span>
+                        </td>
+                        <td className="py-2 px-3 text-right">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleKickSession(sess);
+                            }}
+                            className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-medium transition-colors"
+                            title="Disconnect Session"
+                          >
+                            Kick
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -1047,6 +1322,341 @@ export default function UserManager() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Edit Group Modal (Add / Remove Users) */}
+      {editGroupModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-150">
+          <div className="bg-[#181a2c] border border-white/15 rounded-3xl w-full max-w-lg p-6 space-y-4 shadow-2xl flex flex-col max-h-[85vh]">
+            <div className="flex items-center justify-between pb-3 border-b border-white/10">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-8 h-8 rounded-xl bg-blue-600/20 text-blue-400 flex items-center justify-center">
+                  <Layers className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-white">Edit Group: {editGroupModal.name}</h3>
+                  <span className="text-[10px] text-gray-400 font-mono">GID: {editGroupModal.gid}</span>
+                </div>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => {
+                  setEditGroupModal(null);
+                  setEditGroupError(null);
+                  setSelectedUserToAdd('');
+                }} 
+                className="p-1 hover:bg-white/10 rounded-lg text-gray-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {editGroupError && (
+              <div className="p-3 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-start space-x-2.5 animate-in fade-in duration-150">
+                <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="flex-1 font-mono text-[11px] leading-relaxed break-words">{editGroupError}</div>
+              </div>
+            )}
+
+            {/* Section 1: Add User to Group */}
+            <div className="space-y-2 p-3.5 bg-[#101018] rounded-2xl border border-white/[0.06]">
+              <label className="text-xs font-semibold text-white block">Add User to &ldquo;{editGroupModal.name}&rdquo;</label>
+              <div className="flex space-x-2">
+                <select
+                  value={selectedUserToAdd}
+                  onChange={e => setSelectedUserToAdd(e.target.value)}
+                  className="flex-1 bg-[#141624] border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
+                >
+                  <option value="">-- Choose a user to add --</option>
+                  {users
+                    .filter(u => !(editGroupModal.members || []).includes(u.username))
+                    .map(u => (
+                      <option key={u.username} value={u.username}>
+                        {u.username} (UID: {u.uid})
+                      </option>
+                    ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => handleAddUserToGroup(editGroupModal.name, selectedUserToAdd)}
+                  disabled={!selectedUserToAdd || editGroupLoading}
+                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 shadow-md transition-all active:scale-95 shrink-0"
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>{editGroupLoading ? 'Adding...' : 'Add User'}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Section 2: Current Group Members */}
+            <div className="flex-1 flex flex-col min-h-0 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-gray-300">
+                  Current Group Members ({(editGroupModal.members || []).length})
+                </span>
+                <span className="text-[10px] text-gray-500">Click Remove to detach user</span>
+              </div>
+
+              <div className="flex-1 overflow-y-auto divide-y divide-white/[0.04] border border-white/[0.08] rounded-2xl max-h-56 bg-[#101018] p-2 space-y-1 scrollbar-thin">
+                {(editGroupModal.members || []).length === 0 ? (
+                  <div className="py-8 text-center text-gray-500 text-xs">
+                    No users currently belong to this group.
+                  </div>
+                ) : (
+                  (editGroupModal.members || []).map(member => {
+                    const uObj = users.find(u => u.username === member);
+                    return (
+                      <div key={member} className="flex items-center justify-between p-2 rounded-xl bg-white/[0.02] hover:bg-white/[0.05] transition-colors">
+                        <div className="flex items-center space-x-2.5">
+                          <div className="w-7 h-7 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-bold text-xs text-white shadow-sm">
+                            {member[0]?.toUpperCase()}
+                          </div>
+                          <div>
+                            <div className="font-mono text-xs font-bold text-white">{member}</div>
+                            {uObj && (
+                              <div className="text-[10px] text-gray-400 font-sans">
+                                UID: {uObj.uid} · {uObj.isSudo ? 'Administrator' : 'Standard'}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveUserFromGroup(editGroupModal.name, member)}
+                          disabled={editGroupLoading}
+                          className="px-2.5 py-1 bg-rose-500/15 hover:bg-rose-500 text-rose-300 hover:text-white rounded-lg text-[11px] font-semibold transition-all flex items-center space-x-1"
+                          title="Remove user from group"
+                        >
+                          <UserX className="w-3 h-3" />
+                          <span>Remove</span>
+                        </button>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => {
+                  setEditGroupModal(null);
+                  setEditGroupError(null);
+                  setSelectedUserToAdd('');
+                }}
+                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs text-white font-semibold transition-all active:scale-95 shadow-md"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Clamped In-Window Context Menu */}
+      {contextMenu && contextMenu.visible && (
+        <div
+          style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
+          className="absolute z-50 w-52 bg-[#1b1c2b]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl p-1.5 text-xs text-gray-200 animate-in fade-in zoom-in-95 duration-100 divide-y divide-white/[0.06]"
+          onClick={e => e.stopPropagation()}
+        >
+          {/* User Context Menu Items */}
+          {contextMenu.type === 'user' && (
+            <>
+              <div className="py-1">
+                <div className="px-2.5 py-1 text-[10px] font-bold text-gray-400 truncate uppercase">
+                  User: {contextMenu.data.username}
+                </div>
+                <button
+                  onClick={() => {
+                    setPasswordModalUser(contextMenu.data.username);
+                    setNewPassword('');
+                    setPasswordStatus(null);
+                    setContextMenu(null);
+                  }}
+                  className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-blue-600 hover:text-white rounded-xl transition-colors text-left"
+                >
+                  <Key className="w-3.5 h-3.5" />
+                  <span>Set Password</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setGroupModalUser(contextMenu.data);
+                    setCustomGroupName('');
+                    setGroupStatus(null);
+                    setContextMenu(null);
+                  }}
+                  className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-blue-600 hover:text-white rounded-xl transition-colors text-left"
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>Manage Groups</span>
+                </button>
+                <button
+                  onClick={() => {
+                    toggleSudoPrivilege(contextMenu.data.username, contextMenu.data.isSudo);
+                    setContextMenu(null);
+                  }}
+                  className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-blue-600 hover:text-white rounded-xl transition-colors text-left"
+                >
+                  <Shield className="w-3.5 h-3.5" />
+                  <span>{contextMenu.data.isSudo ? 'Revoke Sudo' : 'Grant Sudo'}</span>
+                </button>
+                <button
+                  onClick={() => {
+                    toggleLock(contextMenu.data.username, contextMenu.data.isLocked);
+                    setContextMenu(null);
+                  }}
+                  className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-blue-600 hover:text-white rounded-xl transition-colors text-left"
+                >
+                  {contextMenu.data.isLocked ? <Unlock className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
+                  <span>{contextMenu.data.isLocked ? 'Unlock Account' : 'Lock Account'}</span>
+                </button>
+              </div>
+              <div className="py-1">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(contextMenu.data.username);
+                    setNotice({ text: `Copied username '${contextMenu.data.username}'`, isError: false });
+                    setTimeout(() => setNotice(null), 2500);
+                    setContextMenu(null);
+                  }}
+                  className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-white/10 rounded-xl transition-colors text-left text-gray-300"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copy Username</span>
+                </button>
+                {contextMenu.data.username !== 'root' && (
+                  <button
+                    onClick={() => {
+                      deleteUser(contextMenu.data.username);
+                      setContextMenu(null);
+                    }}
+                    className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-rose-600 hover:text-white rounded-xl transition-colors text-left text-rose-400"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete User</span>
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* Group Context Menu Items */}
+          {contextMenu.type === 'group' && (() => {
+            const grp = contextMenu.data as GroupEntry;
+            const mems = getGroupMembers(grp);
+            const hasMembers = mems.length > 0;
+            return (
+              <>
+                <div className="py-1">
+                  <div className="px-2.5 py-1 text-[10px] font-bold text-gray-400 truncate uppercase">
+                    Group: {grp.name} ({mems.length} users)
+                  </div>
+                  <button
+                    onClick={() => {
+                      setEditGroupModal(grp);
+                      setEditGroupError(null);
+                      setSelectedUserToAdd('');
+                      setContextMenu(null);
+                    }}
+                    className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-blue-600 hover:text-white rounded-xl transition-colors text-left font-medium text-blue-300"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>Edit Group (Add/Remove)</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(grp.name);
+                      setNotice({ text: `Copied group name '${grp.name}'`, isError: false });
+                      setTimeout(() => setNotice(null), 2500);
+                      setContextMenu(null);
+                    }}
+                    className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-white/10 rounded-xl transition-colors text-left text-gray-300"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copy Group Name</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(String(grp.gid));
+                      setNotice({ text: `Copied GID '${grp.gid}'`, isError: false });
+                      setTimeout(() => setNotice(null), 2500);
+                      setContextMenu(null);
+                    }}
+                    className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-white/10 rounded-xl transition-colors text-left text-gray-300"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copy GID ({grp.gid})</span>
+                  </button>
+                </div>
+                <div className="py-1">
+                  <button
+                    onClick={() => {
+                      handleDeleteGroup(grp);
+                      setContextMenu(null);
+                    }}
+                    className={`w-full flex items-center space-x-2 px-2.5 py-1.5 rounded-xl transition-colors text-left ${
+                      hasMembers ? 'text-gray-500 hover:bg-white/5 cursor-not-allowed opacity-70' : 'text-rose-400 hover:bg-rose-600 hover:text-white'
+                    }`}
+                    title={hasMembers ? `Cannot delete: group has ${mems.length} members` : 'Delete group'}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>{hasMembers ? `Delete Group (Has ${mems.length} users)` : 'Delete Group'}</span>
+                  </button>
+                </div>
+              </>
+            );
+          })()}
+
+          {/* Session Context Menu Items */}
+          {contextMenu.type === 'session' && (
+            <>
+              <div className="py-1">
+                <div className="px-2.5 py-1 text-[10px] font-bold text-gray-400 truncate uppercase">
+                  Session: {contextMenu.data.user} ({contextMenu.data.tty})
+                </div>
+                <button
+                  onClick={() => {
+                    handleKickSession(contextMenu.data);
+                    setContextMenu(null);
+                  }}
+                  className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-rose-600 hover:text-white rounded-xl transition-colors text-left text-rose-300"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Kick / Disconnect</span>
+                </button>
+              </div>
+              <div className="py-1">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(contextMenu.data.user);
+                    setNotice({ text: `Copied username '${contextMenu.data.user}'`, isError: false });
+                    setTimeout(() => setNotice(null), 2500);
+                    setContextMenu(null);
+                  }}
+                  className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-white/10 rounded-xl transition-colors text-left text-gray-300"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copy Username</span>
+                </button>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(contextMenu.data.tty);
+                    setNotice({ text: `Copied TTY '${contextMenu.data.tty}'`, isError: false });
+                    setTimeout(() => setNotice(null), 2500);
+                    setContextMenu(null);
+                  }}
+                  className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-white/10 rounded-xl transition-colors text-left text-gray-300"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copy TTY</span>
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

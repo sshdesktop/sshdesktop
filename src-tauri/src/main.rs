@@ -9,6 +9,8 @@ mod ssh;
 mod system;
 mod store;
 mod database;
+mod archive;
+mod api_client;
 
 pub struct AppState {
     pub connections: Arc<Mutex<HashMap<String, ssh::connection::SshConnection>>>,
@@ -64,6 +66,9 @@ fn main() {
             ssh::exec::ssh_exec,
             ssh::exec::ssh_exec_stream,
             ssh::exec::ssh_exec_stop,
+            ssh::tunnel::ssh_start_tunnel,
+            ssh::tunnel::ssh_stop_tunnel,
+            ssh::tunnel::ssh_list_tunnels,
             
             // System commands
             system::monitor::system_get_stats,
@@ -88,6 +93,8 @@ fn main() {
             system::network::network_interfaces,
             system::network::network_ping,
             system::network::network_dns_lookup,
+            system::network::network_kill_port,
+            system::network::network_bandwidth_stats,
             system::package::package_list,
             system::package::package_search,
             system::package::package_install,
@@ -102,6 +109,8 @@ fn main() {
             system::user::group_list,
             system::user::group_add,
             system::user::group_delete,
+            system::user::group_add_user,
+            system::user::group_remove_user,
             system::user::who_is_logged_in,
             system::user::last_logins,
             system::cron::cron_list,
@@ -118,10 +127,33 @@ fn main() {
             system::firewall::firewall_add_rule,
             system::firewall::firewall_delete_rule,
             system::firewall::firewall_toggle,
+            system::firewall::firewall_detect_backend,
+            system::firewall::firewall_add_rule_advanced,
+            system::firewall::firewall_delete_rule_advanced,
+            system::firewall::firewall_install,
+            system::firewall::firewall_set_default_policy,
+            system::firewall::firewall_reset,
+            system::firewall::firewall_reload,
             system::disk::disk_list,
             system::disk::disk_usage,
             system::disk::disk_smart,
             system::disk::disk_largest_dirs,
+            system::disk::disk_mount,
+            system::disk::disk_unmount,
+            system::disk::disk_remount,
+            system::disk::disk_get_fstab,
+            system::disk::disk_create_label,
+            system::disk::disk_create_partition,
+            system::disk::disk_delete_partition,
+            system::disk::disk_resize_partition,
+            system::disk::disk_set_partition_flag,
+            system::disk::disk_format_filesystem,
+            system::disk::disk_set_label,
+            system::disk::disk_check_filesystem,
+            system::disk::disk_get_swap_info,
+            system::disk::disk_manage_swap,
+            system::disk::disk_get_tmp_info,
+            system::disk::disk_manage_tmp,
             
             // Store commands
             store::connections::store_save_connection,
@@ -145,6 +177,17 @@ fn main() {
             database::mongodb_list_collections,
             database::mongodb_find_documents,
             database::mongodb_insert_document,
+            database::db_execute_operation,
+            database::db_get_object_definition,
+            database::db_get_capabilities,
+
+            // Archive and Desktop Notification commands
+            archive::send_desktop_notification,
+            archive::sftp_create_zip_pure,
+            archive::sftp_extract_archive_pure,
+
+            // API Studio commands (Native HTTP Engine over SSH Port Forwarding Tunnel)
+            api_client::api_send_request,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { 
   Cloud, Bell, LogOut, Settings, ShieldCheck, Terminal, Cpu, MemoryStick,
   Palette, Sun, Moon, Minimize2, Eye, EyeOff, Server, ChevronDown, Check, Plus, X, Lock,
-  Trash2, Fingerprint, Key, Upload, FileCode, ArrowRight, Shield, Globe, RefreshCw
+  Trash2, Search, Key, Upload, FileCode, ArrowRight, Shield, Globe, RefreshCw
 } from 'lucide-react';
 import { useConnectionStore, useSettingsStore, useWindowStore, useTelemetryStore } from '../lib/store';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
@@ -19,14 +19,16 @@ export default function Taskbar({
   const { 
     activeConnectionId, 
     connections, 
+    connectedServers,
     setActive, 
     disconnect, 
     connect, 
     addConnection, 
+    updateConnection,
     removeConnection 
   } = useConnectionStore();
   const { theme, updateSettings } = useSettingsStore();
-  const { minimizeAllWindows } = useWindowStore();
+  const { minimizeAllWindows, windows, closeWindow } = useWindowStore();
   const { openApp } = useWindowManager();
 
   const [time, setTime] = useState('');
@@ -35,7 +37,15 @@ export default function Taskbar({
   const [modalTab, setModalTab] = useState<'saved' | 'new'>('saved');
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
-  const [biometricTargetId, setBiometricTargetId] = useState<string | null>(null);
+
+  // Search & Credential Prompt State
+  const [serverSearchQuery, setServerSearchQuery] = useState('');
+  const [promptConn, setPromptConn] = useState<any | null>(null);
+  const [promptPassword, setPromptPassword] = useState('');
+  const [showPromptPassword, setShowPromptPassword] = useState(false);
+  const [promptKeyPath, setPromptKeyPath] = useState('');
+  const [promptSaveCredentials, setPromptSaveCredentials] = useState(true);
+  const [saveNewServerCredentials, setSaveNewServerCredentials] = useState(true);
 
   // New server form state
   const [authMethod, setAuthMethod] = useState<'password' | 'key'>('password');
@@ -70,10 +80,9 @@ export default function Taskbar({
     const selectedPath = await pickKeyFile();
     if (selectedPath) {
       const fileName = selectedPath.split(/[\\/]/).pop() || selectedPath;
-      const isPpk = selectedPath.toLowerCase().endsWith('.ppk');
       setNewServerForm(f => ({ ...f, privateKeyPath: selectedPath }));
       setUploadedKeyFile({
-        name: `${fileName} [${isPpk ? 'PuTTY (.ppk)' : 'OpenSSH (.pem)'}]`,
+        name: `${fileName} [OpenSSH (.pem)]`,
         size: 'Local file',
         content: selectedPath,
       });
@@ -85,10 +94,9 @@ export default function Taskbar({
   const handleKeyFileUpload = (file: File) => {
     const nativePath = (file as any).path;
     if (nativePath) {
-      const isPpk = nativePath.toLowerCase().endsWith('.ppk');
       setNewServerForm(f => ({ ...f, privateKeyPath: nativePath }));
       setUploadedKeyFile({
-        name: `${file.name} [${isPpk ? 'PuTTY (.ppk)' : 'OpenSSH (.pem)'}]`,
+        name: `${file.name} [OpenSSH (.pem)]`,
         size: `${(file.size / 1024).toFixed(1)} KB`,
         content: nativePath,
       });
@@ -97,9 +105,8 @@ export default function Taskbar({
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = (e.target?.result as string) || '';
-      let detectedType = 'SSH Private Key';
-      if (text.includes('PuTTY-User-Key-File') || file.name.toLowerCase().endsWith('.ppk')) detectedType = 'PuTTY (.ppk)';
-      else if (text.includes('OPENSSH PRIVATE KEY')) detectedType = 'OpenSSH (.pem)';
+      let detectedType = 'OpenSSH Private Key (.pem)';
+      if (text.includes('OPENSSH PRIVATE KEY')) detectedType = 'OpenSSH (.pem)';
       else if (text.includes('RSA PRIVATE KEY')) detectedType = 'RSA (.pem)';
       else if (file.name.toLowerCase().endsWith('.pem')) detectedType = 'PEM (.pem)';
 
@@ -119,7 +126,7 @@ export default function Taskbar({
     setIsConnecting(true);
     setConnectError(null);
     try {
-      const isFilePath = (str?: string) => str && !str.includes('\n') && (str.includes('/') || str.includes('\\') || str.endsWith('.pem') || str.endsWith('.ppk'));
+      const isFilePath = (str?: string) => str && !str.includes('\n') && (str.includes('/') || str.includes('\\') || str.endsWith('.pem'));
       const targetId = `server-${Date.now()}`;
       const effectiveKey = newServerForm.privateKeyPath || uploadedKeyFile?.content;
       const targetConfig: any = {
@@ -136,10 +143,10 @@ export default function Taskbar({
         tags: ['Linux', 'SSH2 direct'],
         created_at: Date.now()
       };
-      // Do NOT store raw private keys in saved profile on disk
       const profileToSave = {
         ...targetConfig,
-        privateKeyPath: isFilePath(targetConfig.privateKeyPath) ? targetConfig.privateKeyPath : undefined,
+        password: saveNewServerCredentials && authMethod === 'password' ? newServerForm.password : undefined,
+        privateKeyPath: saveNewServerCredentials && authMethod === 'key' && isFilePath(targetConfig.privateKeyPath) ? targetConfig.privateKeyPath : undefined,
       };
       addConnection(profileToSave);
       await connect(targetId, targetConfig);
@@ -154,14 +161,32 @@ export default function Taskbar({
   };
 
   const handleQuickConnectSaved = async (connId: string) => {
-    setIsConnecting(true);
     setConnectError(null);
+    const target = connections.find(c => c.id === connId);
+    if (!target) return;
+
+    const isKeyAuth = target.authMethod === 'key' || (target as any).auth_method === 'key';
+    const hasKey = target.privateKeyPath || (target as any).private_key_path;
+    const hasPassword = Boolean(target.password);
+
+    if (isKeyAuth && !hasKey) {
+      setPromptConn(target);
+      setPromptPassword('');
+      setPromptKeyPath('');
+      return;
+    }
+
+    if (!isKeyAuth && !hasPassword) {
+      setPromptConn(target);
+      setPromptPassword('');
+      setPromptKeyPath('');
+      return;
+    }
+
+    setIsConnecting(true);
     try {
-      const target = connections.find(c => c.id === connId);
-      if (target) {
-        await connect(connId, target);
-        setShowAddServerModal(false);
-      }
+      await connect(connId, target);
+      setShowAddServerModal(false);
     } catch (err: any) {
       setConnectError(err?.message || 'Failed to connect to saved server');
     } finally {
@@ -169,12 +194,32 @@ export default function Taskbar({
     }
   };
 
-  const handleTouchIdQuickConnect = (connId: string) => {
-    setBiometricTargetId(connId);
-    setTimeout(async () => {
-      setBiometricTargetId(null);
-      await handleQuickConnectSaved(connId);
-    }, 450);
+  const handlePromptConnect = async () => {
+    if (!promptConn) return;
+    setIsConnecting(true);
+    setConnectError(null);
+    try {
+      const isFilePath = (str?: string) => str && !str.includes('\n') && (str.includes('/') || str.includes('\\') || str.endsWith('.pem'));
+      const effectiveConfig = {
+        ...promptConn,
+        password: promptPassword || promptConn.password,
+        privateKeyPath: promptKeyPath || promptConn.privateKeyPath,
+      };
+      if (promptSaveCredentials) {
+        const toSave = {
+          ...effectiveConfig,
+          privateKeyPath: isFilePath(effectiveConfig.privateKeyPath) ? effectiveConfig.privateKeyPath : undefined,
+        };
+        updateConnection(promptConn.id, toSave);
+      }
+      await connect(promptConn.id, effectiveConfig);
+      setPromptConn(null);
+      setShowAddServerModal(false);
+    } catch (err: any) {
+      setConnectError(err?.message || 'Authentication failed');
+    } finally {
+      setIsConnecting(false);
+    }
   };
 
   const handleDeleteProfile = (connId: string, profileName: string) => {
@@ -183,22 +228,44 @@ export default function Taskbar({
     }
   };
 
+  const handleDisconnectServer = async (connId: string, connName: string) => {
+    if (!confirm(`Are you sure you want to disconnect from server "${connName}"?`)) {
+      return;
+    }
+    // Close only windows belonging to this server
+    windows.filter(w => w.serverId === connId).forEach(w => closeWindow(w.id));
+    await disconnect(connId);
+    // If there are other connected servers, select the first remaining one
+    const remaining = Array.from(connectedServers.keys()).filter(id => id !== connId);
+    if (remaining.length > 0) {
+      setActive(remaining[0]);
+    }
+  };
+
+  const isLight = theme === 'light';
+
   return (
-    <div className="taskbar-bar absolute top-0 left-0 w-full h-8 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between px-3 z-50 text-xs text-gray-300 window-drag select-none shadow-sm">
+    <div className={`taskbar-bar fixed top-0 left-0 w-full h-8 backdrop-blur-xl border-b flex items-center justify-between px-3 z-[999999] text-xs window-drag select-none shadow-sm ${
+      isLight ? 'bg-white/85 text-slate-800 border-black/10' : 'bg-[#14141e]/90 text-gray-300 border-white/[0.08]'
+    }`}>
       {/* Left Menu Items - Apple / CloudDesk Brand */}
       <div className="flex items-center space-x-3 window-no-drag">
         <div className="relative">
           <button
             onClick={() => setShowAppleMenu(!showAppleMenu)}
-            className="flex items-center space-x-1.5 p-1 rounded hover:bg-white/10 text-white font-bold transition-colors"
+            className={`flex items-center space-x-1.5 p-1 rounded font-bold transition-colors cursor-pointer ${
+              isLight ? 'hover:bg-black/5 text-slate-900' : 'hover:bg-white/10 text-white'
+            }`}
           >
-            <Cloud className="w-4 h-4 text-blue-400" />
+            <Cloud className="w-4 h-4 text-blue-500" />
             <span className="font-semibold tracking-tight">CloudDesk</span>
           </button>
 
           {showAppleMenu && (
             <div
-              className="absolute left-0 top-8 w-56 bg-[#1e1e2e]/95 backdrop-blur-2xl border border-white/10 rounded-xl shadow-2xl py-1 z-50 text-xs"
+              className={`absolute left-0 top-8 w-56 backdrop-blur-2xl border rounded-xl shadow-2xl py-1 z-50 text-xs ${
+                isLight ? 'bg-white/95 border-black/10 text-slate-800' : 'bg-[#1e1e2e]/95 border-white/10 text-gray-200'
+              }`}
               onClick={() => setShowAppleMenu(false)}
             >
               <div
@@ -215,7 +282,7 @@ export default function Taskbar({
                 <Palette className="w-3.5 h-3.5 text-pink-400" />
                 <span>Desktop Wallpapers (4K)...</span>
               </div>
-              <div className="my-1 border-t border-white/10" />
+              <div className={`my-1 border-t ${isLight ? 'border-slate-200' : 'border-white/10'}`} />
               <div
                 onClick={() => updateSettings({ theme: theme === 'dark' ? 'light' : 'dark' })}
                 className="px-3 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center justify-between"
@@ -242,12 +309,15 @@ export default function Taskbar({
                 </div>
                 <span className="text-[10px] text-gray-400 font-mono">⌃⌘L / ⊞L</span>
               </div>
-              <div className="my-1 border-t border-white/10" />
+              <div className={`my-1 border-t ${isLight ? 'border-slate-200' : 'border-white/10'}`} />
               <div
                 onClick={() => {
-                  if (activeConnectionId) disconnect(activeConnectionId);
+                  if (activeConnectionId) {
+                    const currentConn = connections.find(c => c.id === activeConnectionId);
+                    handleDisconnectServer(activeConnectionId, currentConn?.name || currentConn?.host || 'server');
+                  }
                 }}
-                className="px-3 py-1.5 hover:bg-red-600/20 text-red-400 cursor-pointer flex items-center space-x-2"
+                className="px-3 py-1.5 hover:bg-red-600/20 text-red-500 cursor-pointer flex items-center space-x-2"
               >
                 <LogOut className="w-3.5 h-3.5" />
                 <span>Log Out Server</span>
@@ -261,43 +331,50 @@ export default function Taskbar({
       <div className="flex items-center space-x-3 window-no-drag font-mono text-[11px]">
         {/* Connected Servers Horizontal Tab Bar with + button */}
         <div className="flex items-center space-x-1 max-w-lg overflow-x-auto scrollbar-none py-0.5">
-          {connections.map(c => {
-            const isActive = c.id === activeConnectionId;
-            return (
-              <div
-                key={c.id}
-                onClick={async () => {
-                  setActive(c.id);
-                  try {
-                    await connect(c.id, c);
-                  } catch (e) {
-                    console.warn('Switch server connect notice:', e);
-                  }
-                }}
-                className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-sans transition-all cursor-pointer select-none group shrink-0 ${
-                  isActive
-                    ? 'bg-blue-600/35 text-white font-semibold border border-blue-400/50 shadow-[0_2px_8px_rgba(59,130,246,0.25)]'
-                    : 'bg-white/5 text-gray-300 hover:text-white hover:bg-white/10 border border-white/5'
-                }`}
-                title={`Active Server: ${c.username}@${c.host}:${c.port}`}
-              >
-                <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-400 animate-pulse' : 'bg-gray-500'}`} />
-                <span className="truncate max-w-[120px]">{c.name || c.host}</span>
-                {connections.length > 1 && (
+          {(() => {
+            const connectedList = connections.filter(c => connectedServers?.has(c.id));
+            const displayServers = connectedList.length > 0 
+              ? connectedList 
+              : (activeConnectionId ? connections.filter(c => c.id === activeConnectionId) : []);
+
+            return displayServers.map(c => {
+              const isActive = c.id === activeConnectionId;
+              return (
+                <div
+                  key={c.id}
+                  onClick={async () => {
+                    setActive(c.id);
+                    try {
+                      await connect(c.id, c);
+                    } catch (e) {
+                      console.warn('Switch server connect notice:', e);
+                    }
+                  }}
+                  className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-sans transition-all cursor-pointer select-none group shrink-0 ${
+                    isActive
+                      ? 'bg-blue-600 text-white font-semibold shadow-sm'
+                      : isLight
+                      ? 'bg-black/5 text-slate-700 hover:text-slate-900 hover:bg-black/10 border border-black/5'
+                      : 'bg-white/5 text-gray-300 hover:text-white hover:bg-white/10 border border-white/5'
+                  }`}
+                  title={`Active Server: ${c.username}@${c.host}:${c.port}`}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-300 animate-pulse' : 'bg-gray-400'}`} />
+                  <span className="truncate max-w-[120px]">{c.name || c.host}</span>
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      disconnect(c.id);
+                      handleDisconnectServer(c.id, c.name || c.host);
                     }}
                     className="opacity-0 group-hover:opacity-100 hover:text-red-400 p-0.5 rounded transition-opacity"
                     title="Disconnect server tab"
                   >
                     <X className="w-2.5 h-2.5" />
                   </button>
-                )}
-              </div>
-            );
-          })}
+                </div>
+              );
+            });
+          })()}
 
           {/* Plus button to open centered Connect Server modal */}
           <button
@@ -345,7 +422,8 @@ export default function Taskbar({
         <button
           onClick={() => {
             if (activeConnectionId) {
-              disconnect(activeConnectionId);
+              const currentConn = connections.find(c => c.id === activeConnectionId);
+              handleDisconnectServer(activeConnectionId, currentConn?.name || currentConn?.host || 'server');
             }
           }}
           className="flex items-center space-x-1.5 px-2.5 py-0.5 rounded-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-white border border-rose-500/30 transition-all font-sans cursor-pointer"
@@ -421,7 +499,110 @@ export default function Taskbar({
 
             {/* Tab 1: Saved Server Profiles */}
             {modalTab === 'saved' && (
-              <div className="flex-1 overflow-y-auto space-y-2 pr-1 max-h-[380px]">
+              <div className="flex-1 overflow-y-auto space-y-3 pr-1 max-h-[400px]">
+                {/* Search Bar */}
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    placeholder="Search saved servers by name, IP, user..."
+                    value={serverSearchQuery}
+                    onChange={(e) => setServerSearchQuery(e.target.value)}
+                    className="w-full bg-[#11111b] border border-white/10 rounded-xl pl-9 pr-8 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                  />
+                  {serverSearchQuery && (
+                    <button
+                      onClick={() => setServerSearchQuery('')}
+                      className="absolute right-2.5 top-2 text-gray-400 hover:text-white"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Inline Credential Prompt when credentials are missing */}
+                {promptConn && (
+                  <div className="p-3.5 rounded-2xl bg-blue-600/15 border border-blue-500/40 space-y-3 animate-in fade-in duration-150">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                        <Lock className="w-4 h-4 text-amber-400" />
+                        <span className="font-semibold text-xs text-white">
+                          Credentials Required: {promptConn.name || promptConn.host}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => setPromptConn(null)}
+                        className="text-gray-400 hover:text-white"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    {(promptConn.authMethod === 'key' || (promptConn as any).auth_method === 'key') ? (
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] text-gray-300 block">Select SSH Private Key</label>
+                        <div 
+                          onClick={async () => {
+                            const p = await pickKeyFile();
+                            if (p) setPromptKeyPath(p);
+                          }}
+                          className="cursor-pointer bg-[#11111b] border border-dashed border-white/20 hover:border-blue-500/60 rounded-xl p-2.5 flex items-center justify-between text-xs"
+                        >
+                          <div className="flex items-center space-x-2 truncate">
+                            <Key className="w-4 h-4 text-blue-400 shrink-0" />
+                            <span className="text-gray-300 truncate font-mono text-[11px]">
+                              {promptKeyPath || 'Click to select key (.pem, id_rsa, id_ed25519)...'}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-blue-400 shrink-0 font-medium ml-2">Browse</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] text-gray-300 block">Password</label>
+                        <div className="relative flex items-center">
+                          <input
+                            type={showPromptPassword ? 'text' : 'password'}
+                            autoFocus
+                            placeholder="Enter SSH password..."
+                            value={promptPassword}
+                            onChange={e => setPromptPassword(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter') handlePromptConnect(); }}
+                            className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 pr-9 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPromptPassword(!showPromptPassword)}
+                            className="absolute right-2.5 text-gray-400 hover:text-white"
+                          >
+                            {showPromptPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between pt-1">
+                      <label className="flex items-center space-x-2 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={promptSaveCredentials}
+                          onChange={e => setPromptSaveCredentials(e.target.checked)}
+                          className="w-3.5 h-3.5 rounded border-white/20 bg-white/10 text-blue-600 focus:ring-0 cursor-pointer"
+                        />
+                        <span className="text-[11px] text-gray-300">Save credentials to this profile</span>
+                      </label>
+                      <button
+                        onClick={handlePromptConnect}
+                        disabled={isConnecting}
+                        className="px-4 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center space-x-1.5 transition-colors shadow-sm disabled:opacity-50"
+                      >
+                        {isConnecting && <RefreshCw className="w-3 h-3 animate-spin" />}
+                        <span>Connect</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {connections.length === 0 ? (
                   <div className="py-8 text-center space-y-3">
                     <Server className="w-10 h-10 text-gray-500 mx-auto" />
@@ -434,82 +615,75 @@ export default function Taskbar({
                     </button>
                   </div>
                 ) : (
-                  connections.map(conn => {
-                    const isCurrent = conn.id === activeConnectionId;
-                    const isBiometric = biometricTargetId === conn.id;
+                  connections
+                    .filter(c => {
+                      if (!serverSearchQuery.trim()) return true;
+                      const q = serverSearchQuery.trim().toLowerCase();
+                      return (c.name || '').toLowerCase().includes(q) ||
+                        (c.host || '').toLowerCase().includes(q) ||
+                        (c.username || '').toLowerCase().includes(q);
+                    })
+                    .map(conn => {
+                      const isCurrent = conn.id === activeConnectionId;
 
-                    return (
-                      <div
-                        key={conn.id}
-                        className={`p-3 rounded-2xl border transition-all flex items-center justify-between space-x-3 group ${
-                          isCurrent
-                            ? 'bg-blue-600/15 border-blue-500/40 shadow-sm'
-                            : 'bg-white/5 border-white/10 hover:bg-white/10 hover:border-white/20'
-                        }`}
-                      >
-                        {/* Profile Info */}
-                        <div className="flex items-center space-x-3 min-w-0 flex-1">
-                          <div 
-                            className="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm text-white shrink-0 shadow-md border border-white/20"
-                            style={{ backgroundColor: conn.color || '#3b82f6' }}
-                          >
-                            {conn.name ? conn.name[0].toUpperCase() : 'S'}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center space-x-2">
-                              <span className="font-semibold text-xs text-white truncate">
-                                {conn.name || conn.host}
-                              </span>
-                              {isCurrent && (
-                                <span className="px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-400 text-[9px] font-semibold">
-                                  Current
+                      return (
+                        <div
+                          key={conn.id}
+                          className={`p-3 rounded-2xl border transition-all flex items-center justify-between space-x-3 group ${
+                            isCurrent
+                              ? 'bg-blue-600/15 border-blue-500/40 shadow-sm'
+                              : 'bg-white/5 border-white/10 hover:bg-white/10 hover:border-white/20'
+                          }`}
+                        >
+                          {/* Profile Info */}
+                          <div className="flex items-center space-x-3 min-w-0 flex-1">
+                            <div 
+                              className="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm text-white shrink-0 shadow-md border border-white/20"
+                              style={{ backgroundColor: conn.color || '#3b82f6' }}
+                            >
+                              {conn.name ? conn.name[0].toUpperCase() : 'S'}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center space-x-2">
+                                <span className="font-semibold text-xs text-white truncate">
+                                  {conn.name || conn.host}
                                 </span>
-                              )}
-                            </div>
-                            <div className="text-[11px] text-gray-400 font-mono truncate">
-                              {conn.username}@{conn.host}:{conn.port || 22}
+                                {isCurrent && (
+                                  <span className="px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-400 text-[9px] font-semibold">
+                                    Current
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-gray-400 font-mono truncate">
+                                {conn.username}@{conn.host}:{conn.port || 22}
+                              </div>
                             </div>
                           </div>
+
+                          {/* Actions */}
+                          <div className="flex items-center space-x-1.5 shrink-0">
+                            {/* Quick Connect Button */}
+                            <button
+                              onClick={() => handleQuickConnectSaved(conn.id)}
+                              disabled={isConnecting}
+                              className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center space-x-1 transition-colors shadow-sm disabled:opacity-50"
+                            >
+                              <ArrowRight className="w-3.5 h-3.5" />
+                              <span>Connect</span>
+                            </button>
+
+                            {/* Delete Profile Button */}
+                            <button
+                              onClick={() => handleDeleteProfile(conn.id, conn.name || conn.host)}
+                              className="p-1.5 rounded-xl hover:bg-rose-500/20 text-gray-400 hover:text-rose-400 transition-colors"
+                              title="Delete Saved Profile"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
-
-                        {/* Actions */}
-                        <div className="flex items-center space-x-1.5 shrink-0">
-                          {/* Touch ID Quick Unlock Button */}
-                          <button
-                            onClick={() => handleTouchIdQuickConnect(conn.id)}
-                            disabled={isConnecting}
-                            className={`p-2 rounded-xl border transition-all text-xs flex items-center space-x-1 ${
-                              isBiometric
-                                ? 'bg-emerald-600 text-white border-emerald-500'
-                                : 'bg-emerald-500/10 hover:bg-emerald-500/25 text-emerald-400 border-emerald-500/30'
-                            }`}
-                            title="Touch ID Quick Unlock"
-                          >
-                            <Fingerprint className="w-4 h-4" />
-                          </button>
-
-                          {/* Quick Connect Button */}
-                          <button
-                            onClick={() => handleQuickConnectSaved(conn.id)}
-                            disabled={isConnecting}
-                            className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center space-x-1 transition-colors shadow-sm disabled:opacity-50"
-                          >
-                            <ArrowRight className="w-3.5 h-3.5" />
-                            <span>Connect</span>
-                          </button>
-
-                          {/* Delete Profile Button */}
-                          <button
-                            onClick={() => handleDeleteProfile(conn.id, conn.name || conn.host)}
-                            className="p-1.5 rounded-xl hover:bg-rose-500/20 text-gray-400 hover:text-rose-400 transition-colors"
-                            title="Delete Saved Profile"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })
+                      );
+                    })
                 )}
               </div>
             )}
@@ -541,11 +715,18 @@ export default function Taskbar({
                     />
                   </div>
                   <div>
-                    <label className="text-gray-400 block mb-1 font-medium">Port</label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-gray-400 font-medium">Port</label>
+                      <div className="flex items-center space-x-1">
+                        <button type="button" onClick={() => setNewServerForm(f => ({ ...f, port: 22 }))} className={`px-1.5 py-0.5 rounded text-[10px] ${newServerForm.port === 22 ? 'bg-blue-600 text-white' : 'bg-white/10 text-gray-400 hover:text-white'}`}>22 (SSH)</button>
+                      </div>
+                    </div>
                     <input
                       type="number"
-                      value={newServerForm.port}
-                      onChange={e => setNewServerForm(f => ({ ...f, port: parseInt(e.target.value) || 22 }))}
+                      value={newServerForm.port || ''}
+                      placeholder="22"
+                      onChange={e => setNewServerForm(f => ({ ...f, port: e.target.value === '' ? ('' as any) : (parseInt(e.target.value) || 0) }))}
+                      onBlur={() => setNewServerForm(f => ({ ...f, port: Number(f.port) || 22 }))}
                       className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-blue-500 font-mono text-center"
                     />
                   </div>
@@ -663,11 +844,24 @@ export default function Taskbar({
                       >
                         <Upload className="w-5 h-5 text-gray-400" />
                         <span className="text-xs text-gray-300 font-medium">Click to browse or drop SSH key file</span>
-                        <span className="text-[10px] text-gray-500">Supports PuTTY (.ppk), OpenSSH (.pem), id_rsa, id_ed25519</span>
+                        <span className="text-[10px] text-gray-500">Supports OpenSSH (.pem), id_rsa, id_ed25519, id_ecdsa</span>
                       </div>
                     )}
                   </div>
                 )}
+
+                <div className="flex items-center space-x-2 pt-1 pb-1">
+                  <input
+                    type="checkbox"
+                    id="save-new-server-creds"
+                    checked={saveNewServerCredentials}
+                    onChange={e => setSaveNewServerCredentials(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-white/20 bg-white/10 text-blue-600 focus:ring-0 cursor-pointer"
+                  />
+                  <label htmlFor="save-new-server-creds" className="text-[11px] text-gray-300 cursor-pointer select-none">
+                    Save password / private key in server profile
+                  </label>
+                </div>
 
                 <div className="flex justify-end space-x-2 pt-3 border-t border-white/10">
                   <button

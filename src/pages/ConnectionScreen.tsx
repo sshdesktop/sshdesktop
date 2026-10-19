@@ -1,13 +1,14 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useConnectionStore, useSettingsStore } from '../lib/store';
 import { 
   Cloud, Plus, Server, Key, Trash2, Check, 
   AlertCircle, Lock, Upload, FileCode, X,
   Eye, EyeOff, ArrowRight, RotateCcw, Power, Wifi,
   Palette, Terminal, CheckCircle2,
-  Edit2, Laptop, Shield
+  Edit2, Laptop, Shield, Search, ChevronLeft, ChevronRight,
+  ChevronDown, SlidersHorizontal, Copy, Download, LayoutGrid, List, Tag, Filter
 } from 'lucide-react';
-import { sshTestConnection, sshLaunchPutty, pickKeyFile } from '../lib/tauri-bridge';
+import { sshTestConnection, sshLaunchPutty, pickKeyFile, storeListConnections } from '../lib/tauri-bridge';
 import { WALLPAPERS } from '../shell/Desktop';
 
 interface UploadedKeyInfo {
@@ -60,6 +61,16 @@ export default function ConnectionScreen() {
   const [showWallpaperMenu, setShowWallpaperMenu] = useState(false);
   const [showAboutModal, setShowAboutModal] = useState(false);
 
+  // Server Profile Manager & Switcher State
+  const [showProfileManagerModal, setShowProfileManagerModal] = useState(false);
+  const [profileSearch, setProfileSearch] = useState('');
+  const [selectedGroupFilter, setSelectedGroupFilter] = useState('all');
+  const [managerViewMode, setManagerViewMode] = useState<'grid' | 'table'>('grid');
+  const [showQuickSwitchDropdown, setShowQuickSwitchDropdown] = useState(false);
+  const quickSwitchRef = useRef<HTMLDivElement | null>(null);
+  const carouselRef = useRef<HTMLDivElement | null>(null);
+  const importJsonInputRef = useRef<HTMLInputElement | null>(null);
+
   // Pre-flight connection probe state
   const [isTestingProbe, setIsTestingProbe] = useState(false);
   const [probeResult, setProbeResult] = useState<{ status: 'idle' | 'success' | 'failed'; latency?: number; message?: string }>({ status: 'idle' });
@@ -83,6 +94,7 @@ export default function ConnectionScreen() {
   const [keyPassphrase, setKeyPassphrase] = useState('');
   const [uploadedKey, setUploadedKey] = useState<UploadedKeyInfo | null>(null);
   const [isDraggingKey, setIsDraggingKey] = useState(false);
+  const [saveCredentials, setSaveCredentials] = useState(true);
   const keyFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Inline "Create First Profile" form state (when connections.length === 0)
@@ -111,6 +123,23 @@ export default function ConnectionScreen() {
     return () => clearInterval(interval);
   }, []);
 
+  // Sync saved server profiles from disk storage ~/.clouddesk/connections.json
+  useEffect(() => {
+    storeListConnections().then((saved) => {
+      if (saved && Array.isArray(saved) && saved.length > 0) {
+        saved.forEach((s: any) => {
+          const formatted = {
+            ...s,
+            authMethod: s.auth_method || s.authMethod || (s.private_key_path ? 'key' : 'password'),
+            privateKeyPath: s.private_key_path || s.privateKeyPath,
+            created_at: s.created_at || Date.now(),
+          };
+          addConnection(formatted);
+        });
+      }
+    }).catch(() => {});
+  }, [addConnection]);
+
   // Caps Lock detection
   useEffect(() => {
     const handleKeyChange = (e: KeyboardEvent) => {
@@ -123,6 +152,114 @@ export default function ConnectionScreen() {
       window.removeEventListener('keyup', handleKeyChange);
     };
   }, []);
+
+  // Quick Switcher outside click handler
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (quickSwitchRef.current && !quickSwitchRef.current.contains(e.target as Node)) {
+        setShowQuickSwitchDropdown(false);
+      }
+    };
+    if (showQuickSwitchDropdown) {
+      document.addEventListener('mousedown', handleOutsideClick);
+    }
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [showQuickSwitchDropdown]);
+
+  // Unique server groups
+  const profileGroups = useMemo(() => {
+    const set = new Set<string>();
+    connections.forEach(c => {
+      if (c.group && c.group.trim()) set.add(c.group.trim());
+    });
+    return ['all', ...Array.from(set)];
+  }, [connections]);
+
+  // Filtered connections based on search & group
+  const filteredConnections = useMemo(() => {
+    const q = profileSearch.trim().toLowerCase();
+    return connections.filter(conn => {
+      const matchesGroup = selectedGroupFilter === 'all' || conn.group === selectedGroupFilter;
+      if (!matchesGroup) return false;
+      if (!q) return true;
+      const nameMatch = (conn.name || '').toLowerCase().includes(q);
+      const hostMatch = (conn.host || '').toLowerCase().includes(q);
+      const userMatch = (conn.username || '').toLowerCase().includes(q);
+      const tagMatch = Array.isArray(conn.tags) && conn.tags.some(t => t.toLowerCase().includes(q));
+      const groupMatch = (conn.group || '').toLowerCase().includes(q);
+      return nameMatch || hostMatch || userMatch || tagMatch || groupMatch;
+    });
+  }, [connections, profileSearch, selectedGroupFilter]);
+
+  // Carousel smooth horizontal scroll
+  const scrollCarousel = (direction: 'left' | 'right') => {
+    if (carouselRef.current) {
+      const scrollAmount = direction === 'left' ? -220 : 220;
+      carouselRef.current.scrollBy({ left: scrollAmount, behavior: 'smooth' });
+    }
+  };
+
+  // Duplicate Profile
+  const handleDuplicateProfile = (conn: any) => {
+    const newId = `server-${Date.now()}`;
+    const duplicate: any = {
+      ...conn,
+      id: newId,
+      name: `${conn.name || 'Server'} (Copy)`,
+      created_at: Date.now(),
+    };
+    addConnection(duplicate);
+    setSelectedId(newId);
+  };
+
+  // Export Profiles to JSON Backup
+  const handleExportProfilesJson = () => {
+    try {
+      const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(connections, null, 2));
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute('href', dataStr);
+      downloadAnchor.setAttribute('download', `clouddesk_servers_${new Date().toISOString().slice(0, 10)}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+    } catch (e: any) {
+      alert(`Export error: ${e?.message || e}`);
+    }
+  };
+
+  // Import Profiles from JSON Backup
+  const handleImportProfilesJson = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) {
+          let count = 0;
+          parsed.forEach(item => {
+            if (item.host) {
+              const newConn = {
+                ...item,
+                id: item.id || `server-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+              };
+              addConnection(newConn);
+              count++;
+            }
+          });
+          alert(`Successfully imported ${count} server profiles!`);
+          if (parsed.length > 0) setSelectedId(parsed[0].id);
+        } else {
+          alert('Invalid backup file format: Expected JSON array of server profiles.');
+        }
+      } catch (err: any) {
+        alert(`Failed to parse JSON file: ${err?.message || err}`);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
 
   // Sync initial server credentials
   useEffect(() => {
@@ -156,11 +293,10 @@ export default function ConnectionScreen() {
           setPrivateKeyPath(connKeyPath || '');
           if (connKeyPath) {
             const fileName = connKeyPath.split(/[\\/]/).pop() || connKeyPath;
-            const isPpk = connKeyPath.toLowerCase().endsWith('.ppk');
             setUploadedKey({
               name: fileName,
               size: 'Saved Key',
-              type: isPpk ? 'PuTTY Private Key (.ppk)' : 'OpenSSH Private Key (.pem)',
+              type: 'OpenSSH Private Key (.pem)',
               content: connKeyPath,
             });
           } else {
@@ -172,11 +308,10 @@ export default function ConnectionScreen() {
           setPrivateKeyPath(connKeyPath || '');
           if (connKeyPath) {
             const fileName = connKeyPath.split(/[\\/]/).pop() || connKeyPath;
-            const isPpk = connKeyPath.toLowerCase().endsWith('.ppk');
             setUploadedKey({
               name: fileName,
               size: 'Saved Key',
-              type: isPpk ? 'PuTTY Private Key (.ppk)' : 'OpenSSH Private Key (.pem)',
+              type: 'OpenSSH Private Key (.pem)',
               content: connKeyPath,
             });
           } else {
@@ -192,12 +327,11 @@ export default function ConnectionScreen() {
     const selectedPath = await pickKeyFile();
     if (selectedPath) {
       const fileName = selectedPath.split(/[\\/]/).pop() || selectedPath;
-      const isPpk = selectedPath.toLowerCase().endsWith('.ppk');
       setPrivateKeyPath(selectedPath);
       setUploadedKey({
         name: fileName,
         size: 'Local Key File',
-        type: isPpk ? 'PuTTY Private Key (.ppk)' : 'OpenSSH Private Key (.pem)',
+        type: 'OpenSSH Private Key (.pem)',
         content: selectedPath,
       });
     } else {
@@ -225,12 +359,11 @@ export default function ConnectionScreen() {
   const handleKeyFileUpload = (file: File) => {
     const nativePath = (file as any).path;
     if (nativePath) {
-      const isPpk = nativePath.toLowerCase().endsWith('.ppk');
       setPrivateKeyPath(nativePath);
       setUploadedKey({
         name: file.name,
         size: `${(file.size / 1024).toFixed(1)} KB`,
-        type: isPpk ? 'PuTTY Private Key (.ppk)' : 'OpenSSH Private Key (.pem)',
+        type: 'OpenSSH Private Key (.pem)',
         content: nativePath,
       });
       return;
@@ -238,9 +371,8 @@ export default function ConnectionScreen() {
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = (e.target?.result as string) || '';
-      let detectedType = 'SSH Private Key';
-      if (text.includes('PuTTY-User-Key-File') || file.name.toLowerCase().endsWith('.ppk')) detectedType = 'PuTTY Private Key (.ppk)';
-      else if (text.includes('OPENSSH PRIVATE KEY')) detectedType = 'OpenSSH Private Key (.pem)';
+      let detectedType = 'OpenSSH Private Key (.pem)';
+      if (text.includes('OPENSSH PRIVATE KEY')) detectedType = 'OpenSSH Private Key (.pem)';
       else if (text.includes('RSA PRIVATE KEY')) detectedType = 'RSA Private Key (.pem)';
       else if (text.includes('EC PRIVATE KEY')) detectedType = 'ECDSA Private Key (.pem)';
       else if (text.includes('ENCRYPTED')) detectedType = 'Encrypted Key';
@@ -295,15 +427,25 @@ export default function ConnectionScreen() {
     }
   };
 
+  // Helper to sanitize key file paths
+  const sanitizeKeyPath = (str?: string) => {
+    if (!str) return undefined;
+    const trimmed = str.trim();
+    if (!trimmed || trimmed.includes('\n') || trimmed.includes('-----BEGIN') || trimmed.includes('PuTTY-User-Key-File')) {
+      return undefined;
+    }
+    return trimmed;
+  };
+
   // Launch / Connect Handler with Apple-style progress
-  const handleLaunch = async (connId?: string) => {
+  const handleLaunch = async (connId?: string, overrideConn?: any) => {
     setIsConnecting(true);
     setErrorMsg(null);
     setConnectingStep('Resolving host address & routing network path...');
     setConnectingProgress(20);
 
     try {
-      const conn = connId ? connections.find(c => c.id === connId) : null;
+      const conn = overrideConn || (connId ? connections.find(c => c.id === connId) : null);
       const targetHost = (host.trim() || conn?.host || '').trim();
       const targetPort = Number(port) || conn?.port || 22;
       const targetUsername = (username.trim() || conn?.username || 'root').trim();
@@ -365,14 +507,39 @@ export default function ConnectionScreen() {
         created_at: Date.now()
       };
 
-      const isFilePath = (str?: string) => str && !str.includes('\n') && (str.includes('/') || str.includes('\\') || str.endsWith('.pem') || str.endsWith('.ppk'));
-
-      if (!connId) {
-        const profileToSave = {
-          ...targetConfig,
-          privateKeyPath: isFilePath(targetConfig.privateKeyPath) ? targetConfig.privateKeyPath : undefined,
-        };
-        addConnection(profileToSave);
+      if (saveCredentials) {
+        if (!connId) {
+          const profileToSave = {
+            ...targetConfig,
+            privateKeyPath: sanitizeKeyPath(targetConfig.privateKeyPath),
+            private_key_path: sanitizeKeyPath(targetConfig.privateKeyPath),
+          };
+          addConnection(profileToSave);
+        } else if (conn) {
+          const updatedProfile = {
+            ...conn,
+            name: serverName.trim() || conn.name,
+            host: targetHost,
+            port: targetPort,
+            username: targetUsername,
+            authMethod,
+            auth_method: authMethod,
+            password: authMethod === 'password' ? effectivePassword : undefined,
+            privateKeyPath: authMethod === 'key' ? sanitizeKeyPath(effectiveKey) : undefined,
+            private_key_path: authMethod === 'key' ? sanitizeKeyPath(effectiveKey) : undefined,
+          };
+          updateConnection(connId, updatedProfile);
+        }
+      } else {
+        if (!connId) {
+          const profileToSave = {
+            ...targetConfig,
+            password: undefined,
+            privateKeyPath: undefined,
+            private_key_path: undefined,
+          };
+          addConnection(profileToSave);
+        }
       }
 
       await connect(targetId, targetConfig);
@@ -389,19 +556,26 @@ export default function ConnectionScreen() {
   };
 
   // Open Edit Profile Modal
-  const handleOpenEditModal = () => {
-    if (!selectedConn) return;
-    const keyP = (selectedConn as any).privateKeyPath || (selectedConn as any).private_key_path || '';
-    const isKey = (selectedConn as any).authMethod === 'key' || (selectedConn as any).auth_method === 'key' || (keyP && !selectedConn.password);
+  const handleOpenEditModal = (targetConn?: any) => {
+    // Ensure targetConn is an actual connection object, not a React SyntheticEvent
+    const connToEdit = (targetConn && typeof targetConn === 'object' && ('host' in targetConn || 'id' in targetConn))
+      ? targetConn
+      : selectedConn;
+
+    if (!connToEdit) return;
+
+    const keyP = (connToEdit as any).privateKeyPath || (connToEdit as any).private_key_path || '';
+    const isKey = (connToEdit as any).authMethod === 'key' || (connToEdit as any).auth_method === 'key' || (Boolean(keyP) && !connToEdit.password);
+
     setModalMode('edit');
     setModalForm({
-      id: selectedConn.id,
-      name: selectedConn.name || '',
-      host: selectedConn.host || '',
-      port: selectedConn.port || 22,
-      username: selectedConn.username || 'root',
+      id: connToEdit.id,
+      name: connToEdit.name || '',
+      host: connToEdit.host || '',
+      port: connToEdit.port || 22,
+      username: connToEdit.username || 'root',
       authMethod: isKey ? 'key' : 'password',
-      password: selectedConn.password || '',
+      password: connToEdit.password || '',
       privateKeyPath: keyP,
     });
     setProfileModalOpen(true);
@@ -427,40 +601,68 @@ export default function ConnectionScreen() {
   const handleSaveProfileModal = (e: React.FormEvent) => {
     e.preventDefault();
     if (!modalForm.host.trim()) return;
-    const isFilePath = (str?: string) => str && !str.includes('\n') && (str.includes('/') || str.includes('\\') || str.endsWith('.pem') || str.endsWith('.ppk'));
+
+    const cleanName = modalForm.name.trim() || `${modalForm.username.trim()}@${modalForm.host.trim()}`;
+    const cleanHost = modalForm.host.trim();
+    const cleanPort = Number(modalForm.port) || 22;
+    const cleanUser = modalForm.username.trim() || 'root';
+    const keyPath = modalForm.authMethod === 'key' ? sanitizeKeyPath(modalForm.privateKeyPath) : undefined;
+    const pass = modalForm.authMethod === 'password' ? (modalForm.password || undefined) : undefined;
 
     if (modalMode === 'edit') {
+      const existing = connections.find(c => c.id === modalForm.id);
       const updatedConn: any = {
+        ...existing,
         id: modalForm.id,
-        name: modalForm.name.trim() || `${modalForm.username.trim()}@${modalForm.host.trim()}`,
-        host: modalForm.host.trim(),
-        port: Number(modalForm.port) || 22,
-        username: modalForm.username.trim() || 'root',
+        name: cleanName,
+        host: cleanHost,
+        port: cleanPort,
+        username: cleanUser,
         authMethod: modalForm.authMethod,
-        password: modalForm.authMethod === 'password' ? modalForm.password : undefined,
-        privateKeyPath: modalForm.authMethod === 'key' && isFilePath(modalForm.privateKeyPath) ? modalForm.privateKeyPath : undefined,
+        auth_method: modalForm.authMethod,
+        password: pass,
+        privateKeyPath: keyPath,
+        private_key_path: keyPath,
+        color: existing?.color || '#89b4fa',
+        group: existing?.group || 'Servers',
+        tags: existing?.tags || ['Linux', 'CloudDesk'],
+        created_at: existing?.created_at || Date.now(),
       };
       updateConnection(modalForm.id, updatedConn);
+      setSelectedId(modalForm.id);
+
       // Synchronize active connection screen state
-      setHost(updatedConn.host);
-      setPort(updatedConn.port);
-      setUsername(updatedConn.username);
-      setServerName(updatedConn.name);
-      setPassword(updatedConn.password || '');
-      setPrivateKeyPath(updatedConn.privateKeyPath || '');
-      setAuthMethod(updatedConn.authMethod);
+      setHost(cleanHost);
+      setPort(cleanPort);
+      setUsername(cleanUser);
+      setServerName(cleanName);
+      setPassword(pass || '');
+      setPrivateKeyPath(keyPath || '');
+      setAuthMethod(modalForm.authMethod);
+      if (keyPath) {
+        setUploadedKey({
+          name: keyPath.split(/[\\/]/).pop() || keyPath,
+          size: 'Saved Key',
+          type: 'OpenSSH Private Key (.pem)',
+          content: keyPath,
+        });
+      } else {
+        setUploadedKey(null);
+      }
       setProfileModalOpen(false);
     } else {
       const newId = `server-${Date.now()}`;
       const newConn: any = {
         id: newId,
-        name: modalForm.name.trim() || `${modalForm.username.trim()}@${modalForm.host.trim()}`,
-        host: modalForm.host.trim(),
-        port: Number(modalForm.port) || 22,
-        username: modalForm.username.trim() || 'root',
+        name: cleanName,
+        host: cleanHost,
+        port: cleanPort,
+        username: cleanUser,
         authMethod: modalForm.authMethod,
-        password: modalForm.authMethod === 'password' ? modalForm.password : undefined,
-        privateKeyPath: modalForm.authMethod === 'key' && isFilePath(modalForm.privateKeyPath) ? modalForm.privateKeyPath : undefined,
+        auth_method: modalForm.authMethod,
+        password: pass,
+        privateKeyPath: keyPath,
+        private_key_path: keyPath,
         color: '#89b4fa',
         group: 'Servers',
         tags: ['Linux', 'CloudDesk'],
@@ -468,6 +670,25 @@ export default function ConnectionScreen() {
       };
       addConnection(newConn);
       setSelectedId(newId);
+
+      // Synchronize active connection screen state to new profile
+      setHost(cleanHost);
+      setPort(cleanPort);
+      setUsername(cleanUser);
+      setServerName(cleanName);
+      setPassword(pass || '');
+      setPrivateKeyPath(keyPath || '');
+      setAuthMethod(modalForm.authMethod);
+      if (keyPath) {
+        setUploadedKey({
+          name: keyPath.split(/[\\/]/).pop() || keyPath,
+          size: 'Saved Key',
+          type: 'OpenSSH Private Key (.pem)',
+          content: keyPath,
+        });
+      } else {
+        setUploadedKey(null);
+      }
       setProfileModalOpen(false);
     }
   };
@@ -476,17 +697,22 @@ export default function ConnectionScreen() {
   const handleCreateFirstProfileAndConnect = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!firstProfile.host.trim()) return;
-    const isFilePath = (str?: string) => str && !str.includes('\n') && (str.includes('/') || str.includes('\\') || str.endsWith('.pem') || str.endsWith('.ppk'));
     const newId = `server-${Date.now()}`;
+    const cleanName = firstProfile.name.trim() || `${firstProfile.username.trim()}@${firstProfile.host.trim()}`;
+    const keyPath = firstProfile.authMethod === 'key' ? sanitizeKeyPath(firstProfile.privateKeyPath) : undefined;
+    const pass = firstProfile.authMethod === 'password' ? firstProfile.password : undefined;
+
     const newConn: any = {
       id: newId,
-      name: firstProfile.name.trim() || `${firstProfile.username.trim()}@${firstProfile.host.trim()}`,
+      name: cleanName,
       host: firstProfile.host.trim(),
       port: Number(firstProfile.port) || 22,
       username: firstProfile.username.trim() || 'root',
       authMethod: firstProfile.authMethod,
-      password: firstProfile.authMethod === 'password' ? firstProfile.password : undefined,
-      privateKeyPath: firstProfile.authMethod === 'key' && isFilePath(firstProfile.privateKeyPath) ? firstProfile.privateKeyPath : undefined,
+      auth_method: firstProfile.authMethod,
+      password: saveCredentials ? pass : undefined,
+      privateKeyPath: saveCredentials ? keyPath : undefined,
+      private_key_path: saveCredentials ? keyPath : undefined,
       color: '#89b4fa',
       group: 'Servers',
       tags: ['Linux', 'CloudDesk'],
@@ -497,12 +723,10 @@ export default function ConnectionScreen() {
     setHost(newConn.host);
     setPort(newConn.port);
     setUsername(newConn.username);
-    setPassword(newConn.password || '');
-    setPrivateKeyPath(newConn.privateKeyPath || '');
-    setAuthMethod(newConn.authMethod);
-
-    // Connect immediately
-    await handleLaunch(newId);
+    setPassword(pass || '');
+    setPrivateKeyPath(keyPath || '');
+    setAuthMethod(firstProfile.authMethod);
+    await handleLaunch(newId, newConn);
   };
 
   // ~/.ssh/config Parser
@@ -612,6 +836,13 @@ export default function ConnectionScreen() {
                   About This Cloud Mac
                 </div>
                 <div className="my-1 border-t border-white/10 mx-2" />
+                <div 
+                  onClick={() => setShowProfileManagerModal(true)}
+                  className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer flex items-center justify-between"
+                >
+                  <span>Server Profile Manager...</span>
+                  <span className="text-[10px] bg-white/10 px-1.5 py-0.5 rounded-full">{connections.length}</span>
+                </div>
                 <div 
                   onClick={handleOpenAddModal}
                   className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer"
@@ -779,11 +1010,18 @@ export default function ConnectionScreen() {
                     />
                   </div>
                   <div>
-                    <label className="text-gray-300 block mb-1 font-medium">Port</label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-gray-300 font-medium">Port</label>
+                      <div className="flex items-center space-x-1">
+                        <button type="button" onClick={() => setFirstProfile(f => ({ ...f, port: 22 }))} className={`px-1.5 py-0.5 rounded text-[10px] ${firstProfile.port === 22 ? 'bg-blue-600 text-white' : 'bg-white/10 text-gray-400 hover:text-white'}`}>22 (SSH)</button>
+                      </div>
+                    </div>
                     <input
                       type="number"
-                      value={firstProfile.port}
-                      onChange={e => setFirstProfile(f => ({ ...f, port: parseInt(e.target.value) || 22 }))}
+                      value={firstProfile.port || ''}
+                      placeholder="22"
+                      onChange={e => setFirstProfile(f => ({ ...f, port: e.target.value === '' ? ('' as any) : (parseInt(e.target.value) || 0) }))}
+                      onBlur={() => setFirstProfile(f => ({ ...f, port: Number(f.port) || 22 }))}
                       className="w-full bg-[#10121d] border border-white/10 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-blue-500 text-center"
                     />
                   </div>
@@ -853,13 +1091,26 @@ export default function ConnectionScreen() {
                       <div className="flex items-center space-x-2 truncate">
                         <Key className="w-4 h-4 text-blue-400 shrink-0" />
                         <span className="text-gray-300 truncate">
-                          {firstProfile.privateKeyPath || 'Click to select key (.pem, .ppk, id_rsa)...'}
+                          {firstProfile.privateKeyPath || 'Click to select key (.pem, id_rsa, id_ed25519)...'}
                         </span>
                       </div>
                       <span className="text-[10px] text-blue-400 shrink-0 font-medium ml-2">Browse</span>
                     </div>
                   </div>
                 )}
+
+                <div className="flex items-center space-x-2 pt-1 pb-1">
+                  <input
+                    type="checkbox"
+                    id="save-creds-first"
+                    checked={saveCredentials}
+                    onChange={e => setSaveCredentials(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-white/20 bg-white/10 text-blue-600 focus:ring-0 cursor-pointer"
+                  />
+                  <label htmlFor="save-creds-first" className="text-[11px] text-gray-300 cursor-pointer select-none">
+                    Save password / private key in server profile
+                  </label>
+                </div>
 
                 <button
                   type="submit"
@@ -884,74 +1135,154 @@ export default function ConnectionScreen() {
           ) : (
             /* SCENARIO B: Profiles Exist -> Show Carousel & Login Card */
             <>
-              {/* Server Profiles Carousel */}
-              <div className="flex items-center justify-center space-x-2.5 overflow-x-auto pb-1 max-w-full scrollbar-none px-2">
-                {connections.map(conn => {
-                  const isSelected = selectedId === conn.id;
-                  return (
-                    <div
-                      key={conn.id}
-                      onClick={() => setSelectedId(conn.id)}
-                      className={`group flex flex-col items-center p-2 rounded-2xl cursor-pointer transition-all duration-200 text-center ${
-                        isSelected
-                          ? 'scale-105 bg-white/15 backdrop-blur-xl border border-white/30 shadow-[0_8px_20px_rgba(0,0,0,0.5)]'
-                          : 'hover:bg-white/5 opacity-70 hover:opacity-100 border border-transparent'
-                      }`}
-                      title={`${conn.name} (${conn.username}@${conn.host})`}
-                    >
-                      <div className="relative">
-                        <div 
-                          className={`w-12 h-12 rounded-full flex items-center justify-center shadow-md border-2 transition-transform ${
-                            isSelected ? 'border-blue-400 scale-105' : 'border-white/20 group-hover:border-white/40'
-                          }`}
-                          style={{ backgroundColor: conn.color ? `${conn.color}25` : '#89b4fa25' }}
-                        >
-                          <span className="text-base font-bold text-white uppercase font-sans">
-                            {conn.name ? conn.name[0] : conn.username[0]}
-                          </span>
-                        </div>
-
-                        {/* Online dot indicator */}
-                        <span className="absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full bg-emerald-500 border-2 border-black flex items-center justify-center">
-                          <span className="w-1 h-1 rounded-full bg-white" />
-                        </span>
-
-                        {/* Delete profile button on hover */}
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (confirm(`Delete saved profile "${conn.name || conn.host}"?`)) {
-                              removeConnection(conn.id);
-                              if (selectedId === conn.id) {
-                                const remaining = connections.filter(c => c.id !== conn.id);
-                                setSelectedId(remaining[0]?.id || null);
-                              }
-                            }
-                          }}
-                          className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md z-20"
-                          title="Delete profile"
-                        >
-                          <Trash2 className="w-2.5 h-2.5" />
-                        </button>
-                      </div>
-
-                      <span className="text-[10px] font-semibold text-white mt-1 truncate max-w-[75px]">
-                        {conn.name}
-                      </span>
-                    </div>
-                  );
-                })}
-
-                {/* "+ New Profile" Tile */}
-                <div
-                  onClick={handleOpenAddModal}
-                  className="flex flex-col items-center p-2 rounded-2xl cursor-pointer hover:bg-white/10 opacity-70 hover:opacity-100 border border-dashed border-white/20 transition-all text-center group"
-                  title="Add New Server Profile"
-                >
-                  <div className="w-12 h-12 rounded-full bg-white/5 border border-dashed border-white/20 flex items-center justify-center text-white/60 group-hover:text-white group-hover:scale-105 transition-transform">
-                    <Plus className="w-5 h-5" />
+              {/* Server Profiles Bar: Search Filter, Manage Button, Left/Right Carousel Controls */}
+              <div className="w-full flex flex-col space-y-2">
+                {/* Carousel Top Controls */}
+                <div className="flex items-center justify-between px-1 text-xs">
+                  {/* Left: Quick Search Filter */}
+                  <div className="relative flex-1 max-w-[200px]">
+                    <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-2" />
+                    <input
+                      type="text"
+                      placeholder="Filter profiles..."
+                      value={profileSearch}
+                      onChange={(e) => setProfileSearch(e.target.value)}
+                      className="w-full pl-8 pr-6 py-1 bg-black/40 border border-white/10 rounded-xl text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
+                    />
+                    {profileSearch && (
+                      <button
+                        onClick={() => setProfileSearch('')}
+                        className="absolute right-2 top-1.5 text-gray-400 hover:text-white text-xs"
+                      >
+                        ✕
+                      </button>
+                    )}
                   </div>
-                  <span className="text-[10px] font-medium text-white/80 mt-1">New</span>
+
+                  {/* Right: Manage All Profiles & Add New Profile Buttons */}
+                  <div className="flex items-center space-x-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setShowProfileManagerModal(true)}
+                      className="px-2.5 py-1 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 text-[11px] font-medium text-white flex items-center space-x-1.5 transition-all shadow-sm active:scale-95"
+                      title="Open full Server Profile Manager"
+                    >
+                      <SlidersHorizontal className="w-3 h-3 text-blue-400" />
+                      <span>Manage All ({connections.length})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleOpenAddModal}
+                      className="p-1 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 text-blue-300 transition-all active:scale-95"
+                      title="Add New Server Profile"
+                    >
+                      <Plus className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Profiles Carousel with Left/Right Smooth Navigation */}
+                <div className="relative flex items-center w-full">
+                  {connections.length > 4 && (
+                    <button
+                      type="button"
+                      onClick={() => scrollCarousel('left')}
+                      className="absolute -left-3 z-20 w-7 h-7 rounded-full bg-black/70 hover:bg-black/90 text-white/80 hover:text-white border border-white/20 shadow-lg flex items-center justify-center transition-all backdrop-blur-md active:scale-90"
+                      title="Scroll Left"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+                  )}
+
+                  <div 
+                    ref={carouselRef}
+                    className="flex items-center space-x-2.5 overflow-x-auto pb-1 max-w-full scrollbar-none px-2 scroll-smooth justify-start"
+                  >
+                    {filteredConnections.length === 0 ? (
+                      <div className="py-2 px-4 text-center text-xs text-gray-400 italic w-full">
+                        No profiles match "{profileSearch}"
+                      </div>
+                    ) : (
+                      filteredConnections.map(conn => {
+                        const isSelected = selectedId === conn.id;
+                        return (
+                          <div
+                            key={conn.id}
+                            onClick={() => setSelectedId(conn.id)}
+                            className={`group flex flex-col items-center p-2 rounded-2xl cursor-pointer transition-all duration-200 text-center shrink-0 ${
+                              isSelected
+                                ? 'scale-105 bg-white/15 backdrop-blur-xl border border-white/30 shadow-[0_8px_20px_rgba(0,0,0,0.5)]'
+                                : 'hover:bg-white/5 opacity-75 hover:opacity-100 border border-transparent'
+                            }`}
+                            title={`${conn.name} (${conn.username}@${conn.host}:${conn.port || 22})`}
+                          >
+                            <div className="relative">
+                              <div 
+                                className={`w-12 h-12 rounded-full flex items-center justify-center shadow-md border-2 transition-transform ${
+                                  isSelected ? 'border-blue-400 scale-105' : 'border-white/20 group-hover:border-white/40'
+                                }`}
+                                style={{ backgroundColor: conn.color ? `${conn.color}25` : '#89b4fa25' }}
+                              >
+                                <span className="text-base font-bold text-white uppercase font-sans">
+                                  {conn.name ? conn.name[0] : conn.username[0]}
+                                </span>
+                              </div>
+
+                              {/* Status dot */}
+                              <span className="absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full bg-emerald-500 border-2 border-black flex items-center justify-center">
+                                <span className="w-1 h-1 rounded-full bg-white" />
+                              </span>
+
+                              {/* Hover quick delete */}
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (confirm(`Delete saved profile "${conn.name || conn.host}"?`)) {
+                                    removeConnection(conn.id);
+                                    if (selectedId === conn.id) {
+                                      const remaining = connections.filter(c => c.id !== conn.id);
+                                      setSelectedId(remaining[0]?.id || null);
+                                    }
+                                  }
+                                }}
+                                className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md z-20"
+                                title="Delete profile"
+                              >
+                                <Trash2 className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+
+                            <span className="text-[10px] font-semibold text-white mt-1 truncate max-w-[90px]" title={conn.name}>
+                              {conn.name}
+                            </span>
+                          </div>
+                        );
+                      })
+                    )}
+
+                    {/* "+ New" Circle */}
+                    <div
+                      onClick={handleOpenAddModal}
+                      className="flex flex-col items-center p-2 rounded-2xl cursor-pointer hover:bg-white/10 opacity-70 hover:opacity-100 border border-dashed border-white/20 transition-all text-center group shrink-0"
+                      title="Add New Server Profile"
+                    >
+                      <div className="w-12 h-12 rounded-full bg-white/5 border border-dashed border-white/20 flex items-center justify-center text-white/60 group-hover:text-white group-hover:scale-105 transition-transform">
+                        <Plus className="w-5 h-5" />
+                      </div>
+                      <span className="text-[10px] font-medium text-white/80 mt-1">New</span>
+                    </div>
+                  </div>
+
+                  {connections.length > 4 && (
+                    <button
+                      type="button"
+                      onClick={() => scrollCarousel('right')}
+                      className="absolute -right-3 z-20 w-7 h-7 rounded-full bg-black/70 hover:bg-black/90 text-white/80 hover:text-white border border-white/20 shadow-lg flex items-center justify-center transition-all backdrop-blur-md active:scale-90"
+                      title="Scroll Right"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -960,8 +1291,8 @@ export default function ConnectionScreen() {
                 shake ? 'border-red-500 animate-lock-shake' : 'border-white/20'
               } rounded-3xl p-5 shadow-[0_25px_80px_rgba(0,0,0,0.7)] space-y-3.5 relative transition-all`}>
                 
-                {/* User Profile Header */}
-                <div className="flex flex-col items-center text-center space-y-1.5">
+                {/* User Profile Header with Searchable Quick Switcher Popover */}
+                <div className="flex flex-col items-center text-center space-y-1.5 relative">
                   <div className="relative">
                     <div className="w-14 h-14 rounded-full bg-gradient-to-tr from-blue-600 via-indigo-600 to-purple-600 p-0.5 shadow-xl border border-white/30 flex items-center justify-center">
                       <div className="w-full h-full rounded-full bg-[#1e1e2e]/90 flex items-center justify-center text-xl font-bold text-white uppercase font-sans">
@@ -973,10 +1304,111 @@ export default function ConnectionScreen() {
                     </span>
                   </div>
 
-                  <div>
-                    <h2 className="text-sm font-bold text-white">
-                      {selectedConn?.name || `${username}@${host || 'remote-node'}`}
-                    </h2>
+                  {/* Server Profile Label with Switcher Trigger */}
+                  <div className="relative" ref={quickSwitchRef}>
+                    <button
+                      type="button"
+                      onClick={() => setShowQuickSwitchDropdown(!showQuickSwitchDropdown)}
+                      className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-xl bg-white/5 hover:bg-white/10 border border-white/15 transition-all text-center group cursor-pointer"
+                      title="Click to search and quickly switch between server profiles"
+                    >
+                      <span className="text-sm font-bold text-white group-hover:text-blue-300 transition-colors truncate max-w-[220px]">
+                        {selectedConn?.name || `${username}@${host || 'remote-node'}`}
+                      </span>
+                      <ChevronDown className="w-3.5 h-3.5 text-gray-400 group-hover:text-white transition-transform" />
+                    </button>
+
+                    {/* Quick Switch Dropdown Popover */}
+                    {showQuickSwitchDropdown && (
+                      <div className="absolute top-9 left-1/2 -translate-x-1/2 w-80 bg-[#161828]/95 backdrop-blur-2xl border border-white/20 rounded-2xl shadow-2xl p-2.5 z-50 animate-in fade-in zoom-in-95 duration-100 text-left">
+                        <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10">
+                          <span className="text-[11px] font-bold text-white uppercase tracking-wider">Switch Server</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowQuickSwitchDropdown(false);
+                              setShowProfileManagerModal(true);
+                            }}
+                            className="text-[10px] text-blue-400 hover:text-blue-300 font-medium"
+                          >
+                            Manage All ({connections.length}) →
+                          </button>
+                        </div>
+
+                        {/* Search Input in Popover */}
+                        <div className="relative mb-2">
+                          <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-2" />
+                          <input
+                            type="text"
+                            autoFocus
+                            placeholder="Search by name, IP, user..."
+                            value={profileSearch}
+                            onChange={(e) => setProfileSearch(e.target.value)}
+                            className="w-full pl-8 pr-3 py-1.5 bg-black/40 border border-white/10 rounded-xl text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                          />
+                        </div>
+
+                        {/* Profiles List */}
+                        <div className="max-h-52 overflow-y-auto space-y-1 pr-1">
+                          {filteredConnections.length === 0 ? (
+                            <div className="p-3 text-center text-xs text-gray-400">
+                              No matching servers found
+                            </div>
+                          ) : (
+                            filteredConnections.map(conn => {
+                              const isCurr = conn.id === selectedId;
+                              return (
+                                <button
+                                  key={conn.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedId(conn.id);
+                                    setShowQuickSwitchDropdown(false);
+                                  }}
+                                  className={`w-full p-2 rounded-xl flex items-center justify-between text-left transition-all ${
+                                    isCurr
+                                      ? 'bg-blue-600/30 border border-blue-500/40 text-white'
+                                      : 'hover:bg-white/5 border border-transparent text-gray-300 hover:text-white'
+                                  }`}
+                                >
+                                  <div className="flex items-center space-x-2.5 truncate">
+                                    <div 
+                                      className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0"
+                                      style={{ backgroundColor: conn.color ? `${conn.color}30` : '#89b4fa30', color: conn.color || '#89b4fa' }}
+                                    >
+                                      {conn.name ? conn.name[0].toUpperCase() : conn.username[0].toUpperCase()}
+                                    </div>
+                                    <div className="truncate">
+                                      <div className="text-xs font-semibold truncate leading-tight">{conn.name}</div>
+                                      <div className="text-[10px] text-gray-400 font-mono truncate">
+                                        {conn.username}@{conn.host}:{conn.port || 22}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  {isCurr && <Check className="w-3.5 h-3.5 text-blue-400 shrink-0 ml-2" />}
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
+
+                        <div className="pt-2 mt-2 border-t border-white/10 flex justify-between items-center text-[10px]">
+                          <span className="text-gray-400">{filteredConnections.length} of {connections.length} servers</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowQuickSwitchDropdown(false);
+                              handleOpenAddModal();
+                            }}
+                            className="text-blue-400 hover:text-blue-300 font-medium flex items-center space-x-1"
+                          >
+                            <Plus className="w-3 h-3" />
+                            <span>New Profile</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="flex items-center justify-center space-x-2 text-[10px] text-white/70 font-mono mt-0.5">
                       <span>{username}@{host || 'localhost'}:{port}</span>
                       {probeResult.status === 'success' && (
@@ -1063,6 +1495,18 @@ export default function ConnectionScreen() {
                       </div>
                     )}
 
+                    <div className="flex items-center justify-center px-1 pt-0.5 text-[11px] text-gray-300">
+                      <label className="flex items-center space-x-2 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={saveCredentials}
+                          onChange={e => setSaveCredentials(e.target.checked)}
+                          className="w-3.5 h-3.5 rounded border-white/20 bg-white/10 text-blue-600 focus:ring-0 cursor-pointer"
+                        />
+                        <span>Save password to server profile</span>
+                      </label>
+                    </div>
+
                     {capsLockActive && (
                       <div className="flex items-center justify-center space-x-1 text-[11px] text-amber-300 font-medium">
                         <span>⇪ Caps Lock is on</span>
@@ -1088,7 +1532,7 @@ export default function ConnectionScreen() {
                         <div className="flex items-center justify-between">
                           <span className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Key Location</span>
                           <span className="text-[10px] text-blue-400 font-mono font-medium">
-                            {privateKeyPath.toLowerCase().endsWith('.ppk') ? 'PuTTY (.ppk)' : 'OpenSSH (.pem)'}
+                            OpenSSH (.pem)
                           </span>
                         </div>
                         <div className="flex items-center space-x-2 bg-black/50 px-2.5 py-1.5 rounded-xl border border-white/10">
@@ -1120,9 +1564,9 @@ export default function ConnectionScreen() {
                       >
                         <Upload className="w-5 h-5 text-blue-400" />
                         <div className="text-xs text-gray-300 font-medium">
-                          Select or Drop Private Key (<span className="font-mono text-gray-400">.pem</span>, <span className="font-mono text-gray-400">.ppk</span>, <span className="font-mono text-gray-400">id_rsa</span>)
+                          Select or Drop Private Key (<span className="font-mono text-gray-400">.pem</span>, <span className="font-mono text-gray-400">id_rsa</span>, <span className="font-mono text-gray-400">id_ed25519</span>)
                         </div>
-                        <div className="text-[10px] text-gray-500">Supports OpenSSH (.pem) & PuTTY (.ppk)</div>
+                        <div className="text-[10px] text-gray-500">Supports OpenSSH (.pem)</div>
                       </div>
                     )}
 
@@ -1135,6 +1579,18 @@ export default function ConnectionScreen() {
                         placeholder="Key passphrase (if encrypted)..."
                         className="bg-transparent text-white placeholder-white/40 flex-1 focus:outline-none font-mono text-xs"
                       />
+                    </div>
+
+                    <div className="flex items-center justify-center px-1 pt-0.5 text-[11px] text-gray-300">
+                      <label className="flex items-center space-x-2 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={saveCredentials}
+                          onChange={e => setSaveCredentials(e.target.checked)}
+                          className="w-3.5 h-3.5 rounded border-white/20 bg-white/10 text-blue-600 focus:ring-0 cursor-pointer"
+                        />
+                        <span>Save private key to server profile</span>
+                      </label>
                     </div>
 
                     <button
@@ -1151,7 +1607,8 @@ export default function ConnectionScreen() {
                 {/* Edit Server Details & Import Links */}
                 <div className="pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-gray-400">
                   <button
-                    onClick={handleOpenEditModal}
+                    type="button"
+                    onClick={() => handleOpenEditModal(selectedConn)}
                     className="hover:text-white transition-colors flex items-center space-x-1"
                   >
                     <Edit2 className="w-3 h-3 text-blue-400" />
@@ -1254,7 +1711,7 @@ export default function ConnectionScreen() {
 
       {/* Unified Add / Edit Server Profile Modal */}
       {profileModalOpen && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-50 flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150">
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-[60] flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150">
           <form onSubmit={handleSaveProfileModal} className="bg-[#181a2c]/95 backdrop-blur-2xl border border-white/20 rounded-3xl w-full max-w-md p-6 space-y-3.5 shadow-2xl text-xs text-gray-200 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-white/10 pb-3">
               <div className="flex items-center space-x-2">
@@ -1274,10 +1731,9 @@ export default function ConnectionScreen() {
 
             <div className="space-y-3">
               <div>
-                <label className="text-gray-300 block mb-1 font-medium">Profile Name</label>
+                <label className="text-gray-300 block mb-1 font-medium">Profile Name (optional)</label>
                 <input
                   type="text"
-                  required
                   placeholder="e.g. Production Cluster, Database Node"
                   value={modalForm.name}
                   onChange={e => setModalForm(f => ({ ...f, name: e.target.value }))}
@@ -1298,11 +1754,18 @@ export default function ConnectionScreen() {
                   />
                 </div>
                 <div>
-                  <label className="text-gray-300 block mb-1 font-medium">Port</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-gray-300 font-medium">Port</label>
+                    <div className="flex items-center space-x-1">
+                      <button type="button" onClick={() => setModalForm(f => ({ ...f, port: 22 }))} className={`px-1.5 py-0.5 rounded text-[10px] ${modalForm.port === 22 ? 'bg-blue-600 text-white' : 'bg-white/10 text-gray-400 hover:text-white'}`}>22 (SSH)</button>
+                    </div>
+                  </div>
                   <input
                     type="number"
-                    value={modalForm.port}
-                    onChange={e => setModalForm(f => ({ ...f, port: parseInt(e.target.value) || 22 }))}
+                    value={modalForm.port || ''}
+                    placeholder="22"
+                    onChange={e => setModalForm(f => ({ ...f, port: e.target.value === '' ? ('' as any) : (parseInt(e.target.value) || 0) }))}
+                    onBlur={() => setModalForm(f => ({ ...f, port: Number(f.port) || 22 }))}
                     className="w-full bg-[#10121d] border border-white/10 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-blue-500 text-center"
                   />
                 </div>
@@ -1363,18 +1826,23 @@ export default function ConnectionScreen() {
                 </div>
               ) : (
                 <div>
-                  <label className="text-gray-300 block mb-1 font-medium">Private Key File</label>
-                  <div 
-                    onClick={handleSelectModalKeyFile}
-                    className="cursor-pointer bg-[#10121d] border border-dashed border-white/20 hover:border-blue-500/60 rounded-xl p-3 flex items-center justify-between text-xs transition-colors"
-                  >
-                    <div className="flex items-center space-x-2 truncate">
-                      <Key className="w-4 h-4 text-blue-400 shrink-0" />
-                      <span className="text-gray-300 truncate font-mono text-[11px]">
-                        {modalForm.privateKeyPath || 'Select SSH Key file (.pem, .ppk)...'}
-                      </span>
-                    </div>
-                    <span className="text-[10px] text-blue-400 shrink-0 font-medium ml-2">Browse</span>
+                  <label className="text-gray-300 block mb-1 font-medium">Private Key File (.pem, id_rsa, .ppk)</label>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="text"
+                      value={modalForm.privateKeyPath}
+                      onChange={e => setModalForm(f => ({ ...f, privateKeyPath: e.target.value }))}
+                      placeholder="e.g. C:\Users\Sharuk\.ssh\id_rsa or /home/.../key.pem"
+                      className="flex-1 bg-[#10121d] border border-white/10 rounded-xl px-3 py-2 text-white font-mono text-xs focus:outline-none focus:border-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSelectModalKeyFile}
+                      className="px-3 py-2 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-medium transition-colors shrink-0 flex items-center space-x-1"
+                    >
+                      <Key className="w-3.5 h-3.5 text-blue-400" />
+                      <span>Browse</span>
+                    </button>
                   </div>
                 </div>
               )}
@@ -1511,6 +1979,384 @@ export default function ConnectionScreen() {
             >
               Close
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ================= SERVER PROFILE MANAGER MODAL ================= */}
+      {showProfileManagerModal && (
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-md z-50 flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150">
+          <div className="bg-[#181a2c]/95 backdrop-blur-2xl border border-white/20 rounded-3xl w-full max-w-4xl shadow-2xl flex flex-col max-h-[85vh] overflow-hidden text-xs text-gray-200">
+            {/* Modal Header */}
+            <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between shrink-0 bg-[#141524]">
+              <div className="flex items-center space-x-3">
+                <div className="w-9 h-9 rounded-2xl bg-blue-500/20 border border-blue-500/30 flex items-center justify-center shadow">
+                  <SlidersHorizontal className="w-4 h-4 text-blue-400" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Server Profile Manager</h3>
+                  <p className="text-[11px] text-gray-400">
+                    Manage, search, organize, and back up all {connections.length} remote servers
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                {/* View Mode Toggle */}
+                <div className="flex items-center p-0.5 rounded-xl bg-black/40 border border-white/10">
+                  <button
+                    type="button"
+                    onClick={() => setManagerViewMode('grid')}
+                    className={`p-1.5 rounded-lg transition-colors ${managerViewMode === 'grid' ? 'bg-blue-600 text-white shadow' : 'text-gray-400 hover:text-white'}`}
+                    title="Grid Cards View"
+                  >
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setManagerViewMode('table')}
+                    className={`p-1.5 rounded-lg transition-colors ${managerViewMode === 'table' ? 'bg-blue-600 text-white shadow' : 'text-gray-400 hover:text-white'}`}
+                    title="Table List View"
+                  >
+                    <List className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {/* Export / Backup JSON */}
+                <button
+                  type="button"
+                  onClick={handleExportProfilesJson}
+                  className="px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 hover:text-white transition-all flex items-center space-x-1"
+                  title="Export all server profiles to a JSON backup file"
+                >
+                  <Download className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="text-[11px]">Export JSON</span>
+                </button>
+
+                {/* Import Backup JSON */}
+                <input
+                  type="file"
+                  ref={importJsonInputRef}
+                  accept=".json"
+                  onChange={handleImportProfilesJson}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => importJsonInputRef.current?.click()}
+                  className="px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 hover:text-white transition-all flex items-center space-x-1"
+                  title="Import server profiles from a JSON backup file"
+                >
+                  <Upload className="w-3.5 h-3.5 text-cyan-400" />
+                  <span className="text-[11px]">Import JSON</span>
+                </button>
+
+                {/* Add New Profile */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleOpenAddModal();
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold transition-all flex items-center space-x-1 shadow"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span className="text-[11px]">New Server</span>
+                </button>
+
+                {/* Close */}
+                <button
+                  type="button"
+                  onClick={() => setShowProfileManagerModal(false)}
+                  className="w-7 h-7 rounded-full hover:bg-white/10 text-gray-400 hover:text-white flex items-center justify-center transition-colors ml-2"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            {/* Filter & Search Bar */}
+            <div className="p-4 border-b border-white/10 bg-[#131422] flex items-center justify-between gap-4 flex-wrap shrink-0">
+              {/* Search Bar */}
+              <div className="relative flex-1 min-w-[240px]">
+                <Search className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Search servers by name, IP, port, username, group or tags..."
+                  value={profileSearch}
+                  onChange={(e) => setProfileSearch(e.target.value)}
+                  className="w-full pl-9 pr-8 py-2 bg-black/40 border border-white/10 rounded-xl text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 font-sans"
+                />
+                {profileSearch && (
+                  <button
+                    onClick={() => setProfileSearch('')}
+                    className="absolute right-3 top-2 text-gray-400 hover:text-white text-xs"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              {/* Group Filter Pills */}
+              <div className="flex items-center space-x-1.5 overflow-x-auto scrollbar-none">
+                <span className="text-[10px] text-gray-500 font-semibold uppercase tracking-wider shrink-0">Groups:</span>
+                {profileGroups.map(grp => (
+                  <button
+                    key={grp}
+                    type="button"
+                    onClick={() => setSelectedGroupFilter(grp)}
+                    className={`px-2.5 py-1 rounded-xl text-[11px] font-medium transition-all capitalize shrink-0 ${
+                      selectedGroupFilter === grp
+                        ? 'bg-blue-600 text-white shadow'
+                        : 'bg-white/5 text-gray-400 hover:text-white hover:bg-white/10'
+                    }`}
+                  >
+                    {grp} {grp === 'all' ? `(${connections.length})` : ''}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Profiles Container */}
+            <div className="flex-1 overflow-y-auto p-5">
+              {filteredConnections.length === 0 ? (
+                <div className="py-16 text-center space-y-3">
+                  <Server className="w-12 h-12 text-gray-600 mx-auto" />
+                  <div className="text-gray-400 font-medium">No server profiles match your filter.</div>
+                  <button
+                    onClick={() => { setProfileSearch(''); setSelectedGroupFilter('all'); }}
+                    className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs transition-colors"
+                  >
+                    Reset Filters
+                  </button>
+                </div>
+              ) : managerViewMode === 'grid' ? (
+                /* 1. GRID CARDS VIEW */
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                  {filteredConnections.map(conn => {
+                    const isSelected = selectedId === conn.id;
+                    return (
+                      <div
+                        key={conn.id}
+                        className={`p-4 rounded-2xl border transition-all flex flex-col justify-between space-y-3 ${
+                          isSelected
+                            ? 'bg-blue-600/15 border-blue-500/50 shadow-lg'
+                            : 'bg-black/30 border-white/10 hover:border-white/20 hover:bg-black/40'
+                        }`}
+                      >
+                        <div className="space-y-2">
+                          {/* Card Header: Avatar, Name, Group Badge */}
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center space-x-3 min-w-0">
+                              <div
+                                className="w-10 h-10 rounded-2xl flex items-center justify-center text-sm font-bold shadow-md shrink-0 border border-white/15"
+                                style={{ backgroundColor: conn.color ? `${conn.color}30` : '#89b4fa30', color: conn.color || '#89b4fa' }}
+                              >
+                                {conn.name ? conn.name[0].toUpperCase() : conn.username[0].toUpperCase()}
+                              </div>
+                              <div className="min-w-0">
+                                <h4 className="text-xs font-bold text-white truncate" title={conn.name}>
+                                  {conn.name}
+                                </h4>
+                                <div className="text-[10px] text-gray-400 font-mono truncate">
+                                  {conn.username}@{conn.host}:{conn.port || 22}
+                                </div>
+                              </div>
+                            </div>
+
+                            {conn.group && (
+                              <span className="px-2 py-0.5 rounded-full bg-white/10 text-[9px] font-semibold text-gray-300 shrink-0">
+                                {conn.group}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Details Row: Auth Method, Tags */}
+                          <div className="flex items-center space-x-2 text-[10px] text-gray-400 pt-1">
+                            <span className="flex items-center space-x-1 bg-white/5 px-2 py-0.5 rounded-md">
+                              {conn.authMethod === 'key' || conn.privateKeyPath ? <Key className="w-3 h-3 text-blue-400" /> : <Lock className="w-3 h-3 text-amber-400" />}
+                              <span>{conn.authMethod === 'key' || conn.privateKeyPath ? 'SSH Key' : 'Password'}</span>
+                            </span>
+                            {conn.tags && conn.tags.length > 0 && (
+                              <span className="truncate text-gray-500">
+                                #{conn.tags.join(' #')}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Card Actions: Connect, Duplicate, Edit, Delete */}
+                        <div className="pt-2 border-t border-white/10 flex items-center justify-between">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedId(conn.id);
+                              setShowProfileManagerModal(false);
+                            }}
+                            className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-sm ${
+                              isSelected
+                                ? 'bg-blue-600 text-white shadow-blue-500/30'
+                                : 'bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30'
+                            }`}
+                          >
+                            <Server className="w-3 h-3" />
+                            <span>{isSelected ? 'Active Profile' : 'Select & Connect'}</span>
+                          </button>
+
+                          <div className="flex items-center space-x-1">
+                            <button
+                              type="button"
+                              onClick={() => handleDuplicateProfile(conn)}
+                              className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+                              title="Duplicate Profile"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleOpenEditModal(conn);
+                              }}
+                              className="p-1.5 rounded-lg text-gray-400 hover:text-blue-400 hover:bg-white/10 transition-colors"
+                              title="Edit Profile"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (confirm(`Permanently delete profile "${conn.name || conn.host}"?`)) {
+                                  removeConnection(conn.id);
+                                  if (selectedId === conn.id) {
+                                    const remaining = connections.filter(c => c.id !== conn.id);
+                                    setSelectedId(remaining[0]?.id || null);
+                                  }
+                                }
+                              }}
+                              className="p-1.5 rounded-lg text-gray-400 hover:text-rose-400 hover:bg-white/10 transition-colors"
+                              title="Delete Profile"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                /* 2. TABLE LIST VIEW */
+                <div className="rounded-2xl border border-white/10 overflow-hidden bg-black/30">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead className="bg-[#12131f] text-gray-400 border-b border-white/10 font-mono text-[10px] uppercase tracking-wider">
+                      <tr>
+                        <th className="py-3 px-4">Profile Name</th>
+                        <th className="py-3 px-4">Host IP</th>
+                        <th className="py-3 px-4 w-20">Port</th>
+                        <th className="py-3 px-4">Username</th>
+                        <th className="py-3 px-4">Auth Method</th>
+                        <th className="py-3 px-4">Group</th>
+                        <th className="py-3 px-4 text-right pr-6 w-44">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {filteredConnections.map(conn => {
+                        const isSelected = selectedId === conn.id;
+                        return (
+                          <tr
+                            key={conn.id}
+                            className={`transition-colors ${
+                              isSelected ? 'bg-blue-600/15' : 'hover:bg-white/[0.03]'
+                            }`}
+                          >
+                            <td className="py-3 px-4 font-semibold text-white flex items-center space-x-2.5">
+                              <div
+                                className="w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0"
+                                style={{ backgroundColor: conn.color ? `${conn.color}30` : '#89b4fa30', color: conn.color || '#89b4fa' }}
+                              >
+                                {conn.name ? conn.name[0].toUpperCase() : conn.username[0].toUpperCase()}
+                              </div>
+                              <span className="truncate max-w-xs">{conn.name}</span>
+                            </td>
+                            <td className="py-3 px-4 font-mono text-gray-300">{conn.host}</td>
+                            <td className="py-3 px-4 font-mono text-gray-400">{conn.port || 22}</td>
+                            <td className="py-3 px-4 font-mono text-gray-300">{conn.username}</td>
+                            <td className="py-3 px-4">
+                              <span className="px-2 py-0.5 rounded bg-white/5 text-[10px] text-gray-300 inline-flex items-center space-x-1">
+                                {conn.authMethod === 'key' || conn.privateKeyPath ? <Key className="w-3 h-3 text-blue-400" /> : <Lock className="w-3 h-3 text-amber-400" />}
+                                <span>{conn.authMethod === 'key' || conn.privateKeyPath ? 'Key' : 'Password'}</span>
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-gray-400">{conn.group || '—'}</td>
+                            <td className="py-3 px-4 text-right pr-6">
+                              <div className="flex items-center justify-end space-x-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedId(conn.id);
+                                    setShowProfileManagerModal(false);
+                                  }}
+                                  className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all ${
+                                    isSelected
+                                      ? 'bg-blue-600 text-white'
+                                      : 'bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300'
+                                  }`}
+                                >
+                                  {isSelected ? 'Active' : 'Select'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDuplicateProfile(conn)}
+                                  className="p-1 rounded text-gray-400 hover:text-white hover:bg-white/10"
+                                  title="Duplicate"
+                                >
+                                  <Copy className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    handleOpenEditModal(conn);
+                                  }}
+                                  className="p-1 rounded text-gray-400 hover:text-blue-400 hover:bg-white/10"
+                                  title="Edit"
+                                >
+                                  <Edit2 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (confirm(`Delete profile "${conn.name}"?`)) {
+                                      removeConnection(conn.id);
+                                    }
+                                  }}
+                                  className="p-1 rounded text-gray-400 hover:text-rose-400 hover:bg-white/10"
+                                  title="Delete"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-3 border-t border-white/10 bg-[#141524] flex items-center justify-between shrink-0">
+              <span className="text-[11px] text-gray-400">
+                Showing {filteredConnections.length} of {connections.length} saved profiles
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowProfileManagerModal(false)}
+                className="px-4 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold transition-colors"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}

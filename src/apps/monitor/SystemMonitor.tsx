@@ -658,10 +658,10 @@ export default function SystemMonitor() {
       )}
 
       {/* 1. macOS Activity Monitor Top Bar & Toolbar */}
-      <header className="px-5 py-3 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between shrink-0">
+      <header className="px-5 py-3 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between shrink-0 overflow-x-auto no-scrollbar gap-3">
         
         {/* Left: Window Controls / Process Action Buttons */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           {/* Quit Process Button */}
           <button
             onClick={() => {
@@ -730,7 +730,7 @@ export default function SystemMonitor() {
         </div>
 
         {/* Center: macOS Activity Monitor Segmented Control Tabs */}
-        <div className="mac-segmented-container">
+        <div className="mac-segmented-container shrink-0">
           <button
             onClick={() => { setActiveTab('cpu'); setSortKey('cpu'); }}
             className={`mac-segmented-item flex items-center space-x-1.5 ${activeTab === 'cpu' ? 'active' : ''}`}
@@ -773,7 +773,7 @@ export default function SystemMonitor() {
         </div>
 
         {/* Right: Search & Refresh Frequency Controls */}
-        <div className="flex items-center space-x-2.5">
+        <div className="flex items-center space-x-2.5 shrink-0">
           {/* Filter Processes */}
           <div className="relative">
             <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />

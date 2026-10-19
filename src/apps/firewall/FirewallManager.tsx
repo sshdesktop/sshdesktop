@@ -1,44 +1,25 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  Flame,
-  ShieldCheck,
-  ShieldAlert,
-  Plus,
-  Trash2,
-  Power,
-  RotateCw,
-  CheckCircle2,
-  RefreshCw,
-  Search,
-  Filter,
-  Globe,
-  Lock,
-  Radio,
-  Server,
-  Ban,
-  ArrowUpRight,
-  ArrowDownLeft,
-  SlidersHorizontal,
-  Info,
-  ExternalLink,
-  Zap,
-  Layers,
-  X,
-  ShieldOff,
-  Copy
+  Flame, ShieldCheck, ShieldAlert, Plus, Trash2, Power, RotateCw,
+  CheckCircle2, RefreshCw, Search, Filter, Globe, Lock, Radio, Server,
+  Ban, ArrowUpRight, ArrowDownLeft, SlidersHorizontal, Info, ExternalLink,
+  Zap, Layers, X, ShieldOff, Copy, AlertTriangle, AlertCircle, Edit,
+  Shield, Check, Wrench, DownloadCloud
 } from 'lucide-react';
-import { firewallStatus, firewallRules, firewallAddRule, firewallDeleteRule, firewallToggle, sshExec } from '../../lib/tauri-bridge';
+import {
+  firewallDetectBackend, firewallRules, firewallAddRuleAdvanced,
+  firewallDeleteRuleAdvanced, firewallToggle, firewallInstall,
+  firewallReset, firewallReload, sshExec,
+  FirewallStatusInfo, FirewallRuleItem, AddRuleRequest
+} from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
 
-interface FirewallRule {
-  id: string;
-  number: number;
-  port: string;
-  proto: 'TCP' | 'UDP' | 'BOTH';
-  action: 'ALLOW' | 'DENY';
-  source: string;
-  comment: string;
-}
+// Subcomponents and Modals
+import FirewallContextMenu from './components/FirewallContextMenu';
+import FirewalldZoneManager from './components/FirewalldZoneManager';
+import AddRuleModal from './modals/AddRuleModal';
+import DeleteRuleModal from './modals/DeleteRuleModal';
+import PolicyModal from './modals/PolicyModal';
 
 interface BannedIP {
   ip: string;
@@ -55,28 +36,37 @@ interface ListeningPort {
 }
 
 export default function FirewallManager() {
-  const [enabled, setEnabled] = useState(true);
-  const [rules, setRules] = useState<FirewallRule[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'rules' | 'listening' | 'banned'>('rules');
-  const [searchFilter, setSearchFilter] = useState('');
-  
-  // Quick Presets Modal
-  const [showAdd, setShowAdd] = useState(false);
-  const [newRule, setNewRule] = useState<{
-    port: string;
-    proto: 'TCP' | 'UDP' | 'BOTH';
-    action: 'ALLOW' | 'DENY';
-    source: string;
-    comment: string;
-  }>({
-    port: '',
-    proto: 'TCP',
-    action: 'ALLOW',
-    source: 'Anywhere',
-    comment: ''
+  const [statusInfo, setStatusInfo] = useState<FirewallStatusInfo>({
+    backend: 'ufw',
+    installed: true,
+    active: true,
+    ufw_installed: true,
+    ufw_active: true,
+    firewalld_installed: false,
+    firewalld_active: false,
+    default_incoming: 'deny',
+    default_outgoing: 'allow',
+    default_routed: 'disabled',
+    all_zones: [],
+    raw_status: '',
   });
-  const [ruleError, setRuleError] = useState<string | null>(null);
+
+  const [activeBackend, setActiveBackend] = useState<'ufw' | 'firewalld'>('ufw');
+  const [rules, setRules] = useState<FirewallRuleItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<'rules' | 'zones' | 'listening' | 'banned'>('rules');
+  const [searchFilter, setSearchFilter] = useState('');
+  const [actionFilter, setActionFilter] = useState<'ALL' | 'ALLOW' | 'DENY'>('ALL');
+  const [toastMessage, setToastMessage] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  // Modals & Context Menu State
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; rule: FirewallRuleItem } | null>(null);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [editingRule, setEditingRule] = useState<FirewallRuleItem | null>(null);
+  const [deletingRule, setDeletingRule] = useState<FirewallRuleItem | null>(null);
+  const [showPolicyModal, setShowPolicyModal] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [installingTool, setInstallingTool] = useState<string | null>(null);
 
   // Fail2ban / Banned Attackers
   const [bannedList, setBannedList] = useState<BannedIP[]>([]);
@@ -87,54 +77,72 @@ export default function FirewallManager() {
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
 
+  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+    setToastMessage({ message, type });
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  // Load firewall backend and status
   const loadFirewall = useCallback(async () => {
     setLoading(true);
     try {
-      const [statusStr, rList] = await Promise.all([
-        firewallStatus(activeConnId),
+      const [detected, rList] = await Promise.all([
+        firewallDetectBackend(activeConnId),
         firewallRules(activeConnId)
       ]);
 
-      setEnabled(statusStr.toLowerCase().includes('active'));
-
-      if (rList && Array.isArray(rList)) {
-        setRules(rList.map((r: any, idx: number) => ({
-          id: String(r.number || idx + 1),
-          number: r.number || idx + 1,
-          port: String(r.to_port || r.port || 'Any'),
-          proto: (r.protocol || 'TCP').toUpperCase() as any,
-          action: (r.action || 'ALLOW').toUpperCase() as any,
-          source: r.from_ip || r.source || 'Anywhere',
-          comment: r.comment || ''
-        })));
+      setStatusInfo(detected);
+      if (detected.backend === 'firewalld' || detected.backend === 'ufw') {
+        setActiveBackend(detected.backend as any);
       }
 
-      // Also query live listening ports from server
+      setRules(rList);
+
+      // Query live listening ports from server
       try {
-        const portsRes = await sshExec(activeConnId, 'ss -tulpn | grep LISTEN');
+        const portsRes = await sshExec(activeConnId, 'ss -tulpn 2>/dev/null | grep LISTEN');
         if (portsRes.exit_code === 0 && portsRes.stdout.trim()) {
           const lines = portsRes.stdout.trim().split('\n');
           const parsed = lines.map(line => {
             const parts = line.split(/\s+/);
+            const proto = (parts[0] || 'tcp').toLowerCase();
             const addr = parts[4] || '';
             const port = addr.split(':').pop() || '';
             const proc = (parts[6] || '').replace(/.*users:\(\("([^"]+)".*/, '$1') || 'process';
+            const isAllowed = rList.some(r => r.to_port === port && r.action === 'ALLOW');
             return {
               port,
-              proto: parts[0] || 'tcp',
+              proto,
               process: proc,
-              isAllowedInFirewall: false
+              isAllowedInFirewall: isAllowed
             };
           }).filter(p => p.port && !isNaN(Number(p.port)));
-          
-          if (parsed.length > 0) {
-            setListeningPorts(parsed);
-          }
+
+          // Deduplicate
+          const uniquePorts = Array.from(new Map(parsed.map(p => [`${p.port}-${p.proto}`, p])).values());
+          setListeningPorts(uniquePorts);
         }
       } catch {
-        // Fallback to static mock ports
+        // Fallback
       }
-    } catch (err) {
+
+      // Query Fail2ban status
+      try {
+        const f2bRes = await sshExec(activeConnId, 'sudo fail2ban-client status sshd 2>/dev/null || fail2ban-client status sshd 2>/dev/null');
+        if (f2bRes.stdout && f2bRes.stdout.includes('Banned IP list:')) {
+          const bannedLine = f2bRes.stdout.split('Banned IP list:')[1] || '';
+          const ips = bannedLine.trim().split(/\s+/).filter(ip => ip.length > 0);
+          setBannedList(ips.map(ip => ({
+            ip,
+            jail: 'sshd',
+            failures: 5,
+            bannedAt: new Date().toLocaleTimeString(),
+          })));
+        }
+      } catch {
+        // Fallback
+      }
+    } catch (err: any) {
       console.warn('Failed to load firewall:', err);
     } finally {
       setLoading(false);
@@ -145,524 +153,796 @@ export default function FirewallManager() {
     loadFirewall();
   }, [loadFirewall]);
 
+  // Toggle firewall power
   const handleToggle = async () => {
-    const nextState = !enabled;
-    try {
-      await firewallToggle(activeConnId, nextState);
-      setEnabled(nextState);
-    } catch (err) {
-      console.warn('Failed to toggle firewall:', err);
-    }
-  };
+    const nextState = !statusInfo.active;
 
-  const deleteRule = async (ruleNum: number) => {
-    try {
-      await firewallDeleteRule(activeConnId, ruleNum);
-      await loadFirewall();
-    } catch (err) {
-      console.warn('Failed to delete rule:', err);
+    // Safety check: if enabling firewall without SSH port 22 allowed, warn user
+    if (nextState) {
+      const hasSsh = rules.some(r => (r.to_port === '22' || r.to_port.toLowerCase() === 'ssh') && r.action === 'ALLOW');
+      if (!hasSsh) {
+        const confirmEnable = window.confirm(
+          'Warning: SSH port 22 is not explicitly allowed in your rules list! Enabling the firewall might lock you out of this SSH session. Would you like to automatically allow SSH (22/tcp) first?'
+        );
+        if (confirmEnable) {
+          try {
+            await firewallAddRuleAdvanced(activeConnId, {
+              port: '22',
+              protocol: 'tcp',
+              action: 'allow',
+              direction: 'in',
+              backend: activeBackend,
+              comment: 'SSH remote management',
+            });
+            showToast('Allowed SSH port 22/tcp before enabling firewall.');
+          } catch (e) {
+            console.warn(e);
+          }
+        }
+      }
     }
-  };
 
-  const handleAdd = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newRule.port) return;
-    setRuleError(null);
     try {
-      await firewallAddRule(activeConnId, newRule.port, newRule.proto.toLowerCase(), newRule.action.toLowerCase());
-      setShowAdd(false);
-      setRuleError(null);
-      setNewRule({ port: '', proto: 'TCP', action: 'ALLOW', source: 'Anywhere', comment: '' });
-      await loadFirewall();
+      const res = await firewallToggle(activeConnId, nextState);
+      showToast(res || `Firewall is now ${nextState ? 'enabled' : 'disabled'}.`);
+      loadFirewall();
     } catch (err: any) {
-      const msg = err?.message || String(err);
-      setRuleError(msg);
-      console.warn('Failed to add rule:', err);
+      showToast(err?.message || String(err), 'error');
     }
   };
 
-  const handleQuickAllow = async (port: string, proto: 'TCP' | 'UDP', comment: string) => {
+  // Toggle rule action (Allow <-> Deny)
+  const handleToggleRuleAction = async (rule: FirewallRuleItem) => {
+    const newAct = rule.action === 'ALLOW' ? 'deny' : 'allow';
     try {
-      await firewallAddRule(activeConnId, port, proto.toLowerCase(), 'allow');
-      await loadFirewall();
-    } catch (err) {
-      console.warn('Failed to quick-add rule:', err);
+      // Delete old and add new
+      await firewallDeleteRuleAdvanced(activeConnId, rule.number, rule.to_port, rule.protocol, activeBackend, rule.zone);
+      await firewallAddRuleAdvanced(activeConnId, {
+        port: rule.to_port,
+        protocol: rule.protocol.toLowerCase(),
+        action: newAct,
+        direction: rule.direction.toLowerCase(),
+        from_ip: rule.from_ip === 'Anywhere' ? undefined : rule.from_ip,
+        backend: activeBackend,
+        zone: rule.zone,
+        comment: rule.comment,
+      });
+      showToast(`Rule #${rule.number} updated to ${newAct.toUpperCase()}`);
+      loadFirewall();
+    } catch (err: any) {
+      showToast(err?.message || String(err), 'error');
     }
   };
 
+  // Install Firewall Software
+  const handleInstallFirewall = async (tool: 'ufw' | 'firewalld') => {
+    setInstallingTool(tool);
+    try {
+      const res = await firewallInstall(activeConnId, tool);
+      showToast(res || `${tool.toUpperCase()} installed successfully!`);
+      loadFirewall();
+    } catch (err: any) {
+      showToast(err?.message || String(err), 'error');
+    } finally {
+      setInstallingTool(null);
+    }
+  };
+
+  // Reload rules
+  const handleReload = async () => {
+    try {
+      const res = await firewallReload(activeConnId);
+      showToast(res || 'Firewall reloaded successfully.');
+      loadFirewall();
+    } catch (err: any) {
+      showToast(err?.message || String(err), 'error');
+    }
+  };
+
+  // Reset firewall
+  const handleReset = async () => {
+    try {
+      const res = await firewallReset(activeConnId);
+      showToast(res || 'Firewall reset to default.');
+      setShowResetConfirm(false);
+      loadFirewall();
+    } catch (err: any) {
+      showToast(err?.message || String(err), 'error');
+    }
+  };
+
+  // Quick allow port
+  const handleQuickAllow = async (port: string, proto: string = 'tcp', comment: string = '') => {
+    try {
+      await firewallAddRuleAdvanced(activeConnId, {
+        port,
+        protocol: proto.toLowerCase(),
+        action: 'allow',
+        direction: 'in',
+        backend: activeBackend,
+        comment,
+      });
+      showToast(`Allowed port ${port}/${proto}`);
+      loadFirewall();
+    } catch (err: any) {
+      showToast(err?.message || String(err), 'error');
+    }
+  };
+
+  // Unban Fail2ban IP
   const handleUnban = async (ip: string) => {
     setUnbanningIp(ip);
     try {
       await sshExec(activeConnId, `sudo fail2ban-client set sshd unbanip ${ip}`);
       setBannedList(prev => prev.filter(b => b.ip !== ip));
-    } catch (err) {
-      console.warn('Failed to unban IP:', err);
+      showToast(`Unbanned IP: ${ip}`);
+    } catch (err: any) {
+      showToast(err?.message || String(err), 'error');
     } finally {
       setUnbanningIp(null);
     }
   };
 
-  // Quick preset buttons for web & dev services
-  const presets = [
-    { label: 'SSH (22)', port: '22', proto: 'TCP' as const },
-    { label: 'Web (80, 443)', port: '80,443', proto: 'TCP' as const },
-    { label: 'MySQL (3306)', port: '3306', proto: 'TCP' as const },
-    { label: 'Postgres (5432)', port: '5432', proto: 'TCP' as const },
-    { label: 'Node (3000)', port: '3000', proto: 'TCP' as const },
-    { label: 'Vite (5173)', port: '5173', proto: 'TCP' as const },
-    { label: 'Redis (6379)', port: '6379', proto: 'TCP' as const }
-  ];
-
+  // Filtered rules
   const filteredRules = useMemo(() => {
-    if (!searchFilter.trim()) return rules;
-    const q = searchFilter.toLowerCase();
-    return rules.filter(r =>
-      r.port.toLowerCase().includes(q) ||
-      r.comment.toLowerCase().includes(q) ||
-      r.source.toLowerCase().includes(q) ||
-      r.proto.toLowerCase().includes(q)
-    );
-  }, [rules, searchFilter]);
+    return rules.filter(r => {
+      if (actionFilter !== 'ALL' && r.action !== actionFilter) return false;
+      if (searchFilter.trim()) {
+        const query = searchFilter.toLowerCase();
+        return (
+          r.to_port.toLowerCase().includes(query) ||
+          r.protocol.toLowerCase().includes(query) ||
+          r.from_ip.toLowerCase().includes(query) ||
+          r.comment.toLowerCase().includes(query) ||
+          String(r.number).includes(query)
+        );
+      }
+      return true;
+    });
+  }, [rules, actionFilter, searchFilter]);
 
-  const allowCount = rules.filter(r => r.action === 'ALLOW').length;
-  const denyCount = rules.filter(r => r.action === 'DENY').length;
+  const hasSshRule = rules.some(r => (r.to_port === '22' || r.to_port.toLowerCase() === 'ssh') && r.action === 'ALLOW');
 
   return (
-    <div className={`flex flex-col h-full bg-[#181825] text-[#cdd6f4] font-sans antialiased overflow-hidden select-none relative ${loading ? 'cursor-mac-wait' : ''}`}>
+    <div className={`flex flex-col h-full bg-[#181825] text-[#cdd6f4] select-none font-sans overflow-hidden relative ${loading ? 'cursor-mac-wait' : ''}`}>
       {loading && (
         <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-blue-500 via-indigo-400 to-blue-500 animate-top-progress z-30 pointer-events-none" />
       )}
-      {/* Top macOS Acrylic Status Hero */}
-      <div className="p-4 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] shrink-0">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          {/* Status Badge & Title */}
-          <div className="flex items-center space-x-3.5">
-            <div
-              className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg transition-all ${
-                enabled
-                  ? 'bg-gradient-to-tr from-emerald-600 to-teal-500 shadow-emerald-500/20 text-white'
-                  : 'bg-gradient-to-tr from-rose-600 to-red-500 shadow-rose-500/20 text-white'
-              }`}
-            >
-              {enabled ? <ShieldCheck className="w-6 h-6 animate-pulse" /> : <ShieldAlert className="w-6 h-6" />}
+
+      {/* Top Header Toolbar */}
+      <div className="h-14 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/10 px-4 flex items-center justify-between shrink-0 gap-3 overflow-x-auto no-scrollbar">
+        {/* Left: Backend status & switcher */}
+        <div className="flex items-center space-x-3 shrink-0">
+          <div className="flex items-center space-x-2">
+            <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+              !statusInfo.installed
+                ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                : statusInfo.active
+                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+            }`}>
+              <Flame className="w-4 h-4" />
             </div>
+
             <div>
               <div className="flex items-center space-x-2">
-                <h1 className="font-bold text-base text-white tracking-tight">Little Snitch Firewall Studio</h1>
-                <span
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                    enabled
-                      ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                      : 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
-                  }`}
-                >
-                  {enabled ? 'Protected' : 'Firewall Disabled'}
+                <span className="text-xs font-bold text-white">Firewall Manager</span>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase inline-flex items-center space-x-1 ${
+                  !statusInfo.installed
+                    ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                    : statusInfo.active
+                    ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                }`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${!statusInfo.installed ? 'bg-amber-400' : statusInfo.active ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+                  <span>{!statusInfo.installed ? 'Not Installed' : statusInfo.active ? 'Active' : 'Disabled'}</span>
                 </span>
               </div>
-              <p className="text-xs text-gray-400 mt-0.5">
-                {enabled
-                  ? 'Active packet filtering enabled. Incoming connections rejected unless explicitly permitted.'
-                  : 'Warning: Firewall is inactive. All open network ports are directly exposed to the internet.'}
-              </p>
+              <div className="text-[10px] text-gray-400 font-mono">
+                Engine: <strong className="text-white uppercase">{activeBackend}</strong> • Incoming: <strong className="text-blue-300 uppercase">{statusInfo.default_incoming}</strong>
+              </div>
             </div>
           </div>
 
-          {/* Quick Controls */}
-          <div className="flex items-center space-x-2">
-            <button
-              onClick={loadFirewall}
-              disabled={loading}
-              title="Refresh Firewall Rules"
-              className="p-2 bg-[#1e1e2e] hover:bg-white/10 border border-white/10 rounded-xl text-gray-300 hover:text-white transition-colors"
-            >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-blue-400' : ''}`} />
-            </button>
-
-            {/* macOS Style Toggle Slider */}
-            <button
-              onClick={handleToggle}
-              className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-all shadow-sm ${
-                enabled
-                  ? 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30'
-                  : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40'
-              }`}
-            >
-              <Power className="w-3.5 h-3.5" />
-              <span>{enabled ? 'Turn Off' : 'Turn On'}</span>
-            </button>
-
-            <button
-              onClick={() => setShowAdd(true)}
-              className="flex items-center space-x-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs px-3.5 py-1.5 rounded-xl font-medium shadow-md shadow-blue-500/25 transition-all active:scale-95"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>New Rule</span>
-            </button>
-          </div>
+          {/* Backend Selector (UFW vs Firewalld) */}
+          {(statusInfo.ufw_installed || statusInfo.firewalld_installed) && (
+            <div className="flex items-center space-x-1 bg-black/40 p-1 rounded-xl border border-white/10 ml-2">
+              {statusInfo.ufw_installed && (
+                <button
+                  onClick={() => { setActiveBackend('ufw'); loadFirewall(); }}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold font-mono transition-all ${
+                    activeBackend === 'ufw'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  UFW
+                </button>
+              )}
+              {statusInfo.firewalld_installed && (
+                <button
+                  onClick={() => { setActiveBackend('firewalld'); loadFirewall(); }}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold font-mono transition-all ${
+                    activeBackend === 'firewalld'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  Firewalld
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* 1-Click Quick Allow Presets Bar */}
-        <div className="mt-3.5 pt-3 border-t border-white/[0.06] flex items-center space-x-2 overflow-x-auto pb-1 text-xs">
-          <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider shrink-0 mr-1 flex items-center gap-1">
-            <Zap className="w-3 h-3 text-amber-400" /> Quick Allow:
-          </span>
-          {presets.map(p => (
-            <button
-              key={p.label}
-              onClick={() => handleQuickAllow(p.port, p.proto, `Quick Allow ${p.label}`)}
-              className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/5 hover:border-white/20 transition-all shrink-0 text-xs flex items-center gap-1.5 group"
-            >
-              <Plus className="w-3 h-3 text-emerald-400 group-hover:scale-125 transition-transform" />
-              <span>{p.label}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Navigation Sub-Tabs & Filter Bar */}
-      <div className="h-10 bg-[#1e1e2e]/90 backdrop-blur-md border-b border-white/[0.08] px-4 flex items-center justify-between shrink-0">
-        <div className="flex items-center space-x-1">
+        {/* Center: Tabs */}
+        <div className="flex items-center space-x-1 bg-black/40 p-1 rounded-xl border border-white/10 shrink-0">
           <button
             onClick={() => setActiveTab('rules')}
-            className={`px-3 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors ${
-              activeTab === 'rules'
-                ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30'
-                : 'text-gray-400 hover:text-white hover:bg-white/5'
+            className={`px-3 py-1 rounded-lg text-xs font-medium transition-all ${
+              activeTab === 'rules' ? 'bg-blue-600 text-white shadow' : 'text-gray-400 hover:text-white'
             }`}
           >
-            <Layers className="w-3.5 h-3.5" />
-            <span>Rules ({rules.length})</span>
+            Rules ({rules.length})
           </button>
+
+          {activeBackend === 'firewalld' && (
+            <button
+              onClick={() => setActiveTab('zones')}
+              className={`px-3 py-1 rounded-lg text-xs font-medium transition-all ${
+                activeTab === 'zones' ? 'bg-blue-600 text-white shadow' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Zones
+            </button>
+          )}
+
           <button
             onClick={() => setActiveTab('listening')}
-            className={`px-3 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors ${
-              activeTab === 'listening'
-                ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30'
-                : 'text-gray-400 hover:text-white hover:bg-white/5'
+            className={`px-3 py-1 rounded-lg text-xs font-medium transition-all ${
+              activeTab === 'listening' ? 'bg-blue-600 text-white shadow' : 'text-gray-400 hover:text-white'
             }`}
           >
-            <Radio className="w-3.5 h-3.5" />
-            <span>Listening Ports ({listeningPorts.length})</span>
+            Listening Ports ({listeningPorts.length})
           </button>
+
           <button
             onClick={() => setActiveTab('banned')}
-            className={`px-3 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors ${
-              activeTab === 'banned'
-                ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30'
-                : 'text-gray-400 hover:text-white hover:bg-white/5'
+            className={`px-3 py-1 rounded-lg text-xs font-medium transition-all ${
+              activeTab === 'banned' ? 'bg-blue-600 text-white shadow' : 'text-gray-400 hover:text-white'
             }`}
           >
-            <Ban className="w-3.5 h-3.5" />
-            <span>Banned Attackers ({bannedList.length})</span>
+            Fail2ban ({bannedList.length})
           </button>
         </div>
 
-        {/* Search Rules Filter */}
-        <div className="flex items-center space-x-3 text-xs">
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-2" />
-            <input
-              type="text"
-              placeholder="Filter rules..."
-              value={searchFilter}
-              onChange={e => setSearchFilter(e.target.value)}
-              className="bg-[#11111b] border border-white/10 rounded-lg pl-7 pr-3 py-1 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500/80 w-44"
-            />
-          </div>
-          <div className="hidden sm:flex items-center space-x-2 text-[11px] text-gray-400">
-            <span className="text-emerald-400 font-medium">{allowCount} Allowed</span>
-            <span>•</span>
-            <span className="text-rose-400 font-medium">{denyCount} Denied</span>
-          </div>
+        {/* Right Actions: Power switch, Reload, Policy */}
+        <div className="flex items-center space-x-2 shrink-0">
+          {statusInfo.installed && (
+            <>
+              {/* Power Toggle Button */}
+              <button
+                onClick={handleToggle}
+                className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold shadow-md active:scale-95 transition-all ${
+                  statusInfo.active
+                    ? 'bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30'
+                    : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                }`}
+                title={statusInfo.active ? 'Disable Firewall' : 'Enable Firewall'}
+              >
+                <Power className="w-3.5 h-3.5" />
+                <span>{statusInfo.active ? 'Turn Off' : 'Turn On'}</span>
+              </button>
+
+              {/* Reload Button */}
+              <button
+                onClick={handleReload}
+                className="p-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 transition-colors"
+                title="Reload firewall rules"
+              >
+                <RotateCw className="w-3.5 h-3.5" />
+              </button>
+
+              {/* Policy Settings Button */}
+              <button
+                onClick={() => setShowPolicyModal(true)}
+                className="p-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 transition-colors"
+                title="Configure default policies"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+              </button>
+            </>
+          )}
+
+          <button
+            onClick={loadFirewall}
+            disabled={loading}
+            className="p-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white border border-white/10 transition-colors"
+            title="Refresh"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-blue-400' : ''}`} />
+          </button>
         </div>
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 overflow-auto bg-[#181825] p-3">
-        {/* Tab 1: Rules Table */}
-        {activeTab === 'rules' && (
-          <div className="bg-[#1e1e2e]/90 rounded-xl border border-white/[0.08] overflow-hidden shadow-sm">
-            <table className="w-full text-left text-xs border-collapse">
-              <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08] sticky top-0">
-                <tr>
-                  <th className="py-2.5 px-3 text-center w-12 text-gray-500 font-normal">#</th>
-                  <th className="py-2.5 px-3 font-semibold text-gray-300">Port / Service</th>
-                  <th className="py-2.5 px-3 font-semibold text-gray-300">Protocol</th>
-                  <th className="py-2.5 px-3 font-semibold text-gray-300">Action</th>
-                  <th className="py-2.5 px-3 font-semibold text-gray-300">Source Host</th>
-                  <th className="py-2.5 px-3 font-semibold text-gray-300">Comment / Service</th>
-                  <th className="py-2.5 px-3 text-right font-semibold text-gray-300">Manage</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/[0.04]">
-                {filteredRules.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="py-12 text-center text-gray-500">
-                      {loading ? (
-                        <div className="flex items-center justify-center space-x-2">
-                          <RefreshCw className="w-4 h-4 animate-spin text-blue-400" />
-                          <span>Scanning server firewall rules...</span>
-                        </div>
-                      ) : (
-                        <div className="space-y-1">
-                          <p className="font-semibold text-gray-400">No matching firewall rules found</p>
-                          <p className="text-xs text-gray-600">Use the Quick Allow bar above or click "New Rule".</p>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
+      <div className="flex-1 overflow-y-auto p-6 space-y-5">
+        {/* Toast Notification */}
+        {toastMessage && (
+          <div className={`p-3 rounded-2xl text-xs flex items-center space-x-2 animate-in fade-in duration-200 ${
+            toastMessage.type === 'error'
+              ? 'bg-rose-500/20 border border-rose-500/40 text-rose-300'
+              : 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300'
+          }`}>
+            {toastMessage.type === 'error' ? (
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+            ) : (
+              <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+            )}
+            <span>{toastMessage.message}</span>
+          </div>
+        )}
+
+        {/* ========================================================= */}
+        {/* ALERT BANNER: NOT INSTALLED                               */}
+        {/* ========================================================= */}
+        {!statusInfo.installed && (
+          <div className="p-6 bg-amber-500/10 border border-amber-500/30 rounded-3xl space-y-4 shadow-xl">
+            <div className="flex items-start space-x-4">
+              <div className="w-12 h-12 rounded-2xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shrink-0">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-white">Firewall Software Not Installed</h3>
+                <p className="text-xs text-amber-200/90 leading-relaxed">
+                  Neither <strong className="font-mono text-white">UFW</strong> (Uncomplicated Firewall) nor <strong className="font-mono text-white">Firewalld</strong> is currently installed on this server. Without a firewall, incoming ports are unfiltered.
+                </p>
+                <p className="text-xs text-gray-400">
+                  Select a firewall engine below to install it with 1-click via the server's native package manager:
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 pt-2">
+              <button
+                onClick={() => handleInstallFirewall('ufw')}
+                disabled={installingTool !== null}
+                className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold shadow-md active:scale-95 transition-all flex items-center space-x-2"
+              >
+                {installingTool === 'ufw' ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                 ) : (
-                  filteredRules.map(rule => (
-                    <tr key={rule.id} className="hover:bg-white/[0.02] transition-colors group">
-                      <td className="py-2.5 px-3 font-mono text-gray-500 text-center">{rule.number}</td>
-                      <td className="py-2.5 px-3 font-mono font-semibold text-white">
-                        <span className="bg-white/5 px-2 py-0.5 rounded border border-white/10">
-                          {rule.port}
-                        </span>
-                      </td>
-                      <td className="py-2.5 px-3">
-                        <span className="text-[11px] font-mono uppercase text-gray-400">
-                          {rule.proto}
-                        </span>
-                      </td>
-                      <td className="py-2.5 px-3">
-                        <span
-                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wider uppercase inline-flex items-center gap-1 ${
-                            rule.action === 'ALLOW'
-                              ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20'
-                              : 'bg-rose-500/15 text-rose-400 border border-rose-500/20'
-                          }`}
-                        >
-                          {rule.action === 'ALLOW' ? <ArrowDownLeft className="w-2.5 h-2.5" /> : <Ban className="w-2.5 h-2.5" />}
-                          {rule.action}
-                        </span>
-                      </td>
-                      <td className="py-2.5 px-3 font-mono text-gray-300">
-                        {rule.source === 'Anywhere' ? (
-                          <span className="text-gray-400 flex items-center gap-1">
-                            <Globe className="w-3 h-3 text-blue-400" /> Anywhere
-                          </span>
-                        ) : (
-                          rule.source
-                        )}
-                      </td>
-                      <td className="py-2.5 px-3 text-gray-400">
-                        {rule.comment || <span className="text-gray-600 italic">No description</span>}
-                      </td>
-                      <td className="py-2.5 px-3 text-right">
-                        <button
-                          onClick={() => deleteRule(rule.number)}
-                          title="Delete Rule"
-                          className="p-1 rounded-lg hover:bg-rose-500/20 text-gray-400 hover:text-rose-400 transition-colors"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                  <DownloadCloud className="w-3.5 h-3.5" />
+                )}
+                <span>Install UFW (Recommended for Ubuntu/Debian)</span>
+              </button>
+
+              <button
+                onClick={() => handleInstallFirewall('firewalld')}
+                disabled={installingTool !== null}
+                className="px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-xs font-semibold shadow-md active:scale-95 transition-all flex items-center space-x-2"
+              >
+                {installingTool === 'firewalld' ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <DownloadCloud className="w-3.5 h-3.5" />
+                )}
+                <span>Install Firewalld (Recommended for RHEL/CentOS/Fedora)</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================= */}
+        {/* ALERT BANNER: INSTALLED BUT INACTIVE                      */}
+        {/* ========================================================= */}
+        {statusInfo.installed && !statusInfo.active && (
+          <div className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-3xl flex flex-wrap items-center justify-between gap-4 shadow-lg">
+            <div className="flex items-center space-x-3.5">
+              <div className="w-10 h-10 rounded-2xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400 shrink-0">
+                <ShieldOff className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-white">Firewall Service is Currently Inactive</h4>
+                <p className="text-xs text-rose-200/80 mt-0.5">
+                  Your server is unprotected from unauthorized network scans and connections.
+                  {!hasSshRule && ' (Warning: Ensure SSH port 22 is allowed before enabling!)'}
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={handleToggle}
+              className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md active:scale-95 transition-all flex items-center space-x-2"
+            >
+              <Power className="w-3.5 h-3.5" />
+              <span>Enable Firewall Protection Now</span>
+            </button>
+          </div>
+        )}
+
+        {/* ========================================================= */}
+        {/* TAB: RULES LIST                                           */}
+        {/* ========================================================= */}
+        {activeTab === 'rules' && (
+          <div className="space-y-4">
+            {/* Filter & Add Rule Toolbar */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center space-x-2 flex-1 max-w-md">
+                <div className="relative flex-1">
+                  <Search className="w-3.5 h-3.5 text-gray-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={searchFilter}
+                    onChange={(e) => setSearchFilter(e.target.value)}
+                    placeholder="Search port, protocol, source, comment..."
+                    className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-black/40 border border-white/10 focus:border-blue-500 focus:outline-none text-xs text-white placeholder-gray-500 font-mono"
+                  />
+                </div>
+
+                <select
+                  value={actionFilter}
+                  onChange={(e) => setActionFilter(e.target.value as any)}
+                  className="px-3 py-1.5 rounded-xl bg-[#12121a] border border-white/10 focus:border-blue-500 focus:outline-none text-xs text-white"
+                >
+                  <option value="ALL">All Actions</option>
+                  <option value="ALLOW">Allow Only</option>
+                  <option value="DENY">Deny Only</option>
+                </select>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setShowResetConfirm(true)}
+                  className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-rose-500/20 text-gray-400 hover:text-rose-300 border border-white/10 transition-colors text-xs"
+                  title="Reset firewall to default"
+                >
+                  Reset Defaults
+                </button>
+
+                <button
+                  onClick={() => { setEditingRule(null); setShowAddModal(true); }}
+                  className="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md active:scale-95 transition-all"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add Rule</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Rules Table */}
+            <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl overflow-hidden shadow-xl">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-black/30 text-gray-400 border-b border-white/10 font-sans">
+                  <tr>
+                    <th className="py-3 px-4 w-12">#</th>
+                    <th className="py-3 px-4">Port / Service</th>
+                    <th className="py-3 px-4">Protocol</th>
+                    <th className="py-3 px-4">Action</th>
+                    <th className="py-3 px-4">Direction</th>
+                    <th className="py-3 px-4">Source IP</th>
+                    <th className="py-3 px-4">Comment</th>
+                    <th className="py-3 px-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {filteredRules.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-12 text-center text-gray-500 font-sans text-xs">
+                        {searchFilter ? 'No rules matching query.' : 'No active firewall rules defined. Click "Add Rule" to configure open ports.'}
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ) : (
+                    filteredRules.map(rule => (
+                      <tr
+                        key={rule.id || rule.number}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setContextMenu({ x: e.clientX, y: e.clientY, rule });
+                        }}
+                        className="hover:bg-white/[0.03] transition-colors group cursor-pointer"
+                      >
+                        <td className="py-3 px-4 text-gray-500 font-mono text-[11px]">{rule.number}</td>
+                        <td className="py-3 px-4 font-bold text-white flex items-center space-x-2">
+                          <Flame className={`w-3.5 h-3.5 ${rule.action === 'ALLOW' ? 'text-emerald-400' : 'text-rose-400'}`} />
+                          <span>{rule.to_port}</span>
+                        </td>
+                        <td className="py-3 px-4 uppercase text-purple-300 font-semibold">{rule.protocol}</td>
+                        <td className="py-3 px-4">
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-sans font-bold ${
+                            rule.action === 'ALLOW'
+                              ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
+                              : rule.action === 'DENY'
+                              ? 'bg-rose-500/15 border border-rose-500/30 text-rose-400'
+                              : 'bg-amber-500/15 border border-amber-500/30 text-amber-400'
+                          }`}>
+                            {rule.action}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-gray-300 text-[11px] font-sans">
+                          {rule.direction === 'OUT' ? 'Outbound' : 'Inbound'}
+                        </td>
+                        <td className="py-3 px-4 text-blue-300 truncate max-w-[140px]" title={rule.from_ip}>
+                          {rule.from_ip}
+                        </td>
+                        <td className="py-3 px-4 text-gray-400 text-[11px] truncate max-w-[180px]">
+                          {rule.comment || '—'}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <div className="flex items-center justify-end space-x-2">
+                            <button
+                              onClick={() => { setEditingRule(rule); setShowAddModal(true); }}
+                              className="p-1 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+                              title="Edit rule"
+                            >
+                              <Edit className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => setDeletingRule(rule)}
+                              className="p-1 rounded-lg hover:bg-rose-500/20 text-gray-400 hover:text-rose-400 transition-colors"
+                              title="Delete rule"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
-        {/* Tab 2: Listening Ports */}
+        {/* ========================================================= */}
+        {/* TAB: FIREWALLD ZONES                                      */}
+        {/* ========================================================= */}
+        {activeTab === 'zones' && (
+          <FirewalldZoneManager
+            connId={activeConnId}
+            activeZone={statusInfo.active_zone}
+            allZones={statusInfo.all_zones}
+            onAddRuleClick={() => { setEditingRule(null); setShowAddModal(true); }}
+            onRefresh={loadFirewall}
+          />
+        )}
+
+        {/* ========================================================= */}
+        {/* TAB: LISTENING PORTS                                      */}
+        {/* ========================================================= */}
         {activeTab === 'listening' && (
-          <div className="bg-[#1e1e2e]/90 rounded-xl border border-white/[0.08] overflow-hidden p-4 space-y-3">
-            <div className="flex items-center justify-between mb-2">
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-xs font-semibold text-white">Active Server Listening Sockets</h3>
-                <p className="text-[11px] text-gray-400">Processes currently bound to network ports on this Linux host.</p>
+                <h3 className="text-base font-bold text-white flex items-center space-x-2">
+                  <Radio className="w-4 h-4 text-emerald-400" />
+                  <span>Live Server Listening Ports</span>
+                </h3>
+                <p className="text-xs text-gray-400">
+                  Processes currently listening for network connections on this host (ss -tulpn)
+                </p>
               </div>
             </div>
-            {listeningPorts.length === 0 ? (
-              <div className="py-12 text-center text-gray-500">
-                <Radio className="w-8 h-8 mx-auto text-gray-600 mb-2" />
-                <p className="font-semibold text-gray-400">No active listening sockets discovered</p>
-                <p className="text-xs text-gray-600 mt-1">Click the refresh button above to query network ports via SSH.</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {listeningPorts.map(p => (
-                  <div key={p.port} className="p-3 bg-[#11111b] border border-white/[0.06] rounded-xl flex items-center justify-between">
-                    <div className="flex items-center space-x-3">
-                      <div className="w-9 h-9 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
-                        <Radio className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="font-mono text-xs font-bold text-white">
-                          Port {p.port} <span className="text-[10px] text-gray-500 font-normal uppercase">({p.proto})</span>
-                        </div>
-                        <div className="text-[11px] text-gray-400">Process: <span className="text-emerald-400 font-mono">{p.process}</span></div>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => handleQuickAllow(p.port, 'TCP', `Allow ${p.process}`)}
-                      className="px-2.5 py-1 bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white rounded-lg text-xs font-medium transition-colors"
-                    >
-                      Allow
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
+
+            <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl overflow-hidden shadow-xl">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-black/30 text-gray-400 border-b border-white/10 font-sans">
+                  <tr>
+                    <th className="py-3 px-4">Port</th>
+                    <th className="py-3 px-4">Protocol</th>
+                    <th className="py-3 px-4">Process Name</th>
+                    <th className="py-3 px-4">Firewall Status</th>
+                    <th className="py-3 px-4 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {listeningPorts.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="py-12 text-center text-gray-500 font-sans text-xs">
+                        No listening ports detected or insufficient permissions.
+                      </td>
+                    </tr>
+                  ) : (
+                    listeningPorts.map((lp, idx) => (
+                      <tr key={idx} className="hover:bg-white/[0.03] transition-colors">
+                        <td className="py-3 px-4 font-bold text-white flex items-center space-x-2">
+                          <Zap className="w-3.5 h-3.5 text-blue-400" />
+                          <span>{lp.port}</span>
+                        </td>
+                        <td className="py-3 px-4 uppercase text-purple-300">{lp.proto}</td>
+                        <td className="py-3 px-4 text-gray-300 font-sans">{lp.process}</td>
+                        <td className="py-3 px-4">
+                          {lp.isAllowedInFirewall ? (
+                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[10px] font-sans font-medium inline-flex items-center space-x-1">
+                              <Check className="w-2.5 h-2.5" />
+                              <span>Allowed in Firewall</span>
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-sans font-medium">
+                              Not in Rules List
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          {!lp.isAllowedInFirewall && (
+                            <button
+                              onClick={() => handleQuickAllow(lp.port, lp.proto, `Allow ${lp.process}`)}
+                              className="px-3 py-1 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-sans font-medium transition-colors"
+                            >
+                              Allow In Firewall
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
-        {/* Tab 3: Banned Attackers */}
+        {/* ========================================================= */}
+        {/* TAB: FAIL2BAN / BANNED ATTACKERS                          */}
+        {/* ========================================================= */}
         {activeTab === 'banned' && (
-          <div className="bg-[#1e1e2e]/90 rounded-xl border border-white/[0.08] overflow-hidden p-4 space-y-3">
-            <div className="flex items-center justify-between mb-2">
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-xs font-semibold text-white">Fail2ban Intrusion Prevention Jail</h3>
-                <p className="text-[11px] text-gray-400">Malicious IPs temporarily or permanently banned due to repeated failed logins.</p>
+                <h3 className="text-base font-bold text-white flex items-center space-x-2">
+                  <Ban className="w-4 h-4 text-rose-400" />
+                  <span>Fail2ban Banned Attackers</span>
+                </h3>
+                <p className="text-xs text-gray-400">
+                  IP addresses blocked by intrusion prevention daemon due to brute-force authentication failures
+                </p>
               </div>
             </div>
-            {bannedList.length === 0 ? (
-              <div className="py-12 text-center text-gray-500">
-                <ShieldCheck className="w-8 h-8 mx-auto text-emerald-500/60 mb-2" />
-                <p className="font-semibold text-gray-400">No attacker IPs currently jailed by fail2ban</p>
-                <p className="text-xs text-gray-600 mt-1">Your server is secure and has zero active IP bans.</p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {bannedList.map(b => (
-                  <div key={b.ip} className="p-3 bg-[#11111b] border border-white/[0.06] rounded-xl flex items-center justify-between">
-                    <div className="flex items-center space-x-3">
-                      <div className="w-8 h-8 rounded-lg bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400">
-                        <Ban className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="font-mono text-xs font-bold text-rose-300 flex items-center gap-2">
+
+            <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl overflow-hidden shadow-xl">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-black/30 text-gray-400 border-b border-white/10 font-sans">
+                  <tr>
+                    <th className="py-3 px-4">Banned IP Address</th>
+                    <th className="py-3 px-4">Protection Jail</th>
+                    <th className="py-3 px-4">Failed Attempts</th>
+                    <th className="py-3 px-4">Detected At</th>
+                    <th className="py-3 px-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {bannedList.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="py-12 text-center text-gray-500 font-sans text-xs">
+                        No active IP bans currently recorded by Fail2ban.
+                      </td>
+                    </tr>
+                  ) : (
+                    bannedList.map(b => (
+                      <tr key={b.ip} className="hover:bg-white/[0.03] transition-colors">
+                        <td className="py-3 px-4 font-bold text-rose-300 flex items-center space-x-2">
+                          <Ban className="w-3.5 h-3.5 text-rose-400" />
                           <span>{b.ip}</span>
-                          <span className="text-[9px] bg-rose-500/20 px-1.5 py-0.2 rounded font-normal uppercase">{b.jail}</span>
-                        </div>
-                        <div className="text-[10px] text-gray-500">
-                          {b.failures} failed attempts • Banned {b.bannedAt}
-                        </div>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => handleUnban(b.ip)}
-                      disabled={unbanningIp === b.ip}
-                      className="px-3 py-1 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
-                    >
-                      {unbanningIp === b.ip ? 'Unbanning...' : 'Unban IP'}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
+                        </td>
+                        <td className="py-3 px-4 text-purple-300">{b.jail}</td>
+                        <td className="py-3 px-4 text-gray-300">{b.failures}</td>
+                        <td className="py-3 px-4 text-gray-400">{b.bannedAt}</td>
+                        <td className="py-3 px-4 text-right">
+                          <button
+                            onClick={() => handleUnban(b.ip)}
+                            disabled={unbanningIp === b.ip}
+                            className="px-3 py-1 rounded-xl bg-white/5 hover:bg-white/15 text-emerald-300 text-[11px] font-sans font-medium transition-colors"
+                          >
+                            {unbanningIp === b.ip ? 'Unbanning...' : 'Unban IP'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </div>
 
-      {/* macOS Sheet Modal for Adding Rule */}
-      {showAdd && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
-          <form
-            onSubmit={handleAdd}
-            className="bg-[#1e1e2e] border border-white/10 rounded-2xl w-full max-w-md p-5 space-y-4 shadow-2xl relative"
-          >
-            <div className="flex items-center justify-between pb-2 border-b border-white/[0.08]">
-              <div className="flex items-center space-x-2">
-                <Flame className="w-4 h-4 text-amber-400" />
-                <h3 className="font-bold text-sm text-white">Create Firewall Rule</h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowAdd(false)}
-                className="text-gray-400 hover:text-white p-1 rounded-md hover:bg-white/10"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+      {/* ========================================================= */}
+      {/* CONTEXT MENU                                              */}
+      {/* ========================================================= */}
+      {contextMenu && (
+        <FirewallContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          rule={contextMenu.rule}
+          backend={activeBackend}
+          onClose={() => setContextMenu(null)}
+          onDelete={(r) => setDeletingRule(r)}
+          onEdit={(r) => { setEditingRule(r); setShowAddModal(true); }}
+          onToggleAction={handleToggleRuleAction}
+          onTestPort={(r) => {
+            const isListening = listeningPorts.some(lp => lp.port === r.to_port);
+            showToast(isListening ? `Port ${r.to_port} is listening on the server!` : `Port ${r.to_port} is not currently listening.`);
+          }}
+        />
+      )}
 
-            <div className="space-y-3 text-xs">
-              <div className="grid grid-cols-2 gap-2.5">
-                <div>
-                  <label className="text-gray-400 block mb-1 font-medium">Port / Port Range</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. 8080 or 8000:8010"
-                    value={newRule.port}
-                    onChange={e => setNewRule({ ...newRule, port: e.target.value })}
-                    className="w-full bg-[#11111b] border border-white/10 rounded-lg px-2.5 py-1.5 text-white font-mono focus:outline-none focus:border-blue-500/80"
-                  />
-                </div>
-                <div>
-                  <label className="text-gray-400 block mb-1 font-medium">Protocol</label>
-                  <select
-                    value={newRule.proto}
-                    onChange={e => setNewRule({ ...newRule, proto: e.target.value as any })}
-                    className="w-full bg-[#11111b] border border-white/10 rounded-lg px-2.5 py-1.5 text-white focus:outline-none focus:border-blue-500/80"
-                  >
-                    <option value="TCP">TCP</option>
-                    <option value="UDP">UDP</option>
-                    <option value="BOTH">BOTH</option>
-                  </select>
-                </div>
-              </div>
+      {/* ========================================================= */}
+      {/* MODALS                                                    */}
+      {/* ========================================================= */}
+      {showAddModal && (
+        <AddRuleModal
+          connId={activeConnId}
+          backend={activeBackend}
+          zones={statusInfo.all_zones}
+          initialRule={editingRule}
+          onClose={() => { setShowAddModal(false); setEditingRule(null); }}
+          onSuccess={(msg) => {
+            showToast(msg);
+            loadFirewall();
+          }}
+        />
+      )}
 
+      {deletingRule && (
+        <DeleteRuleModal
+          connId={activeConnId}
+          rule={deletingRule}
+          backend={activeBackend}
+          onClose={() => setDeletingRule(null)}
+          onSuccess={(msg) => {
+            showToast(msg);
+            loadFirewall();
+          }}
+        />
+      )}
+
+      {showPolicyModal && (
+        <PolicyModal
+          connId={activeConnId}
+          defaultIncoming={statusInfo.default_incoming}
+          defaultOutgoing={statusInfo.default_outgoing}
+          onClose={() => setShowPolicyModal(false)}
+          onSuccess={(msg) => {
+            showToast(msg);
+            loadFirewall();
+          }}
+        />
+      )}
+
+      {/* Reset Confirmation Modal */}
+      {showResetConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-[#181825]/95 border border-white/20 rounded-3xl max-w-md w-full shadow-2xl p-6 space-y-4">
+            <div className="flex items-center space-x-3 pb-3 border-b border-white/10">
+              <div className="w-10 h-10 rounded-2xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
               <div>
-                <label className="text-gray-400 block mb-1 font-medium">Action</label>
-                <select
-                  value={newRule.action}
-                  onChange={e => setNewRule({ ...newRule, action: e.target.value as any })}
-                  className="w-full bg-[#11111b] border border-white/10 rounded-lg px-2.5 py-1.5 text-white focus:outline-none focus:border-blue-500/80"
-                >
-                  <option value="ALLOW">ALLOW (Accept traffic)</option>
-                  <option value="DENY">DENY (Silently drop packet)</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="text-gray-400 block mb-1 font-medium">Allowed Source IP / Subnet</label>
-                <input
-                  type="text"
-                  value={newRule.source}
-                  onChange={e => setNewRule({ ...newRule, source: e.target.value })}
-                  placeholder="Anywhere or 192.168.1.0/24"
-                  className="w-full bg-[#11111b] border border-white/10 rounded-lg px-2.5 py-1.5 text-white font-mono focus:outline-none focus:border-blue-500/80"
-                />
-              </div>
-
-              <div>
-                <label className="text-gray-400 block mb-1 font-medium">Description / Service Tag</label>
-                <input
-                  type="text"
-                  value={newRule.comment}
-                  onChange={e => setNewRule({ ...newRule, comment: e.target.value })}
-                  placeholder="e.g. Staging Web Server"
-                  className="w-full bg-[#11111b] border border-white/10 rounded-lg px-2.5 py-1.5 text-white focus:outline-none focus:border-blue-500/80"
-                />
+                <h3 className="font-bold text-sm text-white">Reset Firewall to Default</h3>
+                <p className="text-xs text-gray-400">Wipe custom rules and disable firewall</p>
               </div>
             </div>
 
-            {ruleError && (
-              <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-start space-x-2.5 animate-in fade-in duration-150">
-                <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                <div className="flex-1 font-mono text-[11px] leading-relaxed break-words">{ruleError}</div>
-              </div>
-            )}
+            <p className="text-xs text-gray-300 leading-relaxed">
+              Are you sure you want to reset <strong className="text-white font-mono">{activeBackend.toUpperCase()}</strong>? All existing custom port allowances and blocklists will be permanently removed.
+            </p>
 
-            <div className="flex justify-end space-x-2 pt-2 border-t border-white/[0.08]">
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-white/10">
               <button
-                type="button"
-                onClick={() => { setShowAdd(false); setRuleError(null); }}
-                className="px-3 py-1.5 rounded-lg text-xs text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+                onClick={() => setShowResetConfirm(false)}
+                className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-gray-300 font-medium transition-colors text-xs"
               >
                 Cancel
               </button>
               <button
-                type="submit"
-                className="px-4 py-1.5 rounded-lg text-xs bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium shadow-md shadow-blue-500/30 transition-all active:scale-95"
+                onClick={handleReset}
+                className="px-5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-semibold shadow-md active:scale-95 transition-all text-xs"
               >
-                Add Rule
+                Reset Firewall
               </button>
             </div>
-          </form>
+          </div>
         </div>
       )}
     </div>

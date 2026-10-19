@@ -224,10 +224,10 @@ export default function LogViewer() {
       )}
 
       {/* 1. macOS Top Header Toolbar */}
-      <header className="px-5 py-3 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between shrink-0">
+      <header className="px-5 py-3 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between shrink-0 overflow-x-auto no-scrollbar gap-3">
         
         {/* Left: App Identity */}
-        <div className="flex items-center space-x-3.5">
+        <div className="flex items-center space-x-3.5 shrink-0">
           <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg shadow-orange-500/25 border border-white/20">
             <ScrollText className="w-5 h-5 text-white" />
           </div>
@@ -244,7 +244,7 @@ export default function LogViewer() {
         </div>
 
         {/* Center: Severity Filter Control Pills */}
-        <div className="flex items-center bg-[#1e1e2e]/90 p-1 rounded-2xl border border-white/10 shadow-inner">
+        <div className="flex items-center bg-[#1e1e2e]/90 p-1 rounded-2xl border border-white/10 shadow-inner shrink-0">
           <button
             onClick={() => setFilterLevel('all')}
             className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all ${
@@ -300,7 +300,7 @@ export default function LogViewer() {
         </div>
 
         {/* Right: Actions (Stream toggle, Tail lines, Export, Refresh) */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           {/* Stream / Pause Button */}
           <button
             onClick={() => setIsStreaming(!isStreaming)}

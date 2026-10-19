@@ -520,9 +520,9 @@ export default function PackageManager() {
       )}
 
       {/* macOS Top Navigation Toolbar */}
-      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3">
+      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto no-scrollbar">
         {/* Segmented Tab Controls */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           <div className="mac-segmented-container">
             <button
               onClick={() => setTab('curated')}
@@ -566,7 +566,7 @@ export default function PackageManager() {
         </div>
 
         {/* Right Tools: Install Package, Search, Refresh */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           {tab === 'upgrades' && upgrades.length > 0 && (
             <button
               onClick={handleUpgradeAll}

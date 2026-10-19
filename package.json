@@ -1,12 +1,16 @@
 {
   "name": "clouddesk",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "serve": "node server.js",
+    "serve:2222": "node server.js",
+    "web:2222": "vite --port 2222 --host 0.0.0.0",
+    "web:222": "vite --port 222 --host 0.0.0.0",
     "tauri": "tauri",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
   },

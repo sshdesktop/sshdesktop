@@ -41,7 +41,9 @@ import {
   Eye,
   ZoomIn,
   ZoomOut,
-  Maximize2
+  Maximize2,
+  Save,
+  ShieldAlert
 } from 'lucide-react';
 import {
   sftpReadTextFile,
@@ -189,10 +191,15 @@ function getMediaMime(filename: string): string {
   return 'application/octet-stream';
 }
 
+function isPermissionDenied(err: any): boolean {
+  const msg = String(err?.message || err);
+  return /permission denied|eacces|operation not permitted|not in sudoers|is not allowed to execute|password is required|authentication failure|sudoers|terminal is required|polkit|access denied/i.test(msg);
+}
+
 function parsePermissionError(err: any): string {
   const msg = String(err?.message || err);
-  if (/permission denied|eacces|operation not permitted/i.test(msg)) {
-    return 'Permission Denied: You do not have permission on the server to perform this operation.';
+  if (isPermissionDenied(msg)) {
+    return 'Permission Denied: Administrator (sudo) privileges required on the server to perform this operation.';
   }
   return msg;
 }
@@ -223,6 +230,7 @@ export default function CodeEditor() {
   const [loading, setLoading] = useState<boolean>(false);
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [permissionAlert, setPermissionAlert] = useState<{ title: string; message: string; path?: string } | null>(null);
   const [isDragOver, setIsDragOver] = useState<boolean>(false);
 
   // Editor Theme
@@ -230,8 +238,10 @@ export default function CodeEditor() {
     return localStorage.getItem('clouddesk_editor_theme') || (isLight ? 'vs' : 'monokai');
   });
 
-  // Editor ref for Monaco instance
+  // Editor ref for Monaco instance & latest callback refs to prevent stale closures
   const editorRef = useRef<any>(null);
+  const handleSaveRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const handleSaveAllRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   // VS Code Activity Bar: 'explorer' | 'git' | 'settings'
   const [activeSidebarTab, setActiveSidebarTab] = useState<'explorer' | 'git' | 'settings'>('explorer');
@@ -535,7 +545,7 @@ export default function CodeEditor() {
 
     // Bind custom editor commands
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      handleSave();
+      handleSaveRef.current?.();
     });
 
     editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.KeyZ, () => {
@@ -850,37 +860,104 @@ export default function CodeEditor() {
     setLoading(true);
     setLoadingAction(`Saving ${activeFile.name}...`);
     setError(null);
+    setPermissionAlert(null);
+
     try {
-      await sftpWriteTextFile(activeConnId, activeFile.remotePath, activeFile.content);
+      try {
+        await sftpWriteTextFile(activeConnId, activeFile.remotePath, activeFile.content);
+      } catch (writeErr: any) {
+        // Fallback: If regular write fails, try privileged save with sudo (routes directly to run_cmd_priv)
+        const b64 = btoa(unescape(encodeURIComponent(activeFile.content)));
+        const privCmd = `sudo sh -c 'printf "%s" "${b64}" | base64 -d > "${activeFile.remotePath}"'`;
+        const res = await sshExec(activeConnId, privCmd);
+        if (res.exit_code !== 0) {
+          const detail = res.stdout || res.stderr || writeErr?.message || 'Permission denied';
+          throw new Error(detail);
+        }
+      }
+
       setFiles(prev =>
         prev.map(f => (f.id === activeFile.id ? { ...f, isModified: false } : f))
       );
       setSavedSuccess(true);
-      setTimeout(() => setSavedSuccess(false), 2000);
+      setTimeout(() => setSavedSuccess(false), 2500);
     } catch (err: any) {
-      setError(parsePermissionError(err));
+      const errMsg = String(err?.message || err);
+      const isPerm = isPermissionDenied(errMsg);
+      const userFacing = isPerm
+        ? `Permission Denied: Administrator (sudo) privileges required to write to '${activeFile.remotePath}'.`
+        : `Failed to save '${activeFile.name}': ${errMsg}`;
+      
+      setError(userFacing);
+      if (isPerm) {
+        setPermissionAlert({
+          title: 'Permission Denied',
+          message: `Administrator (sudo) privileges are required to save changes to this file.\n\nPlease verify that your user account has sudo privileges or connect with a root user session.\n\nServer response:\n${errMsg}`,
+          path: activeFile.remotePath
+        });
+      }
     } finally {
       setLoading(false);
       setLoadingAction(null);
     }
   }, [activeConnId, activeFile]);
 
+  // Keep ref up to date to prevent stale closures in Monaco keybindings
+  useEffect(() => {
+    handleSaveRef.current = handleSave;
+  }, [handleSave]);
+
   const handleSaveAll = useCallback(async () => {
     const modified = files.filter(f => f.isModified && !f.isMedia);
     if (modified.length === 0) return;
     setLoading(true);
     setLoadingAction('Saving all modified files...');
+    setError(null);
+    setPermissionAlert(null);
+
+    const successfullySavedIds = new Set<string>();
+    let firstPermErr: { path: string; msg: string } | null = null;
+
     for (const f of modified) {
       try {
-        await sftpWriteTextFile(activeConnId, f.remotePath, f.content);
+        try {
+          await sftpWriteTextFile(activeConnId, f.remotePath, f.content);
+        } catch (writeErr: any) {
+          const b64 = btoa(unescape(encodeURIComponent(f.content)));
+          const privCmd = `sudo sh -c 'printf "%s" "${b64}" | base64 -d > "${f.remotePath}"'`;
+          const res = await sshExec(activeConnId, privCmd);
+          if (res.exit_code !== 0) {
+            const detail = res.stdout || res.stderr || writeErr?.message || 'Permission denied';
+            throw new Error(detail);
+          }
+        }
+        successfullySavedIds.add(f.id);
       } catch (err: any) {
+        const errMsg = String(err?.message || err);
+        if (isPermissionDenied(errMsg) && !firstPermErr) {
+          firstPermErr = { path: f.remotePath, msg: errMsg };
+        }
         setError(parsePermissionError(err));
       }
     }
-    setFiles(prev => prev.map(f => ({ ...f, isModified: false })));
+
+    setFiles(prev => prev.map(f => successfullySavedIds.has(f.id) ? { ...f, isModified: false } : f));
+    
+    if (firstPermErr) {
+      setPermissionAlert({
+        title: 'Permission Denied',
+        message: `Administrator (sudo) privileges are required to save changes to '${firstPermErr.path}'.\n\nServer response:\n${firstPermErr.msg}`,
+        path: firstPermErr.path
+      });
+    }
+
     setLoading(false);
     setLoadingAction(null);
   }, [activeConnId, files]);
+
+  useEffect(() => {
+    handleSaveAllRef.current = handleSaveAll;
+  }, [handleSaveAll]);
 
   // Tab Close Handling
   const requestCloseTab = (id: string, e?: React.MouseEvent) => {
@@ -910,10 +987,28 @@ export default function CodeEditor() {
   const handleConfirmSaveAndClose = async () => {
     if (!closeConfirmTab) return;
     try {
-      await sftpWriteTextFile(activeConnId, closeConfirmTab.remotePath, closeConfirmTab.content);
+      try {
+        await sftpWriteTextFile(activeConnId, closeConfirmTab.remotePath, closeConfirmTab.content);
+      } catch (writeErr: any) {
+        const b64 = btoa(unescape(encodeURIComponent(closeConfirmTab.content)));
+        const privCmd = `sudo sh -c 'printf "%s" "${b64}" | base64 -d > "${closeConfirmTab.remotePath}"'`;
+        const res = await sshExec(activeConnId, privCmd);
+        if (res.exit_code !== 0) {
+          throw new Error(res.stdout || res.stderr || writeErr?.message || 'Permission denied');
+        }
+      }
       performCloseTab(closeConfirmTab.id);
     } catch (err: any) {
+      const errMsg = String(err?.message || err);
+      const isPerm = isPermissionDenied(errMsg);
       setError(parsePermissionError(err));
+      if (isPerm) {
+        setPermissionAlert({
+          title: 'Permission Denied',
+          message: `Administrator (sudo) privileges are required to save changes to '${closeConfirmTab.remotePath}'.\n\nServer response:\n${errMsg}`,
+          path: closeConfirmTab.remotePath
+        });
+      }
       setCloseConfirmTab(null);
     }
   };
@@ -1016,14 +1111,14 @@ export default function CodeEditor() {
       // Ctrl + S: Save
       if (isCtrlOrCmd && !e.shiftKey && e.key.toLowerCase() === 's') {
         e.preventDefault();
-        handleSave();
+        handleSaveRef.current?.();
         return;
       }
 
       // Ctrl + Shift + S: Save All
       if (isCtrlOrCmd && e.shiftKey && e.key.toLowerCase() === 's') {
         e.preventDefault();
-        handleSaveAll();
+        handleSaveAllRef.current?.();
         return;
       }
 
@@ -2246,7 +2341,7 @@ export default function CodeEditor() {
       {/* ─── 3. Main Editor Area & Split Canvas ───────────────────────── */}
       <div className="flex-1 flex flex-col overflow-hidden bg-[#1e1e2e]">
         {/* Tab Bar (Cleaned up VS Code style without save/lang dropdown/terminal buttons) */}
-        <div className="h-9 bg-[#181825] border-b border-white/[0.08] px-2 flex items-center justify-between shrink-0 select-none">
+        <div className="h-9 bg-[#181825] border-b border-white/[0.08] px-2 flex items-center justify-between shrink-0 select-none overflow-x-auto no-scrollbar gap-2">
           {/* File Tabs */}
           <div className="flex items-center space-x-1 overflow-x-auto scrollbar-none flex-1">
             {files.map(file => (
@@ -2288,8 +2383,34 @@ export default function CodeEditor() {
             </button>
           </div>
 
-          {/* Top Right Tools: Split Editor */}
-          <div className="flex items-center space-x-1 shrink-0 ml-2">
+          {/* Top Right Tools: Save & Split Editor */}
+          <div className="flex items-center space-x-1.5 shrink-0 ml-2">
+            {activeFile && !activeFile.isMedia && (
+              <button
+                onClick={() => handleSave()}
+                disabled={loading || !activeFile.isModified}
+                className={`px-2.5 py-1 rounded-md text-xs font-mono flex items-center space-x-1.5 transition-all shadow-sm ${
+                  savedSuccess
+                    ? 'bg-emerald-600/90 text-white font-medium'
+                    : activeFile.isModified
+                    ? 'bg-blue-600 hover:bg-blue-500 text-white font-semibold cursor-pointer shadow-blue-500/20 shadow-md'
+                    : 'bg-white/5 text-gray-400 hover:text-gray-200 hover:bg-white/10 opacity-70 cursor-default'
+                }`}
+                title={activeFile.isModified ? "Save File (Ctrl+S)" : "File is saved"}
+              >
+                {loading && loadingAction?.includes('Saving') ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
+                ) : savedSuccess ? (
+                  <Check className="w-3.5 h-3.5 text-white" />
+                ) : (
+                  <Save className="w-3.5 h-3.5" />
+                )}
+                <span className="hidden sm:inline">
+                  {savedSuccess ? 'Saved' : 'Save'}
+                </span>
+              </button>
+            )}
+
             <button
               onClick={() => {
                 setIsSplitEditor(prev => !prev);
@@ -3276,6 +3397,46 @@ export default function CodeEditor() {
                     )}
                   </div>
                 ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── 16. Permission Denied Alert Dialog ─────────────────────── */}
+      {permissionAlert && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150 select-none"
+          onClick={() => setPermissionAlert(null)}
+        >
+          <div 
+            className="bg-[#181a28] border border-rose-500/30 rounded-2xl max-w-md w-full shadow-2xl p-5 text-gray-200 flex flex-col space-y-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-start space-x-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400 shrink-0">
+                <ShieldAlert className="w-5 h-5" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="text-sm font-bold text-white mb-1">
+                  {permissionAlert.title}
+                </h3>
+                <p className="text-xs text-gray-300 leading-relaxed whitespace-pre-wrap font-sans">
+                  {permissionAlert.message}
+                </p>
+                {permissionAlert.path && (
+                  <div className="mt-2 text-[11px] font-mono bg-black/40 px-2.5 py-1.5 rounded-lg border border-white/10 text-rose-300 break-all select-text">
+                    {permissionAlert.path}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-end pt-2 border-t border-white/10">
+              <button
+                onClick={() => setPermissionAlert(null)}
+                className="px-4 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold shadow-lg transition-colors cursor-pointer"
+              >
+                Dismiss
+              </button>
             </div>
           </div>
         </div>

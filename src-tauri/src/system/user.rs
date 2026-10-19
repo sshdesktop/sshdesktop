@@ -280,6 +280,35 @@ pub async fn group_delete(
     if matches!(name.as_str(), "root" | "sudo" | "wheel" | "daemon") {
         return Err(format!("Refusing to delete protected group '{}'.", name));
     }
+
+    // Check if group has members in /etc/group
+    let check_members = format!(
+        "getent group '{}' 2>/dev/null | awk -F: '{{print $4}}'",
+        name
+    );
+    let (members_out, _) = run_cmd(&state, &conn_id, &check_members).await;
+    let trimmed_members = members_out.trim();
+    if !trimmed_members.is_empty() {
+        return Err(format!(
+            "Cannot delete group '{}': Group still has active member user(s) ({}). Please remove users from this group first.",
+            name, trimmed_members
+        ));
+    }
+
+    // Check if any user has this group's GID as their primary GID
+    let check_primary = format!(
+        "gid=$(getent group '{}' 2>/dev/null | awk -F: '{{print $3}}'); if [ -n \"$gid\" ]; then getent passwd | awk -F: -v g=\"$gid\" '$4==g{{print $1}}'; fi",
+        name
+    );
+    let (primary_out, _) = run_cmd(&state, &conn_id, &check_primary).await;
+    let trimmed_primary = primary_out.trim();
+    if !trimmed_primary.is_empty() {
+        return Err(format!(
+            "Cannot delete group '{}': It is the primary group for user(s) ({}). Cannot delete a group with assigned users.",
+            name, trimmed_primary.replace('\n', ", ")
+        ));
+    }
+
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &format!("groupdel '{}' 2>&1", name)).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
@@ -291,18 +320,80 @@ pub async fn group_delete(
 }
 
 #[tauri::command]
+pub async fn group_add_user(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    group: String,
+    username: String,
+) -> Result<(), String> {
+    if group.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid group name.".into());
+    }
+    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid username.".into());
+    }
+
+    let cmd = format!("gpasswd -a '{}' '{}' 2>&1 || usermod -aG '{}' '{}' 2>&1", username, group, group, username);
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 && !stdout.is_empty() {
+        return Err(format!("Failed to add user '{}' to group '{}': {}", username, group, stdout.trim()));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn group_remove_user(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    group: String,
+    username: String,
+) -> Result<(), String> {
+    if group.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid group name.".into());
+    }
+    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid username.".into());
+    }
+
+    let cmd = format!("gpasswd -d '{}' '{}' 2>&1", username, group);
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 && !stdout.is_empty() {
+        return Err(format!("Failed to remove user '{}' from group '{}': {}", username, group, stdout.trim()));
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn who_is_logged_in(
     state: tauri::State<'_, AppState>,
     conn_id: String,
 ) -> Result<String, String> {
-    let (stdout, code) = run_cmd(&state, &conn_id, "who 2>/dev/null").await;
+    // Multi-fallback active user session detection (who -> w -> loginctl -> ps)
+    let cmd = r#"
+if [ -n "$(who 2>/dev/null)" ]; then
+    who 2>/dev/null
+elif command -v w >/dev/null 2>&1 && [ -n "$(w -h 2>/dev/null)" ]; then
+    w -h 2>/dev/null | awk '{printf "%s\t%s\t%s\t%s\n", $1, $2, ($3 ? $3 : "local"), $4}'
+elif command -v loginctl >/dev/null 2>&1 && [ -n "$(loginctl list-sessions --no-legend 2>/dev/null)" ]; then
+    loginctl list-sessions --no-legend 2>/dev/null | awk '{printf "%s\t%s\t%s\tActive\n", $3, ($5 ? $5 : "session-"$1), ($4 ? $4 : "systemd")}'
+else
+    ps -eo user,tty,etime,args 2>/dev/null | grep -E 'pts/[0-9]|tty[0-9]' | grep -v grep | awk '{printf "%s\t%s\tlocal/ssh\t%s\n", $1, $2, $3}'
+fi
+"#;
+    let (stdout, code) = run_cmd(&state, &conn_id, cmd).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if !stdout.is_empty() {
+    if !stdout.trim().is_empty() {
         return Ok(stdout);
     }
-    Ok("(No active login sessions found)".into())
+    Ok(String::new())
 }
 
 #[tauri::command]

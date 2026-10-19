@@ -325,9 +325,9 @@ export default function ProcessManager() {
   return (
     <div className="flex flex-col h-full bg-[#181825] text-[#cdd6f4] select-none min-h-0 overflow-hidden font-sans">
       {/* macOS Top Toolbar & Segmented View Bar */}
-      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3">
+      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto no-scrollbar">
         {/* Left: macOS Stop (Quit Process) & Inspect buttons */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           {/* Quit Process Button (macOS Octagon-X icon) */}
           <button
             onClick={() => selectedProcess && setShowQuitModal(selectedProcess)}
@@ -399,7 +399,7 @@ export default function ProcessManager() {
         </div>
 
         {/* Right Controls: Filter Selector, Search Pill, Auto Refresh */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           {/* Filter Dropdown */}
           <select
             value={filterCategory}

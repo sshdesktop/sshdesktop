@@ -1,16 +1,21 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   Globe, Radio, Activity, Network as NetworkIcon, Search, Play, 
-  CheckCircle2, Shield, RefreshCw, Plus, X, PowerOff, ShieldAlert, Trash2,
-  Wifi, ArrowDownUp, HardDrive, Compass, Copy, Terminal, ExternalLink,
-  ChevronDown, ChevronUp, AlertCircle, Check, ArrowRight, Zap, Laptop
+  CheckCircle2, RefreshCw, X, ArrowDownUp, HardDrive, Compass, Copy, 
+  Terminal, ExternalLink, ChevronDown, ChevronUp, AlertCircle, Check, 
+  ArrowRight, Zap, Laptop, Trash2
 } from 'lucide-react';
 import { 
   networkPorts, networkConnections, systemGetNetwork, networkPing, 
-  networkDnsLookup, sshExec, processKill 
+  networkDnsLookup, sshExec, processKill, networkKillPort 
 } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
+
+// Subcomponents and Modals
+import NetworkContextMenu, { ContextMenuTarget } from './components/NetworkContextMenu';
+import SpeedTestDashboard from './components/SpeedTestDashboard';
+import KillPortModal from './modals/KillPortModal';
 
 interface ListeningPort {
   protocol: string;
@@ -40,15 +45,8 @@ interface InterfaceItem {
   txBytes?: number;
 }
 
-interface ContextMenuState {
-  x: number;
-  y: number;
-  port?: ListeningPort;
-  conn?: ActiveConn;
-}
-
 export default function NetworkManager() {
-  const [tab, setTab] = useState<'interfaces' | 'ports' | 'conns' | 'ping' | 'dns'>('interfaces');
+  const [tab, setTab] = useState<'interfaces' | 'speedtest' | 'ports' | 'conns' | 'ping' | 'dns'>('interfaces');
   const [ports, setPorts] = useState<ListeningPort[]>([]);
   const [conns, setConns] = useState<ActiveConn[]>([]);
   const [interfaces, setInterfaces] = useState<InterfaceItem[]>([]);
@@ -56,7 +54,7 @@ export default function NetworkManager() {
   const [search, setSearch] = useState('');
   
   // Selected items for macOS selection highlight
-  const [selectedPortNum, setSelectedPortNum] = useState<number | null>(null);
+  const [selectedPort, setSelectedPort] = useState<ListeningPort | null>(null);
   const [selectedConnKey, setSelectedConnKey] = useState<string | null>(null);
   const [selectedIface, setSelectedIface] = useState<string | null>(null);
 
@@ -71,19 +69,26 @@ export default function NetworkManager() {
   const [dnsResults, setDnsResults] = useState<string>('');
   const [dnsLoading, setDnsLoading] = useState(false);
 
-  // Open Port Modal State
-  const [showOpenPortModal, setShowOpenPortModal] = useState(false);
-  const [newPortNum, setNewPortNum] = useState('');
-  const [newPortProto, setNewPortProto] = useState<'tcp' | 'udp'>('tcp');
-  const [newPortDesc, setNewPortDesc] = useState('');
+  // Kill Port Modal State
+  const [killModalTarget, setKillModalTarget] = useState<{
+    port?: number;
+    protocol?: string;
+    process?: string;
+    pid?: number;
+  } | null>(null);
 
   // Notification Toast
   const [notice, setNotice] = useState<{ text: string; isError: boolean } | null>(null);
-  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: ContextMenuTarget } | null>(null);
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
   const { openApp } = useWindowManager();
   const { runTerminalCommand } = useEditorStore();
+
+  const showToast = (text: string, isError: boolean = false) => {
+    setNotice({ text, isError });
+    setTimeout(() => setNotice(null), 4000);
+  };
 
   const loadNetworkData = useCallback(async () => {
     setLoading(true);
@@ -96,7 +101,7 @@ export default function NetworkManager() {
 
       if (pList && Array.isArray(pList)) {
         setPorts(pList.map((p: any) => ({
-          protocol: p.protocol || 'tcp',
+          protocol: p.protocol || 'TCP',
           port: p.local_port || p.port || 0,
           bindAddr: p.local_addr || p.bindAddr || '0.0.0.0',
           process: p.process_name || p.process || 'system',
@@ -144,52 +149,50 @@ export default function NetworkManager() {
     loadNetworkData();
   }, [loadNetworkData]);
 
-  // Close context menu on window click
+  // Keyboard navigation for selected port (Delete / Backspace to trigger Kill)
   useEffect(() => {
-    const handleClose = () => setContextMenu(null);
-    window.addEventListener('click', handleClose);
-    return () => window.removeEventListener('click', handleClose);
-  }, []);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (tab === 'ports' && selectedPort) {
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          // If active element is an input, don't intercept
+          if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
+          e.preventDefault();
+          setKillModalTarget({
+            port: selectedPort.port,
+            protocol: selectedPort.protocol,
+            process: selectedPort.process,
+            pid: selectedPort.pid,
+          });
+        }
+      }
+    };
 
-  const handleOpenPort = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newPortNum.trim()) return;
-    try {
-      await sshExec(activeConnId, `sudo ufw allow ${newPortNum.trim()}/${newPortProto} comment "${newPortDesc || 'CloudDesk'}" || ufw allow ${newPortNum.trim()}/${newPortProto}`);
-      setShowOpenPortModal(false);
-      setNewPortNum('');
-      setNewPortDesc('');
-      setNotice({ text: `Port ${newPortNum.trim()}/${newPortProto} allowed in firewall.`, isError: false });
-      setTimeout(() => setNotice(null), 3500);
-      await loadNetworkData();
-    } catch (err: any) {
-      setNotice({ text: `Failed to open port: ${err?.message || err}`, isError: true });
-    }
-  };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [tab, selectedPort]);
 
-  const handleClosePort = async (port: number, protocol: string) => {
-    setContextMenu(null);
-    if (!confirm(`Block / close port ${port}/${protocol} in server firewall (UFW)?`)) return;
+  // Kill port execution
+  const handleExecuteKillPort = async (
+    port: number,
+    protocol: string,
+    pid?: number,
+    signal: string = 'KILL'
+  ) => {
     try {
-      await sshExec(activeConnId, `sudo ufw deny ${port}/${protocol} || ufw deny ${port}/${protocol}`);
-      setNotice({ text: `Port ${port}/${protocol} blocked in firewall.`, isError: false });
-      setTimeout(() => setNotice(null), 3500);
+      const res = await networkKillPort(
+        activeConnId,
+        port,
+        protocol.toLowerCase(),
+        pid && pid > 0 ? pid : undefined,
+        signal
+      );
+      showToast(res || `Port :${port} (${protocol}) terminated.`);
       await loadNetworkData();
+      if (selectedPort?.port === port) {
+        setSelectedPort(null);
+      }
     } catch (err: any) {
-      setNotice({ text: `Failed to block port: ${err?.message || err}`, isError: true });
-    }
-  };
-
-  const handleKillPortProcess = async (pid: number, port: number) => {
-    setContextMenu(null);
-    if (!confirm(`Terminate process PID ${pid} listening on port ${port}?`)) return;
-    try {
-      await processKill(activeConnId, pid, 'KILL');
-      setNotice({ text: `Process PID ${pid} terminated.`, isError: false });
-      setTimeout(() => setNotice(null), 3500);
-      await loadNetworkData();
-    } catch (err: any) {
-      setNotice({ text: `Failed to kill process: ${err?.message || err}`, isError: true });
+      showToast(`Failed to kill port :${port}: ${err?.message || err}`, true);
     }
   };
 
@@ -246,11 +249,13 @@ export default function NetworkManager() {
       {loading && (
         <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-blue-500 via-indigo-400 to-blue-500 animate-top-progress z-30 pointer-events-none" />
       )}
+
       {/* macOS Top Navigation Toolbar */}
-      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3">
+      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto no-scrollbar gap-2">
         {/* macOS Segmented Tab Bar */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           <div className="flex items-center bg-white/[0.06] rounded-xl p-0.5 border border-white/10">
+            {/* Hardware Interfaces Tab */}
             <button
               onClick={() => setTab('interfaces')}
               className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all ${
@@ -260,6 +265,19 @@ export default function NetworkManager() {
               <NetworkIcon className="w-3.5 h-3.5" />
               <span>Interfaces ({interfaces.length})</span>
             </button>
+
+            {/* Speed Test Tab */}
+            <button
+              onClick={() => setTab('speedtest')}
+              className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all ${
+                tab === 'speedtest' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              <Zap className="w-3.5 h-3.5 text-amber-400" />
+              <span>Speed Test</span>
+            </button>
+
+            {/* Listening Ports Tab */}
             <button
               onClick={() => setTab('ports')}
               className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all ${
@@ -269,6 +287,8 @@ export default function NetworkManager() {
               <Radio className="w-3.5 h-3.5" />
               <span>Listening Ports ({ports.length})</span>
             </button>
+
+            {/* Active Sockets Tab */}
             <button
               onClick={() => setTab('conns')}
               className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all ${
@@ -278,6 +298,8 @@ export default function NetworkManager() {
               <Activity className="w-3.5 h-3.5" />
               <span>Active Sockets ({conns.length})</span>
             </button>
+
+            {/* Diagnostic Ping Tab */}
             <button
               onClick={() => setTab('ping')}
               className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all ${
@@ -287,6 +309,8 @@ export default function NetworkManager() {
               <Compass className="w-3.5 h-3.5" />
               <span>Ping</span>
             </button>
+
+            {/* DNS Lookup Tab */}
             <button
               onClick={() => setTab('dns')}
               className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all ${
@@ -299,15 +323,23 @@ export default function NetworkManager() {
           </div>
         </div>
 
-        {/* Right Tools: Open Port, Search, Refresh */}
-        <div className="flex items-center space-x-2">
+        {/* Right Tools: Port Kill Action, Search, Refresh */}
+        <div className="flex items-center space-x-2 shrink-0">
           {tab === 'ports' && (
             <button
-              onClick={() => setShowOpenPortModal(true)}
-              className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1 rounded-xl transition-all font-medium shadow-md active:scale-95"
+              onClick={() => {
+                setKillModalTarget({
+                  port: selectedPort ? selectedPort.port : undefined,
+                  protocol: selectedPort ? selectedPort.protocol : 'TCP',
+                  process: selectedPort ? selectedPort.process : '',
+                  pid: selectedPort ? selectedPort.pid : undefined,
+                });
+              }}
+              className="flex items-center space-x-1.5 bg-rose-600/90 hover:bg-rose-500 text-white text-xs px-3 py-1 rounded-xl transition-all font-semibold shadow-md active:scale-95 border border-rose-500/50"
+              title="Kill Port / Terminate Process (Delete)"
             >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Open Port</span>
+              <Zap className="w-3.5 h-3.5" />
+              <span>{selectedPort ? `Kill Port :${selectedPort.port}` : 'Kill Port...'}</span>
             </button>
           )}
 
@@ -355,6 +387,19 @@ export default function NetworkManager() {
       {/* Main Content Area */}
       <div className="flex-1 min-h-0 bg-[#161622] flex flex-col overflow-hidden relative">
         {/* 1. INTERFACES TAB */}
+
+        {/* 2. SPEED TEST TAB */}
+        {tab === 'speedtest' && (
+          <SpeedTestDashboard
+            connId={activeConnId}
+            onInspectTerminal={(cmd) => {
+              runTerminalCommand(cmd, { title: 'Speed Test Console', newTab: true });
+              openApp('terminal', 'Terminal', undefined, true);
+            }}
+          />
+        )}
+
+        {/* 2. INTERFACES TAB */}
         {tab === 'interfaces' && (
           <div className="flex-1 overflow-y-auto p-4 scrollbar-thin">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -371,6 +416,15 @@ export default function NetworkManager() {
                     <div 
                       key={iface.name} 
                       onClick={() => setSelectedIface(iface.name)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setSelectedIface(iface.name);
+                        setContextMenu({
+                          x: e.clientX,
+                          y: e.clientY,
+                          target: { type: 'iface', data: iface }
+                        });
+                      }}
                       className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between space-y-4 ${
                         isSelected 
                           ? 'bg-blue-600/15 border-blue-500/60 shadow-lg' 
@@ -421,17 +475,19 @@ export default function NetworkManager() {
                           </span>
                         </div>
 
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            runTerminalCommand(`ip -s link show ${iface.name}\n`);
-                            openApp('terminal', 'Terminal');
-                          }}
-                          className="px-2 py-1 bg-white/5 hover:bg-white/10 rounded-lg text-gray-300 text-[11px] flex items-center space-x-1 transition-colors"
-                        >
-                          <Terminal className="w-3 h-3 text-emerald-400" />
-                          <span>Inspect</span>
-                        </button>
+                        <div className="flex items-center space-x-2">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              runTerminalCommand(`ip -s link show ${iface.name}\n`);
+                              openApp('terminal', 'Terminal');
+                            }}
+                            className="px-2 py-1 bg-white/5 hover:bg-white/10 rounded-lg text-gray-300 text-[11px] flex items-center space-x-1 transition-colors"
+                          >
+                            <Terminal className="w-3 h-3 text-blue-400" />
+                            <span>Inspect</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );
@@ -441,43 +497,48 @@ export default function NetworkManager() {
           </div>
         )}
 
-        {/* 2. LISTENING PORTS TAB */}
+        {/* 3. LISTENING PORTS TAB (Clean: Firewall & Action column removed, Right click option show, Port Kill enabled) */}
         {tab === 'ports' && (
           <div className="flex-1 overflow-y-auto overflow-x-auto scrollbar-thin">
             <table className="w-full text-left text-xs font-mono border-collapse">
               <thead className="bg-[#11111a] text-gray-400 border-b border-white/[0.08] select-none sticky top-0 z-10 shadow-sm">
                 <tr>
-                  <th className="py-2.5 px-3 w-20">Protocol</th>
-                  <th className="py-2.5 px-3 w-24">Port</th>
-                  <th className="py-2.5 px-3">Bind Address</th>
-                  <th className="py-2.5 px-3">Listening Process</th>
-                  <th className="py-2.5 px-3 w-20">PID</th>
-                  <th className="py-2.5 px-3 w-24 text-center">Exposure</th>
-                  <th className="py-2.5 px-3 text-right w-40">Firewall & Actions</th>
+                  <th className="py-2.5 px-4 w-24">Protocol</th>
+                  <th className="py-2.5 px-4 w-28">Port</th>
+                  <th className="py-2.5 px-4">Bind Address</th>
+                  <th className="py-2.5 px-4">Listening Process</th>
+                  <th className="py-2.5 px-4 w-24">PID</th>
+                  <th className="py-2.5 px-4 w-28 text-center">Exposure</th>
+                  <th className="py-2.5 px-4 text-right w-28">Port Kill</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">
                 {filteredPorts.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="py-16 text-center text-gray-500 font-sans text-xs">
-                      {loading ? 'Scanning listening sockets via ss -tulpn...' : 'No matching listening ports found'}
+                      {loading ? 'Scanning listening sockets via ss -tunlp...' : 'No matching listening ports found'}
                     </td>
                   </tr>
                 ) : (
                   filteredPorts.map((port, idx) => {
-                    const isSelected = selectedPortNum === port.port;
+                    const isSelected = selectedPort?.port === port.port && selectedPort?.protocol === port.protocol;
                     const isPublic = port.bindAddr === '0.0.0.0' || port.bindAddr === '*' || port.bindAddr === '::';
+                    const isUdp = port.protocol.toUpperCase().includes('UDP');
 
                     return (
                       <tr
                         key={`${port.protocol}-${port.port}-${idx}`}
-                        onClick={() => setSelectedPortNum(port.port)}
+                        onClick={() => setSelectedPort(port)}
                         onContextMenu={(e) => {
                           e.preventDefault();
-                          setSelectedPortNum(port.port);
-                          setContextMenu({ x: e.clientX, y: e.clientY, port });
+                          setSelectedPort(port);
+                          setContextMenu({
+                            x: e.clientX,
+                            y: e.clientY,
+                            target: { type: 'port', data: port }
+                          });
                         }}
-                        className={`cursor-pointer transition-colors ${
+                        className={`cursor-pointer transition-colors group ${
                           isSelected
                             ? 'bg-blue-600/25 border-l-2 border-l-blue-500 text-white font-medium'
                             : idx % 2 === 1
@@ -485,22 +546,32 @@ export default function NetworkManager() {
                             : 'bg-transparent hover:bg-white/[0.04]'
                         }`}
                       >
-                        <td className="py-2 px-3 uppercase font-bold text-blue-400">
-                          {port.protocol}
+                        <td className="py-2.5 px-4">
+                          <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                            isUdp 
+                              ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' 
+                              : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                          }`}>
+                            {port.protocol}
+                          </span>
                         </td>
-                        <td className="py-2 px-3 font-bold text-white">
+                        <td className="py-2.5 px-4 font-bold text-white text-sm">
                           :{port.port}
                         </td>
-                        <td className="py-2 px-3 text-gray-300">
+                        <td className="py-2.5 px-4 text-gray-300">
                           {port.bindAddr}
                         </td>
-                        <td className="py-2 px-3 font-semibold text-emerald-400 font-sans truncate max-w-xs">
+                        <td className="py-2.5 px-4 font-semibold text-emerald-400 font-sans truncate max-w-xs">
                           {port.process}
                         </td>
-                        <td className="py-2 px-3 text-gray-400">
-                          {port.pid || '—'}
+                        <td className="py-2.5 px-4 text-gray-400">
+                          {port.pid > 0 ? (
+                            <span className="text-gray-300 font-bold">{port.pid}</span>
+                          ) : (
+                            <span className="text-gray-600">—</span>
+                          )}
                         </td>
-                        <td className="py-2 px-3 text-center">
+                        <td className="py-2.5 px-4 text-center">
                           <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
                             isPublic
                               ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
@@ -509,29 +580,23 @@ export default function NetworkManager() {
                             {isPublic ? 'Public' : 'Localhost'}
                           </span>
                         </td>
-                        <td className="py-2 px-3 text-right space-x-1.5">
+                        <td className="py-2.5 px-4 text-right">
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleClosePort(port.port, port.protocol);
+                              setKillModalTarget({
+                                port: port.port,
+                                protocol: port.protocol,
+                                process: port.process,
+                                pid: port.pid,
+                              });
                             }}
-                            className="px-2 py-0.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[10px] font-medium transition-colors"
-                            title="Block Port in Firewall"
+                            className="px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/25 text-rose-400 border border-rose-500/30 text-[11px] font-semibold transition-all inline-flex items-center space-x-1 active:scale-95"
+                            title={`Kill Port :${port.port}`}
                           >
-                            Block
+                            <Zap className="w-3 h-3 text-rose-400" />
+                            <span>Kill</span>
                           </button>
-                          {port.pid > 0 && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleKillPortProcess(port.pid, port.port);
-                              }}
-                              className="p-1 rounded-lg hover:bg-rose-500/20 text-gray-400 hover:text-rose-400 transition-colors"
-                              title={`Terminate Process PID ${port.pid}`}
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
                         </td>
                       </tr>
                     );
@@ -542,17 +607,17 @@ export default function NetworkManager() {
           </div>
         )}
 
-        {/* 3. ACTIVE CONNECTIONS TAB */}
+        {/* 4. ACTIVE CONNECTIONS TAB */}
         {tab === 'conns' && (
           <div className="flex-1 overflow-y-auto overflow-x-auto scrollbar-thin">
             <table className="w-full text-left text-xs font-mono border-collapse">
               <thead className="bg-[#11111b] text-gray-400 border-b border-white/[0.08] select-none sticky top-0 z-10 shadow-sm">
                 <tr>
-                  <th className="py-2.5 px-3 w-20">Protocol</th>
-                  <th className="py-2.5 px-3">Local Address & Port</th>
-                  <th className="py-2.5 px-3">Remote Host & Port</th>
-                  <th className="py-2.5 px-3 w-32">Socket State</th>
-                  <th className="py-2.5 px-3 w-20 text-right">PID</th>
+                  <th className="py-2.5 px-4 w-20">Protocol</th>
+                  <th className="py-2.5 px-4">Local Address & Port</th>
+                  <th className="py-2.5 px-4">Remote Host & Port</th>
+                  <th className="py-2.5 px-4 w-32">Socket State</th>
+                  <th className="py-2.5 px-4 w-20 text-right">PID</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">
@@ -571,6 +636,15 @@ export default function NetworkManager() {
                       <tr 
                         key={key}
                         onClick={() => setSelectedConnKey(key)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setSelectedConnKey(key);
+                          setContextMenu({
+                            x: e.clientX,
+                            y: e.clientY,
+                            target: { type: 'conn', data: c }
+                          });
+                        }}
                         className={`cursor-pointer transition-colors ${
                           isSelected
                             ? 'bg-blue-600/25 border-l-2 border-l-blue-500 text-white font-medium'
@@ -579,10 +653,10 @@ export default function NetworkManager() {
                             : 'bg-transparent hover:bg-white/[0.04]'
                         }`}
                       >
-                        <td className="py-2 px-3 uppercase text-blue-400 font-bold">{c.protocol}</td>
-                        <td className="py-2 px-3 text-white font-semibold">{c.local}</td>
-                        <td className="py-2 px-3 text-gray-300">{c.remote}</td>
-                        <td className="py-2 px-3">
+                        <td className="py-2.5 px-4 uppercase text-blue-400 font-bold">{c.protocol}</td>
+                        <td className="py-2.5 px-4 text-white font-semibold">{c.local}</td>
+                        <td className="py-2.5 px-4 text-gray-300">{c.remote}</td>
+                        <td className="py-2.5 px-4">
                           <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
                             c.state === 'ESTABLISHED'
                               ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
@@ -593,7 +667,7 @@ export default function NetworkManager() {
                             {c.state}
                           </span>
                         </td>
-                        <td className="py-2 px-3 text-right text-gray-400">{c.pid || '—'}</td>
+                        <td className="py-2.5 px-4 text-right text-gray-400">{c.pid || '—'}</td>
                       </tr>
                     );
                   })
@@ -603,7 +677,7 @@ export default function NetworkManager() {
           </div>
         )}
 
-        {/* 4. PING DIAGNOSTICS TAB */}
+        {/* 5. PING DIAGNOSTICS TAB */}
         {tab === 'ping' && (
           <div className="flex-1 p-6 flex flex-col space-y-4 overflow-y-auto">
             <div className="bg-[#1a1d2e] p-5 rounded-2xl border border-white/[0.08] shadow-sm space-y-4 max-w-2xl">
@@ -657,7 +731,7 @@ export default function NetworkManager() {
           </div>
         )}
 
-        {/* 5. DNS LOOKUP TAB */}
+        {/* 6. DNS LOOKUP TAB */}
         {tab === 'dns' && (
           <div className="flex-1 p-6 flex flex-col space-y-4 overflow-y-auto">
             <div className="bg-[#1a1d2e] p-5 rounded-2xl border border-white/[0.08] shadow-sm space-y-4 max-w-2xl">
@@ -693,7 +767,7 @@ export default function NetworkManager() {
           </div>
         )}
 
-        {/* macOS Bottom Stats Bar */}
+        {/* macOS Bottom Status Bar */}
         <div className="bg-[#11111a] border-t border-white/[0.08] px-4 py-2 flex items-center justify-between text-xs text-gray-400 shrink-0 font-sans">
           <div className="flex items-center space-x-4">
             <span>Listening Ports: <b className="text-white font-mono">{ports.length}</b></span>
@@ -703,148 +777,78 @@ export default function NetworkManager() {
             <span>Network Devices: <b className="text-white font-mono">{interfaces.length}</b></span>
           </div>
 
-          <div className="flex items-center space-x-2 text-[11px]">
-            <Shield className="w-3.5 h-3.5 text-blue-400" />
-            <span>Firewall Managed via UFW / IPTables</span>
+          <div className="flex items-center space-x-3 text-[11px]">
+            {tab === 'ports' && selectedPort ? (
+              <div className="flex items-center space-x-2 text-rose-300 font-mono">
+                <span>Selected: :{selectedPort.port} ({selectedPort.process})</span>
+                <button
+                  onClick={() => {
+                    setKillModalTarget({
+                      port: selectedPort.port,
+                      protocol: selectedPort.protocol,
+                      process: selectedPort.process,
+                      pid: selectedPort.pid,
+                    });
+                  }}
+                  className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[10px] font-bold hover:bg-rose-500/30"
+                >
+                  Kill (Del)
+                </button>
+              </div>
+            ) : (
+              <span className="text-gray-500">
+                Right-click rows for actions & port kill options
+              </span>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Open Port Modal */}
-      {showOpenPortModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-150">
-          <form 
-            onSubmit={handleOpenPort} 
-            className="bg-[#181a2c] border border-white/15 rounded-3xl w-full max-w-sm p-6 space-y-4 shadow-2xl"
-          >
-            <div className="flex items-center justify-between pb-2 border-b border-white/10">
-              <div className="flex items-center space-x-2 text-white font-bold text-sm">
-                <Shield className="w-4 h-4 text-blue-400" />
-                <span>Open Firewall Port (UFW)</span>
-              </div>
-              <button 
-                type="button" 
-                onClick={() => setShowOpenPortModal(false)} 
-                className="p-1 hover:bg-white/10 rounded-lg text-gray-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs text-gray-300 block mb-1 font-medium">Port Number</label>
-                <input
-                  type="number"
-                  required
-                  autoFocus
-                  value={newPortNum}
-                  onChange={e => setNewPortNum(e.target.value)}
-                  placeholder="e.g. 80, 443, 8080, 3000, 5432"
-                  className="w-full bg-[#101018] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs text-gray-300 block mb-1 font-medium">Protocol</label>
-                <div className="flex bg-[#101018] p-1 rounded-xl border border-white/10">
-                  <button
-                    type="button"
-                    onClick={() => setNewPortProto('tcp')}
-                    className={`flex-1 py-1 rounded-lg text-xs font-mono font-bold transition-all ${
-                      newPortProto === 'tcp' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'
-                    }`}
-                  >
-                    TCP
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setNewPortProto('udp')}
-                    className={`flex-1 py-1 rounded-lg text-xs font-mono font-bold transition-all ${
-                      newPortProto === 'udp' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'
-                    }`}
-                  >
-                    UDP
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs text-gray-300 block mb-1 font-medium">Comment / Rule Description</label>
-                <input
-                  type="text"
-                  value={newPortDesc}
-                  onChange={e => setNewPortDesc(e.target.value)}
-                  placeholder="e.g. Node API, Web Server"
-                  className="w-full bg-[#101018] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-blue-500"
-                />
-              </div>
-            </div>
-
-            <div className="flex justify-end space-x-2 pt-2 border-t border-white/10">
-              <button
-                type="button"
-                onClick={() => setShowOpenPortModal(false)}
-                className="px-3.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-xs text-gray-300 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={!newPortNum.trim()}
-                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs font-semibold text-white shadow-md transition-all active:scale-95"
-              >
-                Allow Port
-              </button>
-            </div>
-          </form>
-        </div>
+      {/* Kill Port Modal */}
+      {killModalTarget && (
+        <KillPortModal
+          initialPort={killModalTarget.port}
+          initialProtocol={killModalTarget.protocol}
+          initialProcess={killModalTarget.process}
+          initialPid={killModalTarget.pid}
+          connId={activeConnId}
+          onClose={() => setKillModalTarget(null)}
+          onSuccess={(msg) => {
+            showToast(msg);
+            loadNetworkData();
+          }}
+        />
       )}
 
       {/* Right-Click Context Menu */}
       {contextMenu && (
-        <div
-          className="fixed z-50 bg-[#1e1e2e]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl py-1.5 w-56 text-xs text-gray-200 font-sans select-none animate-in fade-in duration-100"
-          style={{
-            top: Math.min(contextMenu.y, window.innerHeight - 200),
-            left: Math.min(contextMenu.x, window.innerWidth - 240)
+        <NetworkContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          target={contextMenu.target}
+          onClose={() => setContextMenu(null)}
+          onKillPort={(port, protocol, pid, signal) => {
+            handleExecuteKillPort(port, protocol, pid, signal);
           }}
-          onClick={e => e.stopPropagation()}
-        >
-          {contextMenu.port && (
-            <>
-              <div className="px-3.5 py-1 text-[11px] font-bold text-gray-400 border-b border-white/10 mb-1">
-                Port {contextMenu.port.port} ({contextMenu.port.process})
-              </div>
-              <div
-                onClick={() => {
-                  navigator.clipboard.writeText(String(contextMenu.port!.port));
-                  setContextMenu(null);
-                }}
-                className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 cursor-pointer"
-              >
-                <Copy className="w-3.5 h-3.5" />
-                <span>Copy Port Number</span>
-              </div>
-              <div
-                onClick={() => handleClosePort(contextMenu.port!.port, contextMenu.port!.protocol)}
-                className="px-3.5 py-1.5 hover:bg-amber-600 hover:text-white flex items-center space-x-2 cursor-pointer text-amber-300"
-              >
-                <ShieldAlert className="w-3.5 h-3.5" />
-                <span>Block in Firewall</span>
-              </div>
-              {contextMenu.port.pid > 0 && (
-                <div
-                  onClick={() => handleKillPortProcess(contextMenu.port!.pid, contextMenu.port!.port)}
-                  className="px-3.5 py-1.5 hover:bg-rose-600 hover:text-white flex items-center space-x-2 cursor-pointer text-rose-400"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  <span>Kill Listening Process</span>
-                </div>
-              )}
-            </>
-          )}
-        </div>
+          onOpenKillModal={(port, protocol, process, pid) => {
+            setKillModalTarget({ port, protocol, process, pid });
+          }}
+          onInspectTerminal={(cmd) => {
+            runTerminalCommand(cmd);
+            openApp('terminal', 'Terminal');
+          }}
+          onOpenProcessManager={(pid) => {
+            openApp('processes', 'Processes');
+          }}
+          onSwitchToSpeedTest={() => {
+            setTab('speedtest');
+          }}
+          onPingHost={(host) => {
+            setTab('ping');
+            setPingHost(host);
+            setTimeout(() => runPing(), 200);
+          }}
+        />
       )}
     </div>
   );

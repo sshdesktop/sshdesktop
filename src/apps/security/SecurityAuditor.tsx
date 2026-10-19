@@ -446,10 +446,10 @@ export default function SecurityAuditor() {
       )}
 
       {/* 1. macOS Top Header Toolbar */}
-      <header className="px-5 py-3.5 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between shrink-0">
+      <header className="px-5 py-3.5 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between shrink-0 overflow-x-auto no-scrollbar gap-3">
         
         {/* Left: App Identity */}
-        <div className="flex items-center space-x-3.5">
+        <div className="flex items-center space-x-3.5 shrink-0">
           <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/25 border border-white/20">
             <ShieldCheck className="w-5 h-5 text-white" />
           </div>
@@ -470,7 +470,7 @@ export default function SecurityAuditor() {
         </div>
 
         {/* Center: Segmented Navigation Switcher */}
-        <div className="flex items-center bg-[#1e1e2e]/90 p-1 rounded-2xl border border-white/10 shadow-inner">
+        <div className="flex items-center bg-[#1e1e2e]/90 p-1 rounded-2xl border border-white/10 shadow-inner shrink-0">
           <button
             onClick={() => setActiveTab('audit')}
             className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-all ${
@@ -545,7 +545,7 @@ export default function SecurityAuditor() {
         </div>
 
         {/* Right: Rescan Button */}
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 shrink-0">
           <button
             onClick={runSecurityAudit}
             disabled={scanning}
@@ -558,7 +558,7 @@ export default function SecurityAuditor() {
       </header>
 
       {/* 2. Top Hardening Benchmark Metric Card */}
-      <div className="px-5 py-3 bg-[#161622] border-b border-white/[0.06] flex items-center justify-between shrink-0">
+      <div className="px-5 py-3 bg-[#161622] border-b border-white/[0.06] flex items-center justify-between shrink-0 overflow-x-auto no-scrollbar gap-4">
         
         {/* Score Ring & Diagnosis */}
         <div className="flex items-center space-x-4">
