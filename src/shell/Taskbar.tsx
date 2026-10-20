@@ -3,18 +3,51 @@ import { createPortal } from 'react-dom';
 import { 
   Cloud, Bell, LogOut, Settings, ShieldCheck, Terminal, Cpu, MemoryStick,
   Palette, Sun, Moon, Minimize2, Eye, EyeOff, Server, ChevronDown, Check, Plus, X, Lock,
-  Trash2, Search, Key, Upload, FileCode, ArrowRight, Shield, Globe, RefreshCw
+  Trash2, Search, Key, Upload, FileCode, ArrowRight, Shield, Globe, RefreshCw,
+  Folder, Activity, Container, Database, HardDrive, Flame, ScrollText, Package,
+  Users, Clock, StickyNote, Variable, KeyRound, Compass, Send, LayoutGrid, Monitor
 } from 'lucide-react';
 import { useConnectionStore, useSettingsStore, useWindowStore, useTelemetryStore } from '../lib/store';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
 import { pickKeyFile } from '../lib/tauri-bridge';
 
+const TASKBAR_ICONS: Record<string, React.ElementType> = {
+  terminal: Terminal,
+  files: Folder,
+  editor: FileCode,
+  ssh: KeyRound,
+  browser: Compass,
+  api: Send,
+  monitor: Monitor,
+  processes: Activity,
+  services: Server,
+  docker: Container,
+  logs: ScrollText,
+  env: Variable,
+  database: Database,
+  disks: HardDrive,
+  network: Globe,
+  firewall: Flame,
+  packages: Package,
+  users: Users,
+  cron: Clock,
+  security: Shield,
+  notes: StickyNote,
+  settings: Settings,
+};
+
+function getTaskbarIcon(appId: string): React.ElementType {
+  return TASKBAR_ICONS[appId] || Terminal;
+}
+
 export default function Taskbar({ 
   onOpenWallpapers, 
-  onLockScreen 
+  onLockScreen,
+  onToggleLauncher,
 }: { 
   onOpenWallpapers?: () => void;
   onLockScreen?: () => void;
+  onToggleLauncher?: () => void;
 }) {
   const { 
     activeConnectionId, 
@@ -28,7 +61,7 @@ export default function Taskbar({
     removeConnection 
   } = useConnectionStore();
   const { theme, updateSettings } = useSettingsStore();
-  const { minimizeAllWindows, windows, closeWindow } = useWindowStore();
+  const { minimizeAllWindows, windows, closeWindow, minimizeWindow, restoreWindow, focusWindow, bringToFront } = useWindowStore();
   const { openApp } = useWindowManager();
 
   const [time, setTime] = useState('');
@@ -244,20 +277,40 @@ export default function Taskbar({
   const isLight = theme === 'light';
 
   return (
-    <div className={`taskbar-bar fixed top-0 left-0 w-full h-8 backdrop-blur-xl border-b flex items-center justify-between px-3 z-[999999] text-xs window-drag select-none shadow-sm ${
+    <div className={`taskbar-bar fixed top-0 left-0 w-full h-8 backdrop-blur-xl border-b flex items-center justify-between px-2.5 z-[999999] text-xs window-drag select-none shadow-sm ${
       isLight ? 'bg-white/85 text-slate-800 border-black/10' : 'bg-[#14141e]/90 text-gray-300 border-white/[0.08]'
     }`}>
-      {/* Left Menu Items - Apple / CloudDesk Brand */}
-      <div className="flex items-center space-x-3 window-no-drag">
-        <div className="relative">
+      {/* LEFT SECTION: 1st = START, 2nd = SOFTWARE (Professionally Aligned) */}
+      <div className="flex items-center space-x-2 window-no-drag flex-1 min-w-0 pr-4">
+        {/* 1st: START BUTTON */}
+        <div className="relative shrink-0">
+          <button
+            onClick={() => onToggleLauncher?.()}
+            className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg font-bold transition-all cursor-pointer select-none border shadow-sm active:scale-95 ${
+              isLight
+                ? 'bg-blue-600 hover:bg-blue-500 text-white border-blue-500 shadow-blue-500/20'
+                : 'bg-gradient-to-r from-blue-600 via-blue-500 to-indigo-600 hover:brightness-110 text-white border-blue-400/40 shadow-[0_2px_12px_rgba(37,99,235,0.35)]'
+            }`}
+            title="Start Menu - All Software & Tools (Click to open Launchpad)"
+          >
+            <Cloud className="w-4 h-4 text-white" />
+            <span className="font-bold tracking-tight text-xs">Start</span>
+          </button>
+        </div>
+
+        {/* System Controls Dropdown (System ▾) */}
+        <div className="relative shrink-0">
           <button
             onClick={() => setShowAppleMenu(!showAppleMenu)}
-            className={`flex items-center space-x-1.5 p-1 rounded font-bold transition-colors cursor-pointer ${
-              isLight ? 'hover:bg-black/5 text-slate-900' : 'hover:bg-white/10 text-white'
+            className={`flex items-center space-x-1 px-2 py-1 rounded-lg font-medium transition-colors cursor-pointer border ${
+              isLight 
+                ? 'hover:bg-black/5 text-slate-800 border-black/10' 
+                : 'hover:bg-white/10 text-gray-300 border-white/10 bg-white/[0.03]'
             }`}
+            title="CloudDesk System Preferences & Controls"
           >
-            <Cloud className="w-4 h-4 text-blue-500" />
-            <span className="font-semibold tracking-tight">CloudDesk</span>
+            <span className="font-semibold text-[11px]">System</span>
+            <ChevronDown className="w-3 h-3 opacity-60" />
           </button>
 
           {showAppleMenu && (
@@ -324,10 +377,89 @@ export default function Taskbar({
             </div>
           )}
         </div>
+
+        {/* Divider between 1st (Start) and 2nd (Software) */}
+        <div className={`w-px h-5 mx-0.5 shrink-0 ${isLight ? 'bg-black/15' : 'bg-white/15'}`} />
+
+        {/* 2nd: SOFTWARE (Active Running Windows & Quick-Launch Software) */}
+        <div className="flex items-center space-x-1.5 overflow-x-auto scrollbar-none py-0.5 min-w-0">
+          {/* Running Software Window Tabs */}
+          {windows.map(win => {
+            const isFocused = win.focused && !win.minimized;
+            const Icon = getTaskbarIcon(win.appId);
+            return (
+              <button
+                key={win.id}
+                onClick={() => {
+                  if (win.focused && !win.minimized) {
+                    minimizeWindow(win.id);
+                  } else {
+                    restoreWindow(win.id);
+                    bringToFront(win.id);
+                    focusWindow(win.id);
+                  }
+                }}
+                className={`flex items-center space-x-1.5 px-2.5 py-0.5 rounded-lg text-xs transition-all cursor-pointer max-w-[170px] truncate border group select-none shrink-0 ${
+                  isFocused
+                    ? 'bg-blue-600/35 border-blue-400/70 text-white font-semibold shadow-sm ring-1 ring-blue-400/30'
+                    : win.minimized
+                    ? 'bg-black/25 border-white/10 text-gray-400 hover:text-white opacity-70'
+                    : isLight
+                    ? 'bg-black/5 border-black/10 text-slate-700 hover:text-slate-900 hover:bg-black/10'
+                    : 'bg-white/5 border-white/10 text-gray-300 hover:text-white hover:bg-white/10'
+                }`}
+                title={`${win.title}${win.minimized ? ' (Minimized)' : ''}`}
+              >
+                <Icon className={`w-3.5 h-3.5 shrink-0 ${isFocused ? 'text-blue-400' : 'text-gray-400'}`} />
+                <span className="truncate text-[11px] font-sans">{win.title}</span>
+                <span
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    closeWindow(win.id);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 hover:text-rose-400 p-0.5 rounded text-[10px] ml-auto transition-opacity"
+                  title="Close Window"
+                >
+                  ✕
+                </span>
+              </button>
+            );
+          })}
+
+          {/* Quick-Launch Software shortcuts when no windows are open */}
+          {windows.length === 0 && (
+            <div className="flex items-center space-x-1 text-gray-400 shrink-0">
+              {[
+                { id: 'terminal', label: 'Terminal', icon: Terminal },
+                { id: 'files', label: 'Files', icon: Folder },
+                { id: 'editor', label: 'Editor', icon: FileCode },
+                { id: 'monitor', label: 'Monitor', icon: Monitor },
+                { id: 'docker', label: 'Docker', icon: Container },
+              ].map(app => {
+                const AppIcon = app.icon;
+                return (
+                  <button
+                    key={app.id}
+                    onClick={() => openApp(app.id, app.label)}
+                    className={`flex items-center space-x-1.5 px-2.5 py-0.5 rounded-lg transition-all text-[11px] font-medium border cursor-pointer ${
+                      isLight
+                        ? 'bg-black/5 border-black/5 text-slate-700 hover:bg-blue-600 hover:text-white hover:border-blue-500'
+                        : 'bg-white/5 border-white/5 text-gray-300 hover:bg-blue-600 hover:text-white hover:border-blue-500'
+                    }`}
+                    title={`Launch ${app.label}`}
+                  >
+                    <AppIcon className="w-3.5 h-3.5 text-blue-400 group-hover:text-white" />
+                    <span>{app.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Right System Tray */}
-      <div className="flex items-center space-x-3 window-no-drag font-mono text-[11px]">
+      <div className="flex items-center space-x-3 window-no-drag font-mono text-[11px] shrink-0">
         {/* Connected Servers Horizontal Tab Bar with + button */}
         <div className="flex items-center space-x-1 max-w-lg overflow-x-auto scrollbar-none py-0.5">
           {(() => {
