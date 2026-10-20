@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { useConnectionStore, useWindowStore, useSettingsStore } from './lib/store';
+import { useConnectionStore, useWindowStore, useSettingsStore, useNotificationStore } from './lib/store';
 import { storeSaveConnection, settingsGet } from './lib/tauri-bridge';
 import ConnectionScreen from './pages/ConnectionScreen';
 import Desktop from './shell/Desktop';
@@ -107,6 +107,101 @@ export default function App() {
       return () => mediaQuery.removeEventListener('change', handler);
     }
   }, [theme]);
+
+  // Global Protection: Disable browser reload, save page as, inspect, and handle right-click safely across all applications
+  useEffect(() => {
+    // 1. Right-click context menu interceptor (capture phase)
+    const handleGlobalContextMenu = (e: MouseEvent) => {
+      // Prevent native browser menu ("Reload", "Save as...", "Inspect") from ever appearing
+      e.preventDefault();
+    };
+
+    // 2. Keyboard shortcuts interceptor (capture phase)
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const isCtrlOrMeta = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+
+      // Intercept browser reload: Ctrl+R, Ctrl+Shift+R, F5, Ctrl+F5
+      if ((isCtrlOrMeta && key === 'r') || e.key === 'F5') {
+        const target = e.target as HTMLElement | null;
+        const isInsideTerminal = Boolean(target?.closest('.xterm') || target?.closest('.terminal-app'));
+
+        // If inside a terminal: in Linux shell (bash/zsh), Ctrl+R triggers reverse command history search!
+        // We MUST prevent browser reload (e.preventDefault()), but allow the terminal to process the Ctrl+R key code!
+        if (isInsideTerminal && isCtrlOrMeta && key === 'r') {
+          e.preventDefault();
+          return;
+        }
+
+        // Always prevent host browser/webview reload
+        e.preventDefault();
+        e.stopPropagation();
+
+        // Check if the currently focused window is the Browser app
+        const windows = useWindowStore.getState().windows;
+        const focusedWin = windows.find(w => w.focused);
+        const isInsideBrowserApp = focusedWin?.appId === 'browser' || Boolean(target?.closest('.browser-app'));
+
+        if (isInsideBrowserApp) {
+          // Forward reload to active BrowserApp tab
+          window.dispatchEvent(new CustomEvent('sshdesktop:browser-reload'));
+        } else {
+          // Inform the user that full application reload is safely prevented
+          useNotificationStore.getState().addNotification({
+            title: 'Reload Blocked',
+            message: 'Session reload was prevented to protect your active SSH connections and open windows. Use System ▾ > Restart Session if you wish to reset.',
+            type: 'info'
+          });
+        }
+        return;
+      }
+
+      // Intercept browser "Save Page As" (Ctrl+S / Cmd+S)
+      if (isCtrlOrMeta && key === 's') {
+        const target = e.target as HTMLElement | null;
+        const isEditable = Boolean(
+          target?.tagName === 'INPUT' ||
+          target?.tagName === 'TEXTAREA' ||
+          target?.isContentEditable ||
+          target?.closest('.monaco-editor') ||
+          target?.closest('.code-editor') ||
+          target?.closest('.note-editor')
+        );
+
+        // If not inside an editor that has its own save handler, block browser "Save Page As HTML..."
+        if (!isEditable) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        return;
+      }
+
+      // Intercept browser "Print" (Ctrl+P / Cmd+P)
+      if (isCtrlOrMeta && key === 'p') {
+        const target = e.target as HTMLElement | null;
+        if (!target?.closest('.spotlight-search')) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        return;
+      }
+
+      // Intercept browser "View Page Source" (Ctrl+U / Cmd+U)
+      if (isCtrlOrMeta && key === 'u') {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+    };
+
+    window.addEventListener('contextmenu', handleGlobalContextMenu, { capture: true });
+    window.addEventListener('keydown', handleGlobalKeyDown, { capture: true });
+
+    return () => {
+      window.removeEventListener('contextmenu', handleGlobalContextMenu, { capture: true });
+      window.removeEventListener('keydown', handleGlobalKeyDown, { capture: true });
+    };
+  }, []);
 
   const isLight = theme === 'light' || (theme === 'auto' && !window.matchMedia('(prefers-color-scheme: dark)').matches);
 

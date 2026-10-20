@@ -6,7 +6,7 @@ import '@xterm/xterm/css/xterm.css';
 import { 
   Plus, X, Terminal as TerminalIcon, Trash2, ChevronDown, Server, 
   ExternalLink, ShieldAlert, Activity, RefreshCw, Copy, CornerDownLeft,
-  ZoomIn, ZoomOut
+  ZoomIn, ZoomOut, Clipboard, RotateCcw, Check
 } from 'lucide-react';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
@@ -73,6 +73,72 @@ export default function TerminalApp() {
       }
     });
   }, []);
+
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; hasSelection: boolean } | null>(null);
+  const [copiedNotice, setCopiedNotice] = useState(false);
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const inst = tabInstances.current.get(activeTab);
+    const sel = inst?.term.getSelection() || '';
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      hasSelection: Boolean(sel && sel.trim().length > 0)
+    });
+  };
+
+  useEffect(() => {
+    const handleGlobalClick = () => setContextMenu(null);
+    window.addEventListener('click', handleGlobalClick);
+    return () => window.removeEventListener('click', handleGlobalClick);
+  }, []);
+
+  const handleCopySelection = () => {
+    const inst = tabInstances.current.get(activeTab);
+    const sel = inst?.term.getSelection();
+    if (sel) {
+      navigator.clipboard.writeText(sel);
+      setCopiedNotice(true);
+      setTimeout(() => setCopiedNotice(false), 2000);
+    }
+    setContextMenu(null);
+  };
+
+  const handlePasteClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        const bytes = Array.from(new TextEncoder().encode(text));
+        await terminalWrite(activeTab, bytes);
+      }
+    } catch (err) {
+      console.warn('Clipboard paste notice:', err);
+    }
+    setContextMenu(null);
+  };
+
+  const handleSelectAll = () => {
+    const inst = tabInstances.current.get(activeTab);
+    inst?.term.selectAll();
+    setContextMenu(null);
+  };
+
+  const handleClearScreen = () => {
+    const inst = tabInstances.current.get(activeTab);
+    inst?.term.clear();
+    const bytes = Array.from(new TextEncoder().encode('clear\r'));
+    terminalWrite(activeTab, bytes).catch(() => {});
+    setContextMenu(null);
+  };
+
+  const handleResetTerminal = () => {
+    const inst = tabInstances.current.get(activeTab);
+    inst?.term.reset();
+    inst?.fitAddon.fit();
+    setContextMenu(null);
+  };
 
   // Listen to Tauri terminal-output events globally with cancellation protection
   useEffect(() => {
@@ -673,7 +739,10 @@ export default function TerminalApp() {
       </div>
 
       {/* Terminal Viewports Container - Each tab keeps its DOM alive! */}
-      <div className="flex-1 relative bg-[#14141e] overflow-hidden">
+      <div 
+        className="flex-1 relative bg-[#14141e] overflow-hidden terminal-app"
+        onContextMenu={handleContextMenu}
+      >
         {tabs.map(tab => (
           <div
             key={tab.id}
@@ -729,6 +798,97 @@ export default function TerminalApp() {
           <span>/bin/bash</span>
         </div>
       </div>
+
+      {/* Floating Terminal Context Menu */}
+      {contextMenu && (
+        <div 
+          className="fixed z-[9999999] w-52 bg-[#181825]/95 backdrop-blur-xl border border-white/15 rounded-xl shadow-[0_15px_50px_rgba(0,0,0,0.6)] py-1.5 text-xs text-gray-200 animate-in fade-in zoom-in-95 duration-100 select-none font-sans"
+          style={{ 
+            top: `${Math.min(contextMenu.y, window.innerHeight - 260)}px`, 
+            left: `${Math.min(contextMenu.x, window.innerWidth - 220)}px` 
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {contextMenu.hasSelection && (
+            <button
+              onClick={handleCopySelection}
+              className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center justify-between text-left transition-colors cursor-pointer"
+            >
+              <div className="flex items-center space-x-2">
+                <Copy className="w-3.5 h-3.5 text-blue-400" />
+                <span>Copy Selection</span>
+              </div>
+              <span className="text-[10px] text-gray-400 font-mono">Ctrl+C</span>
+            </button>
+          )}
+
+          <button
+            onClick={handlePasteClipboard}
+            className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center justify-between text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center space-x-2">
+              <Clipboard className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Paste from Clipboard</span>
+            </div>
+            <span className="text-[10px] text-gray-400 font-mono">Ctrl+V</span>
+          </button>
+
+          <button
+            onClick={handleSelectAll}
+            className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center justify-between text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center space-x-2">
+              <CornerDownLeft className="w-3.5 h-3.5 text-gray-400" />
+              <span>Select All</span>
+            </div>
+            <span className="text-[10px] text-gray-400 font-mono">Ctrl+A</span>
+          </button>
+
+          <div className="my-1 border-t border-white/10 mx-2" />
+
+          <button
+            onClick={handleClearScreen}
+            className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 text-left transition-colors cursor-pointer"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-amber-400" />
+            <span>Clear Screen (clear)</span>
+          </button>
+
+          <button
+            onClick={handleResetTerminal}
+            className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 text-left transition-colors cursor-pointer"
+          >
+            <RotateCcw className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Reset & Redraw</span>
+          </button>
+
+          <div className="my-1 border-t border-white/10 mx-2" />
+
+          <button
+            onClick={() => { addTab(); setContextMenu(null); }}
+            className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 text-left transition-colors cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5 text-emerald-400" />
+            <span>New Terminal Tab</span>
+          </button>
+
+          <button
+            onClick={() => { handleLaunchPutty(); setContextMenu(null); }}
+            className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 text-left transition-colors cursor-pointer"
+          >
+            <ExternalLink className="w-3.5 h-3.5 text-blue-400" />
+            <span>Launch Standalone PuTTY</span>
+          </button>
+        </div>
+      )}
+
+      {/* Copy Toast */}
+      {copiedNotice && (
+        <div className="absolute bottom-10 right-4 bg-emerald-600/90 text-white px-3 py-1.5 rounded-lg shadow-xl text-xs flex items-center space-x-2 backdrop-blur-md animate-in fade-in slide-in-from-bottom-2 select-none z-[99999]">
+          <Check className="w-3.5 h-3.5" />
+          <span>Copied to clipboard!</span>
+        </div>
+      )}
     </div>
   );
 }

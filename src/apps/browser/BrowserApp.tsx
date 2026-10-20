@@ -452,8 +452,30 @@ export default function BrowserApp() {
     persistBookmarksToServer(nextList);
   };
 
+  // Listen for global Ctrl+R or F5 dispatched to active browser app
+  useEffect(() => {
+    const handleReloadEvent = () => {
+      if (activeTab) {
+        navigateUrl(activeTab.displayUrl || activeTab.url);
+      }
+    };
+    window.addEventListener('sshdesktop:browser-reload', handleReloadEvent);
+    return () => window.removeEventListener('sshdesktop:browser-reload', handleReloadEvent);
+  }, [activeTab, navigateUrl]);
+
   return (
-    <div className="flex flex-col h-full w-full bg-[#1e1e2e] text-[#cdd6f4] select-none overflow-hidden font-sans">
+    <div 
+      className="flex flex-col h-full w-full bg-[#1e1e2e] text-[#cdd6f4] select-none overflow-hidden font-sans browser-app"
+      onKeyDown={(e) => {
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R') || e.key === 'F5') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (activeTab) {
+            navigateUrl(activeTab.displayUrl || activeTab.url);
+          }
+        }
+      }}
+    >
       {/* Top Tabs Bar */}
       <div className="flex items-center justify-between px-2 pt-1.5 bg-[#181825] border-b border-white/[0.08] shrink-0">
         <div className="flex items-center space-x-1 overflow-x-auto no-scrollbar">
