@@ -45,6 +45,38 @@ pub async fn run_exec_channel(
     Ok((String::from_utf8_lossy(&stdout).to_string(), exit_code))
 }
 
+pub async fn run_exec_channel_with_stdin(
+    handle: &ClientHandle,
+    cmd: &str,
+    stdin_data: &[u8],
+) -> Result<(String, i32), Box<dyn std::error::Error + Send + Sync>> {
+    let mut channel = handle.channel_open_session().await?;
+    channel.exec(true, cmd).await?;
+    if !stdin_data.is_empty() {
+        channel.data(stdin_data).await?;
+    }
+    channel.eof().await?;
+    let mut stdout = Vec::new();
+    let mut exit_code = 0;
+
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            ChannelMsg::Data { ref data } => {
+                stdout.extend_from_slice(data);
+            }
+            ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                stdout.extend_from_slice(data);
+            }
+            ChannelMsg::ExitStatus { exit_status } => {
+                exit_code = exit_status as i32;
+            }
+            _ => {}
+        }
+    }
+
+    Ok((String::from_utf8_lossy(&stdout).to_string(), exit_code))
+}
+
 pub async fn run_stream_channel(
     app: &tauri::AppHandle,
     handle: &ClientHandle,
@@ -112,11 +144,25 @@ pub async fn connect_session(
     let mut authenticated = false;
 
     if let Some(key_p) = key_path {
-        if !key_p.is_empty() {
-            if let Ok(key) = russh_keys::decode_secret_key(key_p, None) {
-                authenticated = handle.authenticate_publickey(user, Arc::new(key)).await?;
-            } else if let Ok(key) = russh_keys::load_secret_key(key_p, None) {
-                authenticated = handle.authenticate_publickey(user, Arc::new(key)).await?;
+        let trimmed_key = key_p.trim();
+        if !trimmed_key.is_empty() {
+            // 1. Try loading from file path
+            if let Ok(key) = russh_keys::load_secret_key(trimmed_key, None) {
+                authenticated = handle.authenticate_publickey(user, Arc::new(key)).await.unwrap_or(false);
+            }
+            // 2. Try decoding directly as PEM string
+            if !authenticated {
+                if let Ok(key) = russh_keys::decode_secret_key(trimmed_key, None) {
+                    authenticated = handle.authenticate_publickey(user, Arc::new(key)).await.unwrap_or(false);
+                }
+            }
+            // 3. Try reading file on disk then decoding content
+            if !authenticated {
+                if let Ok(content) = std::fs::read_to_string(trimmed_key) {
+                    if let Ok(key) = russh_keys::decode_secret_key(&content, None) {
+                        authenticated = handle.authenticate_publickey(user, Arc::new(key)).await.unwrap_or(false);
+                    }
+                }
             }
         }
     }

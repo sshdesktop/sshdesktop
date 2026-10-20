@@ -76,8 +76,11 @@ pub fn write_connections_to_disk(list: &[SavedConnection]) -> Result<(), String>
 fn sanitize_connection_secrets(connection: &mut SavedConnection) {
     if let Some(ref key_str) = connection.private_key_path {
         let trimmed = key_str.trim();
-        if trimmed.contains("PRIVATE KEY") || trimmed.contains("PuTTY-User-Key-File") || trimmed.lines().count() > 2 {
-            connection.private_key_path = None;
+        if trimmed.contains("PRIVATE KEY") || trimmed.contains("PuTTY-User-Key-File") || trimmed.lines().count() > 1 {
+            let conn_id = if connection.id.is_empty() { "default" } else { &connection.id };
+            if let Some(saved_path) = crate::ssh::connection::ensure_key_file(conn_id, trimmed) {
+                connection.private_key_path = Some(saved_path);
+            }
         }
     }
 }
