@@ -158,13 +158,16 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
 
     let is_ppk = config.private_key_path.as_deref().map(is_ppk_key).unwrap_or(false);
 
-    // 0. Primary Fast Path: Try establishing persistent in-memory SSH transport (for PEM/OpenSSH keys or password)
+    let auth_method = config.auth_method.as_deref().unwrap_or("password");
+    let is_key_auth = auth_method == "key" || config.private_key_path.is_some();
+
+    // 0. Primary Fast Path: Try establishing persistent in-memory SSH transport
     if !is_ppk {
         if let Ok(handle) = crate::ssh::session::connect_session(
             host,
             config.port,
             user,
-            config.password.as_deref(),
+            if is_key_auth { None } else { config.password.as_deref() },
             config.private_key_path.as_deref(),
         ).await {
             verified = true;
@@ -176,71 +179,121 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
         }
     }
 
-    // 1. If PPK key is provided, use PuTTY's plink with -i
-    if !verified && is_ppk {
-        if let Some(key_path) = &config.private_key_path {
-            let plink_bin = get_plink_path();
-            let mut cmd = tokio::process::Command::new(plink_bin);
-            #[cfg(windows)]
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    // 1. If Key authentication is requested (PPK or PEM)
+    if !verified && is_key_auth {
+        if is_ppk {
+            if let Some(key_path) = &config.private_key_path {
+                let plink_bin = get_plink_path();
+                let mut cmd = tokio::process::Command::new(plink_bin);
+                #[cfg(windows)]
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
-            cmd.arg("-ssh")
-                .arg("-P")
-                .arg(&port)
-                .arg("-l")
-                .arg(user)
-                .arg("-i")
-                .arg(key_path)
-                .arg(host)
-                .arg("echo clouddesk-connected")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
+                cmd.arg("-ssh")
+                    .arg("-P")
+                    .arg(&port)
+                    .arg("-l")
+                    .arg(user)
+                    .arg("-i")
+                    .arg(key_path)
+                    .arg(host)
+                    .arg("echo clouddesk-connected")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
 
-            match cmd.spawn() {
-                Ok(mut child) => {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
-                    }
-                    match tokio::time::timeout(std::time::Duration::from_secs(12), child.wait_with_output()).await {
-                        Ok(Ok(out)) => {
-                            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                            if out.status.success() || stdout.contains("clouddesk-connected") {
-                                verified = true;
-                                log::info!("CloudDesk: Plink connection test with PuTTY PPK successful for {}", host);
-                            } else {
-                                let err_raw = if !stderr.is_empty() { stderr } else { stdout };
-                                last_error = err_raw
-                                    .lines()
-                                    .filter(|l| !l.contains("Store key in cache") && !l.contains("The server's") && !l.contains("fingerprint"))
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                                    .trim()
-                                    .to_string();
-                                if last_error.is_empty() {
-                                    last_error = "PuTTY PPK authentication failed (access denied)".to_string();
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        if let Some(mut stdin) = child.stdin.take() {
+                            let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
+                        }
+                        match tokio::time::timeout(std::time::Duration::from_secs(12), child.wait_with_output()).await {
+                            Ok(Ok(out)) => {
+                                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                                if out.status.success() || stdout.contains("clouddesk-connected") {
+                                    verified = true;
+                                    log::info!("CloudDesk: Plink connection test with PuTTY PPK successful for {}", host);
+                                } else {
+                                    let err_raw = if !stderr.is_empty() { stderr } else { stdout };
+                                    last_error = err_raw
+                                        .lines()
+                                        .filter(|l| !l.contains("Store key in cache") && !l.contains("The server's") && !l.contains("fingerprint"))
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                        .trim()
+                                        .to_string();
+                                    if last_error.is_empty() {
+                                        last_error = "PuTTY PPK authentication failed (access denied)".to_string();
+                                    }
+                                    log::warn!("CloudDesk: Plink PPK test failed for {}: {}", host, last_error);
                                 }
-                                log::warn!("CloudDesk: Plink PPK test failed for {}: {}", host, last_error);
+                            }
+                            Ok(Err(e)) => {
+                                last_error = format!("Plink PPK error: {}", e);
+                            }
+                            Err(_) => {
+                                last_error = format!("Connection timed out connecting to {}:{} with PuTTY PPK key", host, port);
                             }
                         }
-                        Ok(Err(e)) => {
-                            last_error = format!("Plink PPK error: {}", e);
-                        }
-                        Err(_) => {
-                            last_error = format!("Connection timed out connecting to {}:{} with PuTTY PPK key", host, port);
-                        }
+                    }
+                    Err(e) => {
+                        last_error = format!("Could not launch plink for PPK key auth: {}", e);
                     }
                 }
-                Err(e) => {
-                    last_error = format!("Could not launch plink for PPK key auth: {}", e);
+            }
+        } else {
+            // OpenSSH auth (for PEM keys)
+            let mut ssh_test = tokio::process::Command::new("ssh");
+            #[cfg(windows)]
+            ssh_test.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+            ssh_test
+                .arg("-p")
+                .arg(&port)
+                .arg("-o")
+                .arg("StrictHostKeyChecking=accept-new")
+                .arg("-o")
+                .arg("BatchMode=yes")
+                .arg("-o")
+                .arg("IdentitiesOnly=yes")
+                .arg("-o")
+                .arg("ConnectTimeout=6");
+
+            if let Some(key) = &config.private_key_path {
+                if resolve_key_path(key).is_some() {
+                    ssh_test.arg("-i").arg(key);
+                }
+            }
+
+            ssh_test.arg(format!("{}@{}", user, host)).arg("echo clouddesk-connected");
+
+            match tokio::time::timeout(std::time::Duration::from_secs(8), ssh_test.output()).await {
+                Ok(Ok(out)) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                    if out.status.success() || stdout.contains("clouddesk-connected") {
+                        verified = true;
+                        log::info!("CloudDesk: OpenSSH connection test successful for {}", host);
+                    } else {
+                        last_error = if !stderr.is_empty() {
+                            stderr.trim().to_string()
+                        } else {
+                            "OpenSSH authentication failed (Permission denied)".to_string()
+                        };
+                    }
+                }
+                Ok(Err(e)) => {
+                    last_error = format!("OpenSSH execution error: {}", e);
+                }
+                Err(_) => {
+                    last_error = format!("Connection timed out after 8s connecting to {}:{}", host, port);
                 }
             }
         }
     }
 
-    // 2. Password auth via plink
-    if !verified {
+    // 2. Password auth via plink (only if not key auth)
+    if !verified && !is_key_auth {
         if let Some(pwd) = &config.password {
             if !pwd.is_empty() {
                 let plink_bin = get_plink_path();
@@ -300,54 +353,6 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                         last_error = format!("Could not launch plink: {}", e);
                     }
                 }
-            }
-        }
-    }
-
-    // 3. OpenSSH auth (for PEM keys)
-    if !verified && !is_ppk && (config.password.is_none() || config.password.as_ref().map(|s| s.is_empty()).unwrap_or(true)) {
-        let mut ssh_test = tokio::process::Command::new("ssh");
-        #[cfg(windows)]
-        ssh_test.creation_flags(0x08000000); // CREATE_NO_WINDOW
-
-        ssh_test
-            .arg("-p")
-            .arg(&port)
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new")
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-o")
-            .arg("ConnectTimeout=6");
-
-        if let Some(key) = &config.private_key_path {
-            if resolve_key_path(key).is_some() {
-                ssh_test.arg("-i").arg(key);
-            }
-        }
-
-        ssh_test.arg(format!("{}@{}", user, host)).arg("echo clouddesk-connected");
-
-        match tokio::time::timeout(std::time::Duration::from_secs(10), ssh_test.output()).await {
-            Ok(Ok(out)) => {
-                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                if out.status.success() || stdout.contains("clouddesk-connected") {
-                    verified = true;
-                    log::info!("CloudDesk: OpenSSH connection test successful for {}", host);
-                } else {
-                    last_error = if !stderr.is_empty() {
-                        stderr.trim().to_string()
-                    } else {
-                        "OpenSSH authentication failed (Permission denied)".to_string()
-                    };
-                }
-            }
-            Ok(Err(e)) => {
-                last_error = format!("OpenSSH execution error: {}", e);
-            }
-            Err(_) => {
-                last_error = format!("Connection timed out after 10s connecting to {}:{}", host, port);
             }
         }
     }

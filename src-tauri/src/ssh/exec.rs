@@ -75,10 +75,14 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
     let user = conn.config.username.clone();
     let destination = format!("{}@{}", user, host);
 
-    // ── 1. Password auth via plink ──────────────────────────────────────────
-    if let Some(pwd) = &conn.config.password {
-        if !pwd.is_empty() {
-            for attempt in 0..2 {
+    let auth_method = conn.config.auth_method.as_deref().unwrap_or("password");
+    let is_key_auth = auth_method == "key" || conn.config.private_key_path.is_some();
+
+    // ── 1. Password auth via plink (only if not key auth) ───────────────────
+    if !is_key_auth {
+        if let Some(pwd) = &conn.config.password {
+            if !pwd.is_empty() {
+                for attempt in 0..2 {
                 let mut cmd = tokio::process::Command::new("plink");
                 #[cfg(windows)]
                 cmd.creation_flags(0x08000000);
@@ -150,6 +154,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
             }
         }
     }
+}
 
     // ── 2. Key auth via Plink (for PPK) or OpenSSH (for PEM) ────────────────
     let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
@@ -437,9 +442,13 @@ pub async fn run_cmd_with_stdin(
     let user = conn.config.username.clone();
     let destination = format!("{}@{}", user, host);
 
-    // 1. Password auth via plink
-    if let Some(pwd) = &conn.config.password {
-        if !pwd.is_empty() {
+    let auth_method = conn.config.auth_method.as_deref().unwrap_or("password");
+    let is_key_auth = auth_method == "key" || conn.config.private_key_path.is_some();
+
+    // 1. Password auth via plink (only if not key auth)
+    if !is_key_auth {
+        if let Some(pwd) = &conn.config.password {
+            if !pwd.is_empty() {
             let mut cmd = tokio::process::Command::new("plink");
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
@@ -470,6 +479,7 @@ pub async fn run_cmd_with_stdin(
             }
         }
     }
+}
 
     // 2. PPK Key auth via plink
     let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
