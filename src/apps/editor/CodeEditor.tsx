@@ -563,8 +563,10 @@ export default function CodeEditor() {
 
   // ─── Listen to Tauri terminal output globally ───────────────────
   useEffect(() => {
+    let isCancelled = false;
     let unlistenFn: (() => void) | undefined;
     listen<any>('terminal-output', (event) => {
+      if (isCancelled) return;
       const payload = event.payload;
       if (!payload || !payload.terminal_id) return;
       const instance = tabInstances.current.get(payload.terminal_id);
@@ -576,9 +578,16 @@ export default function CodeEditor() {
           instance.term.write(u8);
         }
       }
-    }).then(fn => { unlistenFn = fn; });
+    }).then(fn => {
+      if (isCancelled) {
+        fn();
+      } else {
+        unlistenFn = fn;
+      }
+    });
 
     return () => {
+      isCancelled = true;
       if (unlistenFn) unlistenFn();
     };
   }, []);
