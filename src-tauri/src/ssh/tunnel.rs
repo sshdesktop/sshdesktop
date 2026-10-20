@@ -57,7 +57,7 @@ pub async fn ssh_start_tunnel(
         if let Some(active) = lock.get(&tunnel_key) {
             // Verify if still listening
             if std::net::TcpStream::connect(("127.0.0.1", active.info.local_port)).is_ok() {
-                log::info!("CloudDesk: Reusing active SSH tunnel for {}:{} on local port {}", remote_host, remote_port, active.info.local_port);
+                log::info!("SSH Desktop: Reusing active SSH tunnel for {}:{} on local port {}", remote_host, remote_port, active.info.local_port);
                 return Ok(active.info.local_port);
             }
         }
@@ -74,7 +74,7 @@ pub async fn ssh_start_tunnel(
     let remote_target = if remote_host.trim().is_empty() { "127.0.0.1".to_string() } else { remote_host.trim().to_string() };
 
     log::info!(
-        "CloudDesk: Spawning SSH Tunnel -L 127.0.0.1:{}:{}:{} via {}@{}:{}",
+        "SSH Desktop: Spawning SSH Tunnel -L 127.0.0.1:{}:{}:{} via {}@{}:{}",
         effective_local_port, remote_target, remote_port, user, host, ssh_port
     );
 
@@ -206,7 +206,7 @@ pub async fn ssh_start_tunnel(
         });
     }
 
-    log::info!("CloudDesk: SSH Tunnel active on 127.0.0.1:{} (bound: {})", effective_local_port, bound);
+    log::info!("SSH Desktop: SSH Tunnel active on 127.0.0.1:{} (bound: {})", effective_local_port, bound);
     Ok(effective_local_port)
 }
 
@@ -220,7 +220,7 @@ pub async fn ssh_stop_tunnel(tunnel_id: String) -> Result<(), String> {
 
     if let Some(mut child) = maybe_child {
         let _ = child.kill().await;
-        log::info!("CloudDesk: Stopped SSH Tunnel {}", tunnel_id);
+        log::info!("SSH Desktop: Stopped SSH Tunnel {}", tunnel_id);
     }
     Ok(())
 }

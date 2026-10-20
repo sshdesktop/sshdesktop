@@ -66,7 +66,7 @@ export default function SpeedTestDashboard({ connId, onInspectTerminal }: SpeedT
   // Load history from localStorage
   useEffect(() => {
     try {
-      const stored = localStorage.getItem(`clouddesk:speedtest-history-${connId}`);
+      const stored = localStorage.getItem(`sshdesktop:speedtest-history-${connId}`) || localStorage.getItem(`clouddesk:speedtest-history-${connId}`);
       if (stored) {
         setHistory(JSON.parse(stored));
       }
@@ -77,7 +77,7 @@ export default function SpeedTestDashboard({ connId, onInspectTerminal }: SpeedT
     setHistory(prev => {
       const updated = [record, ...prev].slice(0, 30);
       try {
-        localStorage.setItem(`clouddesk:speedtest-history-${connId}`, JSON.stringify(updated));
+        localStorage.setItem(`sshdesktop:speedtest-history-${connId}`, JSON.stringify(updated));
       } catch {}
       return updated;
     });
@@ -86,6 +86,7 @@ export default function SpeedTestDashboard({ connId, onInspectTerminal }: SpeedT
   const clearHistory = () => {
     setHistory([]);
     try {
+      localStorage.removeItem(`sshdesktop:speedtest-history-${connId}`);
       localStorage.removeItem(`clouddesk:speedtest-history-${connId}`);
     } catch {}
   };

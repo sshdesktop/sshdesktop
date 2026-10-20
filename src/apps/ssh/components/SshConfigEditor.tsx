@@ -284,7 +284,7 @@ export default function SshConfigEditor() {
     const header = [
       `# ==============================================================================`,
       `# OpenSSH Configuration: ${target}`,
-      `# Managed by CloudDesk SSH Studio on ${new Date().toLocaleString()}`,
+      `# Managed by SSH Desktop SSH Studio on ${new Date().toLocaleString()}`,
       `# ==============================================================================`,
       '',
     ];
@@ -400,7 +400,7 @@ Host *
 
     try {
       const b64 = btoa(unescape(encodeURIComponent(textToSave)));
-      const stagingFile = `/tmp/.clouddesk_cfg_${Date.now()}.tmp`;
+      const stagingFile = `/tmp/.sshdesktop_cfg_${Date.now()}.tmp`;
 
       // 1. Write to user-writable staging file (no sudo needed)
       const stageRes = await sshExec(activeConnectionId, `echo "${b64}" | base64 -d > "${stagingFile}"`);

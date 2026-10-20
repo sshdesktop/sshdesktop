@@ -235,7 +235,7 @@ export default function CodeEditor() {
 
   // Editor Theme
   const [editorTheme, setEditorTheme] = useState<string>(() => {
-    return localStorage.getItem('clouddesk_editor_theme') || (isLight ? 'vs' : 'monokai');
+    return localStorage.getItem('sshdesktop_editor_theme') || localStorage.getItem('clouddesk_editor_theme') || (isLight ? 'vs' : 'monokai');
   });
 
   // Editor ref for Monaco instance & latest callback refs to prevent stale closures
@@ -247,7 +247,7 @@ export default function CodeEditor() {
   const [activeSidebarTab, setActiveSidebarTab] = useState<'explorer' | 'git' | 'settings'>('explorer');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
-    const saved = localStorage.getItem('clouddesk_editor_sidebar_width');
+    const saved = localStorage.getItem('sshdesktop_editor_sidebar_width') || localStorage.getItem('clouddesk_editor_sidebar_width');
     return saved ? Math.max(180, Math.min(500, parseInt(saved, 10))) : 260;
   });
   const isResizingSidebar = useRef(false);
@@ -297,7 +297,7 @@ export default function CodeEditor() {
 
   // Editor Settings
   const [fontSize, setFontSize] = useState<number>(() => {
-    const saved = localStorage.getItem('clouddesk_editor_fontsize');
+    const saved = localStorage.getItem('sshdesktop_editor_fontsize') || localStorage.getItem('clouddesk_editor_fontsize');
     return saved ? parseInt(saved, 10) : 13;
   });
   const [tabSize, setTabSize] = useState<number>(2);
@@ -342,7 +342,7 @@ export default function CodeEditor() {
   // Recent Files
   const [recentFiles, setRecentFiles] = useState<string[]>(() => {
     try {
-      return JSON.parse(localStorage.getItem('clouddesk_recent_files') || '[]');
+      return JSON.parse(localStorage.getItem('sshdesktop_recent_files') || localStorage.getItem('clouddesk_recent_files') || '[]');
     } catch {
       return [];
     }
@@ -353,7 +353,7 @@ export default function CodeEditor() {
       const filtered = prev.filter(p => p !== path);
       const updated = [path, ...filtered].slice(0, 20);
       try {
-        localStorage.setItem('clouddesk_recent_files', JSON.stringify(updated));
+        localStorage.setItem('sshdesktop_recent_files', JSON.stringify(updated));
       } catch {}
       return updated;
     });
@@ -558,7 +558,7 @@ export default function CodeEditor() {
   };
 
   useEffect(() => {
-    localStorage.setItem('clouddesk_editor_theme', editorTheme);
+    localStorage.setItem('sshdesktop_editor_theme', editorTheme);
   }, [editorTheme]);
 
   // ─── Listen to Tauri terminal output globally ───────────────────
@@ -1100,7 +1100,7 @@ export default function CodeEditor() {
         e.preventDefault();
         setFontSize(prev => {
           const next = Math.min(32, prev + 1);
-          localStorage.setItem('clouddesk_editor_fontsize', String(next));
+          localStorage.setItem('sshdesktop_editor_fontsize', String(next));
           return next;
         });
         return;
@@ -1111,7 +1111,7 @@ export default function CodeEditor() {
         e.preventDefault();
         setFontSize(prev => {
           const next = Math.max(9, prev - 1);
-          localStorage.setItem('clouddesk_editor_fontsize', String(next));
+          localStorage.setItem('sshdesktop_editor_fontsize', String(next));
           return next;
         });
         return;
@@ -1207,7 +1207,7 @@ export default function CodeEditor() {
       // Activity bar width is 48px
       const newWidth = Math.max(180, Math.min(550, moveEvent.clientX - 48));
       setSidebarWidth(newWidth);
-      localStorage.setItem('clouddesk_editor_sidebar_width', String(newWidth));
+      localStorage.setItem('sshdesktop_editor_sidebar_width', String(newWidth));
     };
 
     const handleMouseUp = () => {
@@ -2282,7 +2282,7 @@ export default function CodeEditor() {
                   onChange={e => {
                     const next = parseInt(e.target.value, 10);
                     setFontSize(next);
-                    localStorage.setItem('clouddesk_editor_fontsize', String(next));
+                    localStorage.setItem('sshdesktop_editor_fontsize', String(next));
                   }}
                   className="w-full"
                 />
@@ -2472,7 +2472,7 @@ export default function CodeEditor() {
           onDrop={async (e) => {
             e.preventDefault();
             setIsDragOver(false);
-            const rawText = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('application/clouddesk-file');
+            const rawText = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('application/sshdesktop-file') || e.dataTransfer.getData('application/clouddesk-file');
             if (rawText && rawText.startsWith('/')) {
               await openPathInEditor(rawText.trim());
             }

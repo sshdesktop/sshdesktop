@@ -1,4 +1,4 @@
-// ─── CloudDesk Database Studio Types ────────────────────────────────
+// ─── SSH Desktop Database Studio Types ────────────────────────────────
 export type DbEngine = 
   | 'postgresql' 
   | 'mysql' 

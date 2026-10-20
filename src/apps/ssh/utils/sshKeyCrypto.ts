@@ -70,10 +70,10 @@ function concatBuffers(buffers: Uint8Array[]): Uint8Array {
  */
 export async function generateSshKeyPair(
   algorithm: SshKeyAlgorithm,
-  comment: string = 'clouddesk-key',
+  comment: string = 'sshdesktop-key',
   passphrase?: string
 ): Promise<{ publicKey: string; privateKey: string; fingerprint: string }> {
-  const effectiveComment = comment.trim() || 'clouddesk-key';
+  const effectiveComment = comment.trim() || 'sshdesktop-key';
 
   if (algorithm === 'ed25519') {
     // Attempt native Ed25519 if supported in runtime WebView

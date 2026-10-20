@@ -61,19 +61,23 @@ impl Default for AppSettings {
     }
 }
 
-pub fn get_clouddesk_dir() -> PathBuf {
+pub fn get_sshdesktop_dir() -> PathBuf {
     if let Some(base) = directories::BaseDirs::new() {
-        let home_dot_dir = base.home_dir().join(".clouddesk");
+        let home_dot_dir = base.home_dir().join(".sshdesktop");
         let _ = fs::create_dir_all(&home_dot_dir);
         return home_dot_dir;
     }
-    let local = PathBuf::from(".clouddesk");
+    let local = PathBuf::from(".sshdesktop");
     let _ = fs::create_dir_all(&local);
     local
 }
 
+pub fn get_clouddesk_dir() -> PathBuf {
+    get_sshdesktop_dir()
+}
+
 fn get_settings_path() -> PathBuf {
-    let dir = get_clouddesk_dir();
+    let dir = get_sshdesktop_dir();
     dir.join("settings.json")
 }
 
@@ -85,8 +89,15 @@ pub async fn settings_get(_state: tauri::State<'_, AppState>) -> Result<AppSetti
             return Ok(settings);
         }
     }
-    // Fallback check legacy location
+    // Fallback check legacy location (~/.clouddesk/settings.json or AppData)
     if let Some(base) = directories::BaseDirs::new() {
+        let legacy_home = base.home_dir().join(".clouddesk").join("settings.json");
+        if let Ok(content) = fs::read_to_string(&legacy_home) {
+            if let Ok(settings) = serde_json::from_str::<AppSettings>(&content) {
+                let _ = fs::write(&path, &content);
+                return Ok(settings);
+            }
+        }
         let legacy = base.data_local_dir().join("clouddesk").join("settings.json");
         if let Ok(content) = fs::read_to_string(legacy) {
             if let Ok(settings) = serde_json::from_str::<AppSettings>(&content) {

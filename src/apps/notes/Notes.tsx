@@ -58,7 +58,7 @@ export default function Notes() {
   const [activeFolderId, setActiveFolderId] = useState<string>('all');
   
   const [notes, setNotes] = useState<NoteItem[]>(() => {
-    const saved = localStorage.getItem('clouddesk_notes_studio_v2');
+    const saved = localStorage.getItem('sshdesktop_notes_studio_v2') || localStorage.getItem('clouddesk_notes_studio_v2');
     return saved ? JSON.parse(saved) : DEFAULT_NOTES;
   });
   
@@ -68,7 +68,7 @@ export default function Notes() {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    localStorage.setItem('clouddesk_notes_studio_v2', JSON.stringify(notes));
+    localStorage.setItem('sshdesktop_notes_studio_v2', JSON.stringify(notes));
   }, [notes]);
 
   const activeNote = notes.find(n => n.id === activeNoteId) || notes[0];

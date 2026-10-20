@@ -54,7 +54,7 @@ export const DatabaseHub: React.FC = () => {
 
   const [profiles, setProfiles] = useState<DbConnectionProfile[]>(() => {
     try {
-      const saved = localStorage.getItem('clouddesk_db_profiles_v2');
+      const saved = localStorage.getItem('sshdesktop_db_profiles_v2') || localStorage.getItem('clouddesk_db_profiles_v2');
       if (saved) return JSON.parse(saved);
     } catch {}
     return [
@@ -116,12 +116,15 @@ export const DatabaseHub: React.FC = () => {
   const username = activeSshServer?.username || 'root';
   const userHome = username === 'root' ? '/root' : `/home/${username}`;
 
-  // Hydrate database profiles from server ~/.clouddesk/database_profiles.json
+  // Hydrate database profiles from server ~/.sshdesktop/database_profiles.json
   useEffect(() => {
     if (!activeSshId) return;
     const loadServerDbProfiles = async () => {
       try {
-        const text = await sftpReadTextFile(activeSshId, `${userHome}/.clouddesk/database_profiles.json`);
+        let text = await sftpReadTextFile(activeSshId, `${userHome}/.sshdesktop/database_profiles.json`).catch(() => '');
+        if (!text) {
+          text = await sftpReadTextFile(activeSshId, `${userHome}/.clouddesk/database_profiles.json`).catch(() => '');
+        }
         if (text) {
           const parsed = JSON.parse(text);
           if (Array.isArray(parsed) && parsed.length > 0) {
@@ -137,10 +140,10 @@ export const DatabaseHub: React.FC = () => {
     loadServerDbProfiles();
   }, [activeSshId, userHome]);
 
-  // Persist database profiles to localStorage and server ~/.clouddesk/database_profiles.json
+  // Persist database profiles to localStorage and server ~/.sshdesktop/database_profiles.json
   useEffect(() => {
     try {
-      localStorage.setItem('clouddesk_db_profiles_v2', JSON.stringify(profiles));
+      localStorage.setItem('sshdesktop_db_profiles_v2', JSON.stringify(profiles));
     } catch {}
 
     if (activeSshId) {
@@ -151,7 +154,7 @@ export const DatabaseHub: React.FC = () => {
         }
         return p;
       });
-      sftpWriteTextFile(activeSshId, `${userHome}/.clouddesk/database_profiles.json`, JSON.stringify(toSave, null, 2)).catch(() => {});
+      sftpWriteTextFile(activeSshId, `${userHome}/.sshdesktop/database_profiles.json`, JSON.stringify(toSave, null, 2)).catch(() => {});
     }
   }, [profiles, activeSshId, userHome]);
 

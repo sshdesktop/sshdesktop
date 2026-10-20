@@ -31,7 +31,7 @@ export async function fetchViaSshGateway(
 
   // Header flags for curl
   const headerFlags = Object.entries({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 CloudDesk/2.0',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 SSHDesktop/2.0',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
     ...headers
@@ -145,7 +145,7 @@ export function prepareHtmlForSandbox(html: string, currentUrl: string): string 
             if (target && target.href && !target.href.startsWith('javascript:') && !target.href.startsWith('#')) {
               e.preventDefault();
               window.parent.postMessage({
-                type: 'clouddesk-browser-navigate',
+                type: 'sshdesktop-browser-navigate',
                 url: target.href
               }, '*');
             }
@@ -163,12 +163,12 @@ export function prepareHtmlForSandbox(html: string, currentUrl: string): string 
               if (method === 'GET') {
                 var separator = actionUrl.indexOf('?') >= 0 ? '&' : '?';
                 window.parent.postMessage({
-                  type: 'clouddesk-browser-navigate',
+                  type: 'sshdesktop-browser-navigate',
                   url: actionUrl + separator + params
                 }, '*');
               } else {
                 window.parent.postMessage({
-                  type: 'clouddesk-browser-submit',
+                  type: 'sshdesktop-browser-submit',
                   url: actionUrl,
                   method: method,
                   body: params

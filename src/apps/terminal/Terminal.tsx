@@ -207,8 +207,10 @@ export default function TerminalApp() {
       });
     };
 
+    window.addEventListener('sshdesktop:env-sync', handleEnvSync);
     window.addEventListener('clouddesk:env-sync', handleEnvSync);
     return () => {
+      window.removeEventListener('sshdesktop:env-sync', handleEnvSync);
       window.removeEventListener('clouddesk:env-sync', handleEnvSync);
     };
   }, [tabs]);
@@ -536,8 +538,12 @@ export default function TerminalApp() {
       }
     };
 
+    window.addEventListener('sshdesktop:terminal-run-command', handleRunCmdEvent);
     window.addEventListener('clouddesk:terminal-run-command', handleRunCmdEvent);
-    return () => window.removeEventListener('clouddesk:terminal-run-command', handleRunCmdEvent);
+    return () => {
+      window.removeEventListener('sshdesktop:terminal-run-command', handleRunCmdEvent);
+      window.removeEventListener('clouddesk:terminal-run-command', handleRunCmdEvent);
+    };
   }, [activeTab, activeConnectionId, connections, activeServer]);
 
   const pendingDockerTerminal = useEditorStore(s => s.pendingDockerTerminal);

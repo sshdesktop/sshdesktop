@@ -87,7 +87,7 @@ export default function Desktop() {
 
   // Stickies State
   const [stickyNoteContent, setStickyNoteContent] = useState(() => {
-    return localStorage.getItem('clouddesk_desktop_stickies') || '';
+    return localStorage.getItem('sshdesktop_desktop_stickies') || localStorage.getItem('clouddesk_desktop_stickies') || '';
   });
   const [stickyColor, setStickyColor] = useState<'amber' | 'emerald' | 'purple' | 'rose' | 'blue'>('amber');
 
@@ -102,10 +102,14 @@ export default function Desktop() {
     currentY: number;
   } | null>(null);
 
-  // Icon Positions on Desktop (persisted locally and in ~/.clouddesk/icon_positions.json)
+  // Icon Positions on Desktop (persisted locally and in ~/.sshdesktop/icon_positions.json)
   const [iconPositions, setIconPositions] = useState<Record<string, { x: number; y: number }>>(() => {
     try {
-      return JSON.parse(localStorage.getItem('clouddesk_desktop_icon_positions') || '{}');
+      return JSON.parse(
+        localStorage.getItem('sshdesktop_desktop_icon_positions') ||
+        localStorage.getItem('clouddesk_desktop_icon_positions') ||
+        '{}'
+      );
     } catch {
       return {};
     }
@@ -124,17 +128,20 @@ export default function Desktop() {
   const activeWallpaperItem = WALLPAPERS.find(w => w.id === wallpaper) || WALLPAPERS[0];
   const activeWallpaperUrl = isCustomWallpaper ? wallpaper : activeWallpaperItem.url;
 
-  // Initialize server directories on login: ~/.clouddesk, ~/Desktop, ~/Downloads, ~/Documents
+  // Initialize server directories on login: ~/.sshdesktop, ~/Desktop, ~/Downloads, ~/Documents
   useEffect(() => {
     if (!activeConnectionId) return;
     const initServerDirectories = async () => {
       try {
-        const cmd = `mkdir -p "${userHome}/.clouddesk" "${userHome}/Desktop" "${userHome}/Downloads" "${userHome}/Documents" "${userHome}/.clouddesk/wallpapers"`;
+        const cmd = `mkdir -p "${userHome}/.sshdesktop" "${userHome}/Desktop" "${userHome}/Downloads" "${userHome}/Documents" "${userHome}/.sshdesktop/wallpapers"`;
         await sshExec(activeConnectionId, cmd).catch(() => {});
 
-        // Hydrate settings if ~/.clouddesk/settings.json exists
+        // Hydrate settings if ~/.sshdesktop/settings.json exists (with fallback to ~/.clouddesk)
         try {
-          const configJson = await sftpReadTextFile(activeConnectionId, `${userHome}/.clouddesk/settings.json`);
+          let configJson = await sftpReadTextFile(activeConnectionId, `${userHome}/.sshdesktop/settings.json`).catch(() => '');
+          if (!configJson) {
+            configJson = await sftpReadTextFile(activeConnectionId, `${userHome}/.clouddesk/settings.json`).catch(() => '');
+          }
           if (configJson) {
             const parsed = JSON.parse(configJson);
             if (parsed.wallpaper && !isCustomWallpaper && parsed.wallpaper !== wallpaper) {
@@ -164,16 +171,19 @@ export default function Desktop() {
           }
         } catch {}
 
-        // Hydrate stickies from ~/.clouddesk/stickies.txt
+        // Hydrate stickies from ~/.sshdesktop/stickies.txt (with fallback to ~/.clouddesk)
         try {
-          const stickiesTxt = await sftpReadTextFile(activeConnectionId, `${userHome}/.clouddesk/stickies.txt`);
+          let stickiesTxt = await sftpReadTextFile(activeConnectionId, `${userHome}/.sshdesktop/stickies.txt`).catch(() => '');
+          if (!stickiesTxt) {
+            stickiesTxt = await sftpReadTextFile(activeConnectionId, `${userHome}/.clouddesk/stickies.txt`).catch(() => '');
+          }
           if (stickiesTxt && stickiesTxt.trim().length > 0) {
             setStickyNoteContent(stickiesTxt);
-            localStorage.setItem('clouddesk_desktop_stickies', stickiesTxt);
+            localStorage.setItem('sshdesktop_desktop_stickies', stickiesTxt);
           }
         } catch {}
 
-        // Save active settings to server ~/.clouddesk/settings.json
+        // Save active settings to server ~/.sshdesktop/settings.json
         const currentPayload = {
           user: username,
           theme,
@@ -187,7 +197,7 @@ export default function Desktop() {
           updated_at: new Date().toISOString(),
           client: 'SSH Desktop macOS Shell'
         };
-        await sftpWriteTextFile(activeConnectionId, `${userHome}/.clouddesk/settings.json`, JSON.stringify(currentPayload, null, 2)).catch(() => {});
+        await sftpWriteTextFile(activeConnectionId, `${userHome}/.sshdesktop/settings.json`, JSON.stringify(currentPayload, null, 2)).catch(() => {});
       } catch (err) {
         console.warn('Server initialization notice:', err);
       }
@@ -231,8 +241,8 @@ export default function Desktop() {
           }
           if (changed) {
             try {
-              localStorage.setItem('clouddesk_desktop_icon_positions', JSON.stringify(next));
-              sftpWriteTextFile(activeConnectionId, `${userHome}/.clouddesk/icon_positions.json`, JSON.stringify(next, null, 2)).catch(() => {});
+              localStorage.setItem('sshdesktop_desktop_icon_positions', JSON.stringify(next));
+              sftpWriteTextFile(activeConnectionId, `${userHome}/.sshdesktop/icon_positions.json`, JSON.stringify(next, null, 2)).catch(() => {});
             } catch {}
             return next;
           }
@@ -249,6 +259,7 @@ export default function Desktop() {
     const handleFilesChanged = () => {
       loadDesktopFolder();
     };
+    window.addEventListener('sshdesktop:files-changed', handleFilesChanged);
     window.addEventListener('clouddesk:files-changed', handleFilesChanged);
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && !document.hidden) {
@@ -256,6 +267,7 @@ export default function Desktop() {
       }
     }, 15000);
     return () => {
+      window.removeEventListener('sshdesktop:files-changed', handleFilesChanged);
       window.removeEventListener('clouddesk:files-changed', handleFilesChanged);
       clearInterval(interval);
     };
@@ -324,9 +336,9 @@ export default function Desktop() {
       const clampedY = Math.max(40, Math.min(window.innerHeight - cfg.h - 110, y));
       const next = { ...prev, [id]: { x: clampedX, y: clampedY } };
       try {
-        localStorage.setItem('clouddesk_desktop_icon_positions', JSON.stringify(next));
+        localStorage.setItem('sshdesktop_desktop_icon_positions', JSON.stringify(next));
         if (activeConnectionId) {
-          sftpWriteTextFile(activeConnectionId, `${userHome}/.clouddesk/icon_positions.json`, JSON.stringify(next, null, 2)).catch(() => {});
+          sftpWriteTextFile(activeConnectionId, `${userHome}/.sshdesktop/icon_positions.json`, JSON.stringify(next, null, 2)).catch(() => {});
         }
       } catch {}
       return next;
@@ -499,6 +511,7 @@ export default function Desktop() {
         await sftpRename(activeConnectionId, actionModal.item.path, targetPath);
       }
       await loadDesktopFolder();
+      window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
       window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
     } catch (err: any) {
       alert(`Operation failed: ${err?.message || err}`);
@@ -521,6 +534,7 @@ export default function Desktop() {
         await sshExec(activeConnectionId, `cp "${item.path}" "${copyPath}"`);
       }
       await loadDesktopFolder();
+      window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
       window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
     } catch (err: any) {
       alert(`Could not duplicate: ${err?.message || err}`);
@@ -537,6 +551,7 @@ export default function Desktop() {
         : `cd "${parentDir}" && tar -czvf "${archiveName}" "${item.label}"`;
       await sshExec(activeConnectionId, cmd);
       await loadDesktopFolder();
+      window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
       window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
     } catch (err: any) {
       alert(`Could not compress: ${err?.message || err}`);
@@ -556,6 +571,7 @@ export default function Desktop() {
       }
       await sshExec(activeConnectionId, cmd);
       await loadDesktopFolder();
+      window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
       window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
     } catch (err: any) {
       alert(`Could not extract archive: ${err?.message || err}`);
@@ -576,11 +592,12 @@ export default function Desktop() {
           const next = { ...prev };
           delete next[itemToDelete.id];
           try {
-            localStorage.setItem('clouddesk_desktop_icon_positions', JSON.stringify(next));
+            localStorage.setItem('sshdesktop_desktop_icon_positions', JSON.stringify(next));
           } catch {}
           return next;
         });
         await loadDesktopFolder();
+        window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
         window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
       }
     } catch (err: any) {
@@ -615,6 +632,7 @@ export default function Desktop() {
         clearClipboard();
       }
       await loadDesktopFolder();
+      window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
       window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
     } catch (err: any) {
       alert(`Paste failed: ${err?.message || err}`);
@@ -634,9 +652,9 @@ export default function Desktop() {
     });
     setIconPositions(newPositions);
     try {
-      localStorage.setItem('clouddesk_desktop_icon_positions', JSON.stringify(newPositions));
+      localStorage.setItem('sshdesktop_desktop_icon_positions', JSON.stringify(newPositions));
       if (activeConnectionId) {
-        sftpWriteTextFile(activeConnectionId, `${userHome}/.clouddesk/icon_positions.json`, JSON.stringify(newPositions, null, 2)).catch(() => {});
+        sftpWriteTextFile(activeConnectionId, `${userHome}/.sshdesktop/icon_positions.json`, JSON.stringify(newPositions, null, 2)).catch(() => {});
       }
     } catch {}
   };
@@ -774,9 +792,9 @@ export default function Desktop() {
         stickyNoteContent={stickyNoteContent}
         onUpdateStickyNote={(content) => {
           setStickyNoteContent(content);
-          localStorage.setItem('clouddesk_desktop_stickies', content);
+          localStorage.setItem('sshdesktop_desktop_stickies', content);
           if (activeConnectionId) {
-            sftpWriteTextFile(activeConnectionId, `${userHome}/.clouddesk/stickies.txt`, content).catch(() => {});
+            sftpWriteTextFile(activeConnectionId, `${userHome}/.sshdesktop/stickies.txt`, content).catch(() => {});
           }
         }}
         stickyColor={stickyColor}
@@ -854,9 +872,10 @@ export default function Desktop() {
         onCleanUpDesktop={handleCleanUpDesktop}
         onResetGrid={() => {
           setIconPositions({});
+          localStorage.removeItem('sshdesktop_desktop_icon_positions');
           localStorage.removeItem('clouddesk_desktop_icon_positions');
           if (activeConnectionId) {
-            sftpWriteTextFile(activeConnectionId, `${userHome}/.clouddesk/icon_positions.json`, '{}').catch(() => {});
+            sftpWriteTextFile(activeConnectionId, `${userHome}/.sshdesktop/icon_positions.json`, '{}').catch(() => {});
           }
         }}
         useStacks={useStacks}

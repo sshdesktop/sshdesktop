@@ -236,7 +236,8 @@ export const FileManager: React.FC = () => {
             setFiles(mapped);
             dirCache.current.set(clean, { files: mapped, timestamp: Date.now() });
             showToast(`Auto-created folder: ${clean.split('/').pop()}`);
-            window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
+            window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
             return;
           }
         } catch (createErr) {
@@ -956,7 +957,8 @@ export const FileManager: React.FC = () => {
       dirCache.current.delete(destDir);
       await loadDirectory(currentPath, true);
       showToast(`Moved ${valid.length} item${valid.length > 1 ? 's' : ''} into "${targetFolderName}"`);
-      window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
+      window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
     } catch (err: any) {
       setTransferState(prev => prev ? {
         ...prev,
@@ -1027,7 +1029,8 @@ export const FileManager: React.FC = () => {
       dirCache.current.delete(destDirPath);
       await loadDirectory(currentPath, true);
       showToast(`Moved ${list.length} item${list.length > 1 ? 's' : ''} to ${destDirPath}`);
-      window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
+      window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
     } catch (err: any) {
       setTransferState(prev => prev ? {
         ...prev,
@@ -1154,7 +1157,8 @@ export const FileManager: React.FC = () => {
       dirCache.current.delete(effectiveClipboard.sourceDir);
       await loadDirectory(currentPath, true);
       showToast(`Pasted ${count} item${count > 1 ? 's' : ''}`);
-      window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
+      window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
     } catch (err: any) {
       setTransferState(prev => prev ? {
         ...prev,
@@ -1222,7 +1226,8 @@ export const FileManager: React.FC = () => {
       dirCache.current.delete(currentPath);
       await loadDirectory(currentPath, true);
       showToast(`Duplicated ${items.length} item${items.length > 1 ? 's' : ''}`);
-      window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
+      window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
     } catch (err: any) {
       setTransferState(prev => prev ? {
         ...prev,
@@ -1297,7 +1302,8 @@ export const FileManager: React.FC = () => {
       await sendDesktopNotification('Upload Complete', `Uploaded ${fileArray.length} file(s) to ${currentPath}`);
       dirCache.current.delete(currentPath);
       await loadDirectory(currentPath, true);
-      window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
+      window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
     } catch (err: any) {
       setTransferState(prev => prev ? {
         ...prev,
@@ -2142,7 +2148,8 @@ export const FileManager: React.FC = () => {
             setSelectedFiles(new Set([outputName]));
           }
           setLiveArchiveModal(prev => ({ ...prev, isOpen: false }));
-          window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
+          window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
         }}
       />
 
@@ -2158,7 +2165,8 @@ export const FileManager: React.FC = () => {
           await loadDirectory(currentPath, true);
           setSelectedFiles(new Set());
           setShowLiveDeleteModal(false);
-          window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
+          window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
         }}
       />
 
@@ -2172,7 +2180,8 @@ export const FileManager: React.FC = () => {
         onSuccess={async () => {
           dirCache.current.delete(currentPath);
           await loadDirectory(currentPath, true);
-          window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
+          window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
         }}
       />
 
@@ -2247,7 +2256,8 @@ export const FileManager: React.FC = () => {
           await loadDirectory(currentPath, true);
           setSelectedFiles(new Set([folderName]));
           showToast(`Created folder "${folderName}"`);
-          window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
+          window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
         }}
       />
 
@@ -2261,7 +2271,8 @@ export const FileManager: React.FC = () => {
           await loadDirectory(currentPath, true);
           setSelectedFiles(new Set([fileName]));
           showToast(`Created file "${fileName}"`);
-          window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
+          window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
         }}
       />
 
@@ -2276,7 +2287,8 @@ export const FileManager: React.FC = () => {
           await loadDirectory(currentPath, true);
           setSelectedFiles(new Set([newName]));
           showToast(`Renamed to "${newName}"`);
-          window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
+          window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
         }}
       />
 

@@ -119,7 +119,7 @@ pub async fn service_action(
         return Err(format!("systemctl {} {} failed: {}", safe_action, name, stdout.trim()));
     }
 
-    log::info!("CloudDesk: systemctl {} {}", safe_action, name);
+    log::info!("SSH Desktop: systemctl {} {}", safe_action, name);
     Ok(format!("Service '{}' {}", name, safe_action))
 }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * CloudDesk 2.0 - Standalone Web Server for Linux CLI
+ * SSH Desktop - Standalone Web Server for Linux CLI
  * Runs on Port 2222 (or custom PORT=222) with Username & Password Protection
  */
 
@@ -64,7 +64,7 @@ const server = http.createServer((req, res) => {
       fs.readFile(indexPath, (readErr, content) => {
         if (readErr) {
           res.writeHead(404, { 'Content-Type': 'text/plain' });
-          res.end('404 Not Found - CloudDesk frontend not built yet. Please run: npm run build');
+          res.end('404 Not Found - SSH Desktop frontend not built yet. Please run: npm run build');
           return;
         }
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -88,9 +88,9 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log('\n================================================================');
-  console.log('🚀 CloudDesk Web Desktop Server Running!');
+  console.log('🚀 SSH Desktop Web Desktop Server Running!');
   console.log(`📡 Listening on: http://${HOST}:${PORT}`);
   console.log(`🔒 Authentication: Username & Password Gate Enabled`);
-  console.log(`🔑 Default Login: Username: admin | Password: clouddesk`);
+  console.log(`🔑 Default Login: Username: admin | Password: sshdesktop`);
   console.log('================================================================\n');
 });

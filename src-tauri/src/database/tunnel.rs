@@ -98,7 +98,7 @@ pub async fn setup_ssh_tunnel(
             }
         });
 
-        log::info!("CloudDesk: Native SSH direct-tcpip tunnel established: 127.0.0.1:{} -> {}:{}", local_port, target_host, target_port);
+        log::info!("SSH Desktop: Native SSH direct-tcpip tunnel established: 127.0.0.1:{} -> {}:{}", local_port, target_host, target_port);
         return Ok((local_port, shutdown_tx));
     }
 
@@ -184,13 +184,13 @@ pub async fn setup_ssh_tunnel(
             let _ = child.kill().await;
         });
 
-        log::info!("CloudDesk: Process SSH tunnel established: 127.0.0.1:{} -> {}:{}", local_port, target_host, target_port);
+        log::info!("SSH Desktop: Process SSH tunnel established: 127.0.0.1:{} -> {}:{}", local_port, target_host, target_port);
         return Ok((local_port, shutdown_tx));
     }
 
     // ── PATH C: No SSH Connection Found ─────────────────────────────────────
     Err(format!(
-        "SSH Tunnel Error: No active SSH server connection found in CloudDesk for '{}'. Please connect to your server via SSH first before using SSH Tunneling.",
+        "SSH Tunnel Error: No active SSH server connection found in SSH Desktop for '{}'. Please connect to your server via SSH first before using SSH Tunneling.",
         ssh_conn_id
     ))
 }

@@ -612,7 +612,7 @@ export const ConnectModal: React.FC<ConnectModalProps> = ({
               <div>
                 <span className="font-medium text-white block">Save Credentials on Server</span>
                 <span className="text-[11px] text-gray-400 block">
-                  Persist username & password securely in ~/.clouddesk/database_profiles.json
+                  Persist username & password securely in ~/.sshdesktop/database_profiles.json
                 </span>
               </div>
             </div>

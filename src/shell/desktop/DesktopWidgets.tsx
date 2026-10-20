@@ -341,7 +341,7 @@ export default function DesktopWidgets({
                   <StickyNote className="w-5 h-5 text-amber-400" />
                   <div>
                     <div className="text-xs font-semibold">Desktop Stickies Widget</div>
-                    <div className="text-[10px] text-gray-400 light:text-slate-500">Persistent notes synced to ~/.clouddesk</div>
+                    <div className="text-[10px] text-gray-400 light:text-slate-500">Persistent notes synced to ~/.sshdesktop</div>
                   </div>
                 </div>
                 <input 

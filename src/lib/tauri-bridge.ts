@@ -9,7 +9,7 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
     try {
       return await invoke<T>(cmd, args);
     } catch (err: any) {
-      console.error(`[CloudDesk Tauri] Command '${cmd}' failed:`, err);
+      console.error(`[SSH Desktop Tauri] Command '${cmd}' failed:`, err);
       const errMsg = String(err?.message || err);
       const isConnectionLoss = 
         errMsg.includes('No active SSH connection') || 
@@ -30,13 +30,13 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
 
       if (isConnectionLoss && cmd !== 'ssh_test_connection' && cmd !== 'ssh_disconnect' && cmd !== 'store_delete_connection') {
         if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('clouddesk-ssh-disconnected', { 
-            detail: { 
-              connId: args?.connId,
-              command: cmd,
-              reason: errMsg 
-            } 
-          }));
+          const detail = { 
+            connId: args?.connId,
+            command: cmd,
+            reason: errMsg 
+          };
+          window.dispatchEvent(new CustomEvent('sshdesktop-ssh-disconnected', { detail }));
+          window.dispatchEvent(new CustomEvent('clouddesk-ssh-disconnected', { detail }));
         }
       }
       throw err;
@@ -866,7 +866,7 @@ export async function pickKeyFile(): Promise<string | null> {
         return selected;
       }
     } catch (e) {
-      console.warn('[CloudDesk] Failed to open native file picker:', e);
+      console.warn('[SSH Desktop] Failed to open native file picker:', e);
     }
   }
   return null;

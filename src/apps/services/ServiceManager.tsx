@@ -183,6 +183,9 @@ export default function ServiceManager() {
     const cmd = `journalctl -u ${name} -f -n 50\n`;
     const title = `journalctl: ${name}`;
     runTerminalCommand({ cmd, title, newTab: true });
+    window.dispatchEvent(new CustomEvent('sshdesktop:terminal-run-command', {
+      detail: { cmd, title, newTab: true }
+    }));
     window.dispatchEvent(new CustomEvent('clouddesk:terminal-run-command', {
       detail: { cmd, title, newTab: true }
     }));

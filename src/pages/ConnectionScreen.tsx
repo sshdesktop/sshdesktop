@@ -124,7 +124,7 @@ export default function ConnectionScreen() {
     return () => clearInterval(interval);
   }, []);
 
-  // Sync saved server profiles from disk storage ~/.clouddesk/connections.json
+  // Sync saved server profiles from disk storage ~/.sshdesktop/connections.json
   useEffect(() => {
     storeListConnections().then((saved) => {
       if (saved && Array.isArray(saved) && saved.length > 0) {
@@ -219,7 +219,7 @@ export default function ConnectionScreen() {
       const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(connections, null, 2));
       const downloadAnchor = document.createElement('a');
       downloadAnchor.setAttribute('href', dataStr);
-      downloadAnchor.setAttribute('download', `clouddesk_servers_${new Date().toISOString().slice(0, 10)}.json`);
+      downloadAnchor.setAttribute('download', `sshdesktop_servers_${new Date().toISOString().slice(0, 10)}.json`);
       document.body.appendChild(downloadAnchor);
       downloadAnchor.click();
       downloadAnchor.remove();

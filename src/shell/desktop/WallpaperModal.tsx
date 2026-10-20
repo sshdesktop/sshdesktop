@@ -33,10 +33,10 @@ export default function WallpaperModal({ isOpen, onClose }: WallpaperModalProps)
 
   const handleSelectWallpaper = async (wpId: string) => {
     updateSettings({ wallpaper: wpId });
-    // Persist to server ~/.clouddesk/settings.json
+    // Persist to server ~/.sshdesktop/settings.json
     if (activeConnectionId) {
       try {
-        const configDir = `${userHome}/.clouddesk`;
+        const configDir = `${userHome}/.sshdesktop`;
         await sftpMkdir(activeConnectionId, configDir).catch(() => {});
         const patch = { wallpaper: wpId, updated_at: new Date().toISOString() };
         await sftpWriteTextFile(activeConnectionId, `${configDir}/settings_wallpaper.json`, JSON.stringify(patch, null, 2)).catch(() => {});
@@ -52,7 +52,7 @@ export default function WallpaperModal({ isOpen, onClose }: WallpaperModalProps)
     setCustomUrlInput('');
     if (activeConnectionId) {
       try {
-        const configDir = `${userHome}/.clouddesk`;
+        const configDir = `${userHome}/.sshdesktop`;
         await sftpMkdir(activeConnectionId, configDir).catch(() => {});
         const patch = { wallpaper: url, updated_at: new Date().toISOString() };
         await sftpWriteTextFile(activeConnectionId, `${configDir}/settings_wallpaper.json`, JSON.stringify(patch, null, 2)).catch(() => {});
@@ -71,10 +71,10 @@ export default function WallpaperModal({ isOpen, onClose }: WallpaperModalProps)
       if (typeof dataUrl === 'string') {
         updateSettings({ wallpaper: dataUrl });
 
-        // Save wallpaper image data directly to ~/.clouddesk/wallpapers/
+        // Save wallpaper image data directly to ~/.sshdesktop/wallpapers/
         if (activeConnectionId) {
           try {
-            const configDir = `${userHome}/.clouddesk`;
+            const configDir = `${userHome}/.sshdesktop`;
             const wpDir = `${configDir}/wallpapers`;
             await sftpMkdir(activeConnectionId, configDir).catch(() => {});
             await sftpMkdir(activeConnectionId, wpDir).catch(() => {});
@@ -114,7 +114,7 @@ export default function WallpaperModal({ isOpen, onClose }: WallpaperModalProps)
                 macOS 4K Ultra-HD Wallpapers
               </h3>
               <p className={`text-xs ${isLight ? 'text-slate-500' : 'text-gray-400'}`}>
-                Authentic Apple 4K imagery and custom photo upload synced to server ~/.clouddesk
+                Authentic Apple 4K imagery and custom photo upload synced to server ~/.sshdesktop
               </p>
             </div>
           </div>

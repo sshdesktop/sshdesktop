@@ -84,7 +84,7 @@ export default function EditServiceModal({
               PATH_VAL="/etc/systemd/system/${serviceName}.service"
             fi
           fi
-          echo "CLOUDDESK_UNIT_PATH:$PATH_VAL"
+          echo "SSHDESKTOP_UNIT_PATH:$PATH_VAL"
           if [ -f "$PATH_VAL" ]; then
             cat "$PATH_VAL"
           else
@@ -96,7 +96,7 @@ export default function EditServiceModal({
         if (!isMounted) return;
 
         const out = res.stdout || '';
-        const match = out.match(/^CLOUDDESK_UNIT_PATH:([^\r\n]+)\r?\n([\s\S]*)$/);
+        const match = out.match(/^(?:SSHDESKTOP|CLOUDDESK)_UNIT_PATH:([^\r\n]+)\r?\n([\s\S]*)$/);
         if (match) {
           const detectedPath = match[1].trim();
           const content = match[2];

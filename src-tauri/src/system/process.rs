@@ -132,7 +132,7 @@ pub async fn process_kill(
     // 1. Try direct kill first
     let (stdout, code) = run_cmd(&state, &conn_id, &format!("kill -s {} {}", safe_signal, pid)).await;
     if code == 0 {
-        log::info!("CloudDesk: Sent signal {} to PID {} directly", safe_signal, pid);
+        log::info!("SSH Desktop: Sent signal {} to PID {} directly", safe_signal, pid);
         return Ok(());
     }
 
@@ -140,7 +140,7 @@ pub async fn process_kill(
     // Automatically elevate with sudo using run_cmd_priv!
     let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &format!("kill -s {} {}", safe_signal, pid)).await;
     if priv_code == 0 {
-        log::info!("CloudDesk: Sent signal {} to PID {} with sudo elevation", safe_signal, pid);
+        log::info!("SSH Desktop: Sent signal {} to PID {} with sudo elevation", safe_signal, pid);
         return Ok(());
     }
 
@@ -148,7 +148,7 @@ pub async fn process_kill(
     if safe_signal == "KILL" || safe_signal == "TERM" {
         let (_, force_code) = run_cmd_priv(&state, &conn_id, &format!("kill -9 {}", pid)).await;
         if force_code == 0 {
-            log::info!("CloudDesk: Force-killed PID {} with sudo kill -9", pid);
+            log::info!("SSH Desktop: Force-killed PID {} with sudo kill -9", pid);
             return Ok(());
         }
     }
@@ -194,14 +194,14 @@ pub async fn process_renice(
     // Try direct renice
     let (stdout, code) = run_cmd(&state, &conn_id, &format!("renice -n {} -p {}", value, pid)).await;
     if code == 0 {
-        log::info!("CloudDesk: Renice PID {} to nice {}", pid, value);
+        log::info!("SSH Desktop: Renice PID {} to nice {}", pid, value);
         return Ok(());
     }
 
     // Elevate with sudo
     let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &format!("renice -n {} -p {}", value, pid)).await;
     if priv_code == 0 {
-        log::info!("CloudDesk: Renice PID {} to nice {} with sudo", pid, value);
+        log::info!("SSH Desktop: Renice PID {} to nice {} with sudo", pid, value);
         return Ok(());
     }
 

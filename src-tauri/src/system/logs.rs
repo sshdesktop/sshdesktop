@@ -158,7 +158,7 @@ pub async fn logs_stream_stop(
     stream_id: String,
 ) -> Result<(), String> {
     ACTIVE_STREAMS.lock().remove(&stream_id);
-    log::info!("CloudDesk: Log stream {} stopped", stream_id);
+    log::info!("SSH Desktop: Log stream {} stopped", stream_id);
     Ok(())
 }
 

@@ -106,6 +106,14 @@ pub fn resolve_key_path(key_input: &str) -> Option<String> {
         }
         return Some(trimmed.to_string());
     }
+
+    // Check if path references legacy ~/.clouddesk or ~/.sshdesktop
+    let migrated = trimmed.replace(".clouddesk", ".sshdesktop");
+    let p_migrated = std::path::Path::new(&migrated);
+    if p_migrated.exists() && p_migrated.is_file() {
+        return Some(migrated);
+    }
+
     None
 }
 
@@ -129,7 +137,7 @@ pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
     // 2. If it is raw key content (PEM or PPK)
     if trimmed.contains("PRIVATE KEY") || trimmed.contains("PuTTY-User-Key-File") || trimmed.lines().count() > 1 {
         if let Some(base) = directories::BaseDirs::new() {
-            let keys_dir = base.home_dir().join(".clouddesk").join("keys");
+            let keys_dir = base.home_dir().join(".sshdesktop").join("keys");
             let _ = std::fs::create_dir_all(&keys_dir);
 
             #[cfg(unix)]
@@ -161,7 +169,7 @@ pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
 pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: ConnectionConfig) -> Result<String, String> {
     let id = config.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     config.id = Some(id.clone());
-    log::info!("CloudDesk: Establishing SSH connection [{}] for {} ({}:{})", id, config.name, config.host, config.port);
+    log::info!("SSH Desktop: Establishing SSH connection [{}] for {} ({}:{})", id, config.name, config.host, config.port);
 
     // Ensure the key file is available on disk for CLI utilities (scp, ssh, plink)
     if let Some(raw_key) = &config.private_key_path {
@@ -195,7 +203,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
             let arc_handle = std::sync::Arc::new(handle);
             sessions.insert(id.clone(), arc_handle.clone());
             sessions.insert("default".to_string(), arc_handle);
-            log::info!("CloudDesk: Native persistent SSH session established for {}", host);
+            log::info!("SSH Desktop: Native persistent SSH session established for {}", host);
         }
     }
 
@@ -217,7 +225,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                     .arg("-i")
                     .arg(key_path)
                     .arg(host)
-                    .arg("echo clouddesk-connected")
+                    .arg("echo sshdesktop-connected")
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
@@ -231,9 +239,9 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                             Ok(Ok(out)) => {
                                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                                 let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                                if out.status.success() || stdout.contains("clouddesk-connected") {
+                                if out.status.success() || stdout.contains("sshdesktop-connected") || stdout.contains("clouddesk-connected") {
                                     verified = true;
-                                    log::info!("CloudDesk: Plink connection test with PuTTY PPK successful for {}", host);
+                                    log::info!("SSH Desktop: Plink connection test with PuTTY PPK successful for {}", host);
                                 } else {
                                     let err_raw = if !stderr.is_empty() { stderr } else { stdout };
                                     last_error = err_raw
@@ -246,7 +254,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                                     if last_error.is_empty() {
                                         last_error = "PuTTY PPK authentication failed (access denied)".to_string();
                                     }
-                                    log::warn!("CloudDesk: Plink PPK test failed for {}: {}", host, last_error);
+                                    log::warn!("SSH Desktop: Plink PPK test failed for {}: {}", host, last_error);
                                 }
                             }
                             Ok(Err(e)) => {
@@ -288,15 +296,15 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                 }
             }
 
-            ssh_test.arg(format!("{}@{}", user, host)).arg("echo clouddesk-connected");
+            ssh_test.arg(format!("{}@{}", user, host)).arg("echo sshdesktop-connected");
 
             match tokio::time::timeout(std::time::Duration::from_secs(8), ssh_test.output()).await {
                 Ok(Ok(out)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                    if out.status.success() || stdout.contains("clouddesk-connected") {
+                    if out.status.success() || stdout.contains("sshdesktop-connected") || stdout.contains("clouddesk-connected") {
                         verified = true;
-                        log::info!("CloudDesk: OpenSSH connection test successful for {}", host);
+                        log::info!("SSH Desktop: OpenSSH connection test successful for {}", host);
                     } else {
                         last_error = if !stderr.is_empty() {
                             stderr.trim().to_string()
@@ -333,7 +341,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                     .arg("-pw")
                     .arg(pwd)
                     .arg(host)
-                    .arg("echo clouddesk-connected")
+                    .arg("echo sshdesktop-connected")
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
@@ -347,9 +355,9 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                             Ok(Ok(out)) => {
                                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                                 let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                                if out.status.success() || stdout.contains("clouddesk-connected") {
+                                if out.status.success() || stdout.contains("sshdesktop-connected") || stdout.contains("clouddesk-connected") {
                                     verified = true;
-                                    log::info!("CloudDesk: Plink connection test successful for {}", host);
+                                    log::info!("SSH Desktop: Plink connection test successful for {}", host);
                                 } else {
                                     let err_raw = if !stderr.is_empty() { stderr } else { stdout };
                                     last_error = err_raw
@@ -362,7 +370,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                                     if last_error.is_empty() {
                                         last_error = "SSH Authentication failed (access denied or wrong password)".to_string();
                                     }
-                                    log::warn!("CloudDesk: Plink test failed for {}: {}", host, last_error);
+                                    log::warn!("SSH Desktop: Plink test failed for {}: {}", host, last_error);
                                 }
                             }
                             Ok(Err(e)) => {
@@ -387,7 +395,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
         } else {
             last_error
         };
-        log::error!("CloudDesk: Connection failed for {}: {}", host, clean_error);
+        log::error!("SSH Desktop: Connection failed for {}: {}", host, clean_error);
         return Err(clean_error);
     }
 
@@ -423,7 +431,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
     };
     let _ = crate::store::connections::save_or_update_connection_on_disk(saved);
 
-    log::info!("CloudDesk: SSH Session established with ID: {} (verified: true)", id);
+    log::info!("SSH Desktop: SSH Session established with ID: {} (verified: true)", id);
     Ok(id)
 }
 
@@ -474,7 +482,7 @@ pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnecti
         let mut lock = state.connections.lock();
         lock.insert(restored.id.clone(), restored.clone());
         lock.insert("default".to_string(), restored.clone());
-        log::info!("CloudDesk: Auto-restored SSH connection '{}' from disk storage into memory", conn_id);
+        log::info!("SSH Desktop: Auto-restored SSH connection '{}' from disk storage into memory", conn_id);
         return Some(restored);
     }
 
@@ -499,7 +507,7 @@ pub async fn ssh_disconnect(state: tauri::State<'_, AppState>, conn_id: String) 
     if map.len() == 1 && map.contains_key("default") {
         map.remove("default");
     }
-    log::info!("CloudDesk: SSH Session disconnected for ID: {}", conn_id);
+    log::info!("SSH Desktop: SSH Session disconnected for ID: {}", conn_id);
     Ok(())
 }
 
@@ -546,8 +554,8 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
             config.password.as_deref(),
             config.private_key_path.as_deref(),
         ).await {
-            if let Ok((out, code)) = crate::ssh::session::run_exec_channel(&handle, "echo clouddesk-ok").await {
-                if code == 0 && out.contains("clouddesk-ok") {
+            if let Ok((out, code)) = crate::ssh::session::run_exec_channel(&handle, "echo sshdesktop-ok").await {
+                if code == 0 && (out.contains("sshdesktop-ok") || out.contains("clouddesk-ok")) {
                     return Ok(true);
                 }
             }
@@ -571,7 +579,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
                 .arg("-l").arg(user)
                 .arg("-i").arg(key_path)
                 .arg(host)
-                .arg("echo clouddesk-ok");
+                .arg("echo sshdesktop-ok");
             if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await {
                 if res.status.success() {
                     return Ok(true);
@@ -594,7 +602,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
                 .arg("-l").arg(user)
                 .arg("-pw").arg(pwd)
                 .arg(host)
-                .arg("echo clouddesk-ok");
+                .arg("echo sshdesktop-ok");
             if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await {
                 if res.status.success() {
                     return Ok(true);
@@ -618,7 +626,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
                 cmd.arg("-i").arg(k);
             }
         }
-        cmd.arg(format!("{}@{}", user, host)).arg("echo clouddesk-ok");
+        cmd.arg(format!("{}@{}", user, host)).arg("echo sshdesktop-ok");
         if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await {
             if res.status.success() {
                 return Ok(true);
