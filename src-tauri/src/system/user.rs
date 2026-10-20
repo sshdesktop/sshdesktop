@@ -35,16 +35,27 @@ pub async fn user_list(
     let (shadow_out, _) = run_cmd_priv(
         &state,
         &conn_id,
-        "getent shadow 2>/dev/null | awk -F: '{print $1,$2}'",
+        "cat /etc/shadow 2>/dev/null || getent shadow 2>/dev/null",
     ).await;
     let mut locked_users: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in shadow_out.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
+        let parts: Vec<&str> = line.split(':').collect();
         if parts.len() >= 2 {
-            let hash = parts[1];
+            let user = parts[0].trim();
+            let hash = parts[1].trim();
             // Locked if hash starts with '!' or '*'
-            if hash.starts_with('!') || hash.starts_with('*') {
-                locked_users.insert(parts[0].to_string());
+            // Or if field 8 (expiration date in days since epoch) is 1 or in past
+            let is_expired = if parts.len() >= 8 && !parts[7].trim().is_empty() {
+                if let Ok(exp_days) = parts[7].trim().parse::<i64>() {
+                    exp_days > 0 && exp_days <= 100 // e.g. 1 means expired in 1970
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if hash.starts_with('!') || hash.starts_with('*') || is_expired {
+                locked_users.insert(user.to_string());
             }
         }
     }
@@ -209,6 +220,67 @@ pub async fn user_modify(
     }
 
     log::info!("CloudDesk: Modified user {}", username);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn user_lock(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    username: String,
+) -> Result<(), String> {
+    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid username.".into());
+    }
+    if username == "root" {
+        return Err("Cannot lock the root superuser account.".into());
+    }
+
+    // Comprehensive lock:
+    // 1. Set expiration date to 1 (day after epoch) -> disables all SSH key and password logins
+    // 2. Lock password hash with usermod -L or passwd -l
+    let cmd = format!(
+        "usermod -L -e 1 '{}' 2>&1 || (usermod -L '{}' 2>&1; usermod -e 1 '{}' 2>&1) || passwd -l '{}' 2>&1",
+        username, username, username, username
+    );
+    let (out, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 && !out.is_empty() {
+        return Err(format!("Lock user failed: {}", out.trim()));
+    }
+
+    log::info!("CloudDesk: Locked user {}", username);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn user_unlock(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    username: String,
+) -> Result<(), String> {
+    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid username.".into());
+    }
+
+    // Comprehensive unlock:
+    // 1. Clear expiration date -> re-enables login access
+    // 2. Unlock password hash with usermod -U or passwd -u
+    let cmd = format!(
+        "usermod -e '' '{}' 2>&1; usermod -U '{}' 2>/dev/null || passwd -u '{}' 2>/dev/null || true",
+        username, username, username
+    );
+    let (out, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 && !out.is_empty() {
+        return Err(format!("Unlock user failed: {}", out.trim()));
+    }
+
+    log::info!("CloudDesk: Unlocked user {}", username);
     Ok(())
 }
 

@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Users, UserPlus, Shield, Trash2, Lock, Unlock, Search, RefreshCw, 
   Terminal, Key, X, Check, Plus, Folder, UserCheck, ShieldAlert, 
   LogOut, Layers, AlertCircle, CheckCircle2, ChevronRight, UserX,
   Settings, ExternalLink, HardDrive, ShieldCheck, Copy, MoreHorizontal,
-  UserMinus
+  UserMinus, AlertTriangle
 } from 'lucide-react';
 import { 
-  userList, groupList, userAdd, userDelete, sshExec,
+  userList, groupList, userAdd, userDelete, userLock, userUnlock, sshExec,
   groupAdd, groupDelete, groupAddUser, groupRemoveUser, whoIsLoggedIn 
 } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
@@ -65,16 +66,36 @@ export default function UserManager() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [newUser, setNewUser] = useState({ username: '', shell: '/bin/bash', sudo: false, password: '' });
   const [addUserError, setAddUserError] = useState<string | null>(null);
+  const [isAddingUser, setIsAddingUser] = useState(false);
 
   const [showAddGroupModal, setShowAddGroupModal] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [addGroupError, setAddGroupError] = useState<string | null>(null);
+  const [isAddingGroup, setIsAddingGroup] = useState(false);
 
   // Edit Group Modal
   const [editGroupModal, setEditGroupModal] = useState<GroupEntry | null>(null);
   const [selectedUserToAdd, setSelectedUserToAdd] = useState<string>('');
   const [editGroupError, setEditGroupError] = useState<string | null>(null);
   const [editGroupLoading, setEditGroupLoading] = useState(false);
+
+  // Confirmation Alert Modal State (for Delete User, Delete Group, and Kick Session)
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: React.ReactNode;
+    confirmText?: string;
+    confirmVariant?: 'danger' | 'warning' | 'info';
+    isAlertOnly?: boolean;
+    onConfirm?: () => Promise<void> | void;
+    isExecuting?: boolean;
+    icon?: React.ElementType;
+  } | null>(null);
+
+  // Action Loading tracking (for lock toggle, sudo toggle, etc.)
+  const [lockingUser, setLockingUser] = useState<string | null>(null);
+  const [togglingSudoUser, setTogglingSudoUser] = useState<string | null>(null);
+  const [isSubmittingPassword, setIsSubmittingPassword] = useState(false);
 
   // Context Menu
   const [contextMenu, setContextMenu] = useState<{
@@ -88,7 +109,7 @@ export default function UserManager() {
   // Password & Group Management Modals
   const [passwordModalUser, setPasswordModalUser] = useState<string | null>(null);
   const [newPassword, setNewPassword] = useState('');
-  const [passwordStatus, setPasswordStatus] = useState<string | null>(null);
+  const [passwordStatus, setPasswordStatus] = useState<{ text: string; isError?: boolean } | null>(null);
 
   const [groupModalUser, setGroupModalUser] = useState<UserEntry | null>(null);
   const [customGroupName, setCustomGroupName] = useState('');
@@ -205,60 +226,123 @@ export default function UserManager() {
   }, [users, selectedUsername]);
 
   const toggleLock = async (username: string, currentlyLocked: boolean) => {
+    if (username === 'root') {
+      setNotice({ text: 'Cannot lock the root superuser account.', isError: true });
+      return;
+    }
+    setLockingUser(username);
     try {
-      const flag = currentlyLocked ? '-U' : '-L';
-      await sshExec(activeConnId, `sudo usermod ${flag} ${username}`);
+      if (currentlyLocked) {
+        await userUnlock(activeConnId, username);
+      } else {
+        await userLock(activeConnId, username);
+      }
       setUsers(prev =>
         prev.map(u => (u.username === username ? { ...u, isLocked: !currentlyLocked } : u))
       );
       setNotice({ 
-        text: `User account '${username}' ${currentlyLocked ? 'unlocked' : 'locked'}.`, 
+        text: `User account '${username}' successfully ${currentlyLocked ? 'unlocked' : 'locked'}.`, 
         isError: false 
       });
-      setTimeout(() => setNotice(null), 3500);
+      setTimeout(() => setNotice(null), 4000);
+      await loadData();
     } catch (err: any) {
-      setNotice({ text: `Failed to toggle lock: ${err?.message || err}`, isError: true });
+      const msg = err?.message || String(err);
+      setNotice({ text: `Failed to ${currentlyLocked ? 'unlock' : 'lock'} user '${username}': ${msg}`, isError: true });
+    } finally {
+      setLockingUser(null);
     }
   };
 
   const toggleSudoPrivilege = async (username: string, currentlySudo: boolean) => {
+    if (username === 'root') {
+      setNotice({ text: 'Root superuser always has full administrative privileges.', isError: true });
+      return;
+    }
+    setTogglingSudoUser(username);
     try {
       if (currentlySudo) {
-        await sshExec(activeConnId, `sudo gpasswd -d ${username} sudo || sudo gpasswd -d ${username} wheel`);
+        const res = await sshExec(activeConnId, `sudo gpasswd -d '${username}' sudo 2>&1 || sudo gpasswd -d '${username}' wheel 2>&1`);
+        if (res.exit_code !== 0) {
+          throw new Error(res.stderr || res.stdout || 'Failed to revoke administrative privileges');
+        }
         setNotice({ text: `Revoked sudo administrative privileges from '${username}'.`, isError: false });
       } else {
-        await sshExec(activeConnId, `sudo usermod -aG sudo ${username} || sudo usermod -aG wheel ${username}`);
+        const res = await sshExec(activeConnId, `sudo usermod -aG sudo '${username}' 2>&1 || sudo usermod -aG wheel '${username}' 2>&1`);
+        if (res.exit_code !== 0) {
+          throw new Error(res.stderr || res.stdout || 'Failed to grant administrative privileges');
+        }
         setNotice({ text: `Granted sudo administrative privileges to '${username}'.`, isError: false });
       }
-      setTimeout(() => setNotice(null), 3500);
+      setTimeout(() => setNotice(null), 4000);
       await loadData();
     } catch (err: any) {
-      setNotice({ text: `Failed to change administrative privileges: ${err?.message || err}`, isError: true });
+      const msg = err?.message || String(err);
+      setNotice({ text: `Failed to change administrative privileges for '${username}': ${msg}`, isError: true });
+    } finally {
+      setTogglingSudoUser(null);
     }
   };
 
-  const deleteUser = async (username: string) => {
+  // Safe user delete with custom confirmation modal
+  const promptDeleteUser = (username: string) => {
     if (username === 'root') {
-      alert('Cannot delete the root superuser account.');
+      setNotice({ text: 'Cannot delete the root superuser account.', isError: true });
       return;
     }
-    if (!confirm(`Are you sure you want to permanently delete user '${username}' and their home folder?`)) return;
-    try {
-      await userDelete(activeConnId, username, true);
-      setUsers(prev => prev.filter(u => u.username !== username));
-      if (selectedUsername === username) {
-        setSelectedUsername(users[0]?.username || null);
+    setConfirmModal({
+      isOpen: true,
+      title: 'Delete User Account',
+      confirmText: 'Delete User Permanently',
+      confirmVariant: 'danger',
+      icon: Trash2,
+      message: (
+        <div className="space-y-3 text-xs">
+          <div className="flex items-center space-x-3 p-3 rounded-2xl bg-white/[0.03] border border-white/10">
+            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-rose-500 to-red-600 flex items-center justify-center font-bold text-white text-sm shadow">
+              {username[0]?.toUpperCase()}
+            </div>
+            <div>
+              <div className="font-bold text-sm text-white font-mono">{username}</div>
+              <div className="text-[11px] text-gray-400">Home: /home/{username}</div>
+            </div>
+          </div>
+          <p className="text-gray-300">
+            Are you sure you want to permanently delete this user account from the server?
+          </p>
+          <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[11px] flex items-start space-x-2">
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <span>
+              <strong>Warning:</strong> The user account and their entire home directory (<span className="font-mono">/home/{username}</span>) will be removed. This operation cannot be undone.
+            </span>
+          </div>
+        </div>
+      ),
+      onConfirm: async () => {
+        try {
+          setConfirmModal(prev => prev ? { ...prev, isExecuting: true } : null);
+          await userDelete(activeConnId, username, true);
+          setUsers(prev => prev.filter(u => u.username !== username));
+          if (selectedUsername === username) {
+            setSelectedUsername(users.find(u => u.username !== username)?.username || null);
+          }
+          setNotice({ text: `User account '${username}' and home directory deleted successfully.`, isError: false });
+          setTimeout(() => setNotice(null), 4000);
+          setConfirmModal(null);
+          await loadData();
+        } catch (err: any) {
+          const msg = err?.message || String(err);
+          setNotice({ text: `Failed to delete user '${username}': ${msg}`, isError: true });
+          setConfirmModal(prev => prev ? { ...prev, isExecuting: false } : null);
+        }
       }
-      setNotice({ text: `User '${username}' has been deleted.`, isError: false });
-      setTimeout(() => setNotice(null), 3500);
-    } catch (err: any) {
-      setNotice({ text: `Failed to delete user: ${err?.message || err}`, isError: true });
-    }
+    });
   };
 
   const handleAddUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newUser.username.trim()) return;
+    setIsAddingUser(true);
     setAddUserError(null);
     try {
       await userAdd(
@@ -268,56 +352,75 @@ export default function UserManager() {
         newUser.sudo ? ['sudo'] : []
       );
       if (newUser.password.trim()) {
-        await sshExec(activeConnId, `echo "${newUser.username.trim()}:${newUser.password.trim()}" | sudo chpasswd`);
+        const res = await sshExec(activeConnId, `echo "${newUser.username.trim()}:${newUser.password.trim()}" | sudo chpasswd 2>&1`);
+        if (res.exit_code !== 0) {
+          throw new Error(res.stderr || res.stdout || 'Password initialization failed');
+        }
       }
       setShowAddModal(false);
       setAddUserError(null);
       const createdUsername = newUser.username.trim();
       setNewUser({ username: '', shell: '/bin/bash', sudo: false, password: '' });
       setSelectedUsername(createdUsername);
-      setNotice({ text: `User '${createdUsername}' created successfully!`, isError: false });
-      setTimeout(() => setNotice(null), 3500);
+      setNotice({ text: `User account '${createdUsername}' created successfully!`, isError: false });
+      setTimeout(() => setNotice(null), 4000);
       await loadData();
     } catch (err: any) {
       const msg = err?.message || String(err);
       setAddUserError(msg);
       setNotice({ text: `Failed to create user: ${msg}`, isError: true });
+    } finally {
+      setIsAddingUser(false);
     }
   };
 
   const handleCreateGroup = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newGroupName.trim()) return;
+    setIsAddingGroup(true);
     setAddGroupError(null);
     try {
       await groupAdd(activeConnId, newGroupName.trim());
       setShowAddGroupModal(false);
       setAddGroupError(null);
+      const createdGroup = newGroupName.trim();
       setNewGroupName('');
-      setNotice({ text: `Group '${newGroupName.trim()}' created!`, isError: false });
-      setTimeout(() => setNotice(null), 3500);
+      setSelectedGroupName(createdGroup);
+      setNotice({ text: `Group '${createdGroup}' created successfully!`, isError: false });
+      setTimeout(() => setNotice(null), 4000);
       await loadData();
     } catch (err: any) {
       const msg = err?.message || String(err);
       setAddGroupError(msg);
       setNotice({ text: `Failed to create group: ${msg}`, isError: true });
+    } finally {
+      setIsAddingGroup(false);
     }
   };
 
   const handleSetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!passwordModalUser || !newPassword) return;
+    setIsSubmittingPassword(true);
+    setPasswordStatus({ text: 'Applying new password...' });
     try {
-      setPasswordStatus('Applying new password...');
-      await sshExec(activeConnId, `echo "${passwordModalUser}:${newPassword}" | sudo chpasswd`);
-      setPasswordStatus('Password updated successfully!');
+      const res = await sshExec(activeConnId, `echo "${passwordModalUser}:${newPassword}" | sudo chpasswd 2>&1`);
+      if (res.exit_code !== 0) {
+        throw new Error(res.stderr || res.stdout || 'Password change failed');
+      }
+      setPasswordStatus({ text: 'Password updated successfully!' });
+      setNotice({ text: `Password for '${passwordModalUser}' updated successfully!`, isError: false });
       setTimeout(() => {
         setPasswordModalUser(null);
         setNewPassword('');
         setPasswordStatus(null);
+        setIsSubmittingPassword(false);
       }, 1000);
     } catch (err: any) {
-      setPasswordStatus(`Failed: ${err?.message || err}`);
+      const msg = err?.message || String(err);
+      setPasswordStatus({ text: `Failed: ${msg}`, isError: true });
+      setNotice({ text: `Failed to update password: ${msg}`, isError: true });
+      setIsSubmittingPassword(false);
     }
   };
 
@@ -327,10 +430,14 @@ export default function UserManager() {
       setGroupStatus(`Adding to ${groupName}...`);
       await groupAddUser(activeConnId, groupName, groupModalUser.username);
       setGroupStatus(`User joined group '${groupName}'!`);
+      setNotice({ text: `Added user '${groupModalUser.username}' to group '${groupName}'.`, isError: false });
+      setTimeout(() => setNotice(null), 4000);
       await loadData();
       setGroupModalUser(prev => prev ? { ...prev, groups: [...prev.groups, groupName] } : null);
     } catch (err: any) {
-      setGroupStatus(`Failed: ${err?.message || err}`);
+      const msg = err?.message || String(err);
+      setGroupStatus(`Failed: ${msg}`);
+      setNotice({ text: `Failed to join group: ${msg}`, isError: true });
     }
   };
 
@@ -340,10 +447,14 @@ export default function UserManager() {
       setGroupStatus(`Removing from ${groupName}...`);
       await groupRemoveUser(activeConnId, groupName, groupModalUser.username);
       setGroupStatus(`User removed from group '${groupName}'!`);
+      setNotice({ text: `Removed user '${groupModalUser.username}' from group '${groupName}'.`, isError: false });
+      setTimeout(() => setNotice(null), 4000);
       await loadData();
       setGroupModalUser(prev => prev ? { ...prev, groups: prev.groups.filter(g => g !== groupName) } : null);
     } catch (err: any) {
-      setGroupStatus(`Failed: ${err?.message || err}`);
+      const msg = err?.message || String(err);
+      setGroupStatus(`Failed: ${msg}`);
+      setNotice({ text: `Failed to remove from group: ${msg}`, isError: true });
     }
   };
 
@@ -356,30 +467,97 @@ export default function UserManager() {
     return Array.from(new Set([...directMembers, ...inferredMembers]));
   }, [users]);
 
-  // Safe group delete with active user prevention
-  const handleDeleteGroup = async (grp: GroupEntry) => {
+  // Safe group delete with active user prevention and confirmation modal
+  const promptDeleteGroup = (grp: GroupEntry) => {
     const mems = getGroupMembers(grp);
     if (mems.length > 0) {
-      alert(`Cannot delete group '${grp.name}':\n\nThis group currently contains ${mems.length} active member user(s):\n${mems.join(', ')}\n\nTo safely delete this group, please edit the group and remove all member users first.`);
+      setConfirmModal({
+        isOpen: true,
+        title: 'Cannot Delete Group',
+        confirmText: 'Understood',
+        confirmVariant: 'info',
+        isAlertOnly: true,
+        icon: ShieldAlert,
+        message: (
+          <div className="space-y-3 text-xs">
+            <div className="flex items-center space-x-3 p-3 rounded-2xl bg-white/[0.03] border border-white/10">
+              <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center font-bold text-white shadow">
+                <Layers className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="font-bold text-sm text-white font-mono">{grp.name}</div>
+                <div className="text-[11px] text-gray-400 font-mono">GID: {grp.gid} · {mems.length} Active Member(s)</div>
+              </div>
+            </div>
+            <p className="text-gray-300">
+              Cannot delete group <strong className="text-white font-mono">{grp.name}</strong> because it still contains active member users:
+            </p>
+            <div className="flex flex-wrap gap-1.5 p-2.5 rounded-xl bg-black/40 border border-white/10 max-h-28 overflow-y-auto font-mono text-[11px]">
+              {mems.map(m => (
+                <span key={m} className="px-2.5 py-0.5 rounded-lg bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                  {m}
+                </span>
+              ))}
+            </div>
+            <p className="text-amber-300/90 text-[11px] bg-amber-500/10 p-2.5 rounded-xl border border-amber-500/20">
+              💡 Please edit the group and remove all member users before deleting this group.
+            </p>
+          </div>
+        ),
+        onConfirm: () => {
+          setConfirmModal(null);
+        }
+      });
       return;
     }
+
     if (['root', 'sudo', 'wheel', 'daemon', 'admin'].includes(grp.name)) {
-      alert(`Cannot delete system protected group '${grp.name}'.`);
+      setNotice({ text: `Cannot delete protected system group '${grp.name}'.`, isError: true });
       return;
     }
-    if (!confirm(`Are you sure you want to permanently delete group '${grp.name}' (GID: ${grp.gid})?`)) return;
-    try {
-      await groupDelete(activeConnId, grp.name);
-      setNotice({ text: `Group '${grp.name}' deleted.`, isError: false });
-      setTimeout(() => setNotice(null), 3500);
-      setGroups(prev => prev.filter(g => g.name !== grp.name));
-      if (selectedGroupName === grp.name) setSelectedGroupName(null);
-      await loadData();
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      alert(`Delete group failed:\n${msg}`);
-      setNotice({ text: `Failed to delete group: ${msg}`, isError: true });
-    }
+
+    setConfirmModal({
+      isOpen: true,
+      title: 'Delete Group',
+      confirmText: 'Delete Group',
+      confirmVariant: 'danger',
+      icon: Trash2,
+      message: (
+        <div className="space-y-3 text-xs">
+          <div className="flex items-center space-x-3 p-3 rounded-2xl bg-white/[0.03] border border-white/10">
+            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-rose-500 to-red-600 flex items-center justify-center font-bold text-white shadow">
+              <Layers className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="font-bold text-sm text-white font-mono">{grp.name}</div>
+              <div className="text-[11px] text-gray-400 font-mono">GID: {grp.gid}</div>
+            </div>
+          </div>
+          <p className="text-gray-300">
+            Are you sure you want to permanently delete group <strong className="text-white font-mono">{grp.name}</strong>?
+          </p>
+          <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[11px]">
+            ⚠️ This will remove the group definition from the remote server.
+          </div>
+        </div>
+      ),
+      onConfirm: async () => {
+        try {
+          setConfirmModal(prev => prev ? { ...prev, isExecuting: true } : null);
+          await groupDelete(activeConnId, grp.name);
+          setNotice({ text: `Group '${grp.name}' deleted successfully.`, isError: false });
+          setTimeout(() => setNotice(null), 4000);
+          setGroups(prev => prev.filter(g => g.name !== grp.name));
+          if (selectedGroupName === grp.name) setSelectedGroupName(null);
+          setConfirmModal(null);
+          await loadData();
+        } catch (err: any) {
+          const msg = err?.message || String(err);
+          setNotice({ text: `Failed to delete group '${grp.name}': ${msg}`, isError: true });
+          setConfirmModal(prev => prev ? { ...prev, isExecuting: false } : null);
+        }
+      }
+    });
   };
 
   const handleAddUserToGroup = async (groupName: string, username: string) => {
@@ -388,8 +566,8 @@ export default function UserManager() {
     setEditGroupError(null);
     try {
       await groupAddUser(activeConnId, groupName, username);
-      setNotice({ text: `Added user '${username}' to group '${groupName}'.`, isError: false });
-      setTimeout(() => setNotice(null), 3500);
+      setNotice({ text: `Added user '${username}' to group '${groupName}' successfully.`, isError: false });
+      setTimeout(() => setNotice(null), 4000);
       setEditGroupModal(prev => prev ? {
         ...prev,
         members: Array.from(new Set([...prev.members, username]))
@@ -397,7 +575,9 @@ export default function UserManager() {
       setSelectedUserToAdd('');
       await loadData();
     } catch (err: any) {
-      setEditGroupError(`Failed to add user: ${err?.message || err}`);
+      const msg = err?.message || String(err);
+      setEditGroupError(`Failed to add user: ${msg}`);
+      setNotice({ text: `Failed to add user to group: ${msg}`, isError: true });
     } finally {
       setEditGroupLoading(false);
     }
@@ -409,30 +589,70 @@ export default function UserManager() {
     setEditGroupError(null);
     try {
       await groupRemoveUser(activeConnId, groupName, username);
-      setNotice({ text: `Removed user '${username}' from group '${groupName}'.`, isError: false });
-      setTimeout(() => setNotice(null), 3500);
+      setNotice({ text: `Removed user '${username}' from group '${groupName}' successfully.`, isError: false });
+      setTimeout(() => setNotice(null), 4000);
       setEditGroupModal(prev => prev ? {
         ...prev,
         members: prev.members.filter(m => m !== username)
       } : null);
       await loadData();
     } catch (err: any) {
-      setEditGroupError(`Failed to remove user: ${err?.message || err}`);
+      const msg = err?.message || String(err);
+      setEditGroupError(`Failed to remove user: ${msg}`);
+      setNotice({ text: `Failed to remove user from group: ${msg}`, isError: true });
     } finally {
       setEditGroupLoading(false);
     }
   };
 
-  const handleKickSession = async (session: ActiveSession) => {
-    if (!confirm(`Terminate active session for '${session.user}' on ${session.tty}?`)) return;
-    try {
-      await sshExec(activeConnId, `sudo pkill -9 -t ${session.tty} || sudo fuser -k /dev/${session.tty}`);
-      setNotice({ text: `Session on ${session.tty} disconnected.`, isError: false });
-      setTimeout(() => setNotice(null), 3500);
-      await loadData();
-    } catch (err: any) {
-      setNotice({ text: `Failed to disconnect session: ${err?.message || err}`, isError: true });
-    }
+  // Safe session termination with confirmation modal
+  const promptKickSession = (session: ActiveSession) => {
+    setConfirmModal({
+      isOpen: true,
+      title: 'Disconnect Active Session',
+      confirmText: 'Disconnect / Kick',
+      confirmVariant: 'danger',
+      icon: LogOut,
+      message: (
+        <div className="space-y-3 text-xs">
+          <div className="flex items-center space-x-3 p-3 rounded-2xl bg-white/[0.03] border border-white/10">
+            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-rose-500 to-red-600 flex items-center justify-center font-bold text-white shadow">
+              <LogOut className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="font-bold text-sm text-emerald-400 font-mono flex items-center space-x-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span>{session.user}</span>
+              </div>
+              <div className="text-[11px] text-gray-400 font-mono">Terminal: {session.tty} · Host: {session.from}</div>
+            </div>
+          </div>
+          <p className="text-gray-300">
+            Are you sure you want to terminate the active session for user <strong className="text-white font-mono">{session.user}</strong> on terminal <strong className="text-white font-mono">{session.tty}</strong>?
+          </p>
+          <div className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[11px]">
+            ⚠️ This will forcibly kill the terminal session and disconnect the user immediately.
+          </div>
+        </div>
+      ),
+      onConfirm: async () => {
+        try {
+          setConfirmModal(prev => prev ? { ...prev, isExecuting: true } : null);
+          const res = await sshExec(activeConnId, `sudo pkill -9 -t '${session.tty}' 2>&1 || sudo fuser -k '/dev/${session.tty}' 2>&1`);
+          if (res.exit_code !== 0 && !res.stdout.includes('killed')) {
+            throw new Error(res.stderr || res.stdout || 'Command failed to kill session process');
+          }
+          setNotice({ text: `Active session on ${session.tty} (${session.user}) disconnected successfully.`, isError: false });
+          setTimeout(() => setNotice(null), 4000);
+          setConfirmModal(null);
+          await loadData();
+        } catch (err: any) {
+          const msg = err?.message || String(err);
+          setNotice({ text: `Failed to disconnect session: ${msg}`, isError: true });
+          setConfirmModal(prev => prev ? { ...prev, isExecuting: false } : null);
+        }
+      }
+    });
   };
 
   // Clamped Right-Click Context Menu inside window boundaries
@@ -551,46 +771,51 @@ export default function UserManager() {
         <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-blue-500 via-indigo-400 to-blue-500 animate-top-progress z-30 pointer-events-none" />
       )}
       {/* macOS Top Navigation Toolbar */}
-      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto no-scrollbar">
-        {/* Segmented Tab Controls */}
-        <div className="flex items-center space-x-2 shrink-0">
-          <div className="flex items-center bg-white/[0.06] rounded-xl p-0.5 border border-white/10">
-            <button
-              onClick={() => setTab('users')}
-              className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all ${
-                tab === 'users' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              <Users className="w-3.5 h-3.5" />
-              <span>Users ({users.length})</span>
-            </button>
-            <button
-              onClick={() => setTab('groups')}
-              className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all ${
-                tab === 'groups' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              <Layers className="w-3.5 h-3.5" />
-              <span>Groups ({groups.length})</span>
-            </button>
-            <button
-              onClick={() => setTab('sessions')}
-              className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all ${
-                tab === 'sessions' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Active Logins ({sessions.length})</span>
-            </button>
-          </div>
+      <div className="bg-[#14141e]/95 backdrop-blur-2xl border-b border-white/[0.08] px-4 pt-1.5 pb-0 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto no-scrollbar">
+        {/* Animated Straight Line Moving Left Right Tab Bar */}
+        <div className="flex items-center space-x-1 relative">
+          {[
+            { id: 'users', label: 'Users', count: users.length, icon: Users },
+            { id: 'groups', label: 'Groups', count: groups.length, icon: Layers },
+            { id: 'sessions', label: 'Active Logins', count: sessions.length, icon: UserCheck },
+          ].map(t => {
+            const isActive = tab === t.id;
+            const Icon = t.icon;
+            return (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id as any)}
+                className={`relative px-4 py-2.5 text-xs font-semibold flex items-center space-x-2 transition-colors cursor-pointer select-none rounded-t-xl ${
+                  isActive ? 'text-white' : 'text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-blue-400' : 'text-gray-400'}`} />
+                <span>{t.label}</span>
+                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono transition-colors ${
+                  isActive ? 'bg-blue-500/25 text-blue-300 font-bold' : 'bg-white/5 text-gray-500'
+                }`}>
+                  {t.count}
+                </span>
+
+                {/* Animated Straight Line Moving Left Right */}
+                {isActive && (
+                  <motion.div
+                    layoutId="activeTabUnderline"
+                    className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-gradient-to-r from-blue-500 via-indigo-400 to-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.9)] rounded-full"
+                    transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                  />
+                )}
+              </button>
+            );
+          })}
         </div>
 
         {/* Right Tools: Add User, Add Group, Search, Refresh */}
-        <div className="flex items-center space-x-2 shrink-0">
+        <div className="flex items-center space-x-2 shrink-0 pb-1.5">
           {tab === 'users' && (
             <button
               onClick={() => setShowAddModal(true)}
-              className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1 rounded-xl transition-all font-medium shadow-md active:scale-95"
+              className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded-xl transition-all font-medium shadow-md active:scale-95 cursor-pointer"
             >
               <UserPlus className="w-3.5 h-3.5" />
               <span>Add User</span>
@@ -600,7 +825,7 @@ export default function UserManager() {
           {tab === 'groups' && (
             <button
               onClick={() => setShowAddGroupModal(true)}
-              className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1 rounded-xl transition-all font-medium shadow-md active:scale-95"
+              className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded-xl transition-all font-medium shadow-md active:scale-95 cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Add Group</span>
@@ -617,7 +842,7 @@ export default function UserManager() {
               className="bg-[#101018] border border-white/10 rounded-xl pl-8 pr-7 py-1 text-xs text-gray-200 focus:outline-none focus:border-blue-500 w-36 focus:w-48 transition-all shadow-inner"
             />
             {search && (
-              <button onClick={() => setSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white p-0.5">
+              <button onClick={() => setSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white p-0.5 cursor-pointer">
                 <X className="w-3 h-3" />
               </button>
             )}
@@ -626,7 +851,7 @@ export default function UserManager() {
           <button
             onClick={loadData}
             disabled={loading}
-            className="p-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-gray-300 hover:text-white transition-all active:scale-95 disabled:opacity-50"
+            className="p-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-gray-300 hover:text-white transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
             title="Refresh Users & Groups"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-blue-400' : ''}`} />
@@ -636,11 +861,20 @@ export default function UserManager() {
 
       {/* Notice Toast */}
       {notice && (
-        <div className={`mx-4 mt-2 px-3 py-2 rounded-xl text-xs flex items-center justify-between animate-in fade-in slide-in-from-top-1 ${
-          notice.isError ? 'bg-red-500/20 text-red-300 border border-red-500/40' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+        <div className={`mx-4 mt-2.5 px-3.5 py-2.5 rounded-2xl text-xs flex items-center justify-between shadow-xl animate-in fade-in slide-in-from-top-1 ${
+          notice.isError 
+            ? 'bg-rose-500/20 text-rose-200 border border-rose-500/40 shadow-rose-900/20' 
+            : 'bg-emerald-500/20 text-emerald-200 border border-emerald-500/40 shadow-emerald-900/20'
         }`}>
-          <span className="font-mono">{notice.text}</span>
-          <button onClick={() => setNotice(null)} className="text-gray-400 hover:text-white">
+          <div className="flex items-center space-x-2.5 font-mono text-[11px] leading-relaxed">
+            {notice.isError ? (
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            )}
+            <span>{notice.text}</span>
+          </div>
+          <button onClick={() => setNotice(null)} className="text-gray-400 hover:text-white p-1 cursor-pointer">
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -749,14 +983,21 @@ export default function UserManager() {
                     {/* Sudo Admin Switch */}
                     <div className="flex items-center justify-between py-2 border-b border-white/[0.06]">
                       <div>
-                        <div className="text-xs font-semibold text-white">Administrator Privileges (sudo)</div>
+                        <div className="text-xs font-semibold text-white flex items-center space-x-2">
+                          <span>Administrator Privileges (sudo)</span>
+                          {togglingSudoUser === selectedUserObj.username && (
+                            <RefreshCw className="w-3 h-3 text-blue-400 animate-spin" />
+                          )}
+                        </div>
                         <div className="text-[11px] text-gray-400">Allow this user to execute administrative commands via sudo.</div>
                       </div>
                       <button
+                        disabled={togglingSudoUser === selectedUserObj.username}
                         onClick={() => toggleSudoPrivilege(selectedUserObj.username, selectedUserObj.isSudo)}
-                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none disabled:opacity-50 ${
                           selectedUserObj.isSudo ? 'bg-blue-600' : 'bg-gray-700'
                         }`}
+                        title={selectedUserObj.isSudo ? 'Click to revoke administrative privileges' : 'Click to grant administrative privileges'}
                       >
                         <span
                           className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
@@ -766,17 +1007,28 @@ export default function UserManager() {
                       </button>
                     </div>
 
-                    {/* Lock Account Switch */}
+                    {/* Lock Account Switch with proper async loading */}
                     <div className="flex items-center justify-between py-2 border-b border-white/[0.06]">
                       <div>
-                        <div className="text-xs font-semibold text-white">Lock Account Access</div>
-                        <div className="text-[11px] text-gray-400">Disables password login for this user account.</div>
+                        <div className="text-xs font-semibold text-white flex items-center space-x-2">
+                          <span>Lock Account Access</span>
+                          {lockingUser === selectedUserObj.username && (
+                            <RefreshCw className="w-3 h-3 text-amber-400 animate-spin" />
+                          )}
+                        </div>
+                        <div className="text-[11px] text-gray-400">
+                          {selectedUserObj.isLocked
+                            ? 'Account is currently locked. Password & SSH logins are disabled.'
+                            : 'Disables all login access (password & SSH keys) for this user account.'}
+                        </div>
                       </div>
                       <button
+                        disabled={lockingUser === selectedUserObj.username}
                         onClick={() => toggleLock(selectedUserObj.username, selectedUserObj.isLocked)}
-                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none disabled:opacity-50 ${
                           selectedUserObj.isLocked ? 'bg-amber-600' : 'bg-gray-700'
                         }`}
+                        title={selectedUserObj.isLocked ? 'Click to unlock account' : 'Click to lock account'}
                       >
                         <span
                           className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
@@ -797,7 +1049,7 @@ export default function UserManager() {
                           navigateFinder(selectedUserObj.home);
                           openApp('files', 'Finder');
                         }}
-                        className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs flex items-center space-x-1.5 transition-colors"
+                        className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs flex items-center space-x-1.5 transition-colors cursor-pointer"
                       >
                         <Folder className="w-3.5 h-3.5 text-blue-400" />
                         <span>Open in Finder</span>
@@ -815,7 +1067,7 @@ export default function UserManager() {
                           runTerminalCommand(`sudo su - ${selectedUserObj.username}\n`);
                           openApp('terminal', 'Terminal');
                         }}
-                        className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs flex items-center space-x-1.5 transition-colors"
+                        className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs flex items-center space-x-1.5 transition-colors cursor-pointer"
                       >
                         <Terminal className="w-3.5 h-3.5 text-emerald-400" />
                         <span>Switch User Shell</span>
@@ -832,7 +1084,7 @@ export default function UserManager() {
                             setCustomGroupName('');
                             setGroupStatus(null);
                           }}
-                          className="text-xs text-blue-400 hover:text-blue-300 font-medium"
+                          className="text-xs text-blue-400 hover:text-blue-300 font-medium cursor-pointer"
                         >
                           + Manage Groups
                         </button>
@@ -854,8 +1106,8 @@ export default function UserManager() {
                     {selectedUserObj.username !== 'root' && (
                       <div className="pt-3 border-t border-white/[0.08] flex justify-end">
                         <button
-                          onClick={() => deleteUser(selectedUserObj.username)}
-                          className="px-3.5 py-1.5 bg-rose-600/15 hover:bg-rose-600 text-rose-300 hover:text-white rounded-xl text-xs font-semibold border border-rose-500/30 transition-all flex items-center space-x-1.5"
+                          onClick={() => promptDeleteUser(selectedUserObj.username)}
+                          className="px-3.5 py-1.5 bg-rose-600/15 hover:bg-rose-600 text-rose-300 hover:text-white rounded-xl text-xs font-semibold border border-rose-500/30 transition-all flex items-center space-x-1.5 cursor-pointer active:scale-95 shadow-sm"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                           <span>Delete User Account</span>
@@ -942,16 +1194,16 @@ export default function UserManager() {
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleDeleteGroup(grp);
+                                promptDeleteGroup(grp);
                               }}
-                              className={`p-1 rounded-lg transition-colors ${
+                              className={`p-1.5 rounded-xl transition-all cursor-pointer ${
                                 hasMembers
-                                  ? 'text-gray-500 hover:bg-white/5 cursor-not-allowed opacity-60'
+                                  ? 'hover:bg-amber-500/20 text-gray-400 hover:text-amber-300'
                                   : 'hover:bg-rose-500/20 text-gray-400 hover:text-rose-400'
                               }`}
                               title={
                                 hasMembers
-                                  ? `Cannot delete: group has ${mems.length} member user(s). Remove users first.`
+                                  ? `Group has ${mems.length} member user(s). Click to view alert.`
                                   : "Delete Group"
                               }
                             >
@@ -1018,12 +1270,13 @@ export default function UserManager() {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleKickSession(sess);
+                              promptKickSession(sess);
                             }}
-                            className="px-2 py-0.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-medium transition-colors"
+                            className="px-2.5 py-1 rounded-xl bg-rose-500/15 hover:bg-rose-500 text-rose-300 hover:text-white border border-rose-500/30 text-[10px] font-semibold transition-all cursor-pointer shadow-sm active:scale-95 flex items-center space-x-1 ml-auto"
                             title="Disconnect Session"
                           >
-                            Kick
+                            <LogOut className="w-3 h-3" />
+                            <span>Kick</span>
                           </button>
                         </td>
                       </tr>
@@ -1114,9 +1367,11 @@ export default function UserManager() {
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-xl text-xs bg-blue-600 hover:bg-blue-500 text-white font-semibold shadow-md transition-all active:scale-95"
+                disabled={isAddingUser}
+                className="px-4 py-2 rounded-xl text-xs bg-blue-600 hover:bg-blue-500 text-white font-semibold shadow-md transition-all active:scale-95 flex items-center space-x-1.5 disabled:opacity-50 cursor-pointer"
               >
-                Create Account
+                {isAddingUser && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isAddingUser ? 'Creating...' : 'Create Account'}</span>
               </button>
             </div>
           </form>
@@ -1129,7 +1384,7 @@ export default function UserManager() {
           <form onSubmit={handleCreateGroup} className="bg-[#181a2c] border border-white/15 rounded-3xl w-full max-w-sm p-6 space-y-4 shadow-2xl">
             <div className="flex items-center justify-between pb-2 border-b border-white/10">
               <h3 className="font-bold text-base text-white">Create New Group</h3>
-              <button type="button" onClick={() => { setShowAddGroupModal(false); setAddGroupError(null); }} className="p-1 hover:bg-white/10 rounded-lg text-gray-400 hover:text-white">
+              <button type="button" onClick={() => { setShowAddGroupModal(false); setAddGroupError(null); }} className="p-1 hover:bg-white/10 rounded-lg text-gray-400 hover:text-white cursor-pointer">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -1158,15 +1413,17 @@ export default function UserManager() {
               <button
                 type="button"
                 onClick={() => { setShowAddGroupModal(false); setAddGroupError(null); }}
-                className="px-3.5 py-2 rounded-xl text-xs text-gray-300 hover:text-white hover:bg-white/5 transition-colors"
+                className="px-3.5 py-2 rounded-xl text-xs text-gray-300 hover:text-white hover:bg-white/5 transition-colors cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-xl text-xs bg-blue-600 hover:bg-blue-500 text-white font-semibold shadow-md transition-all active:scale-95"
+                disabled={isAddingGroup}
+                className="px-4 py-2 rounded-xl text-xs bg-blue-600 hover:bg-blue-500 text-white font-semibold shadow-md transition-all active:scale-95 flex items-center space-x-1.5 disabled:opacity-50 cursor-pointer"
               >
-                Create Group
+                {isAddingGroup && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isAddingGroup ? 'Creating...' : 'Create Group'}</span>
               </button>
             </div>
           </form>
@@ -1182,14 +1439,23 @@ export default function UserManager() {
                 <Key className="w-4 h-4 text-blue-400" />
                 <span>Password for {passwordModalUser}</span>
               </div>
-              <button type="button" onClick={() => setPasswordModalUser(null)} className="p-1 hover:bg-white/10 rounded-lg text-gray-400 hover:text-white">
+              <button type="button" onClick={() => setPasswordModalUser(null)} className="p-1 hover:bg-white/10 rounded-lg text-gray-400 hover:text-white cursor-pointer">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             {passwordStatus && (
-              <div className="p-2.5 rounded-xl bg-blue-500/15 border border-blue-500/30 text-blue-300 text-xs font-mono">
-                {passwordStatus}
+              <div className={`p-2.5 rounded-xl border text-xs font-mono flex items-center space-x-2 ${
+                passwordStatus.isError
+                  ? 'bg-rose-500/15 border-rose-500/30 text-rose-300'
+                  : 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+              }`}>
+                {passwordStatus.isError ? (
+                  <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                ) : (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                )}
+                <span>{passwordStatus.text}</span>
               </div>
             )}
 
@@ -1210,16 +1476,17 @@ export default function UserManager() {
               <button
                 type="button"
                 onClick={() => setPasswordModalUser(null)}
-                className="px-3.5 py-2 rounded-xl text-xs text-gray-300 hover:text-white hover:bg-white/5 transition-colors"
+                className="px-3.5 py-2 rounded-xl text-xs text-gray-300 hover:text-white hover:bg-white/5 transition-colors cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                disabled={!newPassword}
-                className="px-4 py-2 rounded-xl text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold shadow-md transition-all active:scale-95"
+                disabled={!newPassword || isSubmittingPassword}
+                className="px-4 py-2 rounded-xl text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold shadow-md transition-all active:scale-95 flex items-center space-x-1.5 cursor-pointer"
               >
-                Update Password
+                {isSubmittingPassword && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isSubmittingPassword ? 'Updating...' : 'Update Password'}</span>
               </button>
             </div>
           </form>
@@ -1531,8 +1798,9 @@ export default function UserManager() {
                 {contextMenu.data.username !== 'root' && (
                   <button
                     onClick={() => {
-                      deleteUser(contextMenu.data.username);
+                      const userToDelete = contextMenu.data.username;
                       setContextMenu(null);
+                      promptDeleteUser(userToDelete);
                     }}
                     className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-rose-600 hover:text-white rounded-xl transition-colors text-left text-rose-400"
                   >
@@ -1595,13 +1863,14 @@ export default function UserManager() {
                 <div className="py-1">
                   <button
                     onClick={() => {
-                      handleDeleteGroup(grp);
+                      const groupToDelete = grp;
                       setContextMenu(null);
+                      promptDeleteGroup(groupToDelete);
                     }}
                     className={`w-full flex items-center space-x-2 px-2.5 py-1.5 rounded-xl transition-colors text-left ${
-                      hasMembers ? 'text-gray-500 hover:bg-white/5 cursor-not-allowed opacity-70' : 'text-rose-400 hover:bg-rose-600 hover:text-white'
+                      hasMembers ? 'text-amber-400 hover:bg-amber-600 hover:text-white' : 'text-rose-400 hover:bg-rose-600 hover:text-white'
                     }`}
-                    title={hasMembers ? `Cannot delete: group has ${mems.length} members` : 'Delete group'}
+                    title={hasMembers ? `Group has ${mems.length} members` : 'Delete group'}
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     <span>{hasMembers ? `Delete Group (Has ${mems.length} users)` : 'Delete Group'}</span>
@@ -1620,8 +1889,9 @@ export default function UserManager() {
                 </div>
                 <button
                   onClick={() => {
-                    handleKickSession(contextMenu.data);
+                    const sessionToKick = contextMenu.data;
                     setContextMenu(null);
+                    promptKickSession(sessionToKick);
                   }}
                   className="w-full flex items-center space-x-2 px-2.5 py-1.5 hover:bg-rose-600 hover:text-white rounded-xl transition-colors text-left text-rose-300"
                 >
@@ -1657,6 +1927,68 @@ export default function UserManager() {
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {/* Confirmation Alert Modal (Delete User, Delete Group, and Kick Session) */}
+      {confirmModal && confirmModal.isOpen && (
+        <div className="fixed inset-0 bg-black/65 backdrop-blur-md z-50 flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-[#181a2c] border border-white/15 rounded-3xl w-full max-w-md p-6 space-y-4 shadow-2xl animate-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-white/10">
+              <div className="flex items-center space-x-2.5">
+                <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                  confirmModal.confirmVariant === 'danger'
+                    ? 'bg-rose-500/20 text-rose-400'
+                    : confirmModal.confirmVariant === 'warning'
+                    ? 'bg-amber-500/20 text-amber-400'
+                    : 'bg-blue-500/20 text-blue-400'
+                }`}>
+                  {confirmModal.icon ? <confirmModal.icon className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
+                </div>
+                <h3 className="font-bold text-sm text-white">{confirmModal.title}</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setConfirmModal(null)}
+                className="p-1 hover:bg-white/10 rounded-lg text-gray-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div>{confirmModal.message}</div>
+
+            {/* Footer Buttons */}
+            <div className="flex justify-end space-x-2 pt-3 border-t border-white/10">
+              {!confirmModal.isAlertOnly && (
+                <button
+                  type="button"
+                  disabled={confirmModal.isExecuting}
+                  onClick={() => setConfirmModal(null)}
+                  className="px-4 py-2 rounded-xl text-xs text-gray-300 hover:text-white hover:bg-white/5 transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={confirmModal.isExecuting}
+                onClick={confirmModal.onConfirm}
+                className={`px-4 py-2 rounded-xl text-xs font-semibold shadow-md transition-all active:scale-95 flex items-center space-x-1.5 disabled:opacity-50 cursor-pointer ${
+                  confirmModal.confirmVariant === 'danger'
+                    ? 'bg-rose-600 hover:bg-rose-500 text-white'
+                    : confirmModal.confirmVariant === 'warning'
+                    ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                    : 'bg-blue-600 hover:bg-blue-500 text-white'
+                }`}
+              >
+                {confirmModal.isExecuting && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>{confirmModal.confirmText || 'Confirm'}</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

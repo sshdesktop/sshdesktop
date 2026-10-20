@@ -407,6 +407,14 @@ export async function userDelete(connId: string, username: string, removeHome: b
   return safeInvoke<void>('user_delete', { connId, username, removeHome }, undefined);
 }
 
+export async function userLock(connId: string, username: string): Promise<void> {
+  return safeInvoke<void>('user_lock', { connId, username }, undefined);
+}
+
+export async function userUnlock(connId: string, username: string): Promise<void> {
+  return safeInvoke<void>('user_unlock', { connId, username }, undefined);
+}
+
 export async function groupList(connId: string): Promise<any[]> {
   try {
     return await safeInvoke<any[]>('group_list', { connId }, []);
