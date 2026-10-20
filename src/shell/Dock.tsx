@@ -18,22 +18,22 @@ interface DockAppConfig {
 }
 
 const DOCK_APPS: DockAppConfig[] = [
-  { id: 'api', icon: Send, label: 'API Studio (SSH Tunnel)', tileBg: 'from-[#6366f1] via-[#8b5cf6] to-[#d946ef]', iconColor: '#ffffff' },
-  { id: 'browser', icon: Compass, label: 'Private Web Browser', tileBg: 'from-[#06b6d4] via-[#0284c7] to-[#1d4ed8]', iconColor: '#38bdf8' },
-  { id: 'ssh', icon: KeyRound, label: 'SSH Studio', tileBg: 'from-[#0ea5e9] via-[#2563eb] to-[#1e1b4b]', iconColor: '#38bdf8' },
-  { id: 'files', icon: Folder, label: 'File Manager', tileBg: 'from-[#38bdf8] via-[#0284c7] to-[#0369a1]', iconColor: '#ffffff' },
   { id: 'terminal', icon: Terminal, label: 'Terminal', tileBg: 'from-[#334155] via-[#1e293b] to-[#0f172a]', iconColor: '#4ade80' },
+  { id: 'files', icon: Folder, label: 'File Manager', tileBg: 'from-[#38bdf8] via-[#0284c7] to-[#0369a1]', iconColor: '#ffffff' },
   { id: 'editor', icon: FileCode, label: 'Code Editor', tileBg: 'from-[#6366f1] via-[#4f46e5] to-[#3730a3]', iconColor: '#ffffff' },
-  { id: 'env', icon: Variable, label: 'Environment Variables', tileBg: 'from-[#ec4899] via-[#8b5cf6] to-[#6366f1]', iconColor: '#ffffff' },
   { id: 'monitor', icon: Monitor, label: 'Activity Monitor', tileBg: 'from-[#06b6d4] via-[#0891b2] to-[#0e7490]', iconColor: '#ffffff' },
   { id: 'processes', icon: Activity, label: 'Process Manager', tileBg: 'from-[#ec4899] via-[#db2777] to-[#9d174d]', iconColor: '#ffffff' },
   { id: 'services', icon: Server, label: 'Services', tileBg: 'from-[#a855f7] via-[#9333ea] to-[#6b21a8]', iconColor: '#ffffff' },
   { id: 'docker', icon: Container, label: 'Docker Containers', tileBg: 'from-[#0284c7] via-[#0369a1] to-[#075985]', iconColor: '#38bdf8' },
   { id: 'database', icon: Database, label: 'Database Studio', tileBg: 'from-[#06b6d4] via-[#0284c7] to-[#1d4ed8]', iconColor: '#ffffff' },
-  { id: 'disks', icon: HardDrive, label: 'Disk Manager', tileBg: 'from-[#64748b] via-[#475569] to-[#334155]', iconColor: '#38bdf8' },
-  { id: 'firewall', icon: Flame, label: 'Firewall', tileBg: 'from-[#f97316] via-[#ea580c] to-[#dc2626]', iconColor: '#ffffff' },
+  { id: 'ssh', icon: KeyRound, label: 'SSH Studio', tileBg: 'from-[#0ea5e9] via-[#2563eb] to-[#1e1b4b]', iconColor: '#38bdf8' },
+  { id: 'api', icon: Send, label: 'API Studio (SSH Tunnel)', tileBg: 'from-[#6366f1] via-[#8b5cf6] to-[#d946ef]', iconColor: '#ffffff' },
+  { id: 'browser', icon: Compass, label: 'Private Web Browser', tileBg: 'from-[#06b6d4] via-[#0284c7] to-[#1d4ed8]', iconColor: '#38bdf8' },
+  { id: 'env', icon: Variable, label: 'Environment Variables', tileBg: 'from-[#ec4899] via-[#8b5cf6] to-[#6366f1]', iconColor: '#ffffff' },
   { id: 'logs', icon: ScrollText, label: 'Console Logs', tileBg: 'from-[#f97316] via-[#ea580c] to-[#c2410c]', iconColor: '#ffffff' },
   { id: 'network', icon: Globe, label: 'Network', tileBg: 'from-[#14b8a6] via-[#0d9488] to-[#0f766e]', iconColor: '#ffffff' },
+  { id: 'firewall', icon: Flame, label: 'Firewall', tileBg: 'from-[#f97316] via-[#ea580c] to-[#dc2626]', iconColor: '#ffffff' },
+  { id: 'disks', icon: HardDrive, label: 'Disk Manager', tileBg: 'from-[#64748b] via-[#475569] to-[#334155]', iconColor: '#38bdf8' },
   { id: 'packages', icon: Package, label: 'Packages', tileBg: 'from-[#f43f5e] via-[#e11d48] to-[#be123c]', iconColor: '#ffffff' },
   { id: 'users', icon: Users, label: 'Users & Groups', tileBg: 'from-[#3b82f6] via-[#2563eb] to-[#1d4ed8]', iconColor: '#ffffff' },
   { id: 'cron', icon: Clock, label: 'Cron Scheduler', tileBg: 'from-[#f59e0b] via-[#d97706] to-[#b45309]', iconColor: '#ffffff' },
@@ -125,20 +125,20 @@ export default function Dock({
               : 'bg-black/40 border-white/20 text-white shadow-[0_25px_50px_rgba(0,0,0,0.6),inset_0_1px_1px_rgba(255,255,255,0.3)] ring-1 ring-black/10'
           }`}
         >
-          {/* Launcher Button (macOS authentic Launchpad Rocket) */}
+          {/* 1st: START / Launchpad Button */}
           <DockSquircleItem
             icon={Rocket}
-            label="Launchpad"
-            tileBg="from-[#94a3b8] via-[#64748b] to-[#334155]"
+            label="Start / Launchpad"
+            tileBg="from-[#2563eb] via-[#3b82f6] to-[#6366f1]"
             iconColor="#ffffff"
             onClick={onToggleLauncher}
             isLight={isLight}
           />
           
-          {/* Separator */}
+          {/* Separator between 1st (Start) and 2nd (Software) */}
           <div className={`w-px h-6 mx-0.5 self-center ${isLight ? 'bg-black/10' : 'bg-white/15'}`} />
           
-          {/* App Icons */}
+          {/* 2nd: Software Applications */}
           {DOCK_APPS.map((app) => (
             <DockSquircleItem
               key={app.id}
