@@ -761,6 +761,7 @@ export default function Desktop() {
       <Taskbar 
         onOpenWallpapers={() => setShowWallpaperModal(true)}
         onLockScreen={() => setIsLocked(true)}
+        onToggleLauncher={() => setShowAppLauncher(!showAppLauncher)}
       />
 
       {/* Sonoma Desktop Widgets (Clock, Performance Monitor with human GB, Stickies) */}

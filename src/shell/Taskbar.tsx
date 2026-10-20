@@ -3,18 +3,51 @@ import { createPortal } from 'react-dom';
 import { 
   Cloud, Bell, LogOut, Settings, ShieldCheck, Terminal, Cpu, MemoryStick,
   Palette, Sun, Moon, Minimize2, Eye, EyeOff, Server, ChevronDown, Check, Plus, X, Lock,
-  Trash2, Search, Key, Upload, FileCode, ArrowRight, Shield, Globe, RefreshCw
+  Trash2, Search, Key, Upload, FileCode, ArrowRight, Shield, Globe, RefreshCw,
+  Folder, Activity, Container, Database, HardDrive, Flame, ScrollText, Package,
+  Users, Clock, StickyNote, Variable, KeyRound, Compass, Send, LayoutGrid, Monitor
 } from 'lucide-react';
 import { useConnectionStore, useSettingsStore, useWindowStore, useTelemetryStore } from '../lib/store';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
 import { pickKeyFile } from '../lib/tauri-bridge';
 
+const TASKBAR_ICONS: Record<string, React.ElementType> = {
+  terminal: Terminal,
+  files: Folder,
+  editor: FileCode,
+  ssh: KeyRound,
+  browser: Compass,
+  api: Send,
+  monitor: Monitor,
+  processes: Activity,
+  services: Server,
+  docker: Container,
+  logs: ScrollText,
+  env: Variable,
+  database: Database,
+  disks: HardDrive,
+  network: Globe,
+  firewall: Flame,
+  packages: Package,
+  users: Users,
+  cron: Clock,
+  security: Shield,
+  notes: StickyNote,
+  settings: Settings,
+};
+
+function getTaskbarIcon(appId: string): React.ElementType {
+  return TASKBAR_ICONS[appId] || Terminal;
+}
+
 export default function Taskbar({ 
   onOpenWallpapers, 
-  onLockScreen 
+  onLockScreen,
+  onToggleLauncher,
 }: { 
   onOpenWallpapers?: () => void;
   onLockScreen?: () => void;
+  onToggleLauncher?: () => void;
 }) {
   const { 
     activeConnectionId, 
@@ -28,7 +61,7 @@ export default function Taskbar({
     removeConnection 
   } = useConnectionStore();
   const { theme, updateSettings } = useSettingsStore();
-  const { minimizeAllWindows, windows, closeWindow } = useWindowStore();
+  const { minimizeAllWindows, windows, closeWindow, minimizeWindow, restoreWindow, focusWindow, bringToFront } = useWindowStore();
   const { openApp } = useWindowManager();
 
   const [time, setTime] = useState('');
@@ -247,8 +280,8 @@ export default function Taskbar({
     <div className={`taskbar-bar fixed top-0 left-0 w-full h-8 backdrop-blur-xl border-b flex items-center justify-between px-3 z-[999999] text-xs window-drag select-none shadow-sm ${
       isLight ? 'bg-white/85 text-slate-800 border-black/10' : 'bg-[#14141e]/90 text-gray-300 border-white/[0.08]'
     }`}>
-      {/* Left Menu Items - Apple / CloudDesk Brand */}
-      <div className="flex items-center space-x-3 window-no-drag">
+      {/* Left Menu Items - Apple / CloudDesk Brand & Start Button */}
+      <div className="flex items-center space-x-2 window-no-drag">
         <div className="relative">
           <button
             onClick={() => setShowAppleMenu(!showAppleMenu)}
@@ -267,6 +300,13 @@ export default function Taskbar({
               }`}
               onClick={() => setShowAppleMenu(false)}
             >
+              <div
+                onClick={() => onToggleLauncher?.()}
+                className="px-3 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center space-x-2"
+              >
+                <LayoutGrid className="w-3.5 h-3.5 text-blue-400" />
+                <span>All Applications (Launchpad)...</span>
+              </div>
               <div
                 onClick={() => openApp('settings', 'System Settings')}
                 className="px-3 py-1.5 hover:bg-blue-600 hover:text-white cursor-pointer flex items-center space-x-2"
@@ -324,6 +364,61 @@ export default function Taskbar({
             </div>
           )}
         </div>
+
+        {/* Start / Launchpad Button */}
+        <button
+          onClick={() => onToggleLauncher?.()}
+          className="flex items-center space-x-1.5 px-2.5 py-0.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-400/30 transition-all cursor-pointer font-sans text-xs font-semibold shadow-sm active:scale-95"
+          title="Start Menu - All Software & Tools"
+        >
+          <LayoutGrid className="w-3.5 h-3.5 text-blue-400" />
+          <span>Start</span>
+        </button>
+      </div>
+
+      {/* Center: Running Software Windows Strip (Professionally Aligned) */}
+      <div className="flex-1 flex items-center justify-center max-w-xl mx-2 overflow-x-auto scrollbar-none space-x-1.5 window-no-drag">
+        {windows.map(win => {
+          const isFocused = win.focused && !win.minimized;
+          const Icon = getTaskbarIcon(win.appId);
+          return (
+            <button
+              key={win.id}
+              onClick={() => {
+                if (win.focused && !win.minimized) {
+                  minimizeWindow(win.id);
+                } else {
+                  restoreWindow(win.id);
+                  bringToFront(win.id);
+                  focusWindow(win.id);
+                }
+              }}
+              className={`flex items-center space-x-1.5 px-2.5 py-0.5 rounded-lg text-xs transition-all cursor-pointer max-w-[150px] truncate border group select-none shrink-0 ${
+                isFocused
+                  ? 'bg-blue-600/30 border-blue-400/60 text-white font-medium shadow-sm ring-1 ring-blue-500/20'
+                  : win.minimized
+                  ? 'bg-black/25 border-white/5 text-gray-400 hover:text-white opacity-70'
+                  : isLight
+                  ? 'bg-black/5 border-black/10 text-slate-700 hover:text-slate-900 hover:bg-black/10'
+                  : 'bg-white/5 border-white/10 text-gray-300 hover:text-white hover:bg-white/10'
+              }`}
+              title={`${win.title}${win.minimized ? ' (Minimized)' : ''}`}
+            >
+              <Icon className={`w-3.5 h-3.5 shrink-0 ${isFocused ? 'text-blue-400' : 'text-gray-400'}`} />
+              <span className="truncate text-[11px] font-sans">{win.title}</span>
+              <span
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeWindow(win.id);
+                }}
+                className="opacity-0 group-hover:opacity-100 hover:text-rose-400 p-0.5 rounded text-[10px] ml-auto transition-opacity"
+                title="Close Window"
+              >
+                ✕
+              </span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Right System Tray */}

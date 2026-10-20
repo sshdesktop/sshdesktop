@@ -545,6 +545,7 @@ interface SettingsState {
   accentColor: string;
   terminalFontSize: number;
   dockPosition: 'bottom' | 'left';
+  dockAlignment: 'center' | 'left';
   showHiddenFiles: boolean;
   pollingInterval: number;
   wallpaper: string;
@@ -567,6 +568,7 @@ export const useSettingsStore = create<SettingsState>()(
       accentColor: '#89B4FA',
       terminalFontSize: 14,
       dockPosition: 'bottom',
+      dockAlignment: 'center',
       showHiddenFiles: false,
       pollingInterval: 15,
       wallpaper: 'sonoma',
