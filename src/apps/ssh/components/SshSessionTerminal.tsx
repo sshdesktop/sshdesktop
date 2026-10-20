@@ -188,8 +188,10 @@ export default function SshSessionTerminal({
     });
 
     // Handle terminal output from backend
+    let isCancelled = false;
     let unlistenOutput: (() => void) | undefined;
     listen<any>('terminal-output', (event) => {
+      if (isCancelled) return;
       const payload = event.payload;
       if (!payload || payload.terminal_id !== session.terminalId) return;
       if (isDisposedRef.current || !termRef.current) return;
@@ -204,7 +206,11 @@ export default function SshSessionTerminal({
         termRef.current.write(u8);
       }
     }).then(fn => {
-      unlistenOutput = fn;
+      if (isCancelled) {
+        fn();
+      } else {
+        unlistenOutput = fn;
+      }
     });
 
     // Resize observer
@@ -219,6 +225,7 @@ export default function SshSessionTerminal({
     resizeObserver.observe(containerRef.current);
 
     return () => {
+      isCancelled = true;
       isDisposedRef.current = true;
       resizeObserver.disconnect();
       onDataDisposable.dispose();

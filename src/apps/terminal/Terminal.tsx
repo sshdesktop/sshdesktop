@@ -49,6 +49,7 @@ export default function TerminalApp() {
   const [showServerMenu, setShowServerMenu] = useState(false);
   const tabInstances = useRef<Map<string, TabInstance>>(new Map());
   const containersRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const initializingTabsRef = useRef<Set<string>>(new Set());
   const pendingInitialCommandsRef = useRef<Map<string, string>>(new Map());
   const [fontSize, setFontSize] = useState<number>(14);
   const fontSizeRef = useRef<number>(14);
@@ -73,10 +74,13 @@ export default function TerminalApp() {
     });
   }, []);
 
-  // Listen to Tauri terminal-output events globally
+  // Listen to Tauri terminal-output events globally with cancellation protection
   useEffect(() => {
+    let isCancelled = false;
     let unlistenFn: (() => void) | undefined;
+
     listen<any>('terminal-output', (event) => {
+      if (isCancelled) return;
       const payload = event.payload;
       if (!payload || !payload.terminal_id) return;
       const instance = tabInstances.current.get(payload.terminal_id);
@@ -88,10 +92,32 @@ export default function TerminalApp() {
           instance.term.write(u8);
         }
       }
-    }).then(fn => { unlistenFn = fn; });
+    }).then(fn => {
+      if (isCancelled) {
+        fn();
+      } else {
+        unlistenFn = fn;
+      }
+    });
 
     return () => {
+      isCancelled = true;
       if (unlistenFn) unlistenFn();
+    };
+  }, []);
+
+  // Cleanup all terminal sessions and instances when Terminal window unmounts
+  useEffect(() => {
+    return () => {
+      tabInstances.current.forEach((inst, id) => {
+        inst.disposed = true;
+        inst.cleanup?.();
+        try { inst.term.dispose(); } catch {}
+        terminalClose(id).catch(() => {});
+      });
+      tabInstances.current.clear();
+      initializingTabsRef.current.clear();
+      containersRef.current.clear();
     };
   }, []);
 
@@ -122,13 +148,15 @@ export default function TerminalApp() {
   }, [tabs]);
 
   const setupTabInstance = useCallback(async (tabId: string, el: HTMLDivElement) => {
-    if (tabInstances.current.has(tabId)) {
+    if (tabInstances.current.has(tabId) || initializingTabsRef.current.has(tabId)) {
       const inst = tabInstances.current.get(tabId);
       try {
         inst?.fitAddon.fit();
       } catch {}
       return;
     }
+    initializingTabsRef.current.add(tabId);
+    el.innerHTML = '';
 
     const term = new XTerm({
       cursorBlink: true,
@@ -257,6 +285,7 @@ export default function TerminalApp() {
         }, 300);
       }
     } catch (err: any) {
+      initializingTabsRef.current.delete(tabId);
       term.writeln(`\r\n\x1b[31m[Failed to initialize PTY: ${err?.message || err}]\x1b[0m\r\n`);
     }
   }, [tabs, activeConnectionId]);
@@ -492,6 +521,7 @@ export default function TerminalApp() {
     if (tabs.length === 1) return;
 
     terminalClose(id).catch(() => {});
+    initializingTabsRef.current.delete(id);
     const inst = tabInstances.current.get(id);
     if (inst) {
       inst.disposed = true;

@@ -34,6 +34,20 @@ pub async fn terminal_create(
 ) -> Result<String, String> {
     let term_id = terminal_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+    // Ensure clean replacement if session id is reused (prevents duplicate pumps/listeners)
+    if let Some(prev) = state.terminals.lock().remove(&term_id) {
+        if let Some(pid) = prev.child_pid {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("taskkill")
+                    .args(&["/F", "/T", "/PID", &pid.to_string()])
+                    .creation_flags(0x08000000)
+                    .output();
+            }
+        }
+    }
+
     // Find connection config (RAM, disk auto-restore, or fallback)
     let conn = match crate::ssh::connection::resolve_connection(&state, &conn_id) {
         Some(c) => c,
