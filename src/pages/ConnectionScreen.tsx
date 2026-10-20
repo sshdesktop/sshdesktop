@@ -427,11 +427,11 @@ export default function ConnectionScreen() {
     }
   };
 
-  // Helper to sanitize key file paths
+  // Helper to sanitize key file paths or key strings
   const sanitizeKeyPath = (str?: string) => {
     if (!str) return undefined;
     const trimmed = str.trim();
-    if (!trimmed || trimmed.includes('\n') || trimmed.includes('-----BEGIN') || trimmed.includes('PuTTY-User-Key-File')) {
+    if (!trimmed) {
       return undefined;
     }
     return trimmed;
@@ -499,7 +499,7 @@ export default function ConnectionScreen() {
         port: targetPort,
         username: targetUsername,
         authMethod,
-        password: authMethod === 'password' ? effectivePassword : undefined,
+        password: effectivePassword || undefined,
         privateKeyPath: authMethod === 'key' ? effectiveKey : undefined,
         color: conn?.color || '#89b4fa',
         group: 'Servers',
@@ -511,6 +511,7 @@ export default function ConnectionScreen() {
         if (!connId) {
           const profileToSave = {
             ...targetConfig,
+            password: effectivePassword || undefined,
             privateKeyPath: sanitizeKeyPath(targetConfig.privateKeyPath),
             private_key_path: sanitizeKeyPath(targetConfig.privateKeyPath),
           };
@@ -524,7 +525,7 @@ export default function ConnectionScreen() {
             username: targetUsername,
             authMethod,
             auth_method: authMethod,
-            password: authMethod === 'password' ? effectivePassword : undefined,
+            password: effectivePassword || undefined,
             privateKeyPath: authMethod === 'key' ? sanitizeKeyPath(effectiveKey) : undefined,
             private_key_path: authMethod === 'key' ? sanitizeKeyPath(effectiveKey) : undefined,
           };
@@ -607,7 +608,7 @@ export default function ConnectionScreen() {
     const cleanPort = Number(modalForm.port) || 22;
     const cleanUser = modalForm.username.trim() || 'root';
     const keyPath = modalForm.authMethod === 'key' ? sanitizeKeyPath(modalForm.privateKeyPath) : undefined;
-    const pass = modalForm.authMethod === 'password' ? (modalForm.password || undefined) : undefined;
+    const pass = modalForm.password?.trim() || undefined;
 
     if (modalMode === 'edit') {
       const existing = connections.find(c => c.id === modalForm.id);
@@ -700,7 +701,7 @@ export default function ConnectionScreen() {
     const newId = `server-${Date.now()}`;
     const cleanName = firstProfile.name.trim() || `${firstProfile.username.trim()}@${firstProfile.host.trim()}`;
     const keyPath = firstProfile.authMethod === 'key' ? sanitizeKeyPath(firstProfile.privateKeyPath) : undefined;
-    const pass = firstProfile.authMethod === 'password' ? firstProfile.password : undefined;
+    const pass = firstProfile.password?.trim() || undefined;
 
     const newConn: any = {
       id: newId,
@@ -1082,19 +1083,35 @@ export default function ConnectionScreen() {
                     />
                   </div>
                 ) : (
-                  <div>
-                    <label className="text-gray-300 block mb-1 font-medium">SSH Private Key</label>
-                    <div 
-                      onClick={handleSelectFirstProfileKeyFile}
-                      className="cursor-pointer bg-[#10121d] border border-dashed border-white/20 hover:border-blue-500/60 rounded-xl p-3 flex items-center justify-between text-xs transition-colors"
-                    >
-                      <div className="flex items-center space-x-2 truncate">
-                        <Key className="w-4 h-4 text-blue-400 shrink-0" />
-                        <span className="text-gray-300 truncate">
-                          {firstProfile.privateKeyPath || 'Click to select key (.pem, id_rsa, id_ed25519)...'}
-                        </span>
+                  <div className="space-y-2">
+                    <div>
+                      <label className="text-gray-300 block mb-1 font-medium">SSH Private Key</label>
+                      <div 
+                        onClick={handleSelectFirstProfileKeyFile}
+                        className="cursor-pointer bg-[#10121d] border border-dashed border-white/20 hover:border-blue-500/60 rounded-xl p-3 flex items-center justify-between text-xs transition-colors"
+                      >
+                        <div className="flex items-center space-x-2 truncate">
+                          <Key className="w-4 h-4 text-blue-400 shrink-0" />
+                          <span className="text-gray-300 truncate">
+                            {firstProfile.privateKeyPath || 'Click to select key (.pem, id_rsa, id_ed25519)...'}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-blue-400 shrink-0 font-medium ml-2">Browse</span>
                       </div>
-                      <span className="text-[10px] text-blue-400 shrink-0 font-medium ml-2">Browse</span>
+                    </div>
+
+                    <div>
+                      <label className="text-gray-400 block mb-1 font-medium text-[11px] flex items-center space-x-1">
+                        <Shield className="w-3 h-3 text-amber-400" />
+                        <span>Sudo Password (Optional - for admin/root commands)</span>
+                      </label>
+                      <input
+                        type="password"
+                        placeholder="Enter sudo password if user requires it..."
+                        value={firstProfile.password}
+                        onChange={e => setFirstProfile(f => ({ ...f, password: e.target.value }))}
+                        className="w-full bg-[#10121d] border border-white/10 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-blue-500 font-mono text-xs"
+                      />
                     </div>
                   </div>
                 )}
@@ -1581,6 +1598,32 @@ export default function ConnectionScreen() {
                       />
                     </div>
 
+                    {/* Sudo Password (Optional - for admin / root commands) */}
+                    <div className="space-y-1">
+                      <div className="relative flex items-center bg-black/40 border border-white/15 rounded-xl px-3 py-2 text-xs">
+                        <Shield className="w-3.5 h-3.5 text-amber-400 shrink-0 mr-2" />
+                        <input
+                          type={showPassword ? 'text' : 'password'}
+                          value={password}
+                          onChange={e => setPassword(e.target.value)}
+                          placeholder="Sudo Password (Optional - for root/admin commands)..."
+                          className="bg-transparent text-white placeholder-white/40 flex-1 focus:outline-none font-mono text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword(!showPassword)}
+                          className="text-white/50 hover:text-white transition-colors"
+                          title={showPassword ? 'Hide password' : 'Show password'}
+                        >
+                          {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                      <div className="text-[10px] text-gray-400 px-1 flex items-center justify-between">
+                        <span>Required if user (<span className="text-blue-300 font-mono">{username}</span>) needs password for <span className="font-mono text-amber-300">sudo</span>.</span>
+                        {selectedConn?.password && <span className="text-emerald-400 flex items-center space-x-1"><Check className="w-2.5 h-2.5" /><span>Saved</span></span>}
+                      </div>
+                    </div>
+
                     <div className="flex items-center justify-center px-1 pt-0.5 text-[11px] text-gray-300">
                       <label className="flex items-center space-x-2 cursor-pointer select-none">
                         <input
@@ -1589,7 +1632,7 @@ export default function ConnectionScreen() {
                           onChange={e => setSaveCredentials(e.target.checked)}
                           className="w-3.5 h-3.5 rounded border-white/20 bg-white/10 text-blue-600 focus:ring-0 cursor-pointer"
                         />
-                        <span>Save private key to server profile</span>
+                        <span>Save credentials to server profile</span>
                       </label>
                     </div>
 
@@ -1825,24 +1868,40 @@ export default function ConnectionScreen() {
                   />
                 </div>
               ) : (
-                <div>
-                  <label className="text-gray-300 block mb-1 font-medium">Private Key File (.pem, id_rsa, .ppk)</label>
-                  <div className="flex items-center space-x-2">
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-gray-300 block mb-1 font-medium">Private Key File (.pem, id_rsa, .ppk)</label>
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="text"
+                        value={modalForm.privateKeyPath}
+                        onChange={e => setModalForm(f => ({ ...f, privateKeyPath: e.target.value }))}
+                        placeholder="e.g. C:\Users\Sharuk\.ssh\id_rsa or /home/.../key.pem"
+                        className="flex-1 bg-[#10121d] border border-white/10 rounded-xl px-3 py-2 text-white font-mono text-xs focus:outline-none focus:border-blue-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleSelectModalKeyFile}
+                        className="px-3 py-2 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-medium transition-colors shrink-0 flex items-center space-x-1"
+                      >
+                        <Key className="w-3.5 h-3.5 text-blue-400" />
+                        <span>Browse</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-gray-400 block mb-1 font-medium text-xs flex items-center space-x-1">
+                      <Shield className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Sudo Password (Optional - for admin/root commands)</span>
+                    </label>
                     <input
-                      type="text"
-                      value={modalForm.privateKeyPath}
-                      onChange={e => setModalForm(f => ({ ...f, privateKeyPath: e.target.value }))}
-                      placeholder="e.g. C:\Users\Sharuk\.ssh\id_rsa or /home/.../key.pem"
-                      className="flex-1 bg-[#10121d] border border-white/10 rounded-xl px-3 py-2 text-white font-mono text-xs focus:outline-none focus:border-blue-500"
+                      type="password"
+                      value={modalForm.password}
+                      onChange={e => setModalForm(f => ({ ...f, password: e.target.value }))}
+                      placeholder="Optional sudo password for commands..."
+                      className="w-full bg-[#10121d] border border-white/10 rounded-xl px-3 py-2 text-white font-mono text-xs focus:outline-none focus:border-blue-500"
                     />
-                    <button
-                      type="button"
-                      onClick={handleSelectModalKeyFile}
-                      className="px-3 py-2 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-medium transition-colors shrink-0 flex items-center space-x-1"
-                    >
-                      <Key className="w-3.5 h-3.5 text-blue-400" />
-                      <span>Browse</span>
-                    </button>
                   </div>
                 </div>
               )}

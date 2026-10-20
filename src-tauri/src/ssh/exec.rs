@@ -227,6 +227,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         .arg("-p").arg(&port)
         .arg("-o").arg("StrictHostKeyChecking=no")
         .arg("-o").arg("BatchMode=yes")
+        .arg("-o").arg("IdentitiesOnly=yes")
         .arg("-o").arg("ConnectTimeout=8")
         .arg("-o").arg("ServerAliveInterval=10")
         .arg("-o").arg("ServerAliveCountMax=2");
@@ -397,6 +398,200 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
     }
 
     // Fallback: return the output of sudo -n
+    (n_out, n_code)
+}
+
+/// Helper: run a command on the remote server via SSH while streaming data into stdin.
+pub async fn run_cmd_with_stdin(
+    state: &AppState,
+    conn_id: &str,
+    command: &str,
+    stdin_data: &[u8],
+) -> (String, i32) {
+    // 0. Primary Fast Path: Execute directly over active persistent in-memory SSH transport
+    {
+        let handle_opt = {
+            let sessions = state.sessions.lock().await;
+            sessions.get(conn_id).cloned().or_else(|| sessions.get("default").cloned())
+        };
+        if let Some(handle) = handle_opt {
+            match crate::ssh::session::run_exec_channel_with_stdin(&handle, command, stdin_data).await {
+                Ok((stdout, code)) => {
+                    return (stdout, code);
+                }
+                Err(e) => {
+                    log::warn!("CloudDesk: Persistent channel with stdin failed for cmd '{}': {}, falling back...", command, e);
+                }
+            }
+        }
+    }
+
+    // Resolve connection
+    let conn = match crate::ssh::connection::resolve_connection(state, conn_id) {
+        Some(c) => c,
+        None => return (String::new(), -1),
+    };
+
+    let host = conn.config.host.clone();
+    let port = conn.config.port.to_string();
+    let user = conn.config.username.clone();
+    let destination = format!("{}@{}", user, host);
+
+    // 1. Password auth via plink
+    if let Some(pwd) = &conn.config.password {
+        if !pwd.is_empty() {
+            let mut cmd = tokio::process::Command::new("plink");
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000);
+            cmd.arg("-ssh")
+                .arg("-batch")
+                .arg("-P").arg(&port)
+                .arg("-l").arg(&user)
+                .arg("-pw").arg(pwd)
+                .arg(&host)
+                .arg(command)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+
+            if let Ok(mut child) = cmd.spawn() {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, stdin_data).await;
+                }
+                if let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    let exit_code = output.status.code().unwrap_or(-1);
+                    if !stdout.is_empty() || output.status.success() {
+                        return (stdout, exit_code);
+                    }
+                    return (stderr, exit_code);
+                }
+            }
+        }
+    }
+
+    // 2. PPK Key auth via plink
+    let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    if is_ppk {
+        let plink_bin = crate::ssh::connection::get_plink_path();
+        let mut cmd = tokio::process::Command::new(plink_bin);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        cmd.arg("-ssh")
+            .arg("-batch")
+            .arg("-P").arg(&port)
+            .arg("-l").arg(&user);
+        if let Some(key_path) = &conn.config.private_key_path {
+            if crate::ssh::connection::resolve_key_path(key_path).is_some() {
+                cmd.arg("-i").arg(key_path);
+            }
+        }
+        cmd.arg(&host)
+            .arg(command)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        if let Ok(mut child) = cmd.spawn() {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, stdin_data).await;
+            }
+            if let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let exit_code = output.status.code().unwrap_or(-1);
+                if !stdout.is_empty() || output.status.success() {
+                    return (stdout, exit_code);
+                }
+                return (stderr, exit_code);
+            }
+        }
+    }
+
+    // 3. PEM Key auth via OpenSSH
+    let mut ssh_cmd = tokio::process::Command::new("ssh");
+    #[cfg(windows)]
+    ssh_cmd.creation_flags(0x08000000);
+    ssh_cmd
+        .arg("-p").arg(&port)
+        .arg("-o").arg("StrictHostKeyChecking=no")
+        .arg("-o").arg("BatchMode=yes")
+        .arg("-o").arg("IdentitiesOnly=yes")
+        .arg("-o").arg("ConnectTimeout=10");
+
+    if let Some(key_path) = &conn.config.private_key_path {
+        if crate::ssh::connection::resolve_key_path(key_path).is_some() {
+            ssh_cmd.arg("-i").arg(key_path);
+        }
+    }
+
+    ssh_cmd
+        .arg(&destination)
+        .arg(command)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    if let Ok(mut child) = ssh_cmd.spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, stdin_data).await;
+        }
+        if let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let exit_code = output.status.code().unwrap_or(-1);
+            if !stdout.is_empty() || output.status.success() {
+                return (stdout, exit_code);
+            }
+            return (stderr, exit_code);
+        }
+    }
+
+    (String::new(), -1)
+}
+
+/// Helper: run an elevated (sudo) command while streaming data into stdin.
+pub async fn run_cmd_priv_with_stdin(
+    state: &AppState,
+    conn_id: &str,
+    command: &str,
+    stdin_data: &[u8],
+) -> (String, i32) {
+    let conn_opt = crate::ssh::connection::resolve_connection(state, conn_id);
+    let trimmed_cmd = command.trim();
+    let raw_cmd = trimmed_cmd.strip_prefix("sudo ").unwrap_or(trimmed_cmd).trim();
+
+    let conn = match conn_opt {
+        Some(c) => c,
+        None => return run_cmd_with_stdin(state, conn_id, raw_cmd, stdin_data).await,
+    };
+
+    let username = &conn.config.username;
+    if username == "root" {
+        return run_cmd_with_stdin(state, conn_id, raw_cmd, stdin_data).await;
+    }
+
+    let sudo_n_cmd = format!("sudo -n -- sh -c '{}' 2>&1", raw_cmd.replace('\'', r"'\''"));
+    let (n_out, n_code) = run_cmd_with_stdin(state, conn_id, &sudo_n_cmd, stdin_data).await;
+    if n_code == 0 {
+        return (n_out, n_code);
+    }
+
+    if let Some(ref pwd) = conn.config.password {
+        if !pwd.is_empty() {
+            let sudo_s_cmd = format!(
+                "printf '%s\\n' '{}' | sudo -S -p '' -- sh -c '{}' 2>&1",
+                pwd.replace('\'', r"'\''"),
+                raw_cmd.replace('\'', r"'\''")
+            );
+            let (s_out, s_code) = run_cmd_with_stdin(state, conn_id, &sudo_s_cmd, stdin_data).await;
+            if s_code == 0 {
+                return (s_out, s_code);
+            }
+        }
+    }
+
     (n_out, n_code)
 }
 

@@ -178,29 +178,38 @@ pub async fn sftp_write_bytes(
     let escaped_path = shell_escape(path);
     let b64 = to_base64(bytes);
 
-    // Using base64 -d completely eliminates shell redirection (<, >), newlines, quotes, heredoc delimiters
-    let cmd = format!("printf '%s' '{}' | base64 -d > '{}'", b64, escaped_path);
-    let (stdout, code) = run_cmd(state, conn_id, &cmd).await;
-    if code == -1 {
-        return Err("No active SSH connection.".into());
+    // 1. Direct write via base64 decode from stdin (fast path for user-owned paths)
+    let cmd = format!("base64 -d > '{}'", escaped_path);
+    let (stdout, code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &cmd, b64.as_bytes()).await;
+    if code == 0 {
+        log::info!("CloudDesk: Saved remote file {} ({} bytes)", path, bytes.len());
+        return Ok(());
     }
-    if code != 0 {
-        // If regular user gets permission denied in /var/www or /etc, elevate with sudo
-        let sudo_cmd = format!("printf '%s' '{}' | base64 -d > '{}'", b64, escaped_path);
-        let (s_out, s_code) = crate::ssh::exec::run_cmd_priv(state, conn_id, &sudo_cmd).await;
-        if s_code != 0 {
-            let detail = if !s_out.trim().is_empty() {
-                s_out.trim().to_string()
-            } else if !stdout.trim().is_empty() {
-                stdout.trim().to_string()
-            } else {
-                "Permission Denied: Administrator (sudo) privileges required to write to this file.".to_string()
-            };
-            return Err(format!("Failed to write remote file '{}': {}", path, detail));
+
+    // 2. If direct write failed (e.g. Permission Denied in root/system directories like /var/www, /etc),
+    // write safely to /tmp first with regular user permissions, then elevate with sudo mv!
+    // This completely bypasses sudo stdin pipe issues while supporting both passwordless sudo (-n) and password sudo (-S).
+    let tmp_file = format!("/tmp/.cd_up_{}_{}", std::process::id(), uuid::Uuid::new_v4().simple());
+    let tmp_cmd = format!("base64 -d > '{}'", tmp_file);
+    let (_tmp_out, tmp_code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &tmp_cmd, b64.as_bytes()).await;
+    if tmp_code == 0 {
+        let mv_cmd = format!("mv -f '{}' '{}'", tmp_file, escaped_path);
+        let (s_out, s_code) = crate::ssh::exec::run_cmd_priv(state, conn_id, &mv_cmd).await;
+        if s_code == 0 {
+            log::info!("CloudDesk: Saved remote file with elevated privileges via sudo mv: {}", path);
+            return Ok(());
         }
+        // Cleanup temp file if mv failed
+        let _ = crate::ssh::exec::run_cmd(state, conn_id, &format!("rm -f '{}'", tmp_file)).await;
+        return Err(format!("Failed to write remote file '{}': {}", path, s_out.trim()));
     }
-    log::info!("CloudDesk: Saved remote file {}", path);
-    Ok(())
+
+    let detail = if !stdout.trim().is_empty() {
+        stdout.trim().to_string()
+    } else {
+        "Permission Denied: Administrator (sudo) privileges required to write to this file.".to_string()
+    };
+    Err(format!("Failed to write remote file '{}': {}", path, detail))
 }
 
 #[tauri::command]
@@ -297,14 +306,20 @@ pub async fn sftp_chmod(
     mode: u32,
 ) -> Result<(), String> {
     let escaped = shell_escape(&path);
-    let (_stdout, code) = run_cmd(&state, &conn_id, &format!("chmod {:o} '{}'", mode, escaped)).await;
+    let cmd = format!("chmod {:o} '{}'", mode, escaped);
+    let (_stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 {
-        return Err(format!("Failed to update permissions on '{}'", path));
+    if code == 0 {
+        return Ok(());
     }
-    Ok(())
+    // Fallback: try elevated execution if permission denied
+    let (_s_out, s_code) = crate::ssh::exec::run_cmd_priv(&state, &conn_id, &cmd).await;
+    if s_code == 0 {
+        return Ok(());
+    }
+    Err(format!("Failed to update permissions on '{}'", path))
 }
 
 #[tauri::command]
@@ -321,14 +336,20 @@ pub async fn sftp_chown(
         format!("{}:{}", owner, group)
     };
     let escaped = shell_escape(&path);
-    let (_stdout, code) = run_cmd(&state, &conn_id, &format!("chown -R '{}' '{}'", target, escaped)).await;
+    let cmd = format!("chown -R '{}' '{}'", target, escaped);
+    let (_stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 {
-        return Err(format!("Failed to update ownership on '{}'", path));
+    if code == 0 {
+        return Ok(());
     }
-    Ok(())
+    // Fallback: try elevated execution if permission denied
+    let (_s_out, s_code) = crate::ssh::exec::run_cmd_priv(&state, &conn_id, &cmd).await;
+    if s_code == 0 {
+        return Ok(());
+    }
+    Err(format!("Failed to update ownership on '{}'", path))
 }
 
 #[tauri::command]
@@ -374,7 +395,18 @@ pub async fn sftp_download(
     remote_path: String,
     local_path: String,
 ) -> Result<(), String> {
-    // Resolve connection info to build scp command (in-memory, disk auto-restore, or fallback)
+    // 1. Primary fast path: read remote file content directly via SSH stream
+    if let Ok(bytes) = sftp_read_file(state.clone(), conn_id.clone(), remote_path.clone()).await {
+        if let Some(parent) = std::path::Path::new(&local_path).parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        if let Ok(()) = tokio::fs::write(&local_path, &bytes).await {
+            log::info!("CloudDesk: Downloaded {} to {}", remote_path, local_path);
+            return Ok(());
+        }
+    }
+
+    // 2. Fallback: scp
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or("No active SSH connection.")?;
 
@@ -387,10 +419,11 @@ pub async fn sftp_download(
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     cmd.arg("-P").arg(&port)
-        .arg("-o").arg("StrictHostKeyChecking=no");
+        .arg("-o").arg("StrictHostKeyChecking=no")
+        .arg("-o").arg("IdentitiesOnly=yes");
 
     if let Some(key) = &conn.config.private_key_path {
-        if !key.is_empty() {
+        if crate::ssh::connection::resolve_key_path(key).is_some() {
             cmd.arg("-i").arg(key);
         }
     }
@@ -421,6 +454,12 @@ pub async fn sftp_upload(
     local_path: String,
     remote_path: String,
 ) -> Result<(), String> {
+    // 1. Primary fast path: read local file and stream write over active SSH session
+    if let Ok(bytes) = tokio::fs::read(&local_path).await {
+        return sftp_write_bytes(&state, &conn_id, &remote_path, &bytes).await;
+    }
+
+    // 2. Fallback: scp
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or("No active SSH connection.")?;
 
@@ -433,10 +472,11 @@ pub async fn sftp_upload(
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     cmd.arg("-P").arg(&port)
-        .arg("-o").arg("StrictHostKeyChecking=no");
+        .arg("-o").arg("StrictHostKeyChecking=no")
+        .arg("-o").arg("IdentitiesOnly=yes");
 
     if let Some(key) = &conn.config.private_key_path {
-        if !key.is_empty() {
+        if crate::ssh::connection::resolve_key_path(key).is_some() {
             cmd.arg("-i").arg(key);
         }
     }

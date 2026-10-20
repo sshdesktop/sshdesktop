@@ -90,6 +90,8 @@ pub async fn terminal_create(
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg("-o")
+            .arg("IdentitiesOnly=yes")
+            .arg("-o")
             .arg("ConnectTimeout=10");
         if let Some(ref k) = private_key {
             if crate::ssh::connection::resolve_key_path(k).is_some() {

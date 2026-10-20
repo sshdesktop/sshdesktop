@@ -136,7 +136,7 @@ export default function Taskbar({
         port: Number(newServerForm.port) || 22,
         username: newServerForm.username.trim(),
         authMethod,
-        password: authMethod === 'password' ? newServerForm.password : undefined,
+        password: newServerForm.password?.trim() || undefined,
         privateKeyPath: authMethod === 'key' ? effectiveKey : undefined,
         color: '#89b4fa',
         group: 'Servers',
@@ -145,8 +145,8 @@ export default function Taskbar({
       };
       const profileToSave = {
         ...targetConfig,
-        password: saveNewServerCredentials && authMethod === 'password' ? newServerForm.password : undefined,
-        privateKeyPath: saveNewServerCredentials && authMethod === 'key' && isFilePath(targetConfig.privateKeyPath) ? targetConfig.privateKeyPath : undefined,
+        password: saveNewServerCredentials ? (newServerForm.password?.trim() || undefined) : undefined,
+        privateKeyPath: saveNewServerCredentials && authMethod === 'key' ? targetConfig.privateKeyPath : undefined,
       };
       addConnection(profileToSave);
       await connect(targetId, targetConfig);
@@ -199,7 +199,6 @@ export default function Taskbar({
     setIsConnecting(true);
     setConnectError(null);
     try {
-      const isFilePath = (str?: string) => str && !str.includes('\n') && (str.includes('/') || str.includes('\\') || str.endsWith('.pem'));
       const effectiveConfig = {
         ...promptConn,
         password: promptPassword || promptConn.password,
@@ -208,7 +207,7 @@ export default function Taskbar({
       if (promptSaveCredentials) {
         const toSave = {
           ...effectiveConfig,
-          privateKeyPath: isFilePath(effectiveConfig.privateKeyPath) ? effectiveConfig.privateKeyPath : undefined,
+          privateKeyPath: effectiveConfig.privateKeyPath,
         };
         updateConnection(promptConn.id, toSave);
       }
@@ -847,6 +846,30 @@ export default function Taskbar({
                         <span className="text-[10px] text-gray-500">Supports OpenSSH (.pem), id_rsa, id_ed25519, id_ecdsa</span>
                       </div>
                     )}
+
+                    {/* Sudo Password (Optional - for admin/root commands) */}
+                    <div>
+                      <label className="text-gray-400 block mb-1 font-medium text-[11px] flex items-center space-x-1">
+                        <Shield className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Sudo Password (Optional - for admin/root commands)</span>
+                      </label>
+                      <div className="relative flex items-center">
+                        <input
+                          type={showPassword ? 'text' : 'password'}
+                          placeholder="Enter sudo password if user requires it..."
+                          value={newServerForm.password}
+                          onChange={e => setNewServerForm(f => ({ ...f, password: e.target.value }))}
+                          className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 pr-9 text-white focus:outline-none focus:border-blue-500 font-mono text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword(!showPassword)}
+                          className="absolute right-2.5 text-gray-400 hover:text-white"
+                        >
+                          {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 )}
 

@@ -79,8 +79,61 @@ pub fn resolve_key_path(key_input: &str) -> Option<String> {
 
     let path = std::path::Path::new(trimmed);
     if path.exists() && path.is_file() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
         return Some(trimmed.to_string());
     }
+    None
+}
+
+pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
+    let trimmed = key_input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // 1. If it's already an existing file on disk, return its path
+    let p = std::path::Path::new(trimmed);
+    if p.exists() && p.is_file() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+        }
+        return Some(trimmed.to_string());
+    }
+
+    // 2. If it is raw key content (PEM or PPK)
+    if trimmed.contains("PRIVATE KEY") || trimmed.contains("PuTTY-User-Key-File") || trimmed.lines().count() > 1 {
+        if let Some(base) = directories::BaseDirs::new() {
+            let keys_dir = base.home_dir().join(".clouddesk").join("keys");
+            let _ = std::fs::create_dir_all(&keys_dir);
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&keys_dir, std::fs::Permissions::from_mode(0o700));
+            }
+
+            let is_ppk = is_ppk_key(trimmed);
+            let ext = if is_ppk { "ppk" } else { "pem" };
+            let safe_id = conn_id.chars().filter(|c| c.is_alphanumeric() || *c == '-').collect::<String>();
+            let target_file = keys_dir.join(format!("{}.{}", safe_id, ext));
+
+            if let Ok(()) = std::fs::write(&target_file, trimmed) {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(0o600));
+                }
+                return target_file.to_str().map(|s| s.to_string());
+            }
+        }
+    }
+
     None
 }
 
@@ -90,19 +143,10 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
     config.id = Some(id.clone());
     log::info!("CloudDesk: Establishing SSH connection [{}] for {} ({}:{})", id, config.name, config.host, config.port);
 
-    // Clean up any legacy or stored keys on disk - client private keys are NOT stored
-    if let Some(base) = directories::BaseDirs::new() {
-        let keys_dir = base.home_dir().join(".clouddesk").join("keys");
-        if keys_dir.exists() {
-            let _ = std::fs::remove_dir_all(&keys_dir);
-        }
-    }
-
-    // If an existing file on the client computer was supplied, use its path directly.
-    // Otherwise keep the key in memory only for native cryptographic handshake.
+    // Ensure the key file is available on disk for CLI utilities (scp, ssh, plink)
     if let Some(raw_key) = &config.private_key_path {
-        if let Some(existing_file) = resolve_key_path(raw_key) {
-            config.private_key_path = Some(existing_file);
+        if let Some(key_path) = ensure_key_file(&id, raw_key) {
+            config.private_key_path = Some(key_path);
         }
     }
 
@@ -457,7 +501,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
     }
 
     if let Some(raw_key) = &config.private_key_path {
-        if let Some(existing_path) = resolve_key_path(raw_key) {
+        if let Some(existing_path) = ensure_key_file("test-probe", raw_key) {
             config.private_key_path = Some(existing_path);
         }
     }
