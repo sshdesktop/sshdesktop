@@ -232,7 +232,10 @@ export default function Window({ window: win, children }: { window: WindowState;
         minWidth={Math.min(500, viewport.w - 20)}
         minHeight={Math.min(320, viewport.h - 60)}
         onMouseDown={() => { focusWindow(win.id); bringToFront(win.id); }}
-        onContextMenu={(e: any) => e.stopPropagation()}
+        onContextMenu={(e: any) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
         className={`absolute window-shell select-none ${win.minimized ? 'pointer-events-none' : 'pointer-events-auto'}`}
         style={{ 
           zIndex: isFullScreen ? 1000001 : win.zIndex,
@@ -240,7 +243,10 @@ export default function Window({ window: win, children }: { window: WindowState;
         }}
       >
         <motion.div 
-          onContextMenu={(e) => e.stopPropagation()}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
           initial={{ opacity: 0, scale: 0.96 }}
           animate={{ opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 0.96 }}

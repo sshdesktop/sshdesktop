@@ -725,6 +725,7 @@ export default function Desktop() {
           target.closest('.desktop-icon') || 
           target.closest('.desktop-widget')
         ) {
+          e.preventDefault();
           return;
         }
         e.preventDefault();

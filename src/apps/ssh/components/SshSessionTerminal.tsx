@@ -6,7 +6,8 @@ import '@xterm/xterm/css/xterm.css';
 import { 
   Play, Square, Download, Trash2, ZoomIn, ZoomOut, Shield, 
   Clock, Activity, Radio, Terminal as TerminalIcon, ExternalLink,
-  SplitSquareVertical, SplitSquareHorizontal, Check, RefreshCw
+  SplitSquareVertical, SplitSquareHorizontal, Check, RefreshCw,
+  Copy, Clipboard, CornerDownLeft, RotateCcw
 } from 'lucide-react';
 import { SshSessionTab } from '../types';
 import { terminalCreate, terminalWrite, terminalResize, terminalClose, sshLaunchPutty } from '../../../lib/tauri-bridge';
@@ -113,6 +114,65 @@ export default function SshSessionTerminal({
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [latency, setLatency] = useState<number>(session.latencyMs || Math.floor(12 + Math.random() * 15));
   const [copiedNotification, setCopiedNotification] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; hasSelection: boolean } | null>(null);
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const sel = termRef.current?.getSelection() || '';
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      hasSelection: Boolean(sel && sel.trim().length > 0)
+    });
+  };
+
+  useEffect(() => {
+    const handleGlobalClick = () => setContextMenu(null);
+    window.addEventListener('click', handleGlobalClick);
+    return () => window.removeEventListener('click', handleGlobalClick);
+  }, []);
+
+  const handleCopySelection = () => {
+    const sel = termRef.current?.getSelection();
+    if (sel) {
+      navigator.clipboard.writeText(sel);
+      setCopiedNotification(true);
+      setTimeout(() => setCopiedNotification(false), 2000);
+    }
+    setContextMenu(null);
+  };
+
+  const handlePasteClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        const bytes = Array.from(new TextEncoder().encode(text));
+        await terminalWrite(session.connId, bytes);
+      }
+    } catch (err) {
+      console.warn('Clipboard paste notice:', err);
+    }
+    setContextMenu(null);
+  };
+
+  const handleSelectAll = () => {
+    termRef.current?.selectAll();
+    setContextMenu(null);
+  };
+
+  const handleClearScreen = () => {
+    termRef.current?.clear();
+    const bytes = Array.from(new TextEncoder().encode('clear\r'));
+    terminalWrite(session.connId, bytes).catch(() => {});
+    setContextMenu(null);
+  };
+
+  const handleResetTerminal = () => {
+    termRef.current?.reset();
+    fitAddonRef.current?.fit();
+    setContextMenu(null);
+  };
 
   // Timer for duration HUD
   useEffect(() => {
@@ -423,13 +483,89 @@ export default function SshSessionTerminal({
       {/* Terminal Viewport */}
       <div 
         ref={containerRef} 
-        className="flex-1 w-full h-full p-2 overflow-hidden" 
+        className="flex-1 w-full h-full p-2 overflow-hidden terminal-app" 
         onClick={() => termRef.current?.focus()}
+        onContextMenu={handleContextMenu}
       />
+
+      {/* Floating Terminal Context Menu */}
+      {contextMenu && (
+        <div 
+          className="fixed z-[9999999] w-52 bg-[#181825]/95 backdrop-blur-xl border border-white/15 rounded-xl shadow-[0_15px_50px_rgba(0,0,0,0.6)] py-1.5 text-xs text-gray-200 animate-in fade-in zoom-in-95 duration-100 select-none font-sans"
+          style={{ 
+            top: `${Math.min(contextMenu.y, window.innerHeight - 240)}px`, 
+            left: `${Math.min(contextMenu.x, window.innerWidth - 220)}px` 
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {contextMenu.hasSelection && (
+            <button
+              onClick={handleCopySelection}
+              className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center justify-between text-left transition-colors cursor-pointer"
+            >
+              <div className="flex items-center space-x-2">
+                <Copy className="w-3.5 h-3.5 text-blue-400" />
+                <span>Copy Selection</span>
+              </div>
+              <span className="text-[10px] text-gray-400 font-mono">Ctrl+C</span>
+            </button>
+          )}
+
+          <button
+            onClick={handlePasteClipboard}
+            className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center justify-between text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center space-x-2">
+              <Clipboard className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Paste from Clipboard</span>
+            </div>
+            <span className="text-[10px] text-gray-400 font-mono">Ctrl+V</span>
+          </button>
+
+          <button
+            onClick={handleSelectAll}
+            className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center justify-between text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center space-x-2">
+              <CornerDownLeft className="w-3.5 h-3.5 text-gray-400" />
+              <span>Select All</span>
+            </div>
+            <span className="text-[10px] text-gray-400 font-mono">Ctrl+A</span>
+          </button>
+
+          <div className="my-1 border-t border-white/10 mx-2" />
+
+          <button
+            onClick={handleClearScreen}
+            className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 text-left transition-colors cursor-pointer"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-amber-400" />
+            <span>Clear Screen (clear)</span>
+          </button>
+
+          <button
+            onClick={handleResetTerminal}
+            className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 text-left transition-colors cursor-pointer"
+          >
+            <RotateCcw className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Reset & Redraw</span>
+          </button>
+
+          <div className="my-1 border-t border-white/10 mx-2" />
+
+          <button
+            onClick={() => { handleLaunchPutty(); setContextMenu(null); }}
+            className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center space-x-2 text-left transition-colors cursor-pointer"
+          >
+            <ExternalLink className="w-3.5 h-3.5 text-blue-400" />
+            <span>Launch Standalone PuTTY</span>
+          </button>
+        </div>
+      )}
 
       {/* Copied / Exported Notification Toast */}
       {copiedNotification && (
-        <div className="absolute bottom-4 right-4 bg-emerald-600/90 text-white px-3 py-1.5 rounded-lg shadow-xl text-xs flex items-center space-x-2 backdrop-blur-md animate-in fade-in slide-in-from-bottom-2">
+        <div className="absolute bottom-4 right-4 bg-emerald-600/90 text-white px-3 py-1.5 rounded-lg shadow-xl text-xs flex items-center space-x-2 backdrop-blur-md animate-in fade-in slide-in-from-bottom-2 select-none z-[99999]">
           <Check className="w-3.5 h-3.5" />
           <span>Session transcript saved!</span>
         </div>
