@@ -42,6 +42,13 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
       throw err;
     }
   }
+
+  // When running in a standard web browser (http://localhost:1420) without native Tauri runtime:
+  if (cmd === 'ssh_connect' || cmd === 'ssh_test_connection' || cmd === 'terminal_create') {
+    throw new Error(
+      'Native Desktop Runtime Required: Standard web browser tabs (http://localhost:1420) cannot open raw SSH sockets (port 22) or spawn PTY processes directly. Please launch the CloudDesk desktop application (clouddesk.exe) or run "npm run tauri:dev".'
+    );
+  }
   return fallback;
 }
 
