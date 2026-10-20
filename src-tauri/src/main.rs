@@ -106,6 +106,8 @@ fn main() {
             system::user::user_add,
             system::user::user_delete,
             system::user::user_modify,
+            system::user::user_lock,
+            system::user::user_unlock,
             system::user::group_list,
             system::user::group_add,
             system::user::group_delete,
