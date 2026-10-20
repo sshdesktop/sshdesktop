@@ -87,7 +87,7 @@ export default function DesktopLockScreen({
             {username}
           </h2>
           <p className="text-xs text-gray-300/80 font-mono">
-            {serverHost} • CloudDesk Secure Session
+            {serverHost} • SSH Desktop Secure Session
           </p>
         </div>
 
@@ -130,7 +130,7 @@ export default function DesktopLockScreen({
       {/* Footer Info */}
       <div className="relative z-10 text-[11px] text-gray-400 flex items-center space-x-2">
         <Shield className="w-3.5 h-3.5 text-blue-400" />
-        <span>End-to-End Encrypted CloudDesk Session</span>
+        <span>End-to-End Encrypted SSH Desktop Session</span>
       </div>
     </div>
   );

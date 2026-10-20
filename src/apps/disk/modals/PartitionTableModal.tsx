@@ -91,7 +91,7 @@ export default function PartitionTableModal({
                 This physical disk contains the operating system root (/) or bootloader partitions.
               </p>
               <p className="text-rose-200/80">
-                Initializing the partition table will immediately wipe all partitions and render the server completely unbootable. This action is blocked by CloudDesk system protections.
+                Initializing the partition table will immediately wipe all partitions and render the server completely unbootable. This action is blocked by SSH Desktop system protections.
               </p>
             </div>
 

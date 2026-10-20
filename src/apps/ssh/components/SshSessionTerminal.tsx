@@ -163,7 +163,7 @@ export default function SshSessionTerminal({
 
     // Send connection greeting & info banner
     term.writeln(`\x1b[1;36m┌──────────────────────────────────────────────────────────────┐\x1b[0m`);
-    term.writeln(`\x1b[1;36m│\x1b[0m  \x1b[1;32mCloudDesk SSH Studio Production Client\x1b[0m                    \x1b[1;36m│\x1b[0m`);
+    term.writeln(`\x1b[1;36m│\x1b[0m  \x1b[1;32mSSH Desktop Terminal Client\x1b[0m                    \x1b[1;36m│\x1b[0m`);
     term.writeln(`\x1b[1;36m│\x1b[0m  Connecting to \x1b[1;33m${session.username}@${session.host}:${session.port}\x1b[0m               \x1b[1;36m│\x1b[0m`);
     term.writeln(`\x1b[1;36m│\x1b[0m  Cipher: \x1b[35m${session.cipher || 'chacha20-poly1305@openssh.com'}\x1b[0m            \x1b[1;36m│\x1b[0m`);
     term.writeln(`\x1b[1;36m└──────────────────────────────────────────────────────────────┘\x1b[0m\r\n`);
@@ -264,7 +264,7 @@ export default function SshSessionTerminal({
   const handleExportTranscript = () => {
     const content = recordedLines.length > 0 
       ? recordedLines.join('') 
-      : `[CloudDesk SSH Session Log]\nHost: ${session.username}@${session.host}:${session.port}\nStarted: ${new Date(session.connectedAt).toISOString()}\nDuration: ${formatDuration(elapsedSeconds)}\n`;
+      : `[SSH Desktop Session Log]\nHost: ${session.username}@${session.host}:${session.port}\nStarted: ${new Date(session.connectedAt).toISOString()}\nDuration: ${formatDuration(elapsedSeconds)}\n`;
     
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);

@@ -121,7 +121,7 @@ export default function App() {
           <div className="flex items-center space-x-2">
             <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
             <span>
-              <strong>Web Browser Preview (http://localhost:1420):</strong> Real SSH sockets & raw PTY require the native desktop runtime. Please launch <strong>clouddesk.exe</strong> or run <code className="bg-black/30 px-1 py-0.5 rounded">npm run tauri:dev</code>.
+              <strong>Web Browser Preview (http://localhost:1420):</strong> Real SSH sockets & raw PTY require the native desktop runtime. Please launch <strong>SSH Desktop (.exe)</strong> or run <code className="bg-black/30 px-1 py-0.5 rounded">npm run tauri:dev</code>.
             </span>
           </div>
           <span className="text-amber-400 font-mono text-[10px] hidden sm:inline-block">Desktop App (.exe) is active</span>

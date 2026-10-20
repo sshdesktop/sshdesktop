@@ -959,7 +959,7 @@ export default function SecurityAuditor() {
 
             <div className="p-6 space-y-4">
               <p className="text-xs text-gray-300 leading-relaxed">
-                CloudDesk will execute the following hardening command on your server to resolve this vulnerability:
+                SSH Desktop will execute the following hardening command on your server to resolve this vulnerability:
               </p>
 
               <div className="bg-[#101018] p-3.5 rounded-xl border border-white/10 font-mono text-xs text-amber-300 break-all select-text leading-relaxed">

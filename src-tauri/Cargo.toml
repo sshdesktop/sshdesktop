@@ -1,7 +1,7 @@
 [package]
 name = "clouddesk"
 version = "2.4.0"
-description = "A Tauri App"
+description = "SSH Desktop - Remote Linux Administration Interface"
 authors = ["you"]
 edition = "2021"
 

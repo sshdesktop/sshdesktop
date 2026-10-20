@@ -306,7 +306,7 @@ export default function EditServiceModal({
               )}
             </button>
 
-            {/* Open in CloudDesk Code Editor */}
+            {/* Open in SSH Desktop Code Editor */}
             <button
               onClick={handleOpenInCodeEditor}
               disabled={!filePath || isLoading}

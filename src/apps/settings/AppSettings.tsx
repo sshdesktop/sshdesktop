@@ -11,6 +11,7 @@ import {
 import { WALLPAPERS } from '../../shell/Desktop';
 import { sshExec } from '../../lib/tauri-bridge';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
+import { SshDesktopLogo } from '../../components/SshDesktopLogo';
 
 const ACCENT_COLORS = [
   { name: 'Sapphire Blue', value: '#89B4FA' },
@@ -244,7 +245,7 @@ export default function AppSettings() {
     { id: 'editor', label: 'Code Editor', icon: FileCode, color: 'text-purple-400' },
     { id: 'dock', label: 'Desktop & Dock', icon: Monitor, color: 'text-amber-400' },
     { id: 'ssh', label: 'SSH & Network', icon: Sliders, color: 'text-cyan-400' },
-    { id: 'about', label: 'About CloudDesk', icon: Info, color: 'text-gray-400' },
+    { id: 'about', label: 'About SSH Desktop', icon: Info, color: 'text-gray-400' },
   ];
 
   const filteredNavItems = navItems.filter(item => 
@@ -847,16 +848,16 @@ export default function AppSettings() {
             </div>
           )}
 
-          {/* TAB 8: ABOUT CLOUDDESK */}
+          {/* TAB 8: ABOUT SSH DESKTOP */}
           {activeTab === 'about' && (
             <div className="space-y-6">
               <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-3xl p-6 shadow-2xl backdrop-blur-md flex flex-col items-center text-center space-y-4">
-                <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-blue-500 via-indigo-600 to-purple-600 flex items-center justify-center font-bold text-white text-3xl shadow-2xl border border-white/20">
-                  ☁
+                <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-blue-500 via-indigo-600 to-purple-600 flex items-center justify-center shadow-2xl border border-white/20 p-2.5">
+                  <SshDesktopLogo className="w-full h-full" />
                 </div>
 
                 <div>
-                  <h2 className="text-xl font-bold text-white tracking-tight">CloudDesk 2.0</h2>
+                  <h2 className="text-xl font-bold text-white tracking-tight">SSH Desktop</h2>
                   <div className="text-xs text-gray-400 mt-1">macOS Edition for Linux Remote Administration</div>
                 </div>
 

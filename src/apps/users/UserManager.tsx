@@ -198,7 +198,7 @@ export default function UserManager() {
               parsedSessions.push({
                 user: me,
                 tty: myTty && myTty.startsWith('/dev/') ? myTty.replace('/dev/', '') : (myTty || 'pts/0'),
-                from: 'CloudDesk (SSH Session)',
+                from: 'SSH Desktop (SSH Session)',
                 loginAt: myDate || 'Active Now',
                 idle: 'Active Now'
               });
