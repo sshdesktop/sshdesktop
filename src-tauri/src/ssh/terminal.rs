@@ -121,7 +121,112 @@ pub async fn terminal_create(
         }
     }
 
-    // ── 1. Prepare interactive PTY command ──────────────────────────────────
+    // ── 1. Fast Path: Native In-Memory SSH Transport PTY (russh) ────────────
+    // Checks for existing active session or creates a new high-performance russh session.
+    // Native SSH channel request_pty + request_shell bypasses all Windows ConPTY limitations,
+    // host key prompt blocks, and external plink/ssh process spawns.
+    if !is_ppk {
+        let handle_opt = {
+            let sessions = state.sessions.lock().await;
+            sessions.get(&conn_id).cloned().or_else(|| {
+                if conn_id == "default" || conn_id.is_empty() {
+                    sessions.get("default").cloned().or_else(|| sessions.values().next().cloned())
+                } else {
+                    None
+                }
+            })
+        };
+
+        let handle = match handle_opt {
+            Some(h) => Some(h),
+            None => {
+                let key_str = resolved_key_path.as_deref().or(private_key.as_deref());
+                match crate::ssh::session::connect_session(
+                    &host,
+                    conn.config.port,
+                    &user,
+                    password.as_deref(),
+                    key_str,
+                ).await {
+                    Ok(new_handle) => {
+                        let arc_h = std::sync::Arc::new(new_handle);
+                        let mut sessions = state.sessions.lock().await;
+                        sessions.insert(conn_id.clone(), arc_h.clone());
+                        sessions.insert("default".to_string(), arc_h.clone());
+                        Some(arc_h)
+                    }
+                    Err(e) => {
+                        log::warn!("CloudDesk: russh on-demand connect failed for {}: {}", host, e);
+                        None
+                    }
+                }
+            }
+        };
+
+        if let Some(h) = handle {
+            match crate::ssh::session::open_pty_shell(&h, "xterm-256color", cols as u32, rows as u32).await {
+                Ok((mut reader, mut writer)) => {
+                    log::info!("CloudDesk: Native russh interactive PTY shell opened for {}@{}:{}", user, host, port);
+                    let (tx, mut rx) = unbounded_channel::<Vec<u8>>();
+
+                    // Stdin / Writer Pump
+                    tokio::spawn(async move {
+                        while let Some(data) = rx.recv().await {
+                            if writer.write_all(&data).await.is_err() {
+                                break;
+                            }
+                            let _ = writer.flush().await;
+                        }
+                    });
+
+                    // Stdout / Reader Pump
+                    let app_out = app.clone();
+                    let term_id_out = term_id.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 4096];
+                        loop {
+                            match reader.read(&mut buf).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    let _ = app_out.emit("terminal-output", TerminalOutput {
+                                        terminal_id: term_id_out.clone(),
+                                        data: buf[..n].to_vec(),
+                                        text: None,
+                                    });
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let exit_msg = "\r\n\x1b[33m[Session disconnected]\x1b[0m\r\n";
+                        let _ = app_out.emit("terminal-output", TerminalOutput {
+                            terminal_id: term_id_out,
+                            data: exit_msg.as_bytes().to_vec(),
+                            text: Some(exit_msg.to_string()),
+                        });
+                    });
+
+                    let session = TerminalSession {
+                        id: term_id.clone(),
+                        conn_id: conn_id.clone(),
+                        rows,
+                        cols,
+                        created_at: chrono::Utc::now().timestamp(),
+                        tx: Some(tx),
+                        child_pid: None,
+                    };
+                    state.terminals.lock().insert(term_id.clone(), session);
+                    return Ok(term_id);
+                }
+                Err(e) => {
+                    log::warn!("CloudDesk: Native russh PTY request failed for {}: {}, falling back...", host, e);
+                }
+            }
+        }
+    }
+
+    // ── 2. Fallback Path: CLI PTY process (plink or openssh) ────────────────
+    crate::ssh::connection::cleanup_putty_host_key(&host, &port);
+
     let mut cmd = if is_key_auth {
         if is_ppk {
             let mut c = tokio::process::Command::new(plink_path);
@@ -138,7 +243,8 @@ pub async fn terminal_create(
             let mut c = tokio::process::Command::new("ssh");
             c.arg("-tt")
                 .arg("-p").arg(&port)
-                .arg("-o").arg("StrictHostKeyChecking=accept-new")
+                .arg("-o").arg("StrictHostKeyChecking=no")
+                .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
                 .arg("-o").arg("IdentitiesOnly=yes")
                 .arg("-o").arg("ConnectTimeout=10");
             if let Some(ref k) = resolved_key_path {
@@ -160,7 +266,8 @@ pub async fn terminal_create(
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-tt")
             .arg("-p").arg(&port)
-            .arg("-o").arg("StrictHostKeyChecking=accept-new")
+            .arg("-o").arg("StrictHostKeyChecking=no")
+            .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
             .arg("-o").arg("ConnectTimeout=10");
         c.arg(format!("{}@{}", user, host));
         c
@@ -322,6 +429,8 @@ pub async fn ssh_launch_putty(
         Some(c) => c,
         None => return Err(format!("Connection {} not found", conn_id)),
     };
+
+    crate::ssh::connection::cleanup_putty_host_key(&conn.config.host, &conn.config.port.to_string());
 
     let putty_path = if std::path::Path::new(r"C:\Program Files\PuTTY\putty.exe").exists() {
         r"C:\Program Files\PuTTY\putty.exe"

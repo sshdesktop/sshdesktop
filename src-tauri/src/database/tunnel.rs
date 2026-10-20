@@ -141,7 +141,8 @@ pub async fn setup_ssh_tunnel(
             c.arg("-N")
              .arg("-p").arg(conn.config.port.to_string())
              .arg("-L").arg(format!("{}:{}:{}", local_port, target_host, target_port))
-             .arg("-o").arg("StrictHostKeyChecking=accept-new")
+             .arg("-o").arg("StrictHostKeyChecking=no")
+             .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
              .arg("-o").arg("IdentitiesOnly=yes")
              .arg("-o").arg("ExitOnForwardFailure=yes");
             if let Some(ref key) = conn.config.private_key_path {

@@ -191,4 +191,22 @@ pub async fn open_sftp(
     Ok(sftp)
 }
 
+pub async fn open_pty_shell(
+    handle: &ClientHandle,
+    term: &str,
+    cols: u32,
+    rows: u32,
+) -> Result<(tokio::io::ReadHalf<russh::ChannelStream<russh::client::Msg>>, tokio::io::WriteHalf<russh::ChannelStream<russh::client::Msg>>), Box<dyn std::error::Error + Send + Sync>> {
+    let channel = handle.channel_open_session().await?;
+    channel.request_pty(false, term, cols, rows, 0, 0, &[]).await?;
+    channel.request_shell(true).await?;
+    let stream = channel.into_stream();
+    Ok(tokio::io::split(stream))
+}
+
+
+
+
+
+
 

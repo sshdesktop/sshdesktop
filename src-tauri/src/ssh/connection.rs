@@ -55,6 +55,26 @@ pub fn get_plink_path() -> &'static str {
     }
 }
 
+pub fn cleanup_putty_host_key(host: &str, port: &str) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let keys = [
+            format!("ssh-ed25519@{}:{}", port, host),
+            format!("ssh-rsa@{}:{}", port, host),
+            format!("ecdsa-sha2-nistp256@{}:{}", port, host),
+            format!("rsa2@{}:{}", port, host),
+        ];
+        for k in &keys {
+            let _ = std::process::Command::new("reg")
+                .args(&["delete", r"HKCU\Software\SimonTatham\PuTTY\SshHostKeys", "/v", k, "/f"])
+                .creation_flags(0x08000000)
+                .output();
+        }
+    }
+}
+
+
 pub fn is_ppk_key(path_or_content: &str) -> bool {
     let trimmed = path_or_content.trim();
     if trimmed.to_lowercase().ends_with(".ppk") {
@@ -183,6 +203,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
     if !verified && is_key_auth {
         if is_ppk {
             if let Some(key_path) = &config.private_key_path {
+                cleanup_putty_host_key(host, &port);
                 let plink_bin = get_plink_path();
                 let mut cmd = tokio::process::Command::new(plink_bin);
                 #[cfg(windows)]
@@ -251,7 +272,9 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                 .arg("-p")
                 .arg(&port)
                 .arg("-o")
-                .arg("StrictHostKeyChecking=accept-new")
+                .arg("StrictHostKeyChecking=no")
+                .arg("-o")
+                .arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
                 .arg("-o")
                 .arg("BatchMode=yes")
                 .arg("-o")
@@ -296,6 +319,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
     if !verified && !is_key_auth {
         if let Some(pwd) = &config.password {
             if !pwd.is_empty() {
+                cleanup_putty_host_key(host, &port);
                 let plink_bin = get_plink_path();
                 let mut cmd = tokio::process::Command::new(plink_bin);
                 #[cfg(windows)]
@@ -559,6 +583,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
     // 3. Password probe via Plink
     if let Some(pwd) = &config.password {
         if !pwd.is_empty() {
+            cleanup_putty_host_key(host, &port);
             let plink_bin = get_plink_path();
             let mut cmd = tokio::process::Command::new(plink_bin);
             #[cfg(windows)]
@@ -584,7 +609,8 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
         #[cfg(windows)]
         cmd.creation_flags(0x08000000);
         cmd.arg("-p").arg(&port)
-            .arg("-o").arg("StrictHostKeyChecking=accept-new")
+            .arg("-o").arg("StrictHostKeyChecking=no")
+            .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
             .arg("-o").arg("BatchMode=yes")
             .arg("-o").arg("ConnectTimeout=6");
         if let Some(k) = &config.private_key_path {
