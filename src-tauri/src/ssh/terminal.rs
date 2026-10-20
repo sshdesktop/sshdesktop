@@ -53,51 +53,115 @@ pub async fn terminal_create(
         "plink"
     };
 
-    // Prepare interactive command
+    let auth_method = conn.config.auth_method.as_deref().unwrap_or("password");
+    let is_key_auth = auth_method == "key" || private_key.is_some();
     let is_ppk = private_key.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
-    let mut cmd = if password.is_some() && !password.as_ref().unwrap().is_empty() {
+
+    // Ensure key file exists on disk
+    let resolved_key_path = if let Some(ref k) = private_key {
+        crate::ssh::connection::ensure_key_file(&conn_id, k)
+    } else {
+        None
+    };
+
+    // ── 0. Fast TCP Connectivity Probe (3.5s timeout) ─────────────────────────
+    // Avoid misleading "Connected" messages when port 22 is unreachable or offline
+    let target_addr = format!("{}:{}", host, port);
+    let banner_init = format!("\x1b[1;36m[CloudDesk Terminal]\x1b[0m Connecting to \x1b[1m{}@{}:{}\x1b[0m...\r\n", user, host, port);
+    let _ = app.emit("terminal-output", TerminalOutput {
+        terminal_id: term_id.clone(),
+        data: banner_init.as_bytes().to_vec(),
+        text: Some(banner_init),
+    });
+
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(3500),
+        tokio::net::TcpStream::connect(&target_addr),
+    ).await {
+        Ok(Ok(_sock)) => {
+            log::info!("CloudDesk: TCP connect succeeded to {}", target_addr);
+        }
+        Ok(Err(e)) => {
+            let diag = format!(
+                "\r\n\x1b[1;31m[Network Error]\x1b[0m Failed to reach \x1b[1m{} on port {}\x1b[0m: {}\r\n\r\n\
+                 \x1b[1;33mCommon reasons for AWS EC2 ({}) connection failures:\x1b[0m\r\n\
+                 \x1b[36m1. AWS Security Group:\x1b[0m In AWS EC2 console -> Security Groups -> Inbound Rules:\r\n\
+                    Add rule for \x1b[32mSSH (TCP Port 22)\x1b[0m with source \x1b[32m0.0.0.0/0\x1b[0m (or your current IP).\r\n\
+                 \x1b[36m2. Instance State:\x1b[0m Check AWS Console - is the EC2 instance in 'Running' state?\r\n\
+                 \x1b[36m3. Public IP Changed:\x1b[0m If the instance was stopped and restarted, AWS assigns a new Public IP.\r\n\
+                    Update the IP in CloudDesk (Edit Server Details).\r\n\r\n\
+                 \x1b[90m[Process exited]\x1b[0m\r\n",
+                host, port, e, host
+            );
+            let _ = app.emit("terminal-output", TerminalOutput {
+                terminal_id: term_id.clone(),
+                data: diag.as_bytes().to_vec(),
+                text: Some(diag),
+            });
+            return Ok(term_id);
+        }
+        Err(_) => {
+            let diag = format!(
+                "\r\n\x1b[1;31m[Connection Timed Out]\x1b[0m Server \x1b[1m{}:{}\x1b[0m did not respond within 3.5s.\r\n\r\n\
+                 \x1b[1;33mCommon reasons for AWS EC2 ({}) connection timeout:\x1b[0m\r\n\
+                 \x1b[36m1. AWS Security Group:\x1b[0m In AWS EC2 console -> Security Groups -> Inbound Rules:\r\n\
+                    Add rule for \x1b[32mSSH (TCP Port 22)\x1b[0m with source \x1b[32m0.0.0.0/0\x1b[0m (or your current IP).\r\n\
+                 \x1b[36m2. Instance State:\x1b[0m Check AWS Console - is the EC2 instance in 'Running' state?\r\n\
+                 \x1b[36m3. Public IP Changed:\x1b[0m If the instance was stopped and restarted, AWS assigns a new Public IP.\r\n\
+                    Update the IP in CloudDesk (Edit Server Details).\r\n\r\n\
+                 \x1b[90m[Process timed out]\x1b[0m\r\n",
+                host, port, host
+            );
+            let _ = app.emit("terminal-output", TerminalOutput {
+                terminal_id: term_id.clone(),
+                data: diag.as_bytes().to_vec(),
+                text: Some(diag),
+            });
+            return Ok(term_id);
+        }
+    }
+
+    // ── 1. Prepare interactive PTY command ──────────────────────────────────
+    let mut cmd = if is_key_auth {
+        if is_ppk {
+            let mut c = tokio::process::Command::new(plink_path);
+            c.arg("-ssh")
+                .arg("-t")
+                .arg("-P").arg(&port)
+                .arg("-l").arg(&user);
+            if let Some(ref k) = resolved_key_path {
+                c.arg("-i").arg(k);
+            }
+            c.arg(&host);
+            c
+        } else {
+            let mut c = tokio::process::Command::new("ssh");
+            c.arg("-tt")
+                .arg("-p").arg(&port)
+                .arg("-o").arg("StrictHostKeyChecking=accept-new")
+                .arg("-o").arg("IdentitiesOnly=yes")
+                .arg("-o").arg("ConnectTimeout=10");
+            if let Some(ref k) = resolved_key_path {
+                c.arg("-i").arg(k);
+            }
+            c.arg(format!("{}@{}", user, host));
+            c
+        }
+    } else if password.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
         let mut c = tokio::process::Command::new(plink_path);
         c.arg("-ssh")
             .arg("-t") // Force pseudo-terminal
-            .arg("-P")
-            .arg(&port)
-            .arg("-l")
-            .arg(&user)
-            .arg("-pw")
-            .arg(password.as_ref().unwrap())
+            .arg("-P").arg(&port)
+            .arg("-l").arg(&user)
+            .arg("-pw").arg(password.as_ref().unwrap())
             .arg(&host);
-        c
-    } else if is_ppk {
-        let mut c = tokio::process::Command::new(plink_path);
-        c.arg("-ssh")
-            .arg("-t")
-            .arg("-P")
-            .arg(&port)
-            .arg("-l")
-            .arg(&user);
-        if let Some(ref k) = private_key {
-            if crate::ssh::connection::resolve_key_path(k).is_some() {
-                c.arg("-i").arg(k);
-            }
-        }
-        c.arg(&host);
         c
     } else {
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-tt")
-            .arg("-p")
-            .arg(&port)
-            .arg("-o")
-            .arg("StrictHostKeyChecking=no")
-            .arg("-o")
-            .arg("IdentitiesOnly=yes")
-            .arg("-o")
-            .arg("ConnectTimeout=10");
-        if let Some(ref k) = private_key {
-            if crate::ssh::connection::resolve_key_path(k).is_some() {
-                c.arg("-i").arg(k);
-            }
-        }
+            .arg("-p").arg(&port)
+            .arg("-o").arg("StrictHostKeyChecking=accept-new")
+            .arg("-o").arg("ConnectTimeout=10");
         c.arg(format!("{}@{}", user, host));
         c
     };
@@ -165,10 +229,12 @@ pub async fn terminal_create(
             match stderr.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let formatted = format!("\x1b[31m{}\x1b[0m", text.replace("\r\n", "\n").replace('\n', "\r\n"));
                     let _ = app_err.emit("terminal-output", TerminalOutput {
                         terminal_id: term_id_err.clone(),
-                        data: buf[..n].to_vec(),
-                        text: None,
+                        data: formatted.as_bytes().to_vec(),
+                        text: Some(formatted),
                     });
                 }
                 Err(_) => break,
@@ -187,14 +253,6 @@ pub async fn terminal_create(
     };
 
     state.terminals.lock().insert(term_id.clone(), session);
-
-    // Initial banner
-    let banner = format!("\x1b[1;32m[CloudDesk PuTTY-Grade PTY]\x1b[0m Connected to \x1b[1m{}@{}\x1b[0m\r\n\r\n", user, host);
-    let _ = app.emit("terminal-output", TerminalOutput {
-        terminal_id: term_id.clone(),
-        data: banner.as_bytes().to_vec(),
-        text: Some(banner),
-    });
 
     Ok(term_id)
 }

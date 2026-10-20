@@ -40,7 +40,7 @@ const COMMON_TIMEZONES = [
 export default function AppSettings() {
   const { 
     theme, updateSettings, terminalFontSize, accentColor, wallpaper, 
-    dockPosition, dockAlignment, showHiddenFiles, pollingInterval, autoHideDock 
+    dockPosition, showHiddenFiles, pollingInterval, autoHideDock 
   } = useSettingsStore();
   const { openApp } = useWindowManager();
 
@@ -769,7 +769,7 @@ export default function AppSettings() {
                 <div className="p-4 flex items-center justify-between">
                   <div>
                     <span className="text-xs font-semibold text-white block">Dock Screen Position</span>
-                    <span className="text-[11px] text-gray-400">Screen edge where application dock is placed</span>
+                    <span className="text-[11px] text-gray-400">Screen edge where application dock is docked</span>
                   </div>
                   <div className="flex bg-[#12121e] p-1 rounded-xl border border-white/10 text-xs">
                     {(['bottom', 'left'] as const).map(pos => (
@@ -781,26 +781,6 @@ export default function AppSettings() {
                         }`}
                       >
                         {pos}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="p-4 flex items-center justify-between">
-                  <div>
-                    <span className="text-xs font-semibold text-white block">Dock Software Alignment</span>
-                    <span className="text-[11px] text-gray-400">Center (macOS / Windows 11) or Left-Aligned (Windows 10 / Ubuntu)</span>
-                  </div>
-                  <div className="flex bg-[#12121e] p-1 rounded-xl border border-white/10 text-xs">
-                    {(['center', 'left'] as const).map(align => (
-                      <button
-                        key={align}
-                        onClick={() => updateSettings({ dockAlignment: align })}
-                        className={`px-3 py-1 rounded-lg capitalize transition-all ${
-                          (dockAlignment || 'center') === align ? 'bg-blue-600 text-white font-semibold' : 'text-gray-400 hover:text-white'
-                        }`}
-                      >
-                        {align}
                       </button>
                     ))}
                   </div>
