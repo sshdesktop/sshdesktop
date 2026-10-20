@@ -139,7 +139,7 @@ export default function DisconnectAlertModal() {
             <div className="w-3 h-3 rounded-full bg-green-500/80 border border-green-600/40" />
           </div>
           <span className="text-[11px] font-semibold text-gray-400 font-sans tracking-wide">
-            CloudDesk Connection Alert
+            SSH Desktop Connection Alert
           </span>
           <button 
             onClick={handleReturnToLogin}

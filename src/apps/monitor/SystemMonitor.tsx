@@ -1793,7 +1793,7 @@ export default function SystemMonitor() {
                   Are you sure you want to quit &ldquo;{quitTarget.name}&rdquo;?
                 </h3>
                 <p className="text-xs text-gray-400">
-                  Quitting this process (PID: {quitTarget.pid}) will terminate it. If standard termination fails due to user permissions, CloudDesk will automatically elevate with sudo.
+                  Quitting this process (PID: {quitTarget.pid}) will terminate it. If standard termination fails due to user permissions, SSH Desktop will automatically elevate with sudo.
                 </p>
               </div>
             </div>

@@ -88,7 +88,7 @@ export default function UnmountModal({
                 This partition is mounted as <strong className="font-mono text-white underline">{partition.mountpoint}</strong> (root filesystem or system bootloader).
               </p>
               <p className="text-rose-200/80">
-                Unmounting this volume is prohibited by CloudDesk safety guardrails because it would immediately crash running services or make your server unbootable.
+                Unmounting this volume is prohibited by SSH Desktop safety guardrails because it would immediately crash running services or make your server unbootable.
               </p>
             </div>
 

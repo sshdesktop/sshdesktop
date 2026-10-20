@@ -185,7 +185,7 @@ export default function Desktop() {
           showHiddenFiles: useSettingsStore.getState().showHiddenFiles,
           sticky_notes: stickyNoteContent,
           updated_at: new Date().toISOString(),
-          client: 'CloudDesk Native macOS Shell'
+          client: 'SSH Desktop macOS Shell'
         };
         await sftpWriteTextFile(activeConnectionId, `${userHome}/.clouddesk/settings.json`, JSON.stringify(currentPayload, null, 2)).catch(() => {});
       } catch (err) {

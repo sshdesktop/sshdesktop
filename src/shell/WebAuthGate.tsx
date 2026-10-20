@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Lock, User, KeyRound, ArrowRight, ShieldCheck, CheckCircle2, AlertCircle, Eye, EyeOff, Globe } from 'lucide-react';
+import { SshDesktopLogo } from '../components/SshDesktopLogo';
 
 interface WebAuthGateProps {
   onAuthenticated: () => void;
@@ -77,11 +78,11 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
       <div className="relative w-full max-w-md rounded-3xl bg-[#1e1e2e]/80 border border-white/15 p-8 shadow-[0_25px_60px_rgba(0,0,0,0.8)] backdrop-blur-2xl">
         {/* Top Header */}
         <div className="flex flex-col items-center text-center mb-6">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-600/40 mb-3 border border-white/20">
-            <ShieldCheck className="w-9 h-9 text-white" />
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-600/40 mb-3 border border-white/20 p-2">
+            <SshDesktopLogo className="w-full h-full" />
           </div>
 
-          <h2 className="text-xl font-bold text-white tracking-tight">CloudDesk 2.0</h2>
+          <h2 className="text-xl font-bold text-white tracking-tight">SSH Desktop</h2>
           <div className="flex items-center space-x-1.5 mt-1 text-xs text-blue-400 font-mono">
             <Globe className="w-3.5 h-3.5" />
             <span>Web Desktop Access • Port 2222</span>
@@ -180,7 +181,7 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
               <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
             ) : (
               <>
-                <span>Sign In to CloudDesk</span>
+                <span>Sign In to SSH Desktop</span>
                 <ArrowRight className="w-4 h-4" />
               </>
             )}
@@ -189,7 +190,7 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
 
         {/* Footer Info */}
         <div className="mt-6 pt-4 border-t border-white/10 text-center text-[11px] text-gray-500">
-          <span>Protected by CloudDesk Authenticator • Port 2222 Engine</span>
+          <span>Protected by SSH Desktop Authenticator • Port 2222 Engine</span>
         </div>
       </div>
     </div>

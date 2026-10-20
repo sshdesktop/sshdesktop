@@ -4260,7 +4260,7 @@ export default function DockerManager() {
                     className="rounded border-white/20 bg-white/10 text-blue-500 focus:ring-0 cursor-pointer"
                   />
                   <label htmlFor="saveDockerCreds" className="text-xs text-gray-300 cursor-pointer">
-                    Save credential profile in CloudDesk
+                    Save credential profile in SSH Desktop
                   </label>
                 </div>
 
@@ -4772,7 +4772,7 @@ export default function DockerManager() {
               )}
 
               <div className="text-[10px] text-gray-400 leading-relaxed">
-                CloudDesk exports this image with <code className="text-gray-200">docker save</code>, compresses it with gzip, and securely streams it via SFTP directly to your local computer's Downloads directory.
+                SSH Desktop exports this image with <code className="text-gray-200">docker save</code>, compresses it with gzip, and securely streams it via SFTP directly to your local computer's Downloads directory.
               </div>
             </div>
 

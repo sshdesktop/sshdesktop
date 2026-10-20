@@ -302,7 +302,7 @@ export default function PackageManager() {
       status: 'running',
       title: 'Full System Upgrade',
       command: cmdStr,
-      output: `[CloudDesk Package Manager]\r\nInitiating full system upgrade via ${pkgManager.toUpperCase()}...\r\nRunning: ${cmdStr}\r\nPlease wait while packages are being downloaded and configured...\r\n\r\n`
+      output: `[SSH Desktop Package Manager]\r\nInitiating full system upgrade via ${pkgManager.toUpperCase()}...\r\nRunning: ${cmdStr}\r\nPlease wait while packages are being downloaded and configured...\r\n\r\n`
     });
 
     try {
@@ -341,7 +341,7 @@ export default function PackageManager() {
       status: 'running',
       title: `Upgrading Package '${name}'`,
       command: cmdStr,
-      output: `[CloudDesk Package Manager]\r\nUpgrading '${name}' to latest repository version...\r\nRunning: ${cmdStr}\r\nPlease wait...\r\n\r\n`
+      output: `[SSH Desktop Package Manager]\r\nUpgrading '${name}' to latest repository version...\r\nRunning: ${cmdStr}\r\nPlease wait...\r\n\r\n`
     });
 
     try {
@@ -382,7 +382,7 @@ export default function PackageManager() {
       status: 'running',
       title: `Installing Package '${name}'`,
       command: cmdStr,
-      output: `[CloudDesk Package Manager]\r\nTarget OS Manager: ${pkgManager.toUpperCase()}\r\nRunning: ${cmdStr}\r\nResolving dependencies and downloading packages from distribution mirrors...\r\n\r\n`
+      output: `[SSH Desktop Package Manager]\r\nTarget OS Manager: ${pkgManager.toUpperCase()}\r\nRunning: ${cmdStr}\r\nResolving dependencies and downloading packages from distribution mirrors...\r\n\r\n`
     });
 
     try {
@@ -423,7 +423,7 @@ export default function PackageManager() {
       status: 'running',
       title: `Uninstalling Package '${name}'`,
       command: cmdStr,
-      output: `[CloudDesk Package Manager]\r\nUninstalling '${name}' via ${pkgManager.toUpperCase()}...\r\nRunning: ${cmdStr}\r\nRemoving package binaries and updating system package database...\r\n\r\n`
+      output: `[SSH Desktop Package Manager]\r\nUninstalling '${name}' via ${pkgManager.toUpperCase()}...\r\nRunning: ${cmdStr}\r\nRemoving package binaries and updating system package database...\r\n\r\n`
     });
 
     try {

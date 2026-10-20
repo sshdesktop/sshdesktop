@@ -1,7 +1,7 @@
 {
-  "productName": "CloudDesk",
+  "productName": "SSH Desktop",
   "version": "2.4.0",
-  "identifier": "com.clouddesk.desktop",
+  "identifier": "com.sshdesktop.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "CloudDesk",
+        "title": "SSH Desktop",
         "width": 1400,
         "height": 900,
         "minWidth": 1024,
@@ -36,8 +36,8 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "CloudDesk macOS Edition for Linux Administration",
-    "longDescription": "CloudDesk is a modern remote desktop and management interface for Linux servers with native SSH, SFTP, API Studio, and OS provisioning tools.",
+    "shortDescription": "SSH Desktop - Remote Linux Administration Interface",
+    "longDescription": "SSH Desktop is a modern remote desktop and management interface for Linux servers with native SSH, SFTP, and OS administration tools.",
     "linux": {
       "deb": {
         "depends": [

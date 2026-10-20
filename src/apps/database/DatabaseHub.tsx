@@ -284,7 +284,7 @@ export const DatabaseHub: React.FC = () => {
                 <AlertCircle className="w-12 h-12 text-amber-400 mb-3" />
                 <h3 className="text-sm font-bold text-white mb-1">Unsupported Database Engine</h3>
                 <p className="text-xs text-gray-400 max-w-sm mb-4">
-                  The engine &ldquo;{activeProfile.engine}&rdquo; is not recognized by CloudDesk Database Studios.
+                  The engine &ldquo;{activeProfile.engine}&rdquo; is not recognized by SSH Desktop Database Studios.
                 </p>
                 <button
                   onClick={() => setActiveProfile(null)}

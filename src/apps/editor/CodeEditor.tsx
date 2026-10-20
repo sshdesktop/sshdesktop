@@ -1243,7 +1243,7 @@ export default function CodeEditor() {
       if (showCreateModal === 'folder') {
         await sftpMkdir(activeConnId, fullPath);
       } else {
-        await sftpWriteTextFile(activeConnId, fullPath, `// Created in CloudDesk: ${cleanName}\n`);
+        await sftpWriteTextFile(activeConnId, fullPath, `// Created in SSH Desktop: ${cleanName}\n`);
         await openPathInEditor(fullPath);
       }
       setShowCreateModal(null);

@@ -239,7 +239,7 @@ export default function KillPortModal({
           <div className="p-3 bg-white/[0.02] border border-white/5 rounded-2xl flex items-start space-x-2 text-[11px] text-gray-400 font-sans">
             <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
             <span>
-              CloudDesk executes elevated <code className="font-mono text-white">kill</code> and <code className="font-mono text-white">fuser -k</code> across the socket to guarantee the port is released.
+              SSH Desktop executes elevated <code className="font-mono text-white">kill</code> and <code className="font-mono text-white">fuser -k</code> across the socket to guarantee the port is released.
             </span>
           </div>
 

@@ -10,6 +10,7 @@ import {
 import { useConnectionStore, useSettingsStore, useWindowStore, useTelemetryStore } from '../lib/store';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
 import { pickKeyFile } from '../lib/tauri-bridge';
+import { SshDesktopLogo } from '../components/SshDesktopLogo';
 
 const TASKBAR_ICONS: Record<string, React.ElementType> = {
   terminal: Terminal,
@@ -291,9 +292,9 @@ export default function Taskbar({
                 ? 'bg-blue-600 hover:bg-blue-500 text-white border-blue-500 shadow-blue-500/20'
                 : 'bg-gradient-to-r from-blue-600 via-blue-500 to-indigo-600 hover:brightness-110 text-white border-blue-400/40 shadow-[0_2px_12px_rgba(37,99,235,0.35)]'
             }`}
-            title="Start Menu - All Software & Tools (Click to open Launchpad)"
+            title="SSH Desktop Start Menu - All Software & Tools (Click to open Launchpad)"
           >
-            <Cloud className="w-4 h-4 text-white" />
+            <SshDesktopLogo className="w-4 h-4" />
             <span className="font-bold tracking-tight text-xs">Start</span>
           </button>
         </div>
@@ -307,7 +308,7 @@ export default function Taskbar({
                 ? 'hover:bg-black/5 text-slate-800 border-black/10' 
                 : 'hover:bg-white/10 text-gray-300 border-white/10 bg-white/[0.03]'
             }`}
-            title="CloudDesk System Preferences & Controls"
+            title="SSH Desktop System Preferences & Controls"
           >
             <span className="font-semibold text-[11px]">System</span>
             <ChevronDown className="w-3 h-3 opacity-60" />

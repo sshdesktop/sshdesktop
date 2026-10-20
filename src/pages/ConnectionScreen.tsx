@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { sshTestConnection, sshLaunchPutty, pickKeyFile, storeListConnections } from '../lib/tauri-bridge';
 import { WALLPAPERS } from '../shell/Desktop';
+import { SshDesktopLogo } from '../components/SshDesktopLogo';
 
 interface UploadedKeyInfo {
   name: string;
@@ -545,7 +546,7 @@ export default function ConnectionScreen() {
 
       await connect(targetId, targetConfig);
       setConnectingProgress(100);
-      setConnectingStep('Welcome to CloudDesk. Launching desktop...');
+      setConnectingStep('Welcome to SSH Desktop. Launching desktop...');
     } catch (err: any) {
       const msg = typeof err === 'string' ? err : err?.message || (typeof err === 'object' ? JSON.stringify(err) : String(err));
       setErrorMsg(msg || 'Authentication failed: Please verify host address, port, and credentials.');
@@ -626,7 +627,7 @@ export default function ConnectionScreen() {
         private_key_path: keyPath,
         color: existing?.color || '#89b4fa',
         group: existing?.group || 'Servers',
-        tags: existing?.tags || ['Linux', 'CloudDesk'],
+        tags: existing?.tags || ['Linux', 'SSH Desktop'],
         created_at: existing?.created_at || Date.now(),
       };
       updateConnection(modalForm.id, updatedConn);
@@ -666,7 +667,7 @@ export default function ConnectionScreen() {
         private_key_path: keyPath,
         color: '#89b4fa',
         group: 'Servers',
-        tags: ['Linux', 'CloudDesk'],
+        tags: ['Linux', 'SSH Desktop'],
         created_at: Date.now()
       };
       addConnection(newConn);
@@ -716,7 +717,7 @@ export default function ConnectionScreen() {
       private_key_path: saveCredentials ? keyPath : undefined,
       color: '#89b4fa',
       group: 'Servers',
-      tags: ['Linux', 'CloudDesk'],
+      tags: ['Linux', 'SSH Desktop'],
       created_at: Date.now()
     };
     addConnection(newConn);
@@ -834,7 +835,7 @@ export default function ConnectionScreen() {
                   onClick={() => setShowAboutModal(true)}
                   className="px-3.5 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer font-medium"
                 >
-                  About This Cloud Mac
+                  About SSH Desktop
                 </div>
                 <div className="my-1 border-t border-white/10 mx-2" />
                 <div 
@@ -878,8 +879,9 @@ export default function ConnectionScreen() {
             )}
           </div>
 
-          <span className="font-bold tracking-tight text-white flex items-center space-x-1.5">
-            <span>CloudDesk</span>
+          <span className="font-bold tracking-tight text-white flex items-center space-x-2">
+            <SshDesktopLogo className="w-4 h-4" />
+            <span>SSH Desktop</span>
             <span className="text-[10px] px-1.5 py-0.2 bg-blue-500/20 text-blue-300 rounded-full font-mono border border-blue-400/30">2.0</span>
           </span>
 
@@ -973,7 +975,7 @@ export default function ConnectionScreen() {
                 <div className="w-14 h-14 rounded-2xl bg-blue-600/20 border border-blue-400/30 flex items-center justify-center shadow-lg">
                   <Server className="w-7 h-7 text-blue-400" />
                 </div>
-                <h2 className="text-base font-bold text-white">Welcome to CloudDesk</h2>
+                <h2 className="text-base font-bold text-white">Welcome to SSH Desktop</h2>
                 <p className="text-xs text-gray-400 max-w-xs">
                   No server profiles configured. Enter your remote Linux server details to connect:
                 </p>
@@ -1703,7 +1705,7 @@ export default function ConnectionScreen() {
 
           <button
             onClick={() => {
-              if (confirm('Close CloudDesk?')) {
+              if (confirm('Close SSH Desktop?')) {
                 window.close();
               }
             }}
@@ -1719,8 +1721,8 @@ export default function ConnectionScreen() {
       {isConnecting && (
         <div className="fixed inset-0 z-50 bg-[#0f111a]/95 backdrop-blur-3xl flex flex-col items-center justify-center p-8 text-center animate-in fade-in duration-200">
           <div className="w-full max-w-sm flex flex-col items-center space-y-5">
-            <div className="w-18 h-18 rounded-3xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-purple-600 flex items-center justify-center shadow-[0_10px_40px_rgba(59,130,246,0.5)] border border-white/30 animate-pulse">
-              <Cloud className="w-9 h-9 text-white drop-shadow" />
+            <div className="w-20 h-20 rounded-3xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-purple-600 flex items-center justify-center shadow-[0_10px_40px_rgba(59,130,246,0.5)] border border-white/30 animate-pulse p-2">
+              <SshDesktopLogo className="w-full h-full" />
             </div>
 
             <div className="w-64 h-1.5 bg-white/10 rounded-full overflow-hidden shadow-inner">
@@ -1963,7 +1965,7 @@ export default function ConnectionScreen() {
             </div>
 
             <p className="text-gray-400 text-xs">
-              Paste contents of your OpenSSH configuration file. CloudDesk will automatically extract and save host profiles:
+              Paste contents of your OpenSSH configuration file. SSH Desktop will automatically extract and save host profiles:
             </p>
 
             <textarea
@@ -2000,16 +2002,16 @@ export default function ConnectionScreen() {
         </div>
       )}
 
-      {/* "About This Cloud Mac" Modal */}
+      {/* "About SSH Desktop" Modal */}
       {showAboutModal && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-150">
           <div className="bg-[#181a2c]/95 backdrop-blur-2xl border border-white/20 rounded-3xl w-full max-w-sm p-6 text-center space-y-4 shadow-2xl text-xs text-gray-200">
-            <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-purple-600 flex items-center justify-center shadow-2xl mx-auto border border-white/30">
-              <Laptop className="w-7 h-7 text-white" />
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-purple-600 flex items-center justify-center shadow-2xl mx-auto border border-white/30 p-2">
+              <SshDesktopLogo className="w-full h-full" />
             </div>
 
             <div>
-              <h2 className="text-base font-bold text-white tracking-wide">CloudDesk macOS Sequoia</h2>
+              <h2 className="text-base font-bold text-white tracking-wide">SSH Desktop macOS Sequoia</h2>
               <p className="text-[11px] text-gray-400 mt-0.5">Version 2.0 (Build 24A348)</p>
             </div>
 

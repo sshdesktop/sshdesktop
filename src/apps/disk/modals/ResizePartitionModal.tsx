@@ -283,7 +283,7 @@ export default function ResizePartitionModal({
               <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl flex items-start space-x-2 text-[11px] text-emerald-300 font-sans">
                 <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                 <span>
-                  <b>Automatic Online Expansion:</b> CloudDesk will expand the partition table boundary and automatically run <code className="font-mono text-white">resize2fs</code> (for ext4) or <code className="font-mono text-white">xfs_growfs</code> (for XFS) on the fly.
+                  <b>Automatic Online Expansion:</b> SSH Desktop will expand the partition table boundary and automatically run <code className="font-mono text-white">resize2fs</code> (for ext4) or <code className="font-mono text-white">xfs_growfs</code> (for XFS) on the fly.
                 </span>
               </div>
             </div>
@@ -338,7 +338,7 @@ export default function ResizePartitionModal({
                   <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl flex items-start space-x-2 text-[11px] text-amber-300 font-sans">
                     <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                     <span>
-                      <b>Safe Filesystem Shrink Order:</b> For ext4 filesystems, CloudDesk checks filesystem consistency with <code className="font-mono text-white">e2fsck</code> and resizes the filesystem before adjusting partition limits to guarantee zero data loss.
+                      <b>Safe Filesystem Shrink Order:</b> For ext4 filesystems, SSH Desktop checks filesystem consistency with <code className="font-mono text-white">e2fsck</code> and resizes the filesystem before adjusting partition limits to guarantee zero data loss.
                     </span>
                   </div>
                 </>
