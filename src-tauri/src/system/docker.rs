@@ -165,7 +165,7 @@ pub async fn docker_action(
         return Err(format!("docker {} failed: {}", safe_action, stdout.trim()));
     }
 
-    log::info!("CloudDesk: docker {} {}", safe_action, container_id);
+    log::info!("SSH Desktop: docker {} {}", safe_action, container_id);
     Ok(stdout.trim().to_string())
 }
 

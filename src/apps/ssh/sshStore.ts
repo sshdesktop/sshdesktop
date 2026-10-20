@@ -147,6 +147,13 @@ interface SshStoreState {
   setTerminalTheme: (theme: 'catppuccin' | 'dracula' | 'nord' | 'one-dark' | 'solarized') => void;
 }
 
+// Migrate legacy store if present
+if (typeof localStorage !== 'undefined' && !localStorage.getItem('sshdesktop_ssh_studio_store') && localStorage.getItem('clouddesk_ssh_studio_store')) {
+  try {
+    localStorage.setItem('sshdesktop_ssh_studio_store', localStorage.getItem('clouddesk_ssh_studio_store')!);
+  } catch {}
+}
+
 export const useSshStore = create<SshStoreState>()(
   persist(
     (set, get) => ({
@@ -200,7 +207,7 @@ export const useSshStore = create<SshStoreState>()(
       setTerminalTheme: (theme) => set({ terminalTheme: theme }),
     }),
     {
-      name: 'clouddesk_ssh_studio_store',
+      name: 'sshdesktop_ssh_studio_store',
     }
   )
 );

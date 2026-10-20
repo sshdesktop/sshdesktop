@@ -35,7 +35,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                     return (stdout, code);
                 }
                 Err(e) => {
-                    log::warn!("CloudDesk: Persistent channel failed for cmd '{}': {}, falling back...", command, e);
+                    log::warn!("SSH Desktop: Persistent channel failed for cmd '{}': {}, falling back...", command, e);
                 }
             }
         }
@@ -64,7 +64,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                 let arc = std::sync::Arc::new(handle);
                 map.insert(cid, arc.clone());
                 map.insert("default".to_string(), arc);
-                log::info!("CloudDesk: Lazily established persistent SSH transport for {}", conn_clone.config.host);
+                log::info!("SSH Desktop: Lazily established persistent SSH transport for {}", conn_clone.config.host);
             }
         });
     }
@@ -136,14 +136,14 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                             return (String::new(), exit_code);
                         }
                         Ok(Err(e)) => {
-                            log::warn!("CloudDesk: plink wait error for {}: {}", host, e);
+                            log::warn!("SSH Desktop: plink wait error for {}: {}", host, e);
                             if attempt == 0 {
                                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                                 continue;
                             }
                         }
                         Err(_) => {
-                            log::warn!("CloudDesk: plink timed out for {} on command: {}", host, command);
+                            log::warn!("SSH Desktop: plink timed out for {} on command: {}", host, command);
                             return (String::new(), -1);
                         }
                     }
@@ -208,14 +208,14 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                         return (String::new(), exit_code);
                     }
                     Ok(Err(e)) => {
-                        log::warn!("CloudDesk: plink ppk wait error for {}: {}", host, e);
+                        log::warn!("SSH Desktop: plink ppk wait error for {}: {}", host, e);
                         if attempt == 0 {
                             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                             continue;
                         }
                     }
                     Err(_) => {
-                        log::warn!("CloudDesk: plink ppk timed out for {} on command: {}", host, command);
+                        log::warn!("SSH Desktop: plink ppk timed out for {} on command: {}", host, command);
                         return (String::new(), -1);
                     }
                 }
@@ -267,10 +267,10 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
             return (String::new(), exit_code);
         }
         Ok(Err(e)) => {
-            log::warn!("CloudDesk: ssh spawn error for {}: {}", host, e);
+            log::warn!("SSH Desktop: ssh spawn error for {}: {}", host, e);
         }
         Err(_) => {
-            log::warn!("CloudDesk: ssh timed out for {} on command: {}", host, command);
+            log::warn!("SSH Desktop: ssh timed out for {} on command: {}", host, command);
         }
     }
 
@@ -322,7 +322,7 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
             username,
             n_out.trim()
         );
-        log::warn!("CloudDesk: {}", msg);
+        log::warn!("SSH Desktop: {}", msg);
         return (msg, n_code);
     }
 
@@ -332,9 +332,9 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
             "Server Permission Error: /usr/bin/sudo has lost its setuid root permissions on the server.\n\
              Fix on your server by running as root:\n\
                chown root:root /usr/bin/sudo && chmod 4755 /usr/bin/sudo\n\
-             Or connect in CloudDesk as 'root' using your PEM key."
+             Or connect in SSH Desktop as 'root' using your PEM key."
         );
-        log::error!("CloudDesk: {}", msg);
+        log::error!("SSH Desktop: {}", msg);
         return (msg, n_code);
     }
 
@@ -360,9 +360,9 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
                     "Server Permission Error: /usr/bin/sudo has lost its setuid root permissions on the server.\n\
                      Fix on your server by running as root:\n\
                        chown root:root /usr/bin/sudo && chmod 4755 /usr/bin/sudo\n\
-                     Or connect in CloudDesk as 'root' using your PEM key."
+                     Or connect in SSH Desktop as 'root' using your PEM key."
                 );
-                log::error!("CloudDesk: {}", msg);
+                log::error!("SSH Desktop: {}", msg);
                 return (msg, s_code);
             }
 
@@ -425,7 +425,7 @@ pub async fn run_cmd_with_stdin(
                     return (stdout, code);
                 }
                 Err(e) => {
-                    log::warn!("CloudDesk: Persistent channel with stdin failed for cmd '{}': {}, falling back...", command, e);
+                    log::warn!("SSH Desktop: Persistent channel with stdin failed for cmd '{}': {}, falling back...", command, e);
                 }
             }
         }
@@ -640,7 +640,7 @@ pub async fn ssh_exec(
         );
 
         if is_permission_denial {
-            log::info!("CloudDesk: Detected permission denial for '{}', attempting auto-elevation", command);
+            log::info!("SSH Desktop: Detected permission denial for '{}', attempting auto-elevation", command);
             let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &command).await;
             if priv_code == 0 || !priv_out.is_empty() {
                 (priv_out, priv_code)
@@ -766,6 +766,6 @@ pub async fn ssh_exec_stream(
 
 #[tauri::command]
 pub async fn ssh_exec_stop(_state: tauri::State<'_, AppState>, _stream_id: String) -> Result<(), String> {
-    log::info!("CloudDesk: Stopped stream {}", _stream_id);
+    log::info!("SSH Desktop: Stopped stream {}", _stream_id);
     Ok(())
 }

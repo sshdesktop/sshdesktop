@@ -135,7 +135,7 @@ pub async fn api_send_request(
         };
 
         log::info!(
-            "CloudDesk API Studio: Starting SSH tunnel to {}:{} via connection '{}'",
+            "SSH Desktop API Studio: Starting SSH tunnel to {}:{} via connection '{}'",
             remote_target, original_port, conn_id
         );
 
@@ -236,7 +236,7 @@ pub async fn api_send_request(
     }
 
     // Inject User-Agent if not already provided
-    req_builder = req_builder.header("User-Agent", "CloudDesk-API-Studio/1.0");
+    req_builder = req_builder.header("User-Agent", "SSHDesktop-API-Studio/1.0");
 
     // Apply Body
     let body_type = req.body_type.to_lowercase();

@@ -17,7 +17,7 @@ export default function App() {
 
   // Sync connections to backend disk storage & auto-restore backend session on boot
   useEffect(() => {
-    // Auto-create & load settings from C:\Users\<User>\.clouddesk\settings.json
+    // Auto-create & load settings from ~/.sshdesktop/settings.json
     settingsGet().then((saved: any) => {
       if (saved && typeof saved === 'object') {
         const toUpdate: any = {};
@@ -73,8 +73,12 @@ export default function App() {
       const connId = e?.detail?.connId;
       useConnectionStore.getState().triggerDisconnectAlert(reason, connId);
     };
+    window.addEventListener('sshdesktop-ssh-disconnected', handleDisconnectEvent);
     window.addEventListener('clouddesk-ssh-disconnected', handleDisconnectEvent);
-    return () => window.removeEventListener('clouddesk-ssh-disconnected', handleDisconnectEvent);
+    return () => {
+      window.removeEventListener('sshdesktop-ssh-disconnected', handleDisconnectEvent);
+      window.removeEventListener('clouddesk-ssh-disconnected', handleDisconnectEvent);
+    };
   }, []);
 
   useEffect(() => {

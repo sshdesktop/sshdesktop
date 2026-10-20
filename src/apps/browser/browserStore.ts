@@ -24,6 +24,13 @@ interface BrowserStoreState {
   setZoomLevel: (zoom: number) => void;
 }
 
+// Fallback migrate legacy browser store
+if (typeof localStorage !== 'undefined' && !localStorage.getItem('sshdesktop_browser_store') && localStorage.getItem('clouddesk_browser_store')) {
+  try {
+    localStorage.setItem('sshdesktop_browser_store', localStorage.getItem('clouddesk_browser_store')!);
+  } catch {}
+}
+
 export const useBrowserStore = create<BrowserStoreState>()(
   persist(
     (set, get) => ({
@@ -32,7 +39,7 @@ export const useBrowserStore = create<BrowserStoreState>()(
       defaultRoutingMode: 'tunnel',
       showBookmarksBar: true,
       showDevTools: false,
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 CloudDesk/2.0',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 SSHDesktop/2.0',
       zoomLevel: 100,
 
       setBookmarks: (bookmarks) => set({ bookmarks }),
@@ -63,7 +70,7 @@ export const useBrowserStore = create<BrowserStoreState>()(
       setZoomLevel: (zoom) => set({ zoomLevel: Math.max(50, Math.min(200, zoom)) }),
     }),
     {
-      name: 'clouddesk_browser_store',
+      name: 'sshdesktop_browser_store',
     }
   )
 );

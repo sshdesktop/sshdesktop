@@ -1,5 +1,5 @@
 [package]
-name = "clouddesk"
+name = "ssh-desktop"
 version = "2.4.0"
 description = "SSH Desktop - Remote Linux Administration Interface"
 authors = ["you"]

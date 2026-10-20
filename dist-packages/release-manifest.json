@@ -1,33 +1,33 @@
 {
-  "name": "CloudDesk",
+  "name": "SSH Desktop",
   "version": "2.4.0",
-  "releaseDate": "2026-10-19T07:54:02.333Z",
+  "releaseDate": "2026-10-20T15:03:16.024Z",
   "defaultPort": 2222,
   "webAuthGate": {
     "enabled": true,
     "defaultUsername": "admin",
-    "defaultPassword": "clouddesk"
+    "defaultPassword": "sshdesktop"
   },
   "packages": {
     "debian": {
-      "file": "clouddesk_2.4.0_amd64.deb",
+      "file": "ssh-desktop_2.4.0_amd64.deb",
       "type": "Debian / Ubuntu DEB Package",
-      "command": "sudo dpkg -i clouddesk_2.4.0_amd64.deb || sudo apt-get install -f -y"
+      "command": "sudo dpkg -i ssh-desktop_2.4.0_amd64.deb || sudo apt-get install -f -y"
     },
     "redhat": {
-      "file": "clouddesk-2.4.0-1.x86_64.rpm",
+      "file": "ssh-desktop-2.4.0-1.x86_64.rpm",
       "type": "Fedora / RHEL / Rocky Linux RPM Package",
-      "command": "sudo rpm -Uvh clouddesk-2.4.0-1.x86_64.rpm || sudo dnf install ./clouddesk-2.4.0-1.x86_64.rpm"
+      "command": "sudo rpm -Uvh ssh-desktop-2.4.0-1.x86_64.rpm || sudo dnf install ./ssh-desktop-2.4.0-1.x86_64.rpm"
     },
     "portable": {
-      "file": "clouddesk-2.4.0-linux-x86_64.tar.gz",
+      "file": "ssh-desktop-2.4.0-linux-x86_64.tar.gz",
       "type": "Portable Standalone Archive",
-      "command": "tar -xzvf clouddesk-2.4.0-linux-x86_64.tar.gz && sudo bash clouddesk/install.sh"
+      "command": "tar -xzvf ssh-desktop-2.4.0-linux-x86_64.tar.gz && sudo bash sshdesktop/install.sh"
     },
     "macos": {
-      "file": "CloudDesk-2.4.0.dmg",
+      "file": "SSHDesktop-2.4.0.dmg",
       "type": "macOS Universal Disk Image",
-      "command": "hdiutil attach CloudDesk-2.4.0.dmg && cp -R /Volumes/CloudDesk/CloudDesk.app /Applications/"
+      "command": "hdiutil attach SSHDesktop-2.4.0.dmg && cp -R /Volumes/SSHDesktop/SSHDesktop.app /Applications/"
     }
   }
 }

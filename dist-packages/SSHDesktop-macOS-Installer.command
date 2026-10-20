@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# CloudDesk macOS Launcher & Installer
-echo "🍏 Launching CloudDesk macOS Edition..."
+# SSH Desktop macOS Launcher & Installer
+echo "🍏 Launching SSH Desktop macOS Edition..."
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT=2222
 export PORT

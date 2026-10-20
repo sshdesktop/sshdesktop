@@ -1,9 +1,12 @@
 import { create } from 'zustand';
 import { ApiTabState, ApiCollection, HistoryItem, ApiEnvironment, SavedRequest, HttpMethod } from './types';
 
-const STORAGE_KEY_COLLECTIONS = 'clouddesk_api_collections_v1';
-const STORAGE_KEY_HISTORY = 'clouddesk_api_history_v1';
-const STORAGE_KEY_ENVS = 'clouddesk_api_environments_v1';
+const STORAGE_KEY_COLLECTIONS = 'sshdesktop_api_collections_v1';
+const LEGACY_STORAGE_KEY_COLLECTIONS = 'clouddesk_api_collections_v1';
+const STORAGE_KEY_HISTORY = 'sshdesktop_api_history_v1';
+const LEGACY_STORAGE_KEY_HISTORY = 'clouddesk_api_history_v1';
+const STORAGE_KEY_ENVS = 'sshdesktop_api_environments_v1';
+const LEGACY_STORAGE_KEY_ENVS = 'clouddesk_api_environments_v1';
 
 const DEFAULT_INITIAL_REQUEST: ApiTabState = {
   id: 'tab-default',
@@ -13,12 +16,12 @@ const DEFAULT_INITIAL_REQUEST: ApiTabState = {
   useSshTunnel: true,
   headers: [
     { key: 'Accept', value: 'application/json', enabled: true },
-    { key: 'User-Agent', value: 'CloudDesk-API-Studio/1.0', enabled: true },
+    { key: 'User-Agent', value: 'SSHDesktop-API-Studio/1.0', enabled: true },
   ],
   queryParams: [],
   auth: { type: 'none' },
   bodyType: 'none',
-  rawBody: '{\n  "message": "Hello from CloudDesk API Studio"\n}',
+  rawBody: '{\n  "message": "Hello from SSH Desktop API Studio"\n}',
   formData: [],
   timeoutSeconds: 30,
   followRedirects: true,
@@ -76,7 +79,7 @@ const DEFAULT_COLLECTIONS: ApiCollection[] = [
         queryParams: [],
         auth: { type: 'none' },
         bodyType: 'json',
-        rawBody: '{\n  "title": "CloudDesk Integration",\n  "status": "active",\n  "port": 5000\n}',
+        rawBody: '{\n  "title": "SSH Desktop Integration",\n  "status": "active",\n  "port": 5000\n}',
         formData: [],
         updatedAt: new Date().toISOString(),
       }
@@ -93,7 +96,7 @@ const DEFAULT_COLLECTIONS: ApiCollection[] = [
         method: 'GET',
         url: 'https://httpbin.org/get',
         useSshTunnel: false,
-        headers: [{ key: 'X-Client', value: 'CloudDesk', enabled: true }],
+        headers: [{ key: 'X-Client', value: 'SSH Desktop', enabled: true }],
         queryParams: [{ key: 'client', value: 'tauri', enabled: true }],
         auth: { type: 'none' },
         bodyType: 'none',
@@ -168,19 +171,19 @@ export const useApiStore = create<ApiStore>((set, get) => {
   // Load saved state
   let initialCollections = DEFAULT_COLLECTIONS;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_COLLECTIONS);
+    const raw = localStorage.getItem(STORAGE_KEY_COLLECTIONS) || localStorage.getItem(LEGACY_STORAGE_KEY_COLLECTIONS);
     if (raw) initialCollections = JSON.parse(raw);
   } catch {}
 
   let initialHistory: HistoryItem[] = [];
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_HISTORY);
+    const raw = localStorage.getItem(STORAGE_KEY_HISTORY) || localStorage.getItem(LEGACY_STORAGE_KEY_HISTORY);
     if (raw) initialHistory = JSON.parse(raw);
   } catch {}
 
   let initialEnvs = DEFAULT_ENVIRONMENTS;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_ENVS);
+    const raw = localStorage.getItem(STORAGE_KEY_ENVS) || localStorage.getItem(LEGACY_STORAGE_KEY_ENVS);
     if (raw) initialEnvs = JSON.parse(raw);
   } catch {}
 

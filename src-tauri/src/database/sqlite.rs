@@ -41,7 +41,7 @@ pub async fn connect_sqlite(
                 )
                 .await;
 
-                let cache_dir = std::env::temp_dir().join("clouddesk_sqlite");
+                let cache_dir = std::env::temp_dir().join("sshdesktop_sqlite");
                 let _ = std::fs::create_dir_all(&cache_dir);
                 let safe_name = format!(
                     "{}_{}",
@@ -87,7 +87,7 @@ pub async fn connect_sqlite(
             } else {
                 if is_unix_path && cfg!(target_os = "windows") {
                     return Err(format!(
-                        "Path '{}' is a remote Linux path, but no active SSH connection was found in CloudDesk. Please connect to your server via SSH first.",
+                        "Path '{}' is a remote Linux path, but no active SSH connection was found in SSH Desktop. Please connect to your server via SSH first.",
                         raw_path
                     ));
                 }
@@ -245,7 +245,7 @@ pub async fn execute_query_sqlite(
     if had_mutation && session.config.use_ssh {
         if let Some(conn_id) = &session.config.ssh_connection_id {
             let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database);
-            let cache_dir = std::env::temp_dir().join("clouddesk_sqlite");
+            let cache_dir = std::env::temp_dir().join("sshdesktop_sqlite");
             let safe_name = format!("{}_{}", session.config.id, raw_path.replace(|c: char| !c.is_alphanumeric(), "_"));
             let local_cache = cache_dir.join(format!("{}.db", safe_name));
             if let Ok(bytes) = std::fs::read(&local_cache) {
@@ -348,7 +348,7 @@ pub async fn execute_operation_sqlite(
     if session.config.use_ssh {
         if let Some(conn_id) = &session.config.ssh_connection_id {
             let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database);
-            let cache_dir = std::env::temp_dir().join("clouddesk_sqlite");
+            let cache_dir = std::env::temp_dir().join("sshdesktop_sqlite");
             let safe_name = format!("{}_{}", session.config.id, raw_path.replace(|c: char| !c.is_alphanumeric(), "_"));
             let local_cache = cache_dir.join(format!("{}.db", safe_name));
             if let Ok(bytes) = std::fs::read(&local_cache) {

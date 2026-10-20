@@ -160,10 +160,11 @@ export default function BrowserApp() {
   const activeServer = connections.find(c => c.id === activeConnectionId);
   const serverHost = activeServer ? `${activeServer.username}@${activeServer.host}` : 'remote-server';
 
-  // Server bookmark path computation (~/.clouddesk/browser_bookmarks.json)
+  // Server bookmark path computation (~/.sshdesktop/browser_bookmarks.json)
   const username = activeServer?.username || 'sharuk';
   const userHome = username === 'root' ? '/root' : `/home/${username}`;
-  const bookmarksFilePath = `${userHome}/.clouddesk/browser_bookmarks.json`;
+  const bookmarksFilePath = `${userHome}/.sshdesktop/browser_bookmarks.json`;
+  const legacyBookmarksFilePath = `${userHome}/.clouddesk/browser_bookmarks.json`;
 
   const { 
     bookmarks, setBookmarks, addBookmark, removeBookmark, 
@@ -203,14 +204,17 @@ export default function BrowserApp() {
     }
   }, [activeTab?.id, activeTab?.displayUrl, activeTab?.url]);
 
-  // Load server bookmarks from /home/sharuk/.clouddesk/browser_bookmarks.json
+  // Load server bookmarks from ~/.sshdesktop/browser_bookmarks.json (fallback ~/.clouddesk)
   useEffect(() => {
     if (!activeConnectionId) return;
 
     let isSubscribed = true;
     const hydrateServerBookmarks = async () => {
       try {
-        const fileContent = await sftpReadTextFile(activeConnectionId, bookmarksFilePath);
+        let fileContent = await sftpReadTextFile(activeConnectionId, bookmarksFilePath).catch(() => '');
+        if (!fileContent) {
+          fileContent = await sftpReadTextFile(activeConnectionId, legacyBookmarksFilePath).catch(() => '');
+        }
         if (fileContent && fileContent.trim() && isSubscribed) {
           try {
             const parsed = JSON.parse(fileContent);
@@ -218,13 +222,13 @@ export default function BrowserApp() {
               setBookmarks(parsed);
             }
           } catch (jsonErr) {
-            console.warn('[CloudDesk Browser] Failed to parse bookmarks JSON:', jsonErr);
+            console.warn('[SSH Desktop Browser] Failed to parse bookmarks JSON:', jsonErr);
           }
         }
       } catch {
-        // File does not exist yet on server; ensure ~/.clouddesk folder exists
+        // File does not exist yet on server; ensure ~/.sshdesktop folder exists
         try {
-          await sftpMkdir(activeConnectionId, `${userHome}/.clouddesk`).catch(() => {});
+          await sftpMkdir(activeConnectionId, `${userHome}/.sshdesktop`).catch(() => {});
         } catch {}
       }
     };
@@ -233,20 +237,20 @@ export default function BrowserApp() {
     return () => {
       isSubscribed = false;
     };
-  }, [activeConnectionId, bookmarksFilePath, userHome, setBookmarks]);
+  }, [activeConnectionId, bookmarksFilePath, legacyBookmarksFilePath, userHome, setBookmarks]);
 
-  // Helper to persist bookmarks to server file ~/.clouddesk/browser_bookmarks.json
+  // Helper to persist bookmarks to server file ~/.sshdesktop/browser_bookmarks.json
   const persistBookmarksToServer = useCallback(async (updatedBookmarks: BrowserBookmark[]) => {
     if (!activeConnectionId) return;
     try {
-      await sftpMkdir(activeConnectionId, `${userHome}/.clouddesk`).catch(() => {});
+      await sftpMkdir(activeConnectionId, `${userHome}/.sshdesktop`).catch(() => {});
       await sftpWriteTextFile(
         activeConnectionId,
         bookmarksFilePath,
         JSON.stringify(updatedBookmarks, null, 2)
       );
     } catch (err) {
-      console.warn('[CloudDesk Browser] Failed to save bookmarks to server:', err);
+      console.warn('[SSH Desktop Browser] Failed to save bookmarks to server:', err);
     }
   }, [activeConnectionId, bookmarksFilePath, userHome]);
 
@@ -416,7 +420,7 @@ export default function BrowserApp() {
     }
   };
 
-  // Bookmark toggling and auto-saving to server ~/.clouddesk/browser_bookmarks.json
+  // Bookmark toggling and auto-saving to server ~/.sshdesktop/browser_bookmarks.json
   const isCurrentBookmarked = bookmarks.some(
     b => b.url === activeTab.displayUrl || b.url === activeTab.url
   );
@@ -611,8 +615,8 @@ export default function BrowserApp() {
             }`}
             title={
               isCurrentBookmarked
-                ? 'Remove Bookmark (synced with /home/sharuk/.clouddesk)'
-                : 'Bookmark to /home/sharuk/.clouddesk'
+                ? `Remove Bookmark (synced with ${userHome}/.sshdesktop)`
+                : `Bookmark to ${userHome}/.sshdesktop`
             }
           >
             <Star className={`w-3.5 h-3.5 ${isCurrentBookmarked ? 'fill-amber-400' : ''}`} />
@@ -643,7 +647,7 @@ export default function BrowserApp() {
         </button>
       </div>
 
-      {/* Bookmarks Bar - Synced to /home/sharuk/.clouddesk/browser_bookmarks.json */}
+      {/* Bookmarks Bar - Synced to ~/.sshdesktop/browser_bookmarks.json */}
       {showBookmarksBar && bookmarks.length > 0 && (
         <div className="flex items-center space-x-1.5 px-3 py-1.5 bg-[#181825]/90 border-b border-white/[0.06] overflow-x-auto no-scrollbar shrink-0 text-xs">
           <div className="flex items-center space-x-1 text-gray-500 mr-1 shrink-0 text-[10px] uppercase font-semibold">

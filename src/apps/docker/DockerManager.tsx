@@ -768,7 +768,7 @@ export default function DockerManager() {
   // Load saved credentials from localStorage
   useEffect(() => {
     try {
-      const saved = localStorage.getItem('clouddesk_docker_credentials');
+      const saved = localStorage.getItem('sshdesktop_docker_credentials') || localStorage.getItem('clouddesk_docker_credentials');
       if (saved) {
         setSavedCredentialsList(JSON.parse(saved));
       }
@@ -797,9 +797,13 @@ export default function DockerManager() {
             username: loginUsername.trim(),
             savedAt: new Date().toLocaleDateString(),
           };
-          const existing = JSON.parse(localStorage.getItem('clouddesk_docker_credentials') || '[]');
+          const existing = JSON.parse(
+            localStorage.getItem('sshdesktop_docker_credentials') ||
+            localStorage.getItem('clouddesk_docker_credentials') ||
+            '[]'
+          );
           const updated = [newCred, ...existing.filter((c: any) => c.id !== newCred.id)];
-          localStorage.setItem('clouddesk_docker_credentials', JSON.stringify(updated));
+          localStorage.setItem('sshdesktop_docker_credentials', JSON.stringify(updated));
           setSavedCredentialsList(updated);
         }
         setShowLoginModal(false);
@@ -4307,7 +4311,7 @@ export default function DockerManager() {
                           <button
                             onClick={() => {
                               const updated = savedCredentialsList.filter(c => c.id !== cred.id);
-                              localStorage.setItem('clouddesk_docker_credentials', JSON.stringify(updated));
+                              localStorage.setItem('sshdesktop_docker_credentials', JSON.stringify(updated));
                               setSavedCredentialsList(updated);
                             }}
                             className="p-1 rounded text-gray-400 hover:text-rose-400 hover:bg-white/5"

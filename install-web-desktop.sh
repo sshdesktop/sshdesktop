@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# CloudDesk - Linux CLI Web Desktop Installer & Service Runner
+# SSH Desktop - Linux CLI Web Desktop Installer & Service Runner
 # Port: 2222 (or custom with --port 222)
 # Features: Web Desktop, Username & Password Authentication Gate
 # ==============================================================================
@@ -8,7 +8,7 @@
 set -e
 
 PORT=2222
-INSTALL_DIR="/opt/clouddesk"
+INSTALL_DIR="/opt/sshdesktop"
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
@@ -64,7 +64,7 @@ fi
 NODE_VER=$(node -v)
 echo -e "${GREEN}      ✅ Node.js detected: ${NODE_VER}${NC}"
 
-echo -e "${BLUE}[2/5] 📂 Preparing CloudDesk Application in ${INSTALL_DIR}...${NC}"
+echo -e "${BLUE}[2/5] 📂 Preparing SSH Desktop Application in ${INSTALL_DIR}...${NC}"
 
 mkdir -p "$INSTALL_DIR"
 CURRENT_DIR=$(pwd)
@@ -87,7 +87,7 @@ fi
 echo -e "${BLUE}[3/5] 🛡️ Opening Port ${PORT} in Firewall...${NC}"
 
 if command -v ufw >/dev/null 2>&1; then
-  ufw allow ${PORT}/tcp comment 'CloudDesk Web Desktop' >/dev/null 2>&1 || true
+  ufw allow ${PORT}/tcp comment 'SSH Desktop Web Desktop' >/dev/null 2>&1 || true
 fi
 
 if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
@@ -99,9 +99,9 @@ echo -e "${GREEN}      ✅ Firewall configured for Port ${PORT}/tcp.${NC}"
 
 echo -e "${BLUE}[4/5] ⚙️ Creating Systemd 24/7 Background Service...${NC}"
 
-cat << EOF > /etc/systemd/system/clouddesk-web.service
+cat << EOF > /etc/systemd/system/sshdesktop-web.service
 [Unit]
-Description=CloudDesk Web Desktop Service
+Description=SSH Desktop Web Desktop Service
 After=network.target
 
 [Service]
@@ -119,8 +119,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable clouddesk-web.service
-systemctl restart clouddesk-web.service
+systemctl enable sshdesktop-web.service
+systemctl restart sshdesktop-web.service
 
 sleep 1
 
@@ -133,7 +133,7 @@ fi
 
 echo ""
 echo -e "${GREEN}==============================================================================${NC}"
-echo -e "${BOLD}${GREEN}🎉 CloudDesk Web Desktop is Live & Accessible!${NC}"
+echo -e "${BOLD}${GREEN}🎉 SSH Desktop Web Desktop is Live & Accessible!${NC}"
 echo -e "${GREEN}==============================================================================${NC}"
 echo ""
 echo -e "  ${BOLD}🌐 Open Website URL in your Browser:${NC}"
@@ -141,11 +141,11 @@ echo -e "     ${CYAN}http://${PRIMARY_IP}:${PORT}${NC}"
 echo ""
 echo -e "  ${BOLD}🔒 Authentication Gate Credentials:${NC}"
 echo -e "     Username:  ${YELLOW}admin${NC}"
-echo -e "     Password:  ${YELLOW}clouddesk${NC}"
+echo -e "     Password:  ${YELLOW}sshdesktop${NC}"
 echo ""
 echo -e "  ${BOLD}Service Management Commands:${NC}"
-echo -e "     Check Status: ${BOLD}systemctl status clouddesk-web${NC}"
-echo -e "     Restart:      ${BOLD}systemctl restart clouddesk-web${NC}"
-echo -e "     View Logs:    ${BOLD}journalctl -u clouddesk-web -f${NC}"
+echo -e "     Check Status: ${BOLD}systemctl status sshdesktop-web${NC}"
+echo -e "     Restart:      ${BOLD}systemctl restart sshdesktop-web${NC}"
+echo -e "     View Logs:    ${BOLD}journalctl -u sshdesktop-web -f${NC}"
 echo ""
 echo -e "${GREEN}==============================================================================${NC}"

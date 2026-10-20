@@ -144,7 +144,7 @@ pub async fn cron_add(
         return Err("Failed to add cron entry.".into());
     }
 
-    log::info!("CloudDesk: Added cron: {} {}", schedule, command);
+    log::info!("SSH Desktop: Added cron: {} {}", schedule, command);
     Ok(())
 }
 
@@ -191,6 +191,6 @@ pub async fn cron_remove(
         return Err(format!("Failed to remove cron entry #{}", line_number));
     }
 
-    log::info!("CloudDesk: Removed cron entry at line {}", actual_line_num);
+    log::info!("SSH Desktop: Removed cron entry at line {}", actual_line_num);
     Ok(())
 }

@@ -65,7 +65,7 @@ export const useConnectionStore = create<ConnectionState>()(
           group: fullConn.group,
           tags: fullConn.tags || [],
         }).catch((err) => {
-          console.error('[CloudDesk Store] Failed to save connection:', err);
+          console.error('[SSH Desktop Store] Failed to save connection:', err);
         });
       },
       updateConnection: (id, updates) => {
@@ -93,7 +93,7 @@ export const useConnectionStore = create<ConnectionState>()(
           group: updated.group,
           tags: updated.tags || [],
         }).catch((err) => {
-          console.error('[CloudDesk Store] Failed to update connection:', err);
+          console.error('[SSH Desktop Store] Failed to update connection:', err);
         });
       },
       removeConnection: (id) => {
@@ -633,7 +633,7 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: 'settings-storage',
       onRehydrateStorage: () => (state) => {
-        // Hydrate from .clouddesk/settings.json if available
+        // Hydrate from .sshdesktop/settings.json if available
         settingsGet().then((saved) => {
           if (saved && state) {
             state.updateSettings({

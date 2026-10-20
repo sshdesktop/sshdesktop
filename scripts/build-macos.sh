@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# CloudDesk 2.0 - macOS Package Generator (.app & .dmg)
+# SSH Desktop 2.0 - macOS Package Generator (.app & .dmg)
 # ==============================================================================
 
 set -e
 
-APP_NAME="CloudDesk"
+APP_NAME="SSH Desktop"
 VERSION="2.4.0"
 OUTPUT_DIR="$(pwd)/dist-packages"
 BUILD_ROOT="$(pwd)/target/macos-packages"
@@ -36,7 +36,7 @@ cat << EOF > "${APP_BUNDLE}/Contents/Info.plist"
     <key>CFBundleIconFile</key>
     <string>icon.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>com.clouddesk.desktop</string>
+    <string>com.sshdesktop.desktop</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

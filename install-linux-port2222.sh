@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# CloudDesk - Linux Server Automated CLI Installer & Port 2222 Configurator
+# SSH Desktop - Linux Server Automated CLI Installer & Port 2222 Configurator
 # ==============================================================================
 # Supported OS: Ubuntu 24.04/22.04/20.04, Debian 12/11, Rocky/AlmaLinux 8/9,
 #               RHEL/CentOS 7/8/9, Fedora, Arch Linux, Alpine Linux, openSUSE.
@@ -160,7 +160,7 @@ echo -e "${BLUE}[4/6] 🧱 Configuring Firewall for Port ${TARGET_PORT}/tcp...${
 
 # Configure UFW if installed/active
 if command -v ufw >/dev/null 2>&1; then
-  ufw allow ${TARGET_PORT}/tcp comment 'CloudDesk SSH' >/dev/null 2>&1 || true
+  ufw allow ${TARGET_PORT}/tcp comment 'SSH Desktop SSH' >/dev/null 2>&1 || true
   echo -e "      UFW firewall: Allowed TCP port ${TARGET_PORT}."
 fi
 
@@ -231,15 +231,15 @@ fi
 
 echo ""
 echo -e "${GREEN}==============================================================================${NC}"
-echo -e "${BOLD}${GREEN}🎉 CloudDesk Linux Server Setup Completed Successfully!${NC}"
+echo -e "${BOLD}${GREEN}🎉 SSH Desktop Linux Server Setup Completed Successfully!${NC}"
 echo -e "${GREEN}==============================================================================${NC}"
 echo ""
 echo -e "  ${BOLD}Active SSH Port:${NC}   ${CYAN}${TARGET_PORT}${NC}"
 echo -e "  ${BOLD}Primary IP:${NC}        ${YELLOW}${PRIMARY_IP}${NC}"
 echo -e "  ${BOLD}Status:${NC}            ${GREEN}Active & Listening on 0.0.0.0:${TARGET_PORT}${NC}"
 echo ""
-echo -e "${BOLD}Connect via CloudDesk Client:${NC}"
-echo -e "  1. Open ${BOLD}CloudDesk${NC} on your local computer."
+echo -e "${BOLD}Connect via SSH Desktop Client:${NC}"
+echo -e "  1. Open ${BOLD}SSH Desktop${NC} on your local computer."
 echo -e "  2. Click ${BOLD}New Server${NC} or ${BOLD}Quick Connect${NC}."
 echo -e "  3. Enter Host: ${CYAN}${PRIMARY_IP}${NC}"
 echo -e "  4. Enter Port: ${CYAN}${TARGET_PORT}${NC}"

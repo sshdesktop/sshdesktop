@@ -81,7 +81,7 @@ pub async fn terminal_create(
     // ── 0. Fast TCP Connectivity Probe (3.5s timeout) ─────────────────────────
     // Avoid misleading "Connected" messages when port 22 is unreachable or offline
     let target_addr = format!("{}:{}", host, port);
-    let banner_init = format!("\x1b[1;36m[CloudDesk Terminal]\x1b[0m Connecting to \x1b[1m{}@{}:{}\x1b[0m...\r\n", user, host, port);
+    let banner_init = format!("\x1b[1;36m[SSH Desktop Terminal]\x1b[0m Connecting to \x1b[1m{}@{}:{}\x1b[0m...\r\n", user, host, port);
     let _ = app.emit("terminal-output", TerminalOutput {
         terminal_id: term_id.clone(),
         data: banner_init.as_bytes().to_vec(),
@@ -93,7 +93,7 @@ pub async fn terminal_create(
         tokio::net::TcpStream::connect(&target_addr),
     ).await {
         Ok(Ok(_sock)) => {
-            log::info!("CloudDesk: TCP connect succeeded to {}", target_addr);
+            log::info!("SSH Desktop: TCP connect succeeded to {}", target_addr);
         }
         Ok(Err(e)) => {
             let diag = format!(
@@ -103,7 +103,7 @@ pub async fn terminal_create(
                     Add rule for \x1b[32mSSH (TCP Port 22)\x1b[0m with source \x1b[32m0.0.0.0/0\x1b[0m (or your current IP).\r\n\
                  \x1b[36m2. Instance State:\x1b[0m Check AWS Console - is the EC2 instance in 'Running' state?\r\n\
                  \x1b[36m3. Public IP Changed:\x1b[0m If the instance was stopped and restarted, AWS assigns a new Public IP.\r\n\
-                    Update the IP in CloudDesk (Edit Server Details).\r\n\r\n\
+                    Update the IP in SSH Desktop (Edit Server Details).\r\n\r\n\
                  \x1b[90m[Process exited]\x1b[0m\r\n",
                 host, port, e, host
             );
@@ -122,7 +122,7 @@ pub async fn terminal_create(
                     Add rule for \x1b[32mSSH (TCP Port 22)\x1b[0m with source \x1b[32m0.0.0.0/0\x1b[0m (or your current IP).\r\n\
                  \x1b[36m2. Instance State:\x1b[0m Check AWS Console - is the EC2 instance in 'Running' state?\r\n\
                  \x1b[36m3. Public IP Changed:\x1b[0m If the instance was stopped and restarted, AWS assigns a new Public IP.\r\n\
-                    Update the IP in CloudDesk (Edit Server Details).\r\n\r\n\
+                    Update the IP in SSH Desktop (Edit Server Details).\r\n\r\n\
                  \x1b[90m[Process timed out]\x1b[0m\r\n",
                 host, port, host
             );
@@ -170,7 +170,7 @@ pub async fn terminal_create(
                         Some(arc_h)
                     }
                     Err(e) => {
-                        log::warn!("CloudDesk: russh on-demand connect failed for {}: {}", host, e);
+                        log::warn!("SSH Desktop: russh on-demand connect failed for {}: {}", host, e);
                         None
                     }
                 }
@@ -180,7 +180,7 @@ pub async fn terminal_create(
         if let Some(h) = handle {
             match crate::ssh::session::open_pty_shell(&h, "xterm-256color", cols as u32, rows as u32).await {
                 Ok((mut reader, mut writer)) => {
-                    log::info!("CloudDesk: Native russh interactive PTY shell opened for {}@{}:{}", user, host, port);
+                    log::info!("SSH Desktop: Native russh interactive PTY shell opened for {}@{}:{}", user, host, port);
                     let (tx, mut rx) = unbounded_channel::<Vec<u8>>();
 
                     // Stdin / Writer Pump
@@ -232,7 +232,7 @@ pub async fn terminal_create(
                     return Ok(term_id);
                 }
                 Err(e) => {
-                    log::warn!("CloudDesk: Native russh PTY request failed for {}: {}, falling back...", host, e);
+                    log::warn!("SSH Desktop: Native russh PTY request failed for {}: {}, falling back...", host, e);
                 }
             }
         }
@@ -294,7 +294,7 @@ pub async fn terminal_create(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    log::info!("CloudDesk: Spawning interactive terminal PTY for {}@{}:{}", user, host, port);
+    log::info!("SSH Desktop: Spawning interactive terminal PTY for {}@{}:{}", user, host, port);
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn SSH process: {}", e))?;
     let child_pid = child.id();
@@ -429,7 +429,7 @@ pub async fn terminal_close(
             }
         }
     }
-    log::info!("CloudDesk: Terminal PTY session closed: {}", terminal_id);
+    log::info!("SSH Desktop: Terminal PTY session closed: {}", terminal_id);
     Ok(())
 }
 
@@ -475,7 +475,7 @@ pub async fn ssh_launch_putty(
     if let Some(ref dir) = remote_dir {
         if !dir.is_empty() && dir != "/" {
             let temp_dir = std::env::temp_dir();
-            let script_file = temp_dir.join(format!("clouddesk_dir_{}.sh", uuid::Uuid::new_v4()));
+            let script_file = temp_dir.join(format!("sshdesktop_dir_{}.sh", uuid::Uuid::new_v4()));
             let script_body = format!("cd '{}' 2>/dev/null || cd ~; exec $SHELL -l\n", dir.replace('\'', r"'\''"));
             if std::fs::write(&script_file, script_body).is_ok() {
                 cmd.arg("-m").arg(&script_file);

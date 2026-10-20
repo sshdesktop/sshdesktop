@@ -343,7 +343,7 @@ export default function EnvManager() {
         for (const l of lines) {
           const trimmed = l.trim();
           // Remove legacy env.sh integration line if present
-          if (trimmed.includes('.clouddesk/env.sh') || trimmed.includes('# CloudDesk Environment Integration')) {
+          if (trimmed.includes('.clouddesk/env.sh') || trimmed.includes('.sshdesktop/env.sh') || trimmed.includes('# CloudDesk Environment Integration') || trimmed.includes('# SSH Desktop Environment Integration')) {
             continue;
           }
           if (trimmed.startsWith(`export ${targetKey}=`)) {
@@ -364,7 +364,7 @@ export default function EnvManager() {
         await sftpWriteTextFile(activeConnId, bashrcPath, newLines.join('\n'));
 
         // Clean up legacy env.sh and any old backup files from remote server
-        await sshExec(activeConnId, `rm -f "${userHome}/.clouddesk/env.sh"* "${userHome}/.bashrc.clouddesk.bak"*`).catch(() => {});
+        await sshExec(activeConnId, `rm -f "${userHome}/.clouddesk/env.sh"* "${userHome}/.sshdesktop/env.sh"* "${userHome}/.bashrc.clouddesk.bak"* "${userHome}/.bashrc.sshdesktop.bak"*`).catch(() => {});
 
       } else {
         // System Scope: Update /etc/environment (NO .bak files)
@@ -397,20 +397,20 @@ export default function EnvManager() {
         }
 
         // Clean up any old system backup files
-        await sshExec(activeConnId, `rm -f "${sysPath}.clouddesk.bak"*`).catch(() => {});
+        await sshExec(activeConnId, `rm -f "${sysPath}.clouddesk.bak"* "${sysPath}.sshdesktop.bak"*`).catch(() => {});
       }
 
       // If key was renamed, unset the old key
       if (item.originalKey && item.originalKey !== cleanKey) {
-        window.dispatchEvent(new CustomEvent('clouddesk:env-sync', {
-          detail: { key: item.originalKey, value: '', action: 'delete' }
-        }));
+        const delDetail = { key: item.originalKey, value: '', action: 'delete' };
+        window.dispatchEvent(new CustomEvent('sshdesktop:env-sync', { detail: delDetail }));
+        window.dispatchEvent(new CustomEvent('clouddesk:env-sync', { detail: delDetail }));
       }
 
       // Immediate Reflection in ALL active terminals
-      window.dispatchEvent(new CustomEvent('clouddesk:env-sync', {
-        detail: { key: cleanKey, value: finalValue, action: 'set' }
-      }));
+      const setDetail = { key: cleanKey, value: finalValue, action: 'set' };
+      window.dispatchEvent(new CustomEvent('sshdesktop:env-sync', { detail: setDetail }));
+      window.dispatchEvent(new CustomEvent('clouddesk:env-sync', { detail: setDetail }));
 
       showToast(`Saved $${cleanKey} & synced to all active terminals`);
       await sendDesktopNotification('Environment Variable Updated', `Saved $${cleanKey} and reflected immediately in all terminal shells.`);
@@ -445,14 +445,14 @@ export default function EnvManager() {
             .filter(l => {
               const trimmed = l.trim();
               if (trimmed.startsWith(`export ${item.key}=`)) return false;
-              if (trimmed.includes('.clouddesk/env.sh')) return false;
+              if (trimmed.includes('.clouddesk/env.sh') || trimmed.includes('.sshdesktop/env.sh')) return false;
               return true;
             })
             .join('\n');
           await sftpWriteTextFile(activeConnId, bashrcPath, filtered);
         }
         // Clean up any lingering env.sh files
-        await sshExec(activeConnId, `rm -f "${userHome}/.clouddesk/env.sh"*`).catch(() => {});
+        await sshExec(activeConnId, `rm -f "${userHome}/.clouddesk/env.sh"* "${userHome}/.sshdesktop/env.sh"*`).catch(() => {});
       } else if (item.scope === 'system') {
         const sysPath = '/etc/environment';
         const content = await sftpReadTextFile(activeConnId, sysPath).catch(() => '');
@@ -466,9 +466,9 @@ export default function EnvManager() {
       }
 
       // Immediately Unset in ALL active terminals
-      window.dispatchEvent(new CustomEvent('clouddesk:env-sync', {
-        detail: { key: item.key, value: '', action: 'delete' }
-      }));
+      const delDetail = { key: item.key, value: '', action: 'delete' };
+      window.dispatchEvent(new CustomEvent('sshdesktop:env-sync', { detail: delDetail }));
+      window.dispatchEvent(new CustomEvent('clouddesk:env-sync', { detail: delDetail }));
 
       showToast(`Deleted $${item.key} and unset across all active terminals`);
       await sendDesktopNotification('Environment Variable Removed', `Unset $${item.key} in all active terminal sessions.`);
@@ -485,9 +485,9 @@ export default function EnvManager() {
   const handleSyncAllToTerminals = () => {
     let count = 0;
     variables.forEach(v => {
-      window.dispatchEvent(new CustomEvent('clouddesk:env-sync', {
-        detail: { key: v.key, value: v.value, action: 'set' }
-      }));
+      const syncDetail = { key: v.key, value: v.value, action: 'set' };
+      window.dispatchEvent(new CustomEvent('sshdesktop:env-sync', { detail: syncDetail }));
+      window.dispatchEvent(new CustomEvent('clouddesk:env-sync', { detail: syncDetail }));
       count++;
     });
     showToast(`Reflected ${count} environment variables in all active terminal shells`);

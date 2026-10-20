@@ -6,9 +6,10 @@ interface WebAuthGateProps {
   onAuthenticated: () => void;
 }
 
-const AUTH_STORAGE_KEY = 'clouddesk_web_auth_session';
+const AUTH_STORAGE_KEY = 'sshdesktop_web_auth_session';
+const LEGACY_AUTH_STORAGE_KEY = 'clouddesk_web_auth_session';
 const DEFAULT_USER = 'admin';
-const DEFAULT_PASS = 'clouddesk';
+const DEFAULT_PASS = 'sshdesktop';
 
 export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
   const [username, setUsername] = useState('');
@@ -21,8 +22,8 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
   // Check if saved credentials custom exists
   const getStoredCredentials = () => {
     try {
-      const savedUser = localStorage.getItem('clouddesk_custom_uname') || DEFAULT_USER;
-      const savedPass = localStorage.getItem('clouddesk_custom_pwd') || DEFAULT_PASS;
+      const savedUser = localStorage.getItem('sshdesktop_custom_uname') || localStorage.getItem('clouddesk_custom_uname') || DEFAULT_USER;
+      const savedPass = localStorage.getItem('sshdesktop_custom_pwd') || localStorage.getItem('clouddesk_custom_pwd') || DEFAULT_PASS;
       return { user: savedUser, pass: savedPass };
     } catch {
       return { user: DEFAULT_USER, pass: DEFAULT_PASS };
@@ -39,31 +40,28 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
       const inputUser = username.trim();
       const inputPass = password;
 
-      // Allow either custom credentials or standard admin / clouddesk or root
+      // Allow either custom credentials or standard admin / sshdesktop (or legacy clouddesk) or root
       const isValid = 
         (inputUser.toLowerCase() === user.toLowerCase() && inputPass === pass) ||
-        (inputUser.toLowerCase() === 'admin' && (inputPass === 'admin' || inputPass === 'clouddesk' || inputPass === '123456')) ||
-        (inputUser.toLowerCase() === 'root' && (inputPass === 'root' || inputPass === 'clouddesk'));
+        (inputUser.toLowerCase() === 'admin' && (inputPass === 'admin' || inputPass === 'sshdesktop' || inputPass === 'clouddesk' || inputPass === '123456')) ||
+        (inputUser.toLowerCase() === 'root' && (inputPass === 'root' || inputPass === 'sshdesktop' || inputPass === 'clouddesk'));
 
       if (isValid) {
+        const payload = JSON.stringify({
+          username: inputUser,
+          token: 'ssh_token_' + Date.now(),
+          loginAt: Date.now()
+        });
         if (rememberMe) {
-          localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
-            username: inputUser,
-            token: 'cd_token_' + Date.now(),
-            loginAt: Date.now()
-          }));
+          localStorage.setItem(AUTH_STORAGE_KEY, payload);
         } else {
-          sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
-            username: inputUser,
-            token: 'cd_token_' + Date.now(),
-            loginAt: Date.now()
-          }));
+          sessionStorage.setItem(AUTH_STORAGE_KEY, payload);
         }
         setIsLoading(false);
         onAuthenticated();
       } else {
         setIsLoading(false);
-        setError('Invalid username or password. Default username: admin, password: clouddesk');
+        setError('Invalid username or password. Default username: admin, password: sshdesktop');
       }
     }, 400);
   };
@@ -125,7 +123,7 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-gray-300 flex items-center justify-between">
               <span>Password</span>
-              <span className="text-[10px] text-gray-500 font-mono">default: clouddesk</span>
+              <span className="text-[10px] text-gray-500 font-mono">default: sshdesktop</span>
             </label>
             <div className="relative">
               <KeyRound className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -163,7 +161,7 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
               type="button"
               onClick={() => {
                 setUsername('admin');
-                setPassword('clouddesk');
+                setPassword('sshdesktop');
               }}
               className="text-[11px] text-blue-400 hover:underline"
             >
@@ -199,8 +197,8 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
 
 export function isWebAuthenticated(): boolean {
   try {
-    const s1 = sessionStorage.getItem(AUTH_STORAGE_KEY);
-    const s2 = localStorage.getItem(AUTH_STORAGE_KEY);
+    const s1 = sessionStorage.getItem(AUTH_STORAGE_KEY) || sessionStorage.getItem(LEGACY_AUTH_STORAGE_KEY);
+    const s2 = localStorage.getItem(AUTH_STORAGE_KEY) || localStorage.getItem(LEGACY_AUTH_STORAGE_KEY);
     return Boolean(s1 || s2);
   } catch {
     return false;
@@ -211,6 +209,8 @@ export function logoutWebSession(): void {
   try {
     sessionStorage.removeItem(AUTH_STORAGE_KEY);
     localStorage.removeItem(AUTH_STORAGE_KEY);
+    sessionStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
     window.location.reload();
   } catch {
     // ignore

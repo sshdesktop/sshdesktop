@@ -27,7 +27,7 @@ export default function SshKeyVault({ isLight = false }: { isLight?: boolean }) 
   // Key Generation State
   const [genName, setGenName] = useState('');
   const [genAlgorithm, setGenAlgorithm] = useState<SshKeyAlgorithm>('ed25519');
-  const [genComment, setGenComment] = useState('user@clouddesk');
+  const [genComment, setGenComment] = useState('user@sshdesktop');
   const [genPassphrase, setGenPassphrase] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
 
@@ -119,7 +119,7 @@ export default function SshKeyVault({ isLight = false }: { isLight?: boolean }) 
     try {
       const { publicKey, privateKey, fingerprint } = await generateSshKeyPair(
         genAlgorithm,
-        genComment.trim() || 'clouddesk-key',
+        genComment.trim() || 'sshdesktop-key',
         genPassphrase.trim() || undefined
       );
 
@@ -130,7 +130,7 @@ export default function SshKeyVault({ isLight = false }: { isLight?: boolean }) 
         fingerprint,
         publicKey,
         privateKey,
-        comment: genComment.trim() || 'clouddesk-key',
+        comment: genComment.trim() || 'sshdesktop-key',
         passphraseProtected: !!genPassphrase.trim(),
         createdAt: Date.now(),
       };
@@ -460,7 +460,7 @@ export default function SshKeyVault({ isLight = false }: { isLight?: boolean }) 
                 <label className="block text-xs font-medium text-gray-300 mb-1">Key Comment</label>
                 <input
                   type="text"
-                  placeholder="user@clouddesk"
+                  placeholder="user@sshdesktop"
                   value={genComment}
                   onChange={e => setGenComment(e.target.value)}
                   className="w-full px-3 py-2 rounded-xl bg-white/5 border border-white/10 text-white text-xs focus:outline-none focus:ring-2 focus:ring-amber-500"

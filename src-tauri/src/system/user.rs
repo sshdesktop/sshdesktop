@@ -146,12 +146,12 @@ pub async fn user_add(
             let pwd_cmd = format!("echo '{}:{}' | chpasswd 2>&1", username, escaped_pwd);
             let (pwd_out, pwd_code) = run_cmd_priv(&state, &conn_id, &pwd_cmd).await;
             if pwd_code != 0 && !pwd_out.is_empty() {
-                log::warn!("CloudDesk: chpasswd warning for {}: {}", username, pwd_out.trim());
+                log::warn!("SSH Desktop: chpasswd warning for {}: {}", username, pwd_out.trim());
             }
         }
     }
 
-    log::info!("CloudDesk: Added user {}", username);
+    log::info!("SSH Desktop: Added user {}", username);
     Ok(())
 }
 
@@ -179,7 +179,7 @@ pub async fn user_delete(
     if code != 0 && !stdout.is_empty() {
         return Err(format!("userdel failed: {}", stdout.trim()));
     }
-    log::info!("CloudDesk: Deleted user {}", username);
+    log::info!("SSH Desktop: Deleted user {}", username);
     Ok(())
 }
 
@@ -219,7 +219,7 @@ pub async fn user_modify(
         }
     }
 
-    log::info!("CloudDesk: Modified user {}", username);
+    log::info!("SSH Desktop: Modified user {}", username);
     Ok(())
 }
 
@@ -251,7 +251,7 @@ pub async fn user_lock(
         return Err(format!("Lock user failed: {}", out.trim()));
     }
 
-    log::info!("CloudDesk: Locked user {}", username);
+    log::info!("SSH Desktop: Locked user {}", username);
     Ok(())
 }
 
@@ -280,7 +280,7 @@ pub async fn user_unlock(
         return Err(format!("Unlock user failed: {}", out.trim()));
     }
 
-    log::info!("CloudDesk: Unlocked user {}", username);
+    log::info!("SSH Desktop: Unlocked user {}", username);
     Ok(())
 }
 

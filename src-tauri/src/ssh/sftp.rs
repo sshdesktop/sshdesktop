@@ -182,7 +182,7 @@ pub async fn sftp_write_bytes(
     let cmd = format!("base64 -d > '{}'", escaped_path);
     let (stdout, code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &cmd, b64.as_bytes()).await;
     if code == 0 {
-        log::info!("CloudDesk: Saved remote file {} ({} bytes)", path, bytes.len());
+        log::info!("SSH Desktop: Saved remote file {} ({} bytes)", path, bytes.len());
         return Ok(());
     }
 
@@ -196,7 +196,7 @@ pub async fn sftp_write_bytes(
         let mv_cmd = format!("mv -f '{}' '{}'", tmp_file, escaped_path);
         let (s_out, s_code) = crate::ssh::exec::run_cmd_priv(state, conn_id, &mv_cmd).await;
         if s_code == 0 {
-            log::info!("CloudDesk: Saved remote file with elevated privileges via sudo mv: {}", path);
+            log::info!("SSH Desktop: Saved remote file with elevated privileges via sudo mv: {}", path);
             return Ok(());
         }
         // Cleanup temp file if mv failed
@@ -401,7 +401,7 @@ pub async fn sftp_download(
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         if let Ok(()) = tokio::fs::write(&local_path, &bytes).await {
-            log::info!("CloudDesk: Downloaded {} to {}", remote_path, local_path);
+            log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_path);
             return Ok(());
         }
     }
@@ -440,7 +440,7 @@ pub async fn sftp_download(
         .map_err(|e| format!("scp error: {}", e))?;
 
     if output.status.success() {
-        log::info!("CloudDesk: Downloaded {} to {}", remote_path, local_path);
+        log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_path);
         Ok(())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
@@ -493,7 +493,7 @@ pub async fn sftp_upload(
         .map_err(|e| format!("scp error: {}", e))?;
 
     if output.status.success() {
-        log::info!("CloudDesk: Uploaded {} to {}", local_path, remote_path);
+        log::info!("SSH Desktop: Uploaded {} to {}", local_path, remote_path);
         Ok(())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
@@ -576,11 +576,11 @@ pub async fn sftp_download_to_downloads(
 
         if let Ok(Ok(output)) = res {
             if output.status.success() {
-                log::info!("CloudDesk: Downloaded {} to {}", remote_path, local_dest_str);
+                log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_dest_str);
                 return Ok(local_dest_str);
             } else {
                 let err = String::from_utf8_lossy(&output.stderr);
-                log::warn!("CloudDesk: pscp download failed: {}, falling back to scp", err);
+                log::warn!("SSH Desktop: pscp download failed: {}, falling back to scp", err);
             }
         }
     }
@@ -610,7 +610,7 @@ pub async fn sftp_download_to_downloads(
         .map_err(|e| format!("Failed to run scp: {}", e))?;
 
     if output.status.success() {
-        log::info!("CloudDesk: Downloaded {} to {}", remote_path, local_dest_str);
+        log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_dest_str);
         Ok(local_dest_str)
     } else {
         let err = String::from_utf8_lossy(&output.stderr);

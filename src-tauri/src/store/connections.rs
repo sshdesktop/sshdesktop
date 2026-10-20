@@ -41,7 +41,7 @@ fn get_storage_path() -> PathBuf {
     let mut dir = directories::BaseDirs::new()
         .map(|b| b.home_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    dir.push(".clouddesk");
+    dir.push(".sshdesktop");
     let _ = fs::create_dir_all(&dir);
     dir.push("connections.json");
     dir
@@ -54,10 +54,17 @@ pub fn read_connections_from_disk() -> Vec<SavedConnection> {
             return list;
         }
     }
-    // Fallback migration from legacy AppData path
+    // Fallback migration from legacy ~/.clouddesk/connections.json or AppData
     if let Some(base) = directories::BaseDirs::new() {
-        let legacy = base.data_local_dir().join("clouddesk").join("connections.json");
-        if let Ok(content) = fs::read_to_string(legacy) {
+        let legacy_home = base.home_dir().join(".clouddesk").join("connections.json");
+        if let Ok(content) = fs::read_to_string(legacy_home) {
+            if let Ok(list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
+                let _ = fs::write(&path, &content);
+                return list;
+            }
+        }
+        let legacy_appdata = base.data_local_dir().join("clouddesk").join("connections.json");
+        if let Ok(content) = fs::read_to_string(legacy_appdata) {
             if let Ok(list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
                 let _ = fs::write(&path, &content);
                 return list;

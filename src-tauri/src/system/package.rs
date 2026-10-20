@@ -188,7 +188,7 @@ pub async fn package_install(
         return Err(format!("Install failed: {}", stdout.trim()));
     }
 
-    log::info!("CloudDesk: Installed package {}", name);
+    log::info!("SSH Desktop: Installed package {}", name);
     Ok(if !stdout.is_empty() { stdout } else { format!("Package '{}' installed successfully.", name) })
 }
 
@@ -219,7 +219,7 @@ pub async fn package_remove(
         return Err(format!("Remove failed: {}", stdout.trim()));
     }
 
-    log::info!("CloudDesk: Removed package {}", name);
+    log::info!("SSH Desktop: Removed package {}", name);
     Ok(if !stdout.is_empty() { stdout } else { format!("Package '{}' removed successfully.", name) })
 }
 
