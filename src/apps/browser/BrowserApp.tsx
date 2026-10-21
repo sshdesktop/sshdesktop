@@ -4,7 +4,7 @@ import {
   ShieldCheck, Star, Plus, X, Search, Activity, Terminal, 
   Layers, Code2, Server, ExternalLink, ZoomIn, ZoomOut,
   AlertCircle, Check, Sparkles, ChevronDown, Radio, Bookmark as BookmarkIcon,
-  Laptop, Compass, Copy, ArrowUpRight
+  Laptop, Compass, Copy, ArrowUpRight, Play
 } from 'lucide-react';
 import { BrowserTab, BrowserRoutingMode, BrowserBookmark, DevToolsPanel } from './types';
 import { useBrowserStore } from './browserStore';
@@ -34,6 +34,161 @@ interface ResolvedTarget {
   remotePort: number;
   subPath: string;
   isPublicHttps?: boolean;
+}
+
+/**
+ * Extracts and formats YouTube URLs to official embed players
+ * Handles youtube.com, youtu.be, /watch?v=, /shorts/, /results?search_query=, and /playlist?list=
+ */
+function extractYouTubeEmbedInfo(input: string): { isYouTube: boolean; embedSrc: string; displayUrl: string; title: string } {
+  const trimmed = input.trim();
+  const lower = trimmed.toLowerCase();
+
+  const isYtDomain = lower.includes('youtube.com') || lower.includes('youtu.be');
+  if (!isYtDomain) {
+    return { isYouTube: false, embedSrc: '', displayUrl: '', title: '' };
+  }
+
+  const urlToParse = /^[a-zA-Z]+:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const parsed = new URL(urlToParse);
+    const host = parsed.hostname.toLowerCase();
+    const subPath = (parsed.pathname || '/') + (parsed.search || '') + (parsed.hash || '');
+    const cleanDisplay = `${parsed.protocol}//${parsed.host}${subPath}`;
+
+    // 1. Shorts: /shorts/<id>
+    if (parsed.pathname.startsWith('/shorts/')) {
+      const id = parsed.pathname.split('/shorts/')[1]?.split('/')[0]?.split('?')[0];
+      if (id) {
+        return {
+          isYouTube: true,
+          embedSrc: `https://www.youtube.com/embed/${id}?autoplay=1&enablejsapi=1`,
+          displayUrl: cleanDisplay,
+          title: 'YouTube Short',
+        };
+      }
+    }
+
+    // 2. Watch: /watch?v=<id>
+    if (parsed.searchParams.has('v')) {
+      const id = parsed.searchParams.get('v');
+      if (id) {
+        return {
+          isYouTube: true,
+          embedSrc: `https://www.youtube.com/embed/${id}?autoplay=1&enablejsapi=1`,
+          displayUrl: cleanDisplay,
+          title: 'YouTube Video',
+        };
+      }
+    }
+
+    // 3. Short URL: youtu.be/<id>
+    if (host.includes('youtu.be')) {
+      const id = parsed.pathname.replace(/^\//, '').split('?')[0];
+      if (id) {
+        return {
+          isYouTube: true,
+          embedSrc: `https://www.youtube.com/embed/${id}?autoplay=1&enablejsapi=1`,
+          displayUrl: cleanDisplay,
+          title: 'YouTube Video',
+        };
+      }
+    }
+
+    // 4. Playlist: /playlist?list=<id>
+    if (parsed.pathname === '/playlist' && parsed.searchParams.has('list')) {
+      const listId = parsed.searchParams.get('list');
+      return {
+        isYouTube: true,
+        embedSrc: `https://www.youtube.com/embed/videoseries?list=${listId}`,
+        displayUrl: cleanDisplay,
+        title: 'YouTube Playlist',
+      };
+    }
+
+    // 5. Search results: /results?search_query=<q>
+    if (parsed.pathname === '/results' && parsed.searchParams.has('search_query')) {
+      const q = parsed.searchParams.get('search_query') || 'trending';
+      return {
+        isYouTube: true,
+        embedSrc: `https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(q)}`,
+        displayUrl: cleanDisplay,
+        title: `${q} - YouTube Search`,
+      };
+    }
+
+    // 6. Already an embed URL: /embed/<id>
+    if (parsed.pathname.startsWith('/embed/')) {
+      return {
+        isYouTube: true,
+        embedSrc: parsed.toString(),
+        displayUrl: cleanDisplay,
+        title: 'YouTube',
+      };
+    }
+
+    // 7. General root or channel: youtube.com
+    return {
+      isYouTube: true,
+      embedSrc: 'https://www.youtube.com/embed?listType=search&list=trending+music+entertainment',
+      displayUrl: cleanDisplay,
+      title: 'YouTube',
+    };
+  } catch {
+    return {
+      isYouTube: true,
+      embedSrc: 'https://www.youtube.com/embed?listType=search&list=trending',
+      displayUrl: 'https://www.youtube.com',
+      title: 'YouTube',
+    };
+  }
+}
+
+/**
+ * Extracts and formats Google URLs to interactive embed pages with igu=1
+ */
+function extractGoogleEmbedInfo(input: string): { isGoogle: boolean; embedSrc: string; displayUrl: string; title: string } {
+  const trimmed = input.trim();
+  const lower = trimmed.toLowerCase();
+
+  const isGoogleDomain = lower.includes('google.com');
+  if (!isGoogleDomain) {
+    return { isGoogle: false, embedSrc: '', displayUrl: '', title: '' };
+  }
+
+  const urlToParse = /^[a-zA-Z]+:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const parsed = new URL(urlToParse);
+    const subPath = (parsed.pathname || '/') + (parsed.search || '') + (parsed.hash || '');
+    const cleanDisplay = `${parsed.protocol}//${parsed.host}${subPath}`;
+
+    // Always inject igu=1 into Google URLs so X-Frame-Options is suppressed
+    parsed.searchParams.set('igu', '1');
+
+    if (parsed.pathname === '/' || parsed.pathname === '' || parsed.pathname === '/webhp') {
+      return {
+        isGoogle: true,
+        embedSrc: GOOGLE_EMBED_HOME,
+        displayUrl: cleanDisplay,
+        title: 'Google',
+      };
+    }
+
+    const query = parsed.searchParams.get('q');
+    return {
+      isGoogle: true,
+      embedSrc: parsed.toString(),
+      displayUrl: cleanDisplay,
+      title: query ? `${query} - Google Search` : 'Google',
+    };
+  } catch {
+    return {
+      isGoogle: true,
+      embedSrc: GOOGLE_EMBED_HOME,
+      displayUrl: 'https://www.google.com',
+      title: 'Google',
+    };
+  }
 }
 
 /**
@@ -95,6 +250,22 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
 
   // 3. Multi-word search or words without dot/colon/protocol -> Search query
   if (!hasProtocol && !isLocalHost && !isIpWithPort && (hasSpace || (!hasDot && !trimmed.includes(':')))) {
+    // If query starts with "youtube <query>", route directly to YouTube search embed
+    if (trimmed.toLowerCase().startsWith('youtube ')) {
+      const ytQuery = trimmed.slice(8).trim();
+      return {
+        url: `https://www.youtube.com/results?search_query=${encodeURIComponent(ytQuery)}`,
+        displayUrl: `https://www.youtube.com/results?search_query=${encodeURIComponent(ytQuery)}`,
+        iframeSrc: `https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(ytQuery)}`,
+        title: `${ytQuery} - YouTube Search`,
+        isTunneled: false,
+        remoteHost: '',
+        remotePort: 0,
+        subPath: '',
+        isPublicHttps: true,
+      };
+    }
+
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
     return {
       url: searchUrl,
@@ -115,17 +286,49 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
     formatted = (isLocalHost || isIpWithPort) ? `http://${trimmed}` : `https://${trimmed}`;
   }
 
+  // 5. Check if it's YouTube
+  const ytInfo = extractYouTubeEmbedInfo(formatted);
+  if (ytInfo.isYouTube) {
+    return {
+      url: ytInfo.displayUrl,
+      displayUrl: ytInfo.displayUrl,
+      iframeSrc: ytInfo.embedSrc,
+      title: ytInfo.title,
+      isTunneled: false,
+      remoteHost: '',
+      remotePort: 0,
+      subPath: '',
+      isPublicHttps: true,
+    };
+  }
+
+  // 6. Check if it's Google
+  const gInfo = extractGoogleEmbedInfo(formatted);
+  if (gInfo.isGoogle) {
+    return {
+      url: gInfo.displayUrl,
+      displayUrl: gInfo.displayUrl,
+      iframeSrc: gInfo.embedSrc,
+      title: gInfo.title,
+      isTunneled: false,
+      remoteHost: '',
+      remotePort: 0,
+      subPath: '',
+      isPublicHttps: true,
+    };
+  }
+
   try {
     const parsed = new URL(formatted);
     const hostname = parsed.hostname.toLowerCase();
     const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0';
     const subPath = (parsed.pathname || '/') + (parsed.search || '') + (parsed.hash || '');
     const cleanDisplay = `${parsed.protocol}//${parsed.host}${subPath}`;
-    const isCustomPort = parsed.port && parsed.port !== '80' && parsed.port !== '443';
+    const isCustomPort = Boolean(parsed.port && parsed.port !== '80' && parsed.port !== '443');
 
     // If Server Network mode (SSH: ON):
     if (networkMode === 'server') {
-      const isPublicHttps = !isLocal && !isIpWithPort && parsed.protocol === 'https:' && !isCustomPort;
+      const isPublicHttps = !isLocal && !isIpWithPort && !isCustomPort;
       const port = parsed.port 
         ? parseInt(parsed.port, 10) 
         : (parsed.protocol === 'https:' ? 443 : 80);
@@ -134,7 +337,7 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
       return {
         url: cleanDisplay,
         displayUrl: cleanDisplay,
-        iframeSrc: '', // Assigned after sshStartTunnel
+        iframeSrc: isPublicHttps ? formatted : '', // Assigned after sshStartTunnel if tunneled
         title: `${parsed.host}${parsed.pathname !== '/' ? parsed.pathname : ''}`,
         isTunneled: !isPublicHttps,
         remoteHost: targetHost,
@@ -144,28 +347,7 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
       };
     }
 
-    // If User Network mode (SSH: OFF): PC Browser Direct
-    if (hostname.includes('google.com')) {
-      let iframeSrc = formatted;
-      if (parsed.pathname === '/' || parsed.pathname === '' || parsed.pathname === '/webhp') {
-        iframeSrc = GOOGLE_EMBED_HOME;
-      } else if (!parsed.searchParams.has('igu')) {
-        parsed.searchParams.set('igu', '1');
-        iframeSrc = parsed.toString();
-      }
-      return {
-        url: cleanDisplay,
-        displayUrl: cleanDisplay,
-        iframeSrc,
-        title: 'Google',
-        isTunneled: false,
-        remoteHost: '',
-        remotePort: 0,
-        subPath: '',
-        isPublicHttps: true,
-      };
-    }
-
+    // If User Network mode (SSH: OFF): PC Direct (no tunnel)
     return {
       url: cleanDisplay,
       displayUrl: cleanDisplay,
@@ -174,7 +356,7 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
       isTunneled: false,
       remoteHost: '',
       remotePort: 0,
-      subPath: '',
+      subPath,
       isPublicHttps: parsed.protocol === 'https:',
     };
   } catch {
@@ -223,7 +405,7 @@ export default function BrowserApp() {
       isLoading: false,
       headers: {},
       networkMode: initialMode,
-      userBrowserMode: 'external',
+      userBrowserMode: 'embedded',
       routingMode: initialMode === 'server' ? 'tunnel' : 'direct',
       history: [],
       historyIndex: -1,
@@ -319,7 +501,7 @@ export default function BrowserApp() {
           error: null,
           isTunneled: false,
           tunnelPort: undefined,
-          userBrowserMode: 'external',
+          userBrowserMode: 'embedded',
         };
       }));
       if (currentTabId === activeTabId) {
@@ -346,6 +528,7 @@ export default function BrowserApp() {
         historyIndex: newHistory.length - 1,
         networkMode: effectiveNetworkMode,
         routingMode: effectiveNetworkMode === 'server' ? 'tunnel' : 'direct',
+        userBrowserMode: 'embedded',
       };
     }));
 
@@ -357,21 +540,6 @@ export default function BrowserApp() {
     // Branch 1: Server Network Mode (SSH: ON) - Carefully Managed
     // -------------------------------------------------------------
     if (effectiveNetworkMode === 'server') {
-      if (resolved.isPublicHttps) {
-        // Public HTTPS sites require TLS & reject raw TCP port-forwarding in iframes
-        setTabs(prev => prev.map(t => {
-          if (t.id !== currentTabId) return t;
-          return {
-            ...t,
-            isLoading: false,
-            error: `Public HTTPS website (${resolved.displayUrl}) cannot be tunneled via raw TCP in an embedded window. Click "Open in PC Browser" or toggle to "SSH: OFF" for full redirect, login, and browser feature support.`,
-            isTunneled: false,
-            tunnelPort: undefined,
-          };
-        }));
-        return;
-      }
-
       if (resolved.isTunneled) {
         if (!activeConnectionId) {
           setTabs(prev => prev.map(t => {
@@ -379,7 +547,7 @@ export default function BrowserApp() {
             return {
               ...t,
               isLoading: false,
-              error: `Not connected to an SSH server. Server Network mode requires an active SSH connection to reach remote port ${resolved.remotePort} on ${serverHost}. Toggle to "SSH: OFF" to use your PC browser, or connect to a server in SSH Desktop.`,
+              error: `Not connected to an SSH server. Server Network mode requires an active SSH connection to reach remote port ${resolved.remotePort} on ${serverHost}. Toggle to "SSH: OFF" to use your PC network, or connect to a server in SSH Desktop.`,
               isTunneled: false,
             };
           }));
@@ -441,30 +609,54 @@ export default function BrowserApp() {
             };
           }));
         }
+      } else {
+        // Public website accessed while in SSH: ON mode
+        // Renders directly in embedded window with full TLS
+        setTunnelStatusText(null);
+        setTabs(prev => prev.map(t => {
+          if (t.id !== currentTabId) return t;
+          return {
+            ...t,
+            title: resolved.title,
+            iframeSrc: resolved.iframeSrc || resolved.url,
+            isTunneled: false,
+            tunnelPort: undefined,
+            userBrowserMode: 'embedded',
+            isLoading: false,
+            statusCode: 200,
+            statusText: 'Direct TLS (Public Web)',
+            error: null,
+          };
+        }));
+
+        addHistoryItem({
+          url: resolved.displayUrl,
+          title: resolved.title,
+          statusCode: 200,
+          serverHost,
+        });
       }
     } 
     // -------------------------------------------------------------
-    // Branch 2: User Network Mode (SSH: OFF) - PC Browser Mode
-    // All redirects, logins, and web features work natively on PC!
+    // Branch 2: User Network Mode (SSH: OFF) - Direct inside App
+    // Renders DIRECTLY inside SSH Desktop application window!
+    // NO EXTERNAL CHROME POPUP!
     // -------------------------------------------------------------
     else {
       setTunnelStatusText(null);
-
-      // Automatically launch in user's default PC desktop browser so all redirects and features work seamlessly
-      openExternalUrl(resolved.displayUrl || resolved.url);
 
       setTabs(prev => prev.map(t => {
         if (t.id !== currentTabId) return t;
         return {
           ...t,
           title: resolved.title,
-          iframeSrc: resolved.iframeSrc,
+          iframeSrc: resolved.iframeSrc || resolved.url,
           isTunneled: false,
           tunnelPort: undefined,
-          userBrowserMode: 'external',
+          userBrowserMode: 'embedded',
           isLoading: false,
           statusCode: 200,
-          statusText: 'PC Browser (Direct)',
+          statusText: 'SSH: OFF (Direct)',
           error: null,
         };
       }));
@@ -473,7 +665,7 @@ export default function BrowserApp() {
         url: resolved.displayUrl,
         title: resolved.title,
         statusCode: 200,
-        serverHost: 'PC Browser',
+        serverHost: 'PC Network',
       });
     }
   };
@@ -490,7 +682,7 @@ export default function BrowserApp() {
         ...t,
         networkMode: newMode,
         routingMode: newMode === 'server' ? 'tunnel' : 'direct',
-        userBrowserMode: newMode === 'user' ? 'external' : t.userBrowserMode,
+        userBrowserMode: 'embedded',
       };
     }));
 
@@ -513,7 +705,7 @@ export default function BrowserApp() {
       isLoading: false,
       headers: {},
       networkMode: defaultMode,
-      userBrowserMode: 'external',
+      userBrowserMode: 'embedded',
       routingMode: defaultMode === 'server' ? 'tunnel' : 'direct',
       history: [],
       historyIndex: -1,
@@ -819,33 +1011,6 @@ export default function BrowserApp() {
           )}
         </div>
 
-        {/* View Mode Toggle when SSH is OFF and URL is active */}
-        {activeTab.networkMode === 'user' && Boolean(activeTab.displayUrl || activeTab.url) && (
-          <button
-            onClick={() => {
-              setTabs(prev => prev.map(t => 
-                t.id === activeTab.id 
-                  ? { ...t, userBrowserMode: t.userBrowserMode === 'embedded' ? 'external' : 'embedded' } 
-                  : t
-              ));
-            }}
-            className="px-2.5 py-1.5 rounded-xl text-xs font-medium transition-colors bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 shrink-0 cursor-pointer flex items-center space-x-1.5"
-            title="Toggle between PC Browser Hub and Embedded Frame"
-          >
-            {activeTab.userBrowserMode === 'embedded' ? (
-              <>
-                <Laptop className="w-3.5 h-3.5 text-blue-400" />
-                <span className="hidden sm:inline">PC Mode</span>
-              </>
-            ) : (
-              <>
-                <Layers className="w-3.5 h-3.5 text-amber-400" />
-                <span className="hidden sm:inline">Frame Mode</span>
-              </>
-            )}
-          </button>
-        )}
-
         {/* Inspect / DevTools Toggle (Per Tab Isolation) */}
         <button
           onClick={handleToggleDevTools}
@@ -909,13 +1074,18 @@ export default function BrowserApp() {
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
           const isNewTab = !tab.url || tab.url === 'about:newtab';
-          const isUserPcMode = tab.networkMode === 'user' && tab.userBrowserMode !== 'embedded';
+          const isYouTube = Boolean(
+            (tab.url && (tab.url.includes('youtube.com') || tab.url.includes('youtu.be'))) ||
+            (tab.displayUrl && (tab.displayUrl.includes('youtube.com') || tab.displayUrl.includes('youtu.be'))) ||
+            (tab.iframeSrc && tab.iframeSrc.includes('youtube.com/embed'))
+          );
+          const isPublicOnSSH = tab.networkMode === 'server' && !tab.isTunneled && Boolean(tab.url);
 
           return (
             <div
               key={tab.id}
-              style={{ display: isActive ? 'block' : 'none' }}
-              className="w-full h-full relative overflow-hidden bg-[#1e1e2e]"
+              style={{ display: isActive ? 'flex' : 'none' }}
+              className="w-full h-full relative flex-col overflow-hidden bg-[#1e1e2e]"
             >
               {isNewTab ? (
                 /* Clean Start / New Tab Page (NO forced Google!) */
@@ -928,81 +1098,13 @@ export default function BrowserApp() {
                   bookmarks={bookmarks}
                   onSelectBookmark={(url) => navigateUrl(url, tab.id, tab.networkMode)}
                 />
-              ) : isUserPcMode ? (
-                /* PC Browser Mode: All redirects, SSO logins, and web features work natively on PC! */
-                <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-gradient-to-b from-[#181825] via-[#1e1e2e] to-[#11111b] text-center select-none overflow-y-auto">
-                  <div className="max-w-lg w-full flex flex-col items-center space-y-6">
-                    <div className="relative">
-                      <div className="w-16 h-16 rounded-3xl bg-blue-500/10 border border-blue-500/20 text-blue-400 flex items-center justify-center shadow-xl">
-                        <Globe className="w-8 h-8 text-blue-400" />
-                      </div>
-                      <div className="absolute -bottom-1 -right-1 p-1 rounded-full bg-[#11111b] border border-blue-500/30 text-blue-300">
-                        <Laptop className="w-3.5 h-3.5" />
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-center space-x-2">
-                        <h3 className="text-lg font-bold text-white">Opened in PC Browser</h3>
-                        <span className="px-2 py-0.5 rounded-full bg-blue-500/20 border border-blue-500/30 text-blue-300 text-[10px] font-semibold">
-                          SSH: OFF
-                        </span>
-                      </div>
-                      <p className="text-xs text-gray-400 mt-1 max-w-md leading-relaxed">
-                        Redirects, OAuth logins, Google searches, cookies, and extensions run natively in your PC desktop browser without iframe restrictions.
-                      </p>
-                    </div>
-
-                    {/* URL Card */}
-                    <div className="w-full bg-[#11111b] border border-white/10 rounded-2xl p-3 flex items-center justify-between text-left shadow-lg">
-                      <div className="min-w-0 flex-1 mr-3">
-                        <div className="text-[10px] uppercase font-semibold text-gray-500 flex items-center space-x-1">
-                          <Compass className="w-3 h-3 text-blue-400" />
-                          <span>Destination URL</span>
-                        </div>
-                        <div className="text-xs text-blue-300 font-mono truncate select-all">{tab.displayUrl || tab.url}</div>
-                      </div>
-                      <button
-                        onClick={() => openExternalUrl(tab.displayUrl || tab.url)}
-                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1.5 shrink-0"
-                      >
-                        <ExternalLink className="w-3.5 h-3.5" />
-                        <span>Open in PC</span>
-                      </button>
-                    </div>
-
-                    {/* Controls & Options */}
-                    <div className="flex items-center space-x-3 text-xs">
-                      <button
-                        onClick={() => {
-                          setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, userBrowserMode: 'embedded' } : t));
-                        }}
-                        className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 hover:text-white transition-colors cursor-pointer flex items-center space-x-1.5"
-                        title="Try viewing in embedded window"
-                      >
-                        <Layers className="w-3.5 h-3.5 text-amber-400" />
-                        <span>Try Embedded Frame</span>
-                      </button>
-                      <button
-                        onClick={() => navigateUrl('', tab.id)}
-                        className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 hover:text-white transition-colors cursor-pointer"
-                      >
-                        Start Page
-                      </button>
-                    </div>
-
-                    <div className="text-[11px] text-gray-500 max-w-sm pt-2">
-                      💡 <strong>Tip:</strong> Need to access a service on the remote server (e.g. <code className="text-gray-300">localhost:8080</code>)? Toggle <span className="text-emerald-400 font-semibold">SSH: ON</span> above.
-                    </div>
-                  </div>
-                </div>
               ) : tab.error ? (
                 <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-[#1e1e2e] text-center select-none overflow-y-auto">
                   <div className="p-4 rounded-3xl bg-rose-500/10 border border-rose-500/20 text-rose-400 mb-4 shadow-xl">
                     <AlertCircle className="w-12 h-12" />
                   </div>
                   <h3 className="text-base font-bold text-white mb-1">
-                    {tab.isTunneled ? 'Unable to reach destination via SSH Tunnel' : 'Website Refused to Connect in Embedded Window'}
+                    {tab.isTunneled ? 'Unable to reach destination via SSH Tunnel' : 'Connection Notice'}
                   </h3>
                   <p className="text-xs text-gray-400 max-w-md mb-4 font-mono">
                     {tab.error}
@@ -1013,7 +1115,7 @@ export default function BrowserApp() {
                       className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
                     >
                       <ExternalLink className="w-3.5 h-3.5" />
-                      <span>Open in PC Browser (Redirects Supported)</span>
+                      <span>Open in External Browser</span>
                     </button>
                     {tab.networkMode === 'server' && (
                       <button
@@ -1030,41 +1132,71 @@ export default function BrowserApp() {
                       Return to Start Page
                     </button>
                   </div>
-                  <p className="text-[11px] text-gray-500 mt-6 max-w-sm">
-                    Notice: Public websites like Google, GitHub, Wikipedia, and banking sites send security headers (X-Frame-Options) that prevent embedding. Click "Open in PC Browser" where all redirects and features work seamlessly.
-                  </p>
                 </div>
               ) : (
-                <div className="w-full h-full relative">
-                  {/* Floating Open in PC Browser Pill when in embedded frame */}
-                  {tab.networkMode === 'user' && (
-                    <div className="absolute top-2 right-2 z-10">
+                <div className="w-full h-full flex flex-col relative overflow-hidden">
+                  {/* YouTube Helper Header Bar when viewing YouTube */}
+                  {isYouTube && (
+                    <div className="flex items-center justify-between px-3 py-1.5 bg-[#0f0f0f] border-b border-red-500/20 text-xs shrink-0 select-none">
+                      <div className="flex items-center space-x-2">
+                        <div className="flex items-center space-x-1 px-2 py-0.5 rounded bg-red-600 text-white font-bold text-[10px] tracking-wider uppercase shadow-sm">
+                          <Play className="w-3 h-3 fill-current" />
+                          <span>YouTube</span>
+                        </div>
+                        <div className="flex items-center space-x-1 overflow-x-auto no-scrollbar">
+                          {['Trending', 'Lofi Music', 'Coding Beats', 'Tech News', 'Podcasts'].map(topic => (
+                            <button
+                              key={topic}
+                              onClick={() => navigateUrl(`https://www.youtube.com/results?search_query=${encodeURIComponent(topic)}`, tab.id, tab.networkMode)}
+                              className="px-2 py-0.5 rounded-full bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white text-[11px] transition-colors cursor-pointer shrink-0"
+                            >
+                              {topic}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="flex items-center space-x-2 text-[11px] text-gray-400">
+                        <span className="hidden sm:inline font-mono text-[10px] text-emerald-400">● Embedded Player Active</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Advisory banner if accessing public website with SSH ON */}
+                  {isPublicOnSSH && (
+                    <div className="flex items-center justify-between px-3 py-1 bg-amber-500/10 border-b border-amber-500/20 text-amber-300 text-[11px] shrink-0">
+                      <div className="flex items-center space-x-1.5 truncate">
+                        <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                        <span>SSH: ON is active. Public websites connect via direct TLS.</span>
+                      </div>
                       <button
-                        onClick={() => openExternalUrl(tab.displayUrl || tab.url)}
-                        className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-[#181825]/90 hover:bg-[#11111b] border border-white/15 text-blue-300 hover:text-white text-xs font-medium shadow-2xl backdrop-blur-md transition-all cursor-pointer"
-                        title="Open in your PC Browser (all redirects and features work)"
+                        onClick={() => handleToggleNetworkMode(tab.id)}
+                        className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-[10px] font-semibold transition-colors cursor-pointer shrink-0 ml-2"
                       >
-                        <ExternalLink className="w-3.5 h-3.5 text-blue-400" />
-                        <span>Open in PC Browser</span>
+                        Switch to SSH: OFF
                       </button>
                     </div>
                   )}
 
-                  <iframe
-                    src={tab.iframeSrc || tab.url}
-                    sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-top-navigation-by-user-activation"
-                    className="w-full h-full border-none bg-white"
-                    style={{ 
-                      transform: `scale(${zoomLevel / 100})`, 
-                      transformOrigin: 'top left', 
-                      width: `${100 * (100 / zoomLevel)}%`, 
-                      height: `${100 * (100 / zoomLevel)}%` 
-                    }}
-                    title={tab.title}
-                    onLoad={() => {
-                      setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, isLoading: false } : t));
-                    }}
-                  />
+                  <div className="flex-1 w-full h-full relative">
+                    <iframe
+                      src={tab.iframeSrc || tab.url}
+                      sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-presentation"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+                      allowFullScreen={true}
+                      referrerPolicy="no-referrer-when-downgrade"
+                      className="w-full h-full border-none bg-white"
+                      style={{ 
+                        transform: `scale(${zoomLevel / 100})`, 
+                        transformOrigin: 'top left', 
+                        width: `${100 * (100 / zoomLevel)}%`, 
+                        height: `${100 * (100 / zoomLevel)}%` 
+                      }}
+                      title={tab.title}
+                      onLoad={() => {
+                        setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, isLoading: false } : t));
+                      }}
+                    />
+                  </div>
                 </div>
               )}
             </div>
