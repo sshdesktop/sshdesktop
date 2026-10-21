@@ -19,14 +19,6 @@ pub struct AppState {
 }
 
 fn main() {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::set_var(
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--disable-web-security --allow-running-insecure-content --ignore-certificate-errors --ignore-ssl-errors --disable-features=IsolateOrigins,site-per-process --disable-site-isolation-trials",
-        );
-    }
-
     env_logger::init();
 
     let state = AppState {

@@ -180,37 +180,14 @@ async fn execute_remote_ssh_request(
     }
 
     let mut has_content_type = false;
-    let mut has_origin = false;
-    let mut has_referer = false;
     for h in &req.headers {
         if h.enabled && !h.key.trim().is_empty() {
             let key = h.key.trim();
             if key.eq_ignore_ascii_case("content-type") {
                 has_content_type = true;
             }
-            if key.eq_ignore_ascii_case("origin") {
-                has_origin = true;
-            }
-            if key.eq_ignore_ascii_case("referer") {
-                has_referer = true;
-            }
             curl_args.push_str(&format!(" -H '{}: {}'", key.replace('\'', "'\\''"), h.value.replace('\'', "'\\''")));
         }
-    }
-
-    // Automatically inject Origin and Referer headers for authentication / login endpoints if omitted
-    if !has_origin {
-        let origin_port = match target_url.port() {
-            Some(p) if !((target_url.scheme() == "http" && p == 80) || (target_url.scheme() == "https" && p == 443)) => {
-                format!(":{}", p)
-            }
-            _ => String::new(),
-        };
-        let origin_val = format!("{}://{}{}", target_url.scheme(), target_url.host_str().unwrap_or("127.0.0.1"), origin_port);
-        curl_args.push_str(&format!(" -H 'Origin: {}'", origin_val));
-    }
-    if !has_referer {
-        curl_args.push_str(&format!(" -H 'Referer: {}'", target_url_str.replace('\'', "'\\''")));
     }
 
     // Body preparation
@@ -478,19 +455,11 @@ async fn execute_direct_request(
     let mut req_builder = client.request(method, request_url.clone());
 
     let mut has_content_type = false;
-    let mut has_origin = false;
-    let mut has_referer = false;
     for h in &req.headers {
         if h.enabled && !h.key.trim().is_empty() {
             let key = h.key.trim();
             if key.eq_ignore_ascii_case("content-type") {
                 has_content_type = true;
-            }
-            if key.eq_ignore_ascii_case("origin") {
-                has_origin = true;
-            }
-            if key.eq_ignore_ascii_case("referer") {
-                has_referer = true;
             }
             if let (Ok(header_name), Ok(header_val)) = (
                 reqwest::header::HeaderName::from_bytes(key.as_bytes()),
@@ -499,21 +468,6 @@ async fn execute_direct_request(
                 req_builder = req_builder.header(header_name, header_val);
             }
         }
-    }
-
-    // Automatically inject Origin and Referer headers for authentication / login endpoints if omitted
-    if !has_origin {
-        let origin_port = match request_url.port() {
-            Some(p) if !((request_url.scheme() == "http" && p == 80) || (request_url.scheme() == "https" && p == 443)) => {
-                format!(":{}", p)
-            }
-            _ => String::new(),
-        };
-        let origin_val = format!("{}://{}{}", request_url.scheme(), request_url.host_str().unwrap_or("127.0.0.1"), origin_port);
-        req_builder = req_builder.header("Origin", origin_val);
-    }
-    if !has_referer {
-        req_builder = req_builder.header("Referer", request_url.as_str());
     }
 
     req_builder = req_builder.header("User-Agent", "SSHDesktop-API-Studio/1.0");
