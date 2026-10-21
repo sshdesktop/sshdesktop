@@ -3,9 +3,10 @@ import {
   Globe, ArrowLeft, ArrowRight, RotateCw, Home, Lock, 
   ShieldCheck, Star, Plus, X, Search, Activity, Terminal, 
   Layers, Code2, Server, ExternalLink, ZoomIn, ZoomOut,
-  AlertCircle, Check, Sparkles, ChevronDown, Radio, Bookmark as BookmarkIcon
+  AlertCircle, Check, Sparkles, ChevronDown, Radio, Bookmark as BookmarkIcon,
+  Laptop
 } from 'lucide-react';
-import { BrowserTab, BrowserRoutingMode, BrowserBookmark } from './types';
+import { BrowserTab, BrowserRoutingMode, BrowserBookmark, DevToolsPanel } from './types';
 import { useBrowserStore } from './browserStore';
 import { useConnectionStore } from '../../lib/store';
 import { 
@@ -18,6 +19,7 @@ import {
 } from '../../lib/tauri-bridge';
 import DiscoveredServicesBar from './components/DiscoveredServicesBar';
 import BrowserDevTools from './components/BrowserDevTools';
+import BrowserStartPage from './components/BrowserStartPage';
 
 const GOOGLE_HOME = 'https://www.google.com';
 const GOOGLE_EMBED_HOME = 'https://www.google.com/webhp?igu=1';
@@ -34,18 +36,18 @@ interface ResolvedTarget {
 }
 
 /**
- * Resolves user typed text into logical URL, display URL, and iframe destination
+ * Resolves user typed text into logical URL, display URL, and iframe destination based on network mode
  */
-function resolveNavigationTarget(input: string): ResolvedTarget {
+function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'): ResolvedTarget {
   const trimmed = input.trim();
 
-  // 1. Default to Google if empty
-  if (!trimmed || trimmed === 'google.com' || trimmed === 'https://www.google.com' || trimmed === 'http://www.google.com') {
+  // 1. Empty or newtab
+  if (!trimmed || trimmed === 'about:newtab' || trimmed === 'newtab') {
     return {
-      url: GOOGLE_HOME,
-      displayUrl: GOOGLE_HOME,
-      iframeSrc: GOOGLE_EMBED_HOME,
-      title: 'Google',
+      url: '',
+      displayUrl: '',
+      iframeSrc: '',
+      title: 'New Tab',
       isTunneled: false,
       remoteHost: '',
       remotePort: 0,
@@ -53,20 +55,51 @@ function resolveNavigationTarget(input: string): ResolvedTarget {
     };
   }
 
-  // 2. Check if this is a Google search query (multiple words, or no dots, and no protocol/port)
+  // 2. Pure port number like "8080" or ":8080"
+  if (/^:?\d+$/.test(trimmed)) {
+    const port = parseInt(trimmed.replace(':', ''), 10);
+    const display = `http://localhost:${port}`;
+    if (networkMode === 'server') {
+      return {
+        url: display,
+        displayUrl: display,
+        iframeSrc: '',
+        title: `localhost:${port}`,
+        isTunneled: true,
+        remoteHost: '127.0.0.1',
+        remotePort: port,
+        subPath: '/',
+      };
+    } else {
+      return {
+        url: display,
+        displayUrl: display,
+        iframeSrc: display,
+        title: `localhost:${port}`,
+        isTunneled: false,
+        remoteHost: '',
+        remotePort: 0,
+        subPath: '/',
+      };
+    }
+  }
+
   const hasProtocol = /^[a-zA-Z]+:\/\//.test(trimmed);
   const isLocalHost = /^localhost(:\d+)?(\/.*)?$/i.test(trimmed) || 
                       /^127\.0\.0\.1(:\d+)?(\/.*)?$/.test(trimmed) || 
                       /^0\.0\.0\.0(:\d+)?(\/.*)?$/.test(trimmed);
   const hasDot = trimmed.includes('.');
   const hasSpace = /\s/.test(trimmed);
+  const isIpWithPort = /^(\d{1,3}\.){3}\d{1,3}(:\d+)?(\/.*)?$/.test(trimmed);
 
-  if (!hasProtocol && !isLocalHost && (hasSpace || !hasDot)) {
+  // 3. Multi-word search or words without dot/colon/protocol
+  if (!hasProtocol && !isLocalHost && !isIpWithPort && (hasSpace || (!hasDot && !trimmed.includes(':')))) {
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
     return {
-      url: `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`,
-      displayUrl: `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`,
+      url: searchUrl,
+      displayUrl: searchUrl,
       iframeSrc: `https://www.google.com/search?q=${encodeURIComponent(trimmed)}&igu=1`,
-      title: `${trimmed} - Google Search`,
+      title: `${trimmed} - Search`,
       isTunneled: false,
       remoteHost: '',
       remotePort: 0,
@@ -74,10 +107,10 @@ function resolveNavigationTarget(input: string): ResolvedTarget {
     };
   }
 
-  // 3. Format URL with protocol if missing
+  // 4. Format URL with protocol
   let formatted = trimmed;
   if (!hasProtocol) {
-    formatted = isLocalHost ? `http://${trimmed}` : `https://${trimmed}`;
+    formatted = (isLocalHost || isIpWithPort) ? `http://${trimmed}` : `https://${trimmed}`;
   }
 
   try {
@@ -85,18 +118,20 @@ function resolveNavigationTarget(input: string): ResolvedTarget {
     const hostname = parsed.hostname.toLowerCase();
     const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0';
     const subPath = (parsed.pathname || '/') + (parsed.search || '') + (parsed.hash || '');
+    const cleanDisplay = `${parsed.protocol}//${parsed.host}${subPath}`;
 
-    // Check if target is a server port requiring SSH tunnel (localhost or specific port)
-    if (isLocal || (parsed.port && parsed.port !== '80' && parsed.port !== '443')) {
-      const port = parsed.port ? parseInt(parsed.port, 10) : (parsed.protocol === 'https:' ? 443 : 80);
+    // If Server Network mode (SSH: ON):
+    if (networkMode === 'server') {
+      const port = parsed.port 
+        ? parseInt(parsed.port, 10) 
+        : (parsed.protocol === 'https:' ? 443 : 80);
       const targetHost = isLocal ? '127.0.0.1' : hostname;
-      const cleanDisplay = `http://${hostname}${parsed.port ? `:${parsed.port}` : ''}${subPath}`;
 
       return {
         url: cleanDisplay,
         displayUrl: cleanDisplay,
-        iframeSrc: '', // Will be assigned the tunneled 127.0.0.1:localPort upon tunnel startup
-        title: `${hostname}:${port}`,
+        iframeSrc: '', // Assigned after sshStartTunnel
+        title: `${parsed.host}${parsed.pathname !== '/' ? parsed.pathname : ''}`,
         isTunneled: true,
         remoteHost: targetHost,
         remotePort: port,
@@ -104,22 +139,18 @@ function resolveNavigationTarget(input: string): ResolvedTarget {
       };
     }
 
-    // Google domain handler with igu=1 for iframe embedding
+    // If User Network mode (SSH: OFF):
     if (hostname.includes('google.com')) {
       let iframeSrc = formatted;
-      let displayUrl = formatted;
       if (parsed.pathname === '/' || parsed.pathname === '' || parsed.pathname === '/webhp') {
         iframeSrc = GOOGLE_EMBED_HOME;
-        displayUrl = GOOGLE_HOME;
       } else if (!parsed.searchParams.has('igu')) {
         parsed.searchParams.set('igu', '1');
         iframeSrc = parsed.toString();
-        parsed.searchParams.delete('igu');
-        displayUrl = parsed.toString();
       }
       return {
-        url: displayUrl,
-        displayUrl,
+        url: cleanDisplay,
+        displayUrl: cleanDisplay,
         iframeSrc,
         title: 'Google',
         isTunneled: false,
@@ -129,24 +160,23 @@ function resolveNavigationTarget(input: string): ResolvedTarget {
       };
     }
 
-    // Standard public web page
     return {
-      url: formatted,
-      displayUrl: formatted,
+      url: cleanDisplay,
+      displayUrl: cleanDisplay,
       iframeSrc: formatted,
-      title: hostname,
+      title: `${parsed.host}${parsed.pathname !== '/' ? parsed.pathname : ''}`,
       isTunneled: false,
       remoteHost: '',
       remotePort: 0,
       subPath: '',
     };
   } catch {
-    // Fallback search
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
     return {
-      url: `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`,
-      displayUrl: `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`,
+      url: searchUrl,
+      displayUrl: searchUrl,
       iframeSrc: `https://www.google.com/search?q=${encodeURIComponent(trimmed)}&igu=1`,
-      title: `${trimmed} - Google Search`,
+      title: `${trimmed} - Search`,
       isTunneled: false,
       remoteHost: '',
       remotePort: 0,
@@ -170,37 +200,39 @@ export default function BrowserApp() {
     bookmarks, setBookmarks, addBookmark, removeBookmark, 
     history, addHistoryItem,
     showBookmarksBar, setShowBookmarksBar,
-    showDevTools, setShowDevTools,
     zoomLevel, setZoomLevel,
   } = useBrowserStore();
 
-  // Tabs state - Initial tab opens Google.com
+  // Tabs state - Start with clean New Tab (No forced Google!)
+  const initialMode = activeConnectionId ? 'server' : 'user';
   const [tabs, setTabs] = useState<BrowserTab[]>([
     {
       id: 'tab-1',
-      url: GOOGLE_HOME,
-      displayUrl: GOOGLE_HOME,
-      iframeSrc: GOOGLE_EMBED_HOME,
-      title: 'Google',
+      url: '',
+      displayUrl: '',
+      iframeSrc: '',
+      title: 'New Tab',
       isLoading: false,
       headers: {},
-      routingMode: 'tunnel',
-      history: [GOOGLE_HOME],
-      historyIndex: 0,
+      networkMode: initialMode,
+      routingMode: initialMode === 'server' ? 'tunnel' : 'direct',
+      history: [],
+      historyIndex: -1,
       isTunneled: false,
+      devToolsOpen: false,
+      activeDevToolsPanel: 'network',
     }
   ]);
   const [activeTabId, setActiveTabId] = useState<string>('tab-1');
-  const [urlInput, setUrlInput] = useState(GOOGLE_HOME);
+  const [urlInput, setUrlInput] = useState('');
   const [tunnelStatusText, setTunnelStatusText] = useState<string | null>(null);
 
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0];
-  const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
   // Sync url input with active tab displayUrl
   useEffect(() => {
     if (activeTab) {
-      setUrlInput(activeTab.displayUrl || activeTab.url);
+      setUrlInput(activeTab.displayUrl || activeTab.url || '');
     }
   }, [activeTab?.id, activeTab?.displayUrl, activeTab?.url]);
 
@@ -226,7 +258,7 @@ export default function BrowserApp() {
           }
         }
       } catch {
-        // File does not exist yet on server; ensure ~/.sshdesktop folder exists
+        // Ensure ~/.sshdesktop folder exists
         try {
           await sftpMkdir(activeConnectionId, `${userHome}/.sshdesktop`).catch(() => {});
         } catch {}
@@ -254,39 +286,74 @@ export default function BrowserApp() {
     }
   }, [activeConnectionId, bookmarksFilePath, userHome]);
 
-  // Navigate to URL with SSH Port Forwarding Tunnel
-  const navigateUrl = async (targetInput: string) => {
-    if (!targetInput.trim()) return;
+  // Navigate to URL respecting networkMode (SSH: ON Server Network vs SSH: OFF User Network)
+  const navigateUrl = async (
+    targetInput: string, 
+    tabIdOverride?: string, 
+    networkModeOverride?: 'server' | 'user'
+  ) => {
+    const currentTabId = tabIdOverride || activeTabId;
+    const currentTab = tabs.find(t => t.id === currentTabId) || activeTab;
+    const effectiveNetworkMode = networkModeOverride || currentTab.networkMode || 'server';
 
-    const resolved = resolveNavigationTarget(targetInput);
+    if (!targetInput.trim() || targetInput.trim() === 'about:newtab') {
+      // Reset to Start Page
+      setTabs(prev => prev.map(t => {
+        if (t.id !== currentTabId) return t;
+        return {
+          ...t,
+          url: '',
+          displayUrl: '',
+          iframeSrc: '',
+          title: 'New Tab',
+          isLoading: false,
+          error: null,
+          isTunneled: false,
+          tunnelPort: undefined,
+        };
+      }));
+      if (currentTabId === activeTabId) {
+        setUrlInput('');
+      }
+      return;
+    }
 
-    // Update active tab loading state
+    const resolved = resolveNavigationTarget(targetInput, effectiveNetworkMode);
+
+    // Update active tab loading state & history
     setTabs(prev => prev.map(t => {
-      if (t.id !== activeTabId) return t;
+      if (t.id !== currentTabId) return t;
       const newHistory = t.history.slice(0, t.historyIndex + 1);
       newHistory.push(resolved.displayUrl);
       return {
         ...t,
         url: resolved.url,
         displayUrl: resolved.displayUrl,
+        title: resolved.title,
         isLoading: true,
         error: null,
         history: newHistory,
         historyIndex: newHistory.length - 1,
+        networkMode: effectiveNetworkMode,
+        routingMode: effectiveNetworkMode === 'server' ? 'tunnel' : 'direct',
       };
     }));
 
+    if (currentTabId === activeTabId) {
+      setUrlInput(resolved.displayUrl);
+    }
+
     if (resolved.isTunneled) {
       // ---------------------------------------------------------
-      // Real SSH Local Port Forwarding Tunnel (Zero cURL commands!)
+      // SSH Local Port Forwarding Tunnel (Server Network: SSH ON)
       // ---------------------------------------------------------
       if (!activeConnectionId) {
         setTabs(prev => prev.map(t => {
-          if (t.id !== activeTabId) return t;
+          if (t.id !== currentTabId) return t;
           return {
             ...t,
             isLoading: false,
-            error: `Not connected to an SSH server. Please connect to a server first to access remote port ${resolved.remotePort}.`,
+            error: `Not connected to an SSH server. Server Network mode requires an active SSH connection to reach ${resolved.remoteHost}:${resolved.remotePort}. Toggle to "SSH: OFF (User Network)" to load directly, or connect to a server in SSH Desktop.`,
             isTunneled: false,
           };
         }));
@@ -308,7 +375,7 @@ export default function BrowserApp() {
           setTunnelStatusText(`SSH Tunnel active on 127.0.0.1:${boundPort}`);
 
           setTabs(prev => prev.map(t => {
-            if (t.id !== activeTabId) return t;
+            if (t.id !== currentTabId) return t;
             return {
               ...t,
               title: `${resolved.displayUrl.replace(/^https?:\/\//, '')} (Tunnel)`,
@@ -335,7 +402,7 @@ export default function BrowserApp() {
       } catch (err: any) {
         const errMsg = String(err?.message || err);
         setTabs(prev => prev.map(t => {
-          if (t.id !== activeTabId) return t;
+          if (t.id !== currentTabId) return t;
           return {
             ...t,
             isLoading: false,
@@ -348,10 +415,10 @@ export default function BrowserApp() {
         }));
       }
     } else {
-      // Direct Web Access (Google Search / Public URLs)
+      // Direct Web Access (User Network: SSH OFF)
       setTunnelStatusText(null);
       setTabs(prev => prev.map(t => {
-        if (t.id !== activeTabId) return t;
+        if (t.id !== currentTabId) return t;
         return {
           ...t,
           title: resolved.title,
@@ -374,24 +441,50 @@ export default function BrowserApp() {
     }
   };
 
-  // Add new tab with Home page (google.com)
+  // Toggle SSH Network mode (Server Network vs User Network) on specific tab
+  const handleToggleNetworkMode = async (tabId: string) => {
+    const currentTab = tabs.find(t => t.id === tabId);
+    if (!currentTab) return;
+    const newMode: 'server' | 'user' = currentTab.networkMode === 'server' ? 'user' : 'server';
+
+    setTabs(prev => prev.map(t => {
+      if (t.id !== tabId) return t;
+      return {
+        ...t,
+        networkMode: newMode,
+        routingMode: newMode === 'server' ? 'tunnel' : 'direct',
+      };
+    }));
+
+    // If tab currently has an address loaded, re-navigate using the newly selected network mode
+    if (currentTab.displayUrl || currentTab.url) {
+      await navigateUrl(currentTab.displayUrl || currentTab.url, tabId, newMode);
+    }
+  };
+
+  // Add new tab with clean Start Page (Shows what user types, NO forced Google)
   const handleAddNewTab = () => {
     const newId = `tab-${Date.now()}`;
+    const defaultMode: 'server' | 'user' = activeConnectionId ? 'server' : 'user';
     const newTab: BrowserTab = {
       id: newId,
-      url: GOOGLE_HOME,
-      displayUrl: GOOGLE_HOME,
-      iframeSrc: GOOGLE_EMBED_HOME,
-      title: 'Google',
+      url: '',
+      displayUrl: '',
+      iframeSrc: '',
+      title: 'New Tab',
       isLoading: false,
       headers: {},
-      routingMode: 'tunnel',
-      history: [GOOGLE_HOME],
-      historyIndex: 0,
+      networkMode: defaultMode,
+      routingMode: defaultMode === 'server' ? 'tunnel' : 'direct',
+      history: [],
+      historyIndex: -1,
       isTunneled: false,
+      devToolsOpen: false,
+      activeDevToolsPanel: 'network',
     };
     setTabs(prev => [...prev, newTab]);
     setActiveTabId(newId);
+    setUrlInput('');
   };
 
   const handleCloseTab = (id: string, e: React.MouseEvent) => {
@@ -422,10 +515,11 @@ export default function BrowserApp() {
 
   // Bookmark toggling and auto-saving to server ~/.sshdesktop/browser_bookmarks.json
   const isCurrentBookmarked = bookmarks.some(
-    b => b.url === activeTab.displayUrl || b.url === activeTab.url
+    b => (activeTab.displayUrl && b.url === activeTab.displayUrl) || (activeTab.url && b.url === activeTab.url)
   );
 
   const handleToggleBookmark = () => {
+    if (!activeTab.displayUrl && !activeTab.url) return;
     let nextList: BrowserBookmark[];
     if (isCurrentBookmarked) {
       nextList = bookmarks.filter(
@@ -439,7 +533,7 @@ export default function BrowserApp() {
       const newBm: BrowserBookmark = {
         id: `bm-${Date.now()}`,
         title: activeTab.title || activeTab.displayUrl,
-        url: activeTab.displayUrl,
+        url: activeTab.displayUrl || activeTab.url,
         tag: activeTab.isTunneled ? 'dev' : 'public',
         icon: activeTab.isTunneled ? 'server' : 'globe',
       };
@@ -456,10 +550,24 @@ export default function BrowserApp() {
     persistBookmarksToServer(nextList);
   };
 
+  // Inspect panel switching per-tab
+  const handlePanelChange = (panel: DevToolsPanel) => {
+    setTabs(prev => prev.map(t => 
+      t.id === activeTabId ? { ...t, activeDevToolsPanel: panel } : t
+    ));
+  };
+
+  // Toggle Inspect panel on active tab
+  const handleToggleDevTools = () => {
+    setTabs(prev => prev.map(t => 
+      t.id === activeTabId ? { ...t, devToolsOpen: !t.devToolsOpen } : t
+    ));
+  };
+
   // Listen for global Ctrl+R or F5 dispatched to active browser app
   useEffect(() => {
     const handleReloadEvent = () => {
-      if (activeTab) {
+      if (activeTab && (activeTab.displayUrl || activeTab.url)) {
         navigateUrl(activeTab.displayUrl || activeTab.url);
       }
     };
@@ -474,7 +582,7 @@ export default function BrowserApp() {
         if ((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R') || e.key === 'F5') {
           e.preventDefault();
           e.stopPropagation();
-          if (activeTab) {
+          if (activeTab && (activeTab.displayUrl || activeTab.url)) {
             navigateUrl(activeTab.displayUrl || activeTab.url);
           }
         }
@@ -497,12 +605,16 @@ export default function BrowserApp() {
               >
                 {tab.isLoading ? (
                   <div className="w-3.5 h-3.5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-                ) : tab.isTunneled ? (
-                  <Server className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                ) : tab.networkMode === 'server' ? (
+                  <span title="Server Network (SSH: ON)">
+                    <Server className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  </span>
                 ) : (
-                  <Globe className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-blue-400' : 'text-gray-500'}`} />
+                  <span title="User Network (SSH: OFF)">
+                    <Globe className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-blue-400' : 'text-gray-500'}`} />
+                  </span>
                 )}
-                <span className="truncate text-xs">{tab.title || tab.displayUrl || 'Google'}</span>
+                <span className="truncate text-xs">{tab.title || tab.displayUrl || 'New Tab'}</span>
                 {tabs.length > 1 && (
                   <button
                     onClick={(e) => handleCloseTab(tab.id, e)}
@@ -519,7 +631,7 @@ export default function BrowserApp() {
           <button
             onClick={handleAddNewTab}
             className="p-1.5 rounded-xl hover:bg-white/10 text-gray-400 hover:text-white transition-colors cursor-pointer"
-            title="New Tab (Google)"
+            title="New Tab"
           >
             <Plus className="w-3.5 h-3.5" />
           </button>
@@ -554,13 +666,45 @@ export default function BrowserApp() {
             <RotateCw className={`w-4 h-4 ${activeTab.isLoading ? 'animate-spin text-blue-400' : ''}`} />
           </button>
           <button
-            onClick={() => navigateUrl(GOOGLE_HOME)}
+            onClick={() => navigateUrl('')}
             className="p-1.5 rounded-lg hover:bg-white/10 hover:text-white cursor-pointer transition-colors"
-            title="Home (Google.com)"
+            title="Home (Start Page)"
           >
             <Home className="w-4 h-4" />
           </button>
         </div>
+
+        {/* Every Tab Network Toggle: SSH ON (Server Network) vs SSH OFF (User Network) */}
+        <button
+          type="button"
+          onClick={() => handleToggleNetworkMode(activeTab.id)}
+          className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-all cursor-pointer shadow-sm shrink-0 ${
+            activeTab.networkMode === 'server'
+              ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25'
+              : 'bg-blue-500/15 border-blue-500/40 text-blue-300 hover:bg-blue-500/25'
+          }`}
+          title={
+            activeTab.networkMode === 'server'
+              ? 'Server Network (SSH: ON). Traffic is tunneled through the remote SSH server. Click to switch to User Network (SSH: OFF).'
+              : 'User Network (SSH: OFF). Traffic connects directly via your local network. Click to switch to Server Network (SSH: ON).'
+          }
+        >
+          {activeTab.networkMode === 'server' ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <Server className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="font-bold">SSH: ON</span>
+              <span className="text-[10px] text-emerald-400/90 font-mono hidden md:inline">(Server Network)</span>
+            </>
+          ) : (
+            <>
+              <span className="w-2 h-2 rounded-full bg-blue-400" />
+              <Laptop className="w-3.5 h-3.5 text-blue-400" />
+              <span className="font-bold">SSH: OFF</span>
+              <span className="text-[10px] text-blue-300/90 font-mono hidden md:inline">(User Network)</span>
+            </>
+          )}
+        </button>
 
         {/* Address Omnibox */}
         <div className="flex-1 flex items-center bg-[#11111b] border border-white/10 rounded-2xl px-3 py-1.5 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/20 shadow-inner transition-all">
@@ -572,20 +716,20 @@ export default function BrowserApp() {
                 title={`SSH Port Forwarding Tunnel: 127.0.0.1:${activeTab.tunnelPort} ➔ ${serverHost}`}
               >
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="font-semibold text-[10px]">SSH Tunnel</span>
+                <span className="font-semibold text-[10px]">Tunnel</span>
               </span>
             ) : activeTab.displayUrl?.startsWith('https://') ? (
               <span title="Secure HTTPS Connection">
                 <Lock className="w-3.5 h-3.5 text-emerald-400" />
               </span>
             ) : (
-              <span title="Google / Web Gateway">
+              <span title="Direct Web Connection">
                 <Globe className="w-3.5 h-3.5 text-blue-400" />
               </span>
             )}
           </div>
 
-          {/* URL Input Bar */}
+          {/* URL Input Bar - Displays EXACTLY what user typed */}
           <input
             type="text"
             value={urlInput}
@@ -595,7 +739,7 @@ export default function BrowserApp() {
                 navigateUrl(urlInput);
               }
             }}
-            placeholder="Search Google or type a server address (e.g. localhost:8080, 127.0.0.1:3000)..."
+            placeholder="Type a URL or server address (e.g. localhost:8080, 192.168.74.43:3000)..."
             className="flex-1 bg-transparent border-none text-xs text-white font-mono focus:outline-none placeholder-gray-500 select-all"
           />
 
@@ -608,39 +752,43 @@ export default function BrowserApp() {
           )}
 
           {/* Bookmark Star Button */}
-          <button
-            onClick={handleToggleBookmark}
-            className={`p-1 rounded-lg ml-1 transition-colors cursor-pointer ${
-              isCurrentBookmarked ? 'text-amber-400' : 'text-gray-400 hover:text-white'
-            }`}
-            title={
-              isCurrentBookmarked
-                ? `Remove Bookmark (synced with ${userHome}/.sshdesktop)`
-                : `Bookmark to ${userHome}/.sshdesktop`
-            }
-          >
-            <Star className={`w-3.5 h-3.5 ${isCurrentBookmarked ? 'fill-amber-400' : ''}`} />
-          </button>
+          {Boolean(activeTab.displayUrl || activeTab.url) && (
+            <button
+              onClick={handleToggleBookmark}
+              className={`p-1 rounded-lg ml-1 transition-colors cursor-pointer ${
+                isCurrentBookmarked ? 'text-amber-400' : 'text-gray-400 hover:text-white'
+              }`}
+              title={
+                isCurrentBookmarked
+                  ? `Remove Bookmark (synced with ${userHome}/.sshdesktop)`
+                  : `Bookmark to ${userHome}/.sshdesktop`
+              }
+            >
+              <Star className={`w-3.5 h-3.5 ${isCurrentBookmarked ? 'fill-amber-400' : ''}`} />
+            </button>
+          )}
 
           {/* Open in Desktop Browser (Chrome/Edge) */}
-          <button
-            onClick={() => openExternalUrl(activeTab.displayUrl || activeTab.url)}
-            className="p-1 rounded-lg ml-1 text-gray-400 hover:text-blue-300 hover:bg-white/10 transition-colors cursor-pointer"
-            title="Open in Desktop Browser (Chrome/Edge/Firefox)"
-          >
-            <ExternalLink className="w-3.5 h-3.5" />
-          </button>
+          {Boolean(activeTab.displayUrl || activeTab.url) && (
+            <button
+              onClick={() => openExternalUrl(activeTab.displayUrl || activeTab.url)}
+              className="p-1 rounded-lg ml-1 text-gray-400 hover:text-blue-300 hover:bg-white/10 transition-colors cursor-pointer"
+              title="Open in Desktop Browser (Chrome/Edge/Firefox)"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
 
-        {/* Inspect / DevTools Toggle */}
+        {/* Inspect / DevTools Toggle (Per Tab Isolation) */}
         <button
-          onClick={() => setShowDevTools(!showDevTools)}
+          onClick={handleToggleDevTools}
           className={`flex items-center space-x-1 px-2.5 py-1.5 rounded-xl text-xs transition-colors cursor-pointer border ${
-            showDevTools 
-              ? 'bg-blue-600/30 text-blue-300 border-blue-500/40' 
+            activeTab.devToolsOpen 
+              ? 'bg-blue-600/30 text-blue-300 border-blue-500/40 shadow-sm' 
               : 'bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white border-white/10'
           }`}
-          title="Inspect Network, Headers & SSH Tunnel State"
+          title="Inspect Network, Headers & SSH Tunnel State (Per-Tab Isolated)"
         >
           <Code2 className="w-3.5 h-3.5" />
           <span>Inspect</span>
@@ -684,8 +832,8 @@ export default function BrowserApp() {
         />
       )}
 
-      {/* Main Page Viewport - Keeps all tab iframes mounted in DOM so switching tabs never restarts or loses state */}
-      <div className="flex-1 w-full h-full relative overflow-hidden bg-white">
+      {/* Main Page Viewport - Keeps tabs mounted in DOM */}
+      <div className="flex-1 w-full h-full relative overflow-hidden bg-[#1e1e2e]">
         {/* Loading overlay bar */}
         {activeTab.isLoading && (
           <div className="absolute top-0 left-0 right-0 h-0.5 bg-blue-500 animate-pulse z-20" />
@@ -694,13 +842,26 @@ export default function BrowserApp() {
         {/* Tab Viewports */}
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
+          const isNewTab = !tab.url || tab.url === 'about:newtab';
+
           return (
             <div
               key={tab.id}
               style={{ display: isActive ? 'block' : 'none' }}
-              className="w-full h-full relative overflow-hidden bg-white"
+              className="w-full h-full relative overflow-hidden bg-[#1e1e2e]"
             >
-              {tab.error ? (
+              {isNewTab ? (
+                /* Clean Start / New Tab Page (NO forced Google!) */
+                <BrowserStartPage
+                  onNavigate={(target) => navigateUrl(target, tab.id, tab.networkMode)}
+                  networkMode={tab.networkMode}
+                  onToggleNetworkMode={() => handleToggleNetworkMode(tab.id)}
+                  serverHost={serverHost}
+                  isConnected={Boolean(activeConnectionId)}
+                  bookmarks={bookmarks}
+                  onSelectBookmark={(url) => navigateUrl(url, tab.id, tab.networkMode)}
+                />
+              ) : tab.error ? (
                 <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-[#1e1e2e] text-center select-none">
                   <div className="p-4 rounded-3xl bg-rose-500/10 border border-rose-500/20 text-rose-400 mb-4 shadow-xl">
                     <AlertCircle className="w-12 h-12" />
@@ -720,10 +881,10 @@ export default function BrowserApp() {
                       <span>Open in Desktop Browser</span>
                     </button>
                     <button
-                      onClick={() => navigateUrl(GOOGLE_HOME)}
+                      onClick={() => navigateUrl('', tab.id)}
                       className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-semibold border border-white/10 transition-colors cursor-pointer"
                     >
-                      Return to Google
+                      Return to Start Page
                     </button>
                   </div>
                   {!tab.isTunneled && (
@@ -754,38 +915,54 @@ export default function BrowserApp() {
         })}
       </div>
 
-      {/* Developer Tools / Inspector Drawer */}
-      {showDevTools && (
+      {/* Developer Tools / Inspector Drawer (Per Tab Isolation) */}
+      {activeTab.devToolsOpen && (
         <BrowserDevTools
+          key={activeTab.id}
           activeTab={activeTab}
-          onClose={() => setShowDevTools(false)}
+          activePanel={activeTab.activeDevToolsPanel || 'network'}
+          onPanelChange={handlePanelChange}
+          onClose={() => {
+            setTabs(prev => prev.map(t => 
+              t.id === activeTab.id ? { ...t, devToolsOpen: false } : t
+            ));
+          }}
         />
       )}
 
       {/* Bottom Status Bar */}
       <div className="flex items-center justify-between px-3 py-1 bg-[#11111b] border-t border-white/[0.08] text-[11px] font-mono text-gray-400 shrink-0">
         <div className="flex items-center space-x-3">
-          {activeTab.isTunneled ? (
-            <span className="flex items-center space-x-1.5 text-emerald-400 font-semibold">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>SSH Port Tunnel: 127.0.0.1:{activeTab.tunnelPort} ➔ remote:{activeTab.url.split(':')[2]?.split('/')[0] || 'app'}</span>
-            </span>
+          {activeTab.networkMode === 'server' ? (
+            activeTab.isTunneled ? (
+              <span className="flex items-center space-x-1.5 text-emerald-400 font-semibold">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span>SSH Port Tunnel: 127.0.0.1:{activeTab.tunnelPort} ➔ remote:{activeTab.url.split(':')[2]?.split('/')[0] || 'app'}</span>
+              </span>
+            ) : (
+              <span className="flex items-center space-x-1 text-emerald-400/90 font-semibold">
+                <Server className="w-3 h-3 text-emerald-400" />
+                <span>Server Network (SSH: ON): {activeTab.displayUrl || 'Start Page'}</span>
+              </span>
+            )
           ) : (
-            <span className="flex items-center space-x-1 text-gray-400">
+            <span className="flex items-center space-x-1 text-blue-400">
               <Globe className="w-3 h-3 text-blue-400" />
-              <span>Direct Web: {activeTab.displayUrl}</span>
+              <span>User Network (SSH: OFF): {activeTab.displayUrl || 'Start Page'}</span>
             </span>
           )}
 
           {/* Open in Desktop Browser link */}
-          <button
-            onClick={() => openExternalUrl(activeTab.displayUrl || activeTab.url)}
-            className="flex items-center space-x-1 text-blue-400 hover:text-blue-300 transition-colors cursor-pointer ml-1"
-            title="Open current page in your desktop Chrome/Edge browser"
-          >
-            <ExternalLink className="w-3 h-3" />
-            <span>Open in Desktop Browser</span>
-          </button>
+          {Boolean(activeTab.displayUrl || activeTab.url) && (
+            <button
+              onClick={() => openExternalUrl(activeTab.displayUrl || activeTab.url)}
+              className="flex items-center space-x-1 text-blue-400 hover:text-blue-300 transition-colors cursor-pointer ml-1"
+              title="Open current page in your desktop Chrome/Edge browser"
+            >
+              <ExternalLink className="w-3 h-3" />
+              <span>Open in Desktop Browser</span>
+            </button>
+          )}
 
           <span className="hidden md:inline text-gray-500">
             Server: <strong className="text-gray-300">{serverHost}</strong>
