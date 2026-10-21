@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Plus, X, Globe, Server, Shield, Layers, Code2, 
-  Settings2, SplitSquareVertical, Save, Check, AlertCircle, Sparkles, FolderPlus 
+  Settings2, SplitSquareVertical, Save, Check, AlertCircle, Sparkles, FolderPlus, Cloud, RefreshCw 
 } from 'lucide-react';
 import { useApiStore } from './apiStore';
 import { useConnectionStore } from '../../lib/store';
@@ -36,15 +36,58 @@ export default function ApiApp() {
     updateTabById,
     addToHistory, 
     collections, 
+    environments,
+    history,
     saveToCollection, 
     createCollection, 
-    resolveVariables 
+    resolveVariables,
+    hydrateFromServer,
+    syncToServer,
+    isSyncingServer,
+    lastServerSync
   } = useApiStore();
 
   const { activeConnectionId, connections } = useConnectionStore();
   const activeServer = connections.find(c => c.id === activeConnectionId);
+  const userHome = activeServer?.username === 'root' ? '/root' : `/home/${activeServer?.username || 'user'}`;
 
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0];
+
+  // Resizable Sidebar Width (min 180px, max 550px, default 260px)
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('sshdesktop_api_sidebar_width');
+      return saved ? Math.max(180, Math.min(550, Number(saved))) : 260;
+    } catch {
+      return 260;
+    }
+  });
+  const isResizingSidebar = useRef(false);
+
+  const startSidebarResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizingSidebar.current = true;
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (!isResizingSidebar.current) return;
+      const newWidth = Math.max(180, Math.min(550, startW + (moveEvent.clientX - startX)));
+      setSidebarWidth(newWidth);
+      try {
+        localStorage.setItem('sshdesktop_api_sidebar_width', String(newWidth));
+      } catch {}
+    };
+
+    const handleMouseUp = () => {
+      isResizingSidebar.current = false;
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
 
   // Modals state
   const [showSaveModal, setShowSaveModal] = useState(false);
@@ -57,6 +100,22 @@ export default function ApiApp() {
 
   // In-flight abort controller reference
   const isCancelledRef = useRef(false);
+
+  // Hydrate from remote server ~/.sshdesktop/api_studio.json on initial connect
+  useEffect(() => {
+    if (activeConnectionId && userHome) {
+      hydrateFromServer(activeConnectionId, userHome);
+    }
+  }, [activeConnectionId, userHome]);
+
+  // Debounced auto-sync to server on data changes
+  useEffect(() => {
+    if (!activeConnectionId || !userHome) return;
+    const timer = setTimeout(() => {
+      syncToServer(activeConnectionId, userHome);
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [collections, environments, activeConnectionId, userHome]);
 
   // Send request execution
   const handleSendRequest = useCallback(async () => {
@@ -125,79 +184,95 @@ export default function ApiApp() {
         });
       }
 
-      // 4. Construct payload for native Rust HTTP engine (NO curl command!)
+      // 4. Construct Payload
       const payload: ApiRequestPayload = {
-        id: activeTab.id,
-        conn_id: activeConnectionId || undefined,
-        use_ssh_tunnel: activeTab.useSshTunnel,
         method: activeTab.method,
         url: resolvedUrl,
+        use_ssh_tunnel: activeTab.useSshTunnel,
+        conn_id: activeTab.useSshTunnel ? activeConnectionId || undefined : undefined,
         headers: finalHeaders,
         query_params: finalQueryParams,
         body_type: activeTab.bodyType,
         raw_body: activeTab.bodyType !== 'none' ? resolvedRawBody : undefined,
-        form_data: activeTab.formData?.map(f => ({
-          key: resolveVariables(f.key),
-          value: resolveVariables(f.value),
-          item_type: f.item_type,
-          enabled: f.enabled,
-        })),
+        form_data: activeTab.bodyType === 'form-data' ? activeTab.formData : undefined,
         timeout_seconds: activeTab.timeoutSeconds || 30,
-        follow_redirects: activeTab.followRedirects,
-        verify_ssl: activeTab.verifySsl,
+        follow_redirects: activeTab.followRedirects ?? true,
+        verify_ssl: activeTab.verifySsl ?? false,
       };
 
-      const resp = await apiSendRequest(payload);
+      const res = await apiSendRequest(payload);
 
-      if (isCancelledRef.current) return;
-
-      if (resp.status === 0 && resp.body.startsWith('Error:')) {
+      if (!isCancelledRef.current) {
         updateActiveTab({
           isLoading: false,
-          error: resp.body,
-          response: null,
-        });
-      } else {
-        updateActiveTab({
-          isLoading: false,
-          response: resp,
+          response: res,
           error: null,
-          isDirty: false,
         });
-        addToHistory(activeTab, resp);
+        addToHistory(activeTab, res);
       }
     } catch (err: any) {
-      if (isCancelledRef.current) return;
-      updateActiveTab({
-        isLoading: false,
-        error: String(err?.message || err),
-        response: null,
-      });
+      if (!isCancelledRef.current) {
+        const errorMsg = typeof err === 'string' ? err : err.message || 'API request failed';
+        updateActiveTab({
+          isLoading: false,
+          response: null,
+          error: errorMsg,
+        });
+      }
     }
   }, [activeTab, activeConnectionId, resolveVariables, updateActiveTab, addToHistory]);
 
-  const handleCancelRequest = () => {
+  const handleCancelRequest = useCallback(() => {
     isCancelledRef.current = true;
-    updateActiveTab({ isLoading: false });
+    updateActiveTab({
+      isLoading: false,
+      error: 'Request cancelled by user',
+    });
+  }, [updateActiveTab]);
+
+  // Tab close confirmation handler
+  const handleCloseTab = (tabId: string) => {
+    const target = tabs.find(t => t.id === tabId);
+    if (target?.isDirty) {
+      const confirmed = window.confirm(
+        `Request "${target.name || 'Untitled'}" has unsaved changes.\n\nAre you sure you want to close this tab and discard changes?`
+      );
+      if (!confirmed) return;
+    }
+    closeTab(tabId);
   };
 
-  // Keyboard shortcut listener (⌘ Enter to send)
+  // Keyboard shortcut listener for sending request and beforeunload guard
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         handleSendRequest();
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 't') {
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 't') {
         e.preventDefault();
         addTab();
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'w') {
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w') {
         e.preventDefault();
-        if (activeTab) closeTab(activeTab.id);
+        if (activeTab) handleCloseTab(activeTab.id);
       }
     };
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (tabs.some(t => t.isDirty)) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleSendRequest, addTab, closeTab, activeTab]);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [handleSendRequest, addTab, activeTab, tabs]);
 
   return (
     <div className="flex flex-col h-full bg-[#181825] text-gray-200 select-none overflow-hidden font-sans">
@@ -209,7 +284,7 @@ export default function ApiApp() {
           <button
             type="button"
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className={`p-1.5 rounded-lg text-xs transition-colors mr-1 ${
+            className={`p-1.5 rounded-lg text-xs transition-colors mr-1 cursor-pointer ${
               sidebarOpen ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30' : 'text-gray-400 hover:text-white hover:bg-white/10'
             }`}
             title="Toggle Sidebar"
@@ -240,16 +315,17 @@ export default function ApiApp() {
                 </span>
 
                 {tab.isDirty && (
-                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" title="Unsaved changes" />
                 )}
 
                 <button
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    closeTab(tab.id);
+                    handleCloseTab(tab.id);
                   }}
                   className="p-0.5 rounded-md hover:bg-white/10 text-gray-500 hover:text-white shrink-0 transition-colors"
+                  title="Close tab"
                 >
                   <X className="w-3 h-3" />
                 </button>
@@ -268,29 +344,50 @@ export default function ApiApp() {
           </button>
         </div>
 
-        {/* Right: Active Server SSH Tunnel Indicator */}
+        {/* Right: Remote Storage Sync & SSH Server Indicator */}
         <div className="flex items-center space-x-2 text-xs font-mono text-gray-400 shrink-0 pl-2">
-          {activeServer ? (
-            <div className="flex items-center space-x-1.5 bg-blue-500/10 border border-blue-500/20 px-2.5 py-1 rounded-xl text-blue-300">
-              <Server className="w-3.5 h-3.5 text-blue-400" />
-              <span className="truncate max-w-[180px]">{activeServer.username}@{activeServer.host}</span>
-            </div>
+          {activeServer && activeConnectionId ? (
+            <button
+              type="button"
+              onClick={() => syncToServer(activeConnectionId, userHome)}
+              className="flex items-center space-x-1.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 px-2.5 py-1 rounded-xl text-blue-300 transition-colors cursor-pointer"
+              title={`Click to save/sync API data with ${userHome}/.sshdesktop/api_studio.json`}
+            >
+              <Cloud className={`w-3.5 h-3.5 ${isSyncingServer ? 'animate-pulse text-amber-400' : 'text-blue-400'}`} />
+              <span className="truncate max-w-[220px]">
+                {isSyncingServer ? 'Saving to server...' : `Saved in ${userHome}/.sshdesktop`}
+              </span>
+            </button>
           ) : (
-            <div className="flex items-center space-x-1.5 text-gray-500 text-[11px]">
+            <div className="flex items-center space-x-1.5 text-gray-500 text-[11px] px-2 py-1">
               <Globe className="w-3.5 h-3.5" />
-              <span>Direct Mode</span>
+              <span>Direct Mode (Offline)</span>
             </div>
           )}
         </div>
       </div>
 
-      {/* 2. MAIN WORKSPACE */}
-      <div className="flex-1 flex min-h-0 overflow-hidden">
-        {/* Left Sidebar */}
+      {/* 2. MAIN WORKSPACE WITH RESIZABLE SIDEBAR */}
+      <div className="flex-1 flex min-h-0 overflow-hidden relative">
+        {/* Left Sidebar (Resizable) */}
         {sidebarOpen && (
-          <ApiSidebar 
-            onOpenCreateCollectionModal={() => setShowCreateCollectionModal(true)} 
-          />
+          <>
+            <div 
+              style={{ width: `${sidebarWidth}px` }} 
+              className="shrink-0 h-full overflow-hidden select-none"
+            >
+              <ApiSidebar 
+                onOpenCreateCollectionModal={() => setShowCreateCollectionModal(true)} 
+              />
+            </div>
+
+            {/* Draggable Divider Handle */}
+            <div
+              onMouseDown={startSidebarResize}
+              className="w-1 hover:w-1.5 h-full cursor-col-resize hover:bg-blue-500/60 active:bg-blue-500 transition-all z-20 shrink-0 bg-white/[0.08]"
+              title="Drag to resize sidebar width"
+            />
+          </>
         )}
 
         {/* Center Request/Response Workspace */}
@@ -312,12 +409,13 @@ export default function ApiApp() {
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
             {/* Top Half: Request Configuration (Headers, Params, Auth, Body) */}
             <div className="h-[48%] min-h-[160px] border-b border-white/[0.08] overflow-hidden flex flex-col">
-              <RequestConfigTabs activeTab={activeTab} />
+              <RequestConfigTabs key={activeTab.id} activeTab={activeTab} />
             </div>
 
             {/* Bottom Half: Response Inspector (Status, Timing, Body, Headers) */}
             <div className="flex-1 min-h-[180px] overflow-hidden flex flex-col">
               <ResponseViewer
+                key={activeTab.id}
                 response={activeTab.response}
                 isLoading={activeTab.isLoading}
                 error={activeTab.error}
@@ -352,15 +450,31 @@ export default function ApiApp() {
 
               <div className="space-y-1">
                 <label className="text-xs font-semibold text-gray-300">Collection</label>
-                <select
-                  value={targetCollectionId}
-                  onChange={(e) => setTargetCollectionId(e.target.value)}
-                  className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-xs text-gray-200 focus:outline-none"
-                >
-                  {collections.map(c => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
+                {collections.length === 0 ? (
+                  <div className="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 p-2.5 rounded-xl space-y-1.5">
+                    <div>No collections exist yet. Please create a collection first.</div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowSaveModal(false);
+                        setShowCreateCollectionModal(true);
+                      }}
+                      className="text-blue-400 font-bold hover:underline"
+                    >
+                      + Create Collection
+                    </button>
+                  </div>
+                ) : (
+                  <select
+                    value={targetCollectionId || collections[0]?.id}
+                    onChange={(e) => setTargetCollectionId(e.target.value)}
+                    className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-xs text-gray-200 focus:outline-none"
+                  >
+                    {collections.map(c => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                )}
               </div>
             </div>
 
@@ -368,20 +482,22 @@ export default function ApiApp() {
               <button
                 type="button"
                 onClick={() => setShowSaveModal(false)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-gray-400 hover:text-white"
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-gray-400 hover:text-white cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="button"
+                disabled={collections.length === 0}
                 onClick={() => {
-                  if (targetCollectionId) {
-                    saveToCollection(targetCollectionId, saveRequestName);
+                  const colId = targetCollectionId || collections[0]?.id;
+                  if (colId) {
+                    saveToCollection(colId, saveRequestName);
                     updateActiveTab({ name: saveRequestName, isDirty: false });
                     setShowSaveModal(false);
                   }
                 }}
-                className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md"
+                className="px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold shadow-md cursor-pointer"
               >
                 Save
               </button>
@@ -408,7 +524,7 @@ export default function ApiApp() {
                   type="text"
                   value={newCollectionName}
                   onChange={(e) => setNewCollectionName(e.target.value)}
-                  placeholder="e.g. Payments Microservice"
+                  placeholder="e.g. Authentication Services"
                   className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-blue-500"
                 />
               </div>
@@ -419,7 +535,7 @@ export default function ApiApp() {
                   type="text"
                   value={newCollectionDesc}
                   onChange={(e) => setNewCollectionDesc(e.target.value)}
-                  placeholder="e.g. Endpoints routed through remote internal port 8080"
+                  placeholder="e.g. Endpoints routed through internal network"
                   className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-xs text-gray-200 focus:outline-none"
                 />
               </div>
@@ -429,7 +545,7 @@ export default function ApiApp() {
               <button
                 type="button"
                 onClick={() => setShowCreateCollectionModal(false)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-gray-400 hover:text-white"
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-gray-400 hover:text-white cursor-pointer"
               >
                 Cancel
               </button>
@@ -443,7 +559,7 @@ export default function ApiApp() {
                     setShowCreateCollectionModal(false);
                   }
                 }}
-                className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md"
+                className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md cursor-pointer"
               >
                 Create
               </button>

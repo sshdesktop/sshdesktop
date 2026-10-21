@@ -12,7 +12,10 @@ interface RequestConfigTabsProps {
 
 export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps) {
   const { updateActiveTab } = useApiStore();
-  const [activeSubTab, setActiveSubTab] = useState<'params' | 'headers' | 'auth' | 'body' | 'settings'>('params');
+  const currentSubTab = activeTab.activeSubTab || 'params';
+  const setSubTab = (tab: 'params' | 'headers' | 'auth' | 'body' | 'settings') => {
+    updateActiveTab({ activeSubTab: tab });
+  };
 
   // Password visibility
   const [showToken, setShowToken] = useState(false);
@@ -32,6 +35,9 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
   };
 
   const handleDeleteParam = (index: number) => {
+    const p = activeTab.queryParams[index];
+    const name = p?.key ? `parameter "${p.key}"` : 'this parameter';
+    if (!window.confirm(`Are you sure you want to delete ${name}?`)) return;
     const updated = activeTab.queryParams.filter((_, i) => i !== index);
     updateActiveTab({ queryParams: updated });
   };
@@ -50,6 +56,9 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
   };
 
   const handleDeleteHeader = (index: number) => {
+    const h = activeTab.headers[index];
+    const name = h?.key ? `header "${h.key}"` : 'this header';
+    if (!window.confirm(`Are you sure you want to delete ${name}?`)) return;
     const updated = activeTab.headers.filter((_, i) => i !== index);
     updateActiveTab({ headers: updated });
   };
@@ -68,6 +77,9 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
   };
 
   const handleDeleteFormData = (index: number) => {
+    const f = (activeTab.formData || [])[index];
+    const name = f?.key ? `field "${f.key}"` : 'this field';
+    if (!window.confirm(`Are you sure you want to delete ${name}?`)) return;
     const updated = (activeTab.formData || []).filter((_, i) => i !== index);
     updateActiveTab({ formData: updated });
   };
@@ -89,9 +101,9 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
       <div className="flex items-center space-x-1 border-b border-white/[0.08] px-3 pt-2 bg-[#14141e]/70 shrink-0">
         <button
           type="button"
-          onClick={() => setActiveSubTab('params')}
+          onClick={() => setSubTab('params')}
           className={`px-3 py-1.5 rounded-t-lg text-xs font-medium flex items-center space-x-1.5 transition-all border-b-2 ${
-            activeSubTab === 'params'
+            currentSubTab === 'params'
               ? 'border-blue-500 text-blue-400 bg-white/[0.04]'
               : 'border-transparent text-gray-400 hover:text-white'
           }`}
@@ -104,9 +116,9 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
 
         <button
           type="button"
-          onClick={() => setActiveSubTab('headers')}
+          onClick={() => setSubTab('headers')}
           className={`px-3 py-1.5 rounded-t-lg text-xs font-medium flex items-center space-x-1.5 transition-all border-b-2 ${
-            activeSubTab === 'headers'
+            currentSubTab === 'headers'
               ? 'border-blue-500 text-blue-400 bg-white/[0.04]'
               : 'border-transparent text-gray-400 hover:text-white'
           }`}
@@ -121,9 +133,9 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
 
         <button
           type="button"
-          onClick={() => setActiveSubTab('auth')}
+          onClick={() => setSubTab('auth')}
           className={`px-3 py-1.5 rounded-t-lg text-xs font-medium flex items-center space-x-1.5 transition-all border-b-2 ${
-            activeSubTab === 'auth'
+            currentSubTab === 'auth'
               ? 'border-blue-500 text-blue-400 bg-white/[0.04]'
               : 'border-transparent text-gray-400 hover:text-white'
           }`}
@@ -136,9 +148,9 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
 
         <button
           type="button"
-          onClick={() => setActiveSubTab('body')}
+          onClick={() => setSubTab('body')}
           className={`px-3 py-1.5 rounded-t-lg text-xs font-medium flex items-center space-x-1.5 transition-all border-b-2 ${
-            activeSubTab === 'body'
+            currentSubTab === 'body'
               ? 'border-blue-500 text-blue-400 bg-white/[0.04]'
               : 'border-transparent text-gray-400 hover:text-white'
           }`}
@@ -151,9 +163,9 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
 
         <button
           type="button"
-          onClick={() => setActiveSubTab('settings')}
+          onClick={() => setSubTab('settings')}
           className={`px-3 py-1.5 rounded-t-lg text-xs font-medium flex items-center space-x-1.5 transition-all border-b-2 ${
-            activeSubTab === 'settings'
+            currentSubTab === 'settings'
               ? 'border-blue-500 text-blue-400 bg-white/[0.04]'
               : 'border-transparent text-gray-400 hover:text-white'
           }`}
@@ -165,7 +177,7 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
       {/* Content Area */}
       <div className="flex-1 overflow-y-auto p-4 scrollbar-thin">
         {/* 1. QUERY PARAMS TAB */}
-        {activeSubTab === 'params' && (
+        {currentSubTab === 'params' && (
           <div className="space-y-3">
             <div className="flex items-center justify-between text-xs text-gray-400">
               <span>Query Parameters</span>
@@ -237,7 +249,7 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
         )}
 
         {/* 2. HEADERS TAB */}
-        {activeSubTab === 'headers' && (
+        {currentSubTab === 'headers' && (
           <div className="space-y-3">
             <div className="flex items-center justify-between text-xs text-gray-400">
               <span>Request Headers</span>
@@ -303,7 +315,7 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
         )}
 
         {/* 3. AUTH TAB */}
-        {activeSubTab === 'auth' && (
+        {currentSubTab === 'auth' && (
           <div className="space-y-5 max-w-xl">
             <div className="space-y-1">
               <label className="text-xs font-semibold text-gray-300">Authentication Type</label>
@@ -434,7 +446,7 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
         )}
 
         {/* 4. BODY TAB */}
-        {activeSubTab === 'body' && (
+        {currentSubTab === 'body' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
@@ -553,7 +565,7 @@ export default function RequestConfigTabs({ activeTab }: RequestConfigTabsProps)
         )}
 
         {/* 5. SETTINGS TAB */}
-        {activeSubTab === 'settings' && (
+        {currentSubTab === 'settings' && (
           <div className="space-y-5 max-w-lg">
             <div className="flex items-center justify-between p-3.5 bg-[#14141e]/80 border border-white/10 rounded-2xl">
               <div>

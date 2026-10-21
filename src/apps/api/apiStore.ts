@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { ApiTabState, ApiCollection, HistoryItem, ApiEnvironment, SavedRequest, HttpMethod } from './types';
+import { sftpReadTextFile, sftpWriteTextFile, sftpMkdir } from '../../lib/tauri-bridge';
 
 const STORAGE_KEY_COLLECTIONS = 'sshdesktop_api_collections_v1';
 const LEGACY_STORAGE_KEY_COLLECTIONS = 'clouddesk_api_collections_v1';
@@ -9,19 +10,16 @@ const STORAGE_KEY_ENVS = 'sshdesktop_api_environments_v1';
 const LEGACY_STORAGE_KEY_ENVS = 'clouddesk_api_environments_v1';
 
 const DEFAULT_INITIAL_REQUEST: ApiTabState = {
-  id: 'tab-default',
-  name: 'Local API Test',
+  id: 'tab-1',
+  name: 'New Request',
   method: 'GET',
-  url: 'http://localhost:8080/api/health',
+  url: '',
   useSshTunnel: true,
-  headers: [
-    { key: 'Accept', value: 'application/json', enabled: true },
-    { key: 'User-Agent', value: 'SSHDesktop-API-Studio/1.0', enabled: true },
-  ],
+  headers: [],
   queryParams: [],
   auth: { type: 'none' },
   bodyType: 'none',
-  rawBody: '{\n  "message": "Hello from SSH Desktop API Studio"\n}',
+  rawBody: '',
   formData: [],
   timeoutSeconds: 30,
   followRedirects: true,
@@ -30,104 +28,11 @@ const DEFAULT_INITIAL_REQUEST: ApiTabState = {
   response: null,
   error: null,
   isDirty: false,
+  activeSubTab: 'params',
 };
 
-const DEFAULT_COLLECTIONS: ApiCollection[] = [
-  {
-    id: 'col-sample-1',
-    name: 'Localhost Microservices',
-    description: 'Internal private services reached via SSH port forwarding tunnel',
-    requests: [
-      {
-        id: 'req-health',
-        name: 'Service Health Check',
-        method: 'GET',
-        url: 'http://localhost:8080/health',
-        useSshTunnel: true,
-        headers: [{ key: 'Accept', value: 'application/json', enabled: true }],
-        queryParams: [],
-        auth: { type: 'none' },
-        bodyType: 'none',
-        rawBody: '',
-        formData: [],
-        updatedAt: new Date().toISOString(),
-      },
-      {
-        id: 'req-users-list',
-        name: 'List Users (Port 3000)',
-        method: 'GET',
-        url: 'http://127.0.0.1:3000/api/v1/users',
-        useSshTunnel: true,
-        headers: [{ key: 'Accept', value: 'application/json', enabled: true }],
-        queryParams: [{ key: 'limit', value: '25', enabled: true }, { key: 'page', value: '1', enabled: true }],
-        auth: { type: 'bearer', bearerToken: 'your-auth-token-here' },
-        bodyType: 'none',
-        rawBody: '',
-        formData: [],
-        updatedAt: new Date().toISOString(),
-      },
-      {
-        id: 'req-create-item',
-        name: 'Create Resource (POST JSON)',
-        method: 'POST',
-        url: 'http://localhost:5000/api/items',
-        useSshTunnel: true,
-        headers: [
-          { key: 'Content-Type', value: 'application/json', enabled: true },
-          { key: 'Accept', value: 'application/json', enabled: true }
-        ],
-        queryParams: [],
-        auth: { type: 'none' },
-        bodyType: 'json',
-        rawBody: '{\n  "title": "SSH Desktop Integration",\n  "status": "active",\n  "port": 5000\n}',
-        formData: [],
-        updatedAt: new Date().toISOString(),
-      }
-    ]
-  },
-  {
-    id: 'col-sample-2',
-    name: 'Public APIs',
-    description: 'Direct internet endpoints or gateway testing',
-    requests: [
-      {
-        id: 'req-httpbin-get',
-        name: 'HTTPBin Inspect Headers',
-        method: 'GET',
-        url: 'https://httpbin.org/get',
-        useSshTunnel: false,
-        headers: [{ key: 'X-Client', value: 'SSH Desktop', enabled: true }],
-        queryParams: [{ key: 'client', value: 'tauri', enabled: true }],
-        auth: { type: 'none' },
-        bodyType: 'none',
-        rawBody: '',
-        formData: [],
-        updatedAt: new Date().toISOString(),
-      }
-    ]
-  }
-];
-
-const DEFAULT_ENVIRONMENTS: ApiEnvironment[] = [
-  {
-    id: 'env-local',
-    name: 'Local Server (SSH Tunnel)',
-    variables: [
-      { key: 'baseUrl', value: 'http://localhost:8080', enabled: true },
-      { key: 'apiPrefix', value: '/api/v1', enabled: true },
-      { key: 'token', value: 'dev-secret-token-123', enabled: true }
-    ]
-  },
-  {
-    id: 'env-prod',
-    name: 'Production Gateway',
-    variables: [
-      { key: 'baseUrl', value: 'https://api.example.com', enabled: true },
-      { key: 'apiPrefix', value: '/v1', enabled: true },
-      { key: 'token', value: 'prod-bearer-token', enabled: true }
-    ]
-  }
-];
+const DEFAULT_COLLECTIONS: ApiCollection[] = [];
+const DEFAULT_ENVIRONMENTS: ApiEnvironment[] = [];
 
 interface ApiStore {
   tabs: ApiTabState[];
@@ -138,6 +43,8 @@ interface ApiStore {
   selectedEnvId: string | null;
   sidebarOpen: boolean;
   sidebarTab: 'collections' | 'history' | 'env';
+  isSyncingServer: boolean;
+  lastServerSync: string | null;
 
   // Tab Actions
   addTab: (req?: Partial<ApiTabState>) => void;
@@ -157,6 +64,7 @@ interface ApiStore {
   // History Actions
   addToHistory: (tabState: ApiTabState, response: any) => void;
   clearHistory: () => void;
+  deleteHistoryItem: (id: string) => void;
   loadHistoryItem: (item: HistoryItem) => void;
 
   // Environment Actions
@@ -164,27 +72,48 @@ interface ApiStore {
   setSidebarTab: (tab: 'collections' | 'history' | 'env') => void;
   setSelectedEnvId: (envId: string | null) => void;
   updateEnvironment: (env: ApiEnvironment) => void;
+  createEnvironment: (name: string) => void;
+  deleteEnvironment: (id: string) => void;
   resolveVariables: (input: string) => string;
+
+  // Remote Server Persistence (~/.sshdesktop/api_studio.json)
+  hydrateFromServer: (connId: string, userHome: string) => Promise<boolean>;
+  syncToServer: (connId: string, userHome: string) => Promise<boolean>;
 }
 
 export const useApiStore = create<ApiStore>((set, get) => {
-  // Load saved state
-  let initialCollections = DEFAULT_COLLECTIONS;
+  // Load saved state from localStorage, filtering out legacy sample/dummy data
+  let initialCollections: ApiCollection[] = [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY_COLLECTIONS) || localStorage.getItem(LEGACY_STORAGE_KEY_COLLECTIONS);
-    if (raw) initialCollections = JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        // Strip dummy sample collections
+        initialCollections = parsed.filter((c: any) => c.id !== 'col-sample-1' && c.id !== 'col-sample-2');
+      }
+    }
   } catch {}
 
   let initialHistory: HistoryItem[] = [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY_HISTORY) || localStorage.getItem(LEGACY_STORAGE_KEY_HISTORY);
-    if (raw) initialHistory = JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) initialHistory = parsed;
+    }
   } catch {}
 
-  let initialEnvs = DEFAULT_ENVIRONMENTS;
+  let initialEnvs: ApiEnvironment[] = [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY_ENVS) || localStorage.getItem(LEGACY_STORAGE_KEY_ENVS);
-    if (raw) initialEnvs = JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        // Strip dummy sample environments
+        initialEnvs = parsed.filter((e: any) => e.id !== 'env-local' && e.id !== 'env-prod');
+      }
+    }
   } catch {}
 
   return {
@@ -193,16 +122,23 @@ export const useApiStore = create<ApiStore>((set, get) => {
     collections: initialCollections,
     history: initialHistory,
     environments: initialEnvs,
-    selectedEnvId: 'env-local',
+    selectedEnvId: initialEnvs[0]?.id || null,
     sidebarOpen: true,
     sidebarTab: 'collections',
+    isSyncingServer: false,
+    lastServerSync: null,
 
     addTab: (req) => {
-      const newId = `tab-${Date.now()}`;
+      const newId = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const newTab: ApiTabState = {
         ...DEFAULT_INITIAL_REQUEST,
         id: newId,
-        name: req?.name || 'Untitled Request',
+        name: req?.name || 'New Request',
+        headers: JSON.parse(JSON.stringify(req?.headers || [])),
+        queryParams: JSON.parse(JSON.stringify(req?.queryParams || [])),
+        formData: JSON.parse(JSON.stringify(req?.formData || [])),
+        auth: JSON.parse(JSON.stringify(req?.auth || { type: 'none' })),
+        activeSubTab: req?.activeSubTab || 'params',
         ...req,
       };
       set(state => ({
@@ -214,7 +150,7 @@ export const useApiStore = create<ApiStore>((set, get) => {
     closeTab: (tabId) => {
       const state = get();
       if (state.tabs.length <= 1) {
-        // Reset the single tab instead of leaving zero tabs
+        // Reset single tab instead of leaving zero tabs
         const freshId = `tab-${Date.now()}`;
         set({
           tabs: [{ ...DEFAULT_INITIAL_REQUEST, id: freshId, name: 'New Request' }],
@@ -246,11 +182,16 @@ export const useApiStore = create<ApiStore>((set, get) => {
       const { tabs } = get();
       const target = tabs.find(t => t.id === tabId);
       if (!target) return;
-      const newId = `tab-${Date.now()}`;
+      const newId = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const dup: ApiTabState = {
         ...target,
         id: newId,
         name: `${target.name} (Copy)`,
+        headers: JSON.parse(JSON.stringify(target.headers || [])),
+        queryParams: JSON.parse(JSON.stringify(target.queryParams || [])),
+        formData: JSON.parse(JSON.stringify(target.formData || [])),
+        auth: JSON.parse(JSON.stringify(target.auth || { type: 'none' })),
+        isDirty: true,
       };
       set({
         tabs: [...tabs, dup],
@@ -264,18 +205,18 @@ export const useApiStore = create<ApiStore>((set, get) => {
       if (!active) return;
 
       const saved: SavedRequest = {
-        id: `req-${Date.now()}`,
+        id: `req-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         collectionId,
-        name: name || active.name || 'Saved Request',
+        name: name.trim() || active.name || 'Saved Request',
         method: active.method,
         url: active.url,
         useSshTunnel: active.useSshTunnel,
-        headers: active.headers,
-        queryParams: active.queryParams,
-        auth: active.auth,
+        headers: JSON.parse(JSON.stringify(active.headers || [])),
+        queryParams: JSON.parse(JSON.stringify(active.queryParams || [])),
+        auth: JSON.parse(JSON.stringify(active.auth || { type: 'none' })),
         bodyType: active.bodyType,
         rawBody: active.rawBody,
-        formData: active.formData,
+        formData: JSON.parse(JSON.stringify(active.formData || [])),
         updatedAt: new Date().toISOString(),
       };
 
@@ -293,13 +234,18 @@ export const useApiStore = create<ApiStore>((set, get) => {
       try {
         localStorage.setItem(STORAGE_KEY_COLLECTIONS, JSON.stringify(updated));
       } catch {}
+
+      // Mark active tab clean
+      set({
+        tabs: tabs.map(t => (t.id === activeTabId ? { ...t, isDirty: false, name: saved.name } : t)),
+      });
     },
 
     createCollection: (name, description) => {
       const newCol: ApiCollection = {
-        id: `col-${Date.now()}`,
+        id: `col-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         name: name.trim() || 'New Collection',
-        description,
+        description: description?.trim() || '',
         requests: [],
       };
       const updated = [...get().collections, newCol];
@@ -334,19 +280,19 @@ export const useApiStore = create<ApiStore>((set, get) => {
     },
 
     loadSavedRequest: (req) => {
-      const newId = `tab-${Date.now()}`;
+      const newId = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const newTab: ApiTabState = {
         id: newId,
         name: req.name,
         method: req.method,
         url: req.url,
         useSshTunnel: req.useSshTunnel,
-        headers: req.headers,
-        queryParams: req.queryParams,
-        auth: req.auth,
+        headers: JSON.parse(JSON.stringify(req.headers || [])),
+        queryParams: JSON.parse(JSON.stringify(req.queryParams || [])),
+        auth: JSON.parse(JSON.stringify(req.auth || { type: 'none' })),
         bodyType: req.bodyType,
         rawBody: req.rawBody,
-        formData: req.formData,
+        formData: JSON.parse(JSON.stringify(req.formData || [])),
         timeoutSeconds: 30,
         followRedirects: true,
         verifySsl: false,
@@ -354,6 +300,7 @@ export const useApiStore = create<ApiStore>((set, get) => {
         response: null,
         error: null,
         isDirty: false,
+        activeSubTab: 'params',
       };
       set(state => ({
         tabs: [...state.tabs, newTab],
@@ -363,7 +310,7 @@ export const useApiStore = create<ApiStore>((set, get) => {
 
     addToHistory: (tabState, response) => {
       const item: HistoryItem = {
-        id: `hist-${Date.now()}`,
+        id: `hist-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
         method: tabState.method,
         url: tabState.url,
@@ -371,7 +318,15 @@ export const useApiStore = create<ApiStore>((set, get) => {
         durationMs: response?.duration_ms || 0,
         sizeBytes: response?.size_bytes || 0,
         useSshTunnel: tabState.useSshTunnel,
-        requestSnapshot: { ...tabState, response: null },
+        requestSnapshot: {
+          ...tabState,
+          headers: JSON.parse(JSON.stringify(tabState.headers || [])),
+          queryParams: JSON.parse(JSON.stringify(tabState.queryParams || [])),
+          formData: JSON.parse(JSON.stringify(tabState.formData || [])),
+          auth: JSON.parse(JSON.stringify(tabState.auth || { type: 'none' })),
+          response: null,
+          isDirty: false,
+        },
       };
 
       const updated = [item, ...get().history.slice(0, 99)]; // Keep latest 100
@@ -388,15 +343,37 @@ export const useApiStore = create<ApiStore>((set, get) => {
       } catch {}
     },
 
+    deleteHistoryItem: (id) => {
+      const updated = get().history.filter(h => h.id !== id);
+      set({ history: updated });
+      try {
+        localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(updated));
+      } catch {}
+    },
+
     loadHistoryItem: (item) => {
-      const newId = `tab-${Date.now()}`;
+      const newId = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const snap = item.requestSnapshot;
       const newTab: ApiTabState = {
-        ...item.requestSnapshot,
         id: newId,
-        name: `${item.method} ${item.url.replace(/^https?:\/\//, '').slice(0, 20)}`,
+        name: `${item.method} ${item.url.replace(/^https?:\/\//, '').slice(0, 20)}` || 'History Item',
+        method: snap?.method || item.method,
+        url: snap?.url || item.url,
+        useSshTunnel: snap?.useSshTunnel ?? item.useSshTunnel,
+        headers: JSON.parse(JSON.stringify(snap?.headers || [])),
+        queryParams: JSON.parse(JSON.stringify(snap?.queryParams || [])),
+        formData: JSON.parse(JSON.stringify(snap?.formData || [])),
+        auth: JSON.parse(JSON.stringify(snap?.auth || { type: 'none' })),
+        bodyType: snap?.bodyType || 'none',
+        rawBody: snap?.rawBody || '',
+        timeoutSeconds: snap?.timeoutSeconds || 30,
+        followRedirects: snap?.followRedirects ?? true,
+        verifySsl: snap?.verifySsl ?? false,
         response: null,
         error: null,
         isLoading: false,
+        isDirty: false,
+        activeSubTab: snap?.activeSubTab || 'params',
       };
       set(state => ({
         tabs: [...state.tabs, newTab],
@@ -416,6 +393,30 @@ export const useApiStore = create<ApiStore>((set, get) => {
       } catch {}
     },
 
+    createEnvironment: (name) => {
+      const newEnv: ApiEnvironment = {
+        id: `env-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: name.trim() || 'New Environment',
+        variables: [],
+      };
+      const updated = [...get().environments, newEnv];
+      set({ environments: updated, selectedEnvId: newEnv.id });
+      try {
+        localStorage.setItem(STORAGE_KEY_ENVS, JSON.stringify(updated));
+      } catch {}
+    },
+
+    deleteEnvironment: (id) => {
+      const updated = get().environments.filter(e => e.id !== id);
+      set({
+        environments: updated,
+        selectedEnvId: get().selectedEnvId === id ? (updated[0]?.id || null) : get().selectedEnvId,
+      });
+      try {
+        localStorage.setItem(STORAGE_KEY_ENVS, JSON.stringify(updated));
+      } catch {}
+    },
+
     resolveVariables: (input) => {
       if (!input || !input.includes('{{')) return input;
       const { environments, selectedEnvId } = get();
@@ -430,6 +431,73 @@ export const useApiStore = create<ApiStore>((set, get) => {
         }
       }
       return resolved;
+    },
+
+    hydrateFromServer: async (connId: string, userHome: string) => {
+      if (!connId || !userHome) return false;
+      try {
+        // Ensure ~/.sshdesktop folder exists on remote server
+        await sftpMkdir(connId, `${userHome}/.sshdesktop`).catch(() => {});
+
+        // Try reading ~/.sshdesktop/api_studio.json (with fallback to ~/.clouddesk/api_studio.json)
+        let content = await sftpReadTextFile(connId, `${userHome}/.sshdesktop/api_studio.json`).catch(() => '');
+        if (!content) {
+          content = await sftpReadTextFile(connId, `${userHome}/.clouddesk/api_studio.json`).catch(() => '');
+        }
+
+        if (content && content.trim().startsWith('{')) {
+          const parsed = JSON.parse(content);
+          if (Array.isArray(parsed.collections)) {
+            const cleanCols = parsed.collections.filter((c: any) => c.id !== 'col-sample-1' && c.id !== 'col-sample-2');
+            set({ collections: cleanCols });
+            try { localStorage.setItem(STORAGE_KEY_COLLECTIONS, JSON.stringify(cleanCols)); } catch {}
+          }
+          if (Array.isArray(parsed.environments)) {
+            const cleanEnvs = parsed.environments.filter((e: any) => e.id !== 'env-local' && e.id !== 'env-prod');
+            set({ environments: cleanEnvs });
+            if (cleanEnvs.length > 0 && !get().selectedEnvId) {
+              set({ selectedEnvId: cleanEnvs[0].id });
+            }
+            try { localStorage.setItem(STORAGE_KEY_ENVS, JSON.stringify(cleanEnvs)); } catch {}
+          }
+          if (Array.isArray(parsed.history)) {
+            set({ history: parsed.history });
+            try { localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(parsed.history)); } catch {}
+          }
+
+          set({ lastServerSync: new Date().toLocaleTimeString() });
+          return true;
+        }
+      } catch (err) {
+        console.warn('[API Studio] Failed to hydrate from server:', err);
+      }
+      return false;
+    },
+
+    syncToServer: async (connId: string, userHome: string) => {
+      if (!connId || !userHome) return false;
+      set({ isSyncingServer: true });
+      try {
+        await sftpMkdir(connId, `${userHome}/.sshdesktop`).catch(() => {});
+        const payload = {
+          collections: get().collections,
+          environments: get().environments,
+          history: get().history.slice(0, 50),
+          savedAt: new Date().toISOString(),
+          savedBy: 'SSH Desktop API Studio',
+        };
+        await sftpWriteTextFile(
+          connId,
+          `${userHome}/.sshdesktop/api_studio.json`,
+          JSON.stringify(payload, null, 2)
+        );
+        set({ isSyncingServer: false, lastServerSync: new Date().toLocaleTimeString() });
+        return true;
+      } catch (err) {
+        console.warn('[API Studio] Failed to sync to server:', err);
+        set({ isSyncingServer: false });
+        return false;
+      }
     },
   };
 });

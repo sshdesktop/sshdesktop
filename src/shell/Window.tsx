@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Rnd } from 'react-rnd';
 import { useWindowStore, useSettingsStore } from '../lib/store';
 import { WindowState } from '../lib/types';
+import { useApiStore } from '../apps/api/apiStore';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   RefreshCw, Maximize2, Minimize2, SplitSquareVertical, 
@@ -292,6 +293,15 @@ export default function Window({ window: win, children }: { window: WindowState;
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => { 
                 e.stopPropagation(); 
+                if (win.appId === 'api') {
+                  const dirtyTabs = useApiStore.getState().tabs.filter(t => t.isDirty);
+                  if (dirtyTabs.length > 0) {
+                    const ok = window.confirm(
+                      `API Studio has ${dirtyTabs.length} unsaved request tab(s).\n\nAre you sure you want to close API Studio and discard unsaved changes?`
+                    );
+                    if (!ok) return;
+                  }
+                }
                 closeWindow(win.id); 
               }} 
               className={`mac-traffic-light w-3.5 h-3.5 rounded-full flex items-center justify-center transition-all border border-black/20 shadow-sm cursor-pointer ${
