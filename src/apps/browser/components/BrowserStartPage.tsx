@@ -159,8 +159,8 @@ export default function BrowserStartPage({
             </div>
             <p className="text-gray-400 text-[11px] mt-0.5 leading-relaxed">
               {networkMode === 'server'
-                ? `Requests route through your remote SSH server (${serverHost}). Localhost ports connect directly to internal services listening on the Linux host via encrypted SSH tunnels.`
-                : 'Requests connect directly using your local machine network interface. Use this mode for external public websites or local client dev servers.'}
+                ? `Server Network (SSH: ON): Requests route through your remote SSH server (${serverHost}) via encrypted port tunnels. Access internal server ports (localhost:8080, :3000) directly.`
+                : 'User Network (SSH: OFF): Opens destinations in your PC browser with full redirect support, SSO logins, cookies, and extensions.'}
             </p>
           </div>
         </div>

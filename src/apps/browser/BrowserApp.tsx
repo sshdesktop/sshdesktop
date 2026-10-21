@@ -4,7 +4,7 @@ import {
   ShieldCheck, Star, Plus, X, Search, Activity, Terminal, 
   Layers, Code2, Server, ExternalLink, ZoomIn, ZoomOut,
   AlertCircle, Check, Sparkles, ChevronDown, Radio, Bookmark as BookmarkIcon,
-  Laptop
+  Laptop, Compass, Copy, ArrowUpRight
 } from 'lucide-react';
 import { BrowserTab, BrowserRoutingMode, BrowserBookmark, DevToolsPanel } from './types';
 import { useBrowserStore } from './browserStore';
@@ -33,6 +33,7 @@ interface ResolvedTarget {
   remoteHost: string;
   remotePort: number;
   subPath: string;
+  isPublicHttps?: boolean;
 }
 
 /**
@@ -92,7 +93,7 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
   const hasSpace = /\s/.test(trimmed);
   const isIpWithPort = /^(\d{1,3}\.){3}\d{1,3}(:\d+)?(\/.*)?$/.test(trimmed);
 
-  // 3. Multi-word search or words without dot/colon/protocol
+  // 3. Multi-word search or words without dot/colon/protocol -> Search query
   if (!hasProtocol && !isLocalHost && !isIpWithPort && (hasSpace || (!hasDot && !trimmed.includes(':')))) {
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
     return {
@@ -104,6 +105,7 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
       remoteHost: '',
       remotePort: 0,
       subPath: '',
+      isPublicHttps: true,
     };
   }
 
@@ -119,9 +121,11 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
     const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0';
     const subPath = (parsed.pathname || '/') + (parsed.search || '') + (parsed.hash || '');
     const cleanDisplay = `${parsed.protocol}//${parsed.host}${subPath}`;
+    const isCustomPort = parsed.port && parsed.port !== '80' && parsed.port !== '443';
 
     // If Server Network mode (SSH: ON):
     if (networkMode === 'server') {
+      const isPublicHttps = !isLocal && !isIpWithPort && parsed.protocol === 'https:' && !isCustomPort;
       const port = parsed.port 
         ? parseInt(parsed.port, 10) 
         : (parsed.protocol === 'https:' ? 443 : 80);
@@ -132,14 +136,15 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
         displayUrl: cleanDisplay,
         iframeSrc: '', // Assigned after sshStartTunnel
         title: `${parsed.host}${parsed.pathname !== '/' ? parsed.pathname : ''}`,
-        isTunneled: true,
+        isTunneled: !isPublicHttps,
         remoteHost: targetHost,
         remotePort: port,
         subPath,
+        isPublicHttps,
       };
     }
 
-    // If User Network mode (SSH: OFF):
+    // If User Network mode (SSH: OFF): PC Browser Direct
     if (hostname.includes('google.com')) {
       let iframeSrc = formatted;
       if (parsed.pathname === '/' || parsed.pathname === '' || parsed.pathname === '/webhp') {
@@ -157,6 +162,7 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
         remoteHost: '',
         remotePort: 0,
         subPath: '',
+        isPublicHttps: true,
       };
     }
 
@@ -169,6 +175,7 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
       remoteHost: '',
       remotePort: 0,
       subPath: '',
+      isPublicHttps: parsed.protocol === 'https:',
     };
   } catch {
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
@@ -181,6 +188,7 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
       remoteHost: '',
       remotePort: 0,
       subPath: '',
+      isPublicHttps: true,
     };
   }
 }
@@ -203,7 +211,7 @@ export default function BrowserApp() {
     zoomLevel, setZoomLevel,
   } = useBrowserStore();
 
-  // Tabs state - Start with clean New Tab (No forced Google!)
+  // Tabs state - Start with clean New Tab
   const initialMode = activeConnectionId ? 'server' : 'user';
   const [tabs, setTabs] = useState<BrowserTab[]>([
     {
@@ -215,6 +223,7 @@ export default function BrowserApp() {
       isLoading: false,
       headers: {},
       networkMode: initialMode,
+      userBrowserMode: 'external',
       routingMode: initialMode === 'server' ? 'tunnel' : 'direct',
       history: [],
       historyIndex: -1,
@@ -310,6 +319,7 @@ export default function BrowserApp() {
           error: null,
           isTunneled: false,
           tunnelPort: undefined,
+          userBrowserMode: 'external',
         };
       }));
       if (currentTabId === activeTabId) {
@@ -343,80 +353,106 @@ export default function BrowserApp() {
       setUrlInput(resolved.displayUrl);
     }
 
-    if (resolved.isTunneled) {
-      // ---------------------------------------------------------
-      // SSH Local Port Forwarding Tunnel (Server Network: SSH ON)
-      // ---------------------------------------------------------
-      if (!activeConnectionId) {
+    // -------------------------------------------------------------
+    // Branch 1: Server Network Mode (SSH: ON) - Carefully Managed
+    // -------------------------------------------------------------
+    if (effectiveNetworkMode === 'server') {
+      if (resolved.isPublicHttps) {
+        // Public HTTPS sites require TLS & reject raw TCP port-forwarding in iframes
         setTabs(prev => prev.map(t => {
           if (t.id !== currentTabId) return t;
           return {
             ...t,
             isLoading: false,
-            error: `Not connected to an SSH server. Server Network mode requires an active SSH connection to reach ${resolved.remoteHost}:${resolved.remotePort}. Toggle to "SSH: OFF (User Network)" to load directly, or connect to a server in SSH Desktop.`,
+            error: `Public HTTPS website (${resolved.displayUrl}) cannot be tunneled via raw TCP in an embedded window. Click "Open in PC Browser" or toggle to "SSH: OFF" for full redirect, login, and browser feature support.`,
             isTunneled: false,
+            tunnelPort: undefined,
           };
         }));
         return;
       }
 
-      setTunnelStatusText(`Establishing SSH Tunnel to ${resolved.remoteHost}:${resolved.remotePort}...`);
-
-      try {
-        const boundPort = await sshStartTunnel(
-          activeConnectionId,
-          resolved.remotePort,
-          resolved.remoteHost || '127.0.0.1',
-          resolved.remotePort
-        );
-
-        if (boundPort && boundPort > 0) {
-          const tunnelIframeSrc = `http://127.0.0.1:${boundPort}${resolved.subPath}`;
-          setTunnelStatusText(`SSH Tunnel active on 127.0.0.1:${boundPort}`);
-
+      if (resolved.isTunneled) {
+        if (!activeConnectionId) {
           setTabs(prev => prev.map(t => {
             if (t.id !== currentTabId) return t;
             return {
               ...t,
-              title: `${resolved.displayUrl.replace(/^https?:\/\//, '')} (Tunnel)`,
-              iframeSrc: tunnelIframeSrc,
-              tunnelPort: boundPort,
-              isTunneled: true,
               isLoading: false,
-              statusCode: 200,
-              statusText: 'SSH Tunnel Active',
-              serverHost,
-              error: null,
+              error: `Not connected to an SSH server. Server Network mode requires an active SSH connection to reach remote port ${resolved.remotePort} on ${serverHost}. Toggle to "SSH: OFF" to use your PC browser, or connect to a server in SSH Desktop.`,
+              isTunneled: false,
             };
           }));
-
-          addHistoryItem({
-            url: resolved.displayUrl,
-            title: `${resolved.displayUrl.replace(/^https?:\/\//, '')} (Tunnel)`,
-            statusCode: 200,
-            serverHost,
-          });
-        } else {
-          throw new Error(`Tunnel initialization failed. Remote port ${resolved.remotePort} might not be listening on server.`);
+          return;
         }
-      } catch (err: any) {
-        const errMsg = String(err?.message || err);
-        setTabs(prev => prev.map(t => {
-          if (t.id !== currentTabId) return t;
-          return {
-            ...t,
-            isLoading: false,
-            statusCode: 502,
-            statusText: 'SSH Tunnel Failed',
-            error: `Failed to open SSH Tunnel to port ${resolved.remotePort} on ${serverHost}: ${errMsg}`,
-            isTunneled: false,
-            tunnelPort: undefined,
-          };
-        }));
+
+        setTunnelStatusText(`Establishing SSH Tunnel to ${resolved.remoteHost}:${resolved.remotePort}...`);
+
+        try {
+          // Starts tunnel with dynamic unprivileged port (>= 1024)
+          const boundPort = await sshStartTunnel(
+            activeConnectionId,
+            0,
+            resolved.remoteHost || '127.0.0.1',
+            resolved.remotePort
+          );
+
+          if (boundPort && boundPort > 0) {
+            const tunnelIframeSrc = `http://127.0.0.1:${boundPort}${resolved.subPath}`;
+            setTunnelStatusText(`SSH Tunnel active on 127.0.0.1:${boundPort}`);
+
+            setTabs(prev => prev.map(t => {
+              if (t.id !== currentTabId) return t;
+              return {
+                ...t,
+                title: `${resolved.displayUrl.replace(/^https?:\/\//, '')} (Tunnel)`,
+                iframeSrc: tunnelIframeSrc,
+                tunnelPort: boundPort,
+                isTunneled: true,
+                isLoading: false,
+                statusCode: 200,
+                statusText: 'SSH Tunnel Active',
+                serverHost,
+                error: null,
+              };
+            }));
+
+            addHistoryItem({
+              url: resolved.displayUrl,
+              title: `${resolved.displayUrl.replace(/^https?:\/\//, '')} (Tunnel)`,
+              statusCode: 200,
+              serverHost,
+            });
+          } else {
+            throw new Error(`Tunnel initialization failed. Remote port ${resolved.remotePort} might not be listening on server.`);
+          }
+        } catch (err: any) {
+          const errMsg = String(err?.message || err);
+          setTabs(prev => prev.map(t => {
+            if (t.id !== currentTabId) return t;
+            return {
+              ...t,
+              isLoading: false,
+              statusCode: 502,
+              statusText: 'SSH Tunnel Failed',
+              error: `Failed to open SSH Tunnel to port ${resolved.remotePort} on ${serverHost}: ${errMsg}`,
+              isTunneled: false,
+              tunnelPort: undefined,
+            };
+          }));
+        }
       }
-    } else {
-      // Direct Web Access (User Network: SSH OFF)
+    } 
+    // -------------------------------------------------------------
+    // Branch 2: User Network Mode (SSH: OFF) - PC Browser Mode
+    // All redirects, logins, and web features work natively on PC!
+    // -------------------------------------------------------------
+    else {
       setTunnelStatusText(null);
+
+      // Automatically launch in user's default PC desktop browser so all redirects and features work seamlessly
+      openExternalUrl(resolved.displayUrl || resolved.url);
+
       setTabs(prev => prev.map(t => {
         if (t.id !== currentTabId) return t;
         return {
@@ -425,9 +461,10 @@ export default function BrowserApp() {
           iframeSrc: resolved.iframeSrc,
           isTunneled: false,
           tunnelPort: undefined,
+          userBrowserMode: 'external',
           isLoading: false,
           statusCode: 200,
-          statusText: 'Web Direct',
+          statusText: 'PC Browser (Direct)',
           error: null,
         };
       }));
@@ -436,7 +473,7 @@ export default function BrowserApp() {
         url: resolved.displayUrl,
         title: resolved.title,
         statusCode: 200,
-        serverHost: 'Direct',
+        serverHost: 'PC Browser',
       });
     }
   };
@@ -453,6 +490,7 @@ export default function BrowserApp() {
         ...t,
         networkMode: newMode,
         routingMode: newMode === 'server' ? 'tunnel' : 'direct',
+        userBrowserMode: newMode === 'user' ? 'external' : t.userBrowserMode,
       };
     }));
 
@@ -475,6 +513,7 @@ export default function BrowserApp() {
       isLoading: false,
       headers: {},
       networkMode: defaultMode,
+      userBrowserMode: 'external',
       routingMode: defaultMode === 'server' ? 'tunnel' : 'direct',
       history: [],
       historyIndex: -1,
@@ -610,7 +649,7 @@ export default function BrowserApp() {
                     <Server className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                   </span>
                 ) : (
-                  <span title="User Network (SSH: OFF)">
+                  <span title="User Network (SSH: OFF - PC Browser)">
                     <Globe className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-blue-400' : 'text-gray-500'}`} />
                   </span>
                 )}
@@ -685,8 +724,8 @@ export default function BrowserApp() {
           }`}
           title={
             activeTab.networkMode === 'server'
-              ? 'Server Network (SSH: ON). Traffic is tunneled through the remote SSH server. Click to switch to User Network (SSH: OFF).'
-              : 'User Network (SSH: OFF). Traffic connects directly via your local network. Click to switch to Server Network (SSH: ON).'
+              ? 'Server Network (SSH: ON): Tunneled through remote SSH host. Click to switch to User Network (SSH: OFF).'
+              : 'User Network (SSH: OFF): Native PC browser mode with all redirects, logins & features active. Click to switch to Server Network (SSH: ON).'
           }
         >
           {activeTab.networkMode === 'server' ? (
@@ -694,14 +733,14 @@ export default function BrowserApp() {
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
               <Server className="w-3.5 h-3.5 text-emerald-400" />
               <span className="font-bold">SSH: ON</span>
-              <span className="text-[10px] text-emerald-400/90 font-mono hidden md:inline">(Server Network)</span>
+              <span className="text-[10px] text-emerald-400/90 font-mono hidden md:inline">(Server)</span>
             </>
           ) : (
             <>
               <span className="w-2 h-2 rounded-full bg-blue-400" />
               <Laptop className="w-3.5 h-3.5 text-blue-400" />
               <span className="font-bold">SSH: OFF</span>
-              <span className="text-[10px] text-blue-300/90 font-mono hidden md:inline">(User Network)</span>
+              <span className="text-[10px] text-blue-300/90 font-mono hidden md:inline">(PC Browser)</span>
             </>
           )}
         </button>
@@ -723,7 +762,7 @@ export default function BrowserApp() {
                 <Lock className="w-3.5 h-3.5 text-emerald-400" />
               </span>
             ) : (
-              <span title="Direct Web Connection">
+              <span title="Direct PC Browser Connection">
                 <Globe className="w-3.5 h-3.5 text-blue-400" />
               </span>
             )}
@@ -739,7 +778,7 @@ export default function BrowserApp() {
                 navigateUrl(urlInput);
               }
             }}
-            placeholder="Type a URL or server address (e.g. localhost:8080, 192.168.74.43:3000)..."
+            placeholder="Type a URL or server address (e.g. localhost:8080, 192.168.74.43:3000, google.com)..."
             className="flex-1 bg-transparent border-none text-xs text-white font-mono focus:outline-none placeholder-gray-500 select-all"
           />
 
@@ -768,17 +807,44 @@ export default function BrowserApp() {
             </button>
           )}
 
-          {/* Open in Desktop Browser (Chrome/Edge) */}
+          {/* Open in Desktop PC Browser (Chrome/Edge/Firefox) */}
           {Boolean(activeTab.displayUrl || activeTab.url) && (
             <button
               onClick={() => openExternalUrl(activeTab.displayUrl || activeTab.url)}
-              className="p-1 rounded-lg ml-1 text-gray-400 hover:text-blue-300 hover:bg-white/10 transition-colors cursor-pointer"
-              title="Open in Desktop Browser (Chrome/Edge/Firefox)"
+              className="p-1 rounded-lg ml-1 text-gray-400 hover:text-blue-300 hover:bg-white/10 transition-colors cursor-pointer flex items-center space-x-1"
+              title="Open in your PC Browser (Chrome/Edge/Firefox) - all redirects, logins, and web features work"
             >
               <ExternalLink className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
+
+        {/* View Mode Toggle when SSH is OFF and URL is active */}
+        {activeTab.networkMode === 'user' && Boolean(activeTab.displayUrl || activeTab.url) && (
+          <button
+            onClick={() => {
+              setTabs(prev => prev.map(t => 
+                t.id === activeTab.id 
+                  ? { ...t, userBrowserMode: t.userBrowserMode === 'embedded' ? 'external' : 'embedded' } 
+                  : t
+              ));
+            }}
+            className="px-2.5 py-1.5 rounded-xl text-xs font-medium transition-colors bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 shrink-0 cursor-pointer flex items-center space-x-1.5"
+            title="Toggle between PC Browser Hub and Embedded Frame"
+          >
+            {activeTab.userBrowserMode === 'embedded' ? (
+              <>
+                <Laptop className="w-3.5 h-3.5 text-blue-400" />
+                <span className="hidden sm:inline">PC Mode</span>
+              </>
+            ) : (
+              <>
+                <Layers className="w-3.5 h-3.5 text-amber-400" />
+                <span className="hidden sm:inline">Frame Mode</span>
+              </>
+            )}
+          </button>
+        )}
 
         {/* Inspect / DevTools Toggle (Per Tab Isolation) */}
         <button
@@ -843,6 +909,7 @@ export default function BrowserApp() {
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
           const isNewTab = !tab.url || tab.url === 'about:newtab';
+          const isUserPcMode = tab.networkMode === 'user' && tab.userBrowserMode !== 'embedded';
 
           return (
             <div
@@ -861,8 +928,76 @@ export default function BrowserApp() {
                   bookmarks={bookmarks}
                   onSelectBookmark={(url) => navigateUrl(url, tab.id, tab.networkMode)}
                 />
+              ) : isUserPcMode ? (
+                /* PC Browser Mode: All redirects, SSO logins, and web features work natively on PC! */
+                <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-gradient-to-b from-[#181825] via-[#1e1e2e] to-[#11111b] text-center select-none overflow-y-auto">
+                  <div className="max-w-lg w-full flex flex-col items-center space-y-6">
+                    <div className="relative">
+                      <div className="w-16 h-16 rounded-3xl bg-blue-500/10 border border-blue-500/20 text-blue-400 flex items-center justify-center shadow-xl">
+                        <Globe className="w-8 h-8 text-blue-400" />
+                      </div>
+                      <div className="absolute -bottom-1 -right-1 p-1 rounded-full bg-[#11111b] border border-blue-500/30 text-blue-300">
+                        <Laptop className="w-3.5 h-3.5" />
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-center space-x-2">
+                        <h3 className="text-lg font-bold text-white">Opened in PC Browser</h3>
+                        <span className="px-2 py-0.5 rounded-full bg-blue-500/20 border border-blue-500/30 text-blue-300 text-[10px] font-semibold">
+                          SSH: OFF
+                        </span>
+                      </div>
+                      <p className="text-xs text-gray-400 mt-1 max-w-md leading-relaxed">
+                        Redirects, OAuth logins, Google searches, cookies, and extensions run natively in your PC desktop browser without iframe restrictions.
+                      </p>
+                    </div>
+
+                    {/* URL Card */}
+                    <div className="w-full bg-[#11111b] border border-white/10 rounded-2xl p-3 flex items-center justify-between text-left shadow-lg">
+                      <div className="min-w-0 flex-1 mr-3">
+                        <div className="text-[10px] uppercase font-semibold text-gray-500 flex items-center space-x-1">
+                          <Compass className="w-3 h-3 text-blue-400" />
+                          <span>Destination URL</span>
+                        </div>
+                        <div className="text-xs text-blue-300 font-mono truncate select-all">{tab.displayUrl || tab.url}</div>
+                      </div>
+                      <button
+                        onClick={() => openExternalUrl(tab.displayUrl || tab.url)}
+                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1.5 shrink-0"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>Open in PC</span>
+                      </button>
+                    </div>
+
+                    {/* Controls & Options */}
+                    <div className="flex items-center space-x-3 text-xs">
+                      <button
+                        onClick={() => {
+                          setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, userBrowserMode: 'embedded' } : t));
+                        }}
+                        className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 hover:text-white transition-colors cursor-pointer flex items-center space-x-1.5"
+                        title="Try viewing in embedded window"
+                      >
+                        <Layers className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Try Embedded Frame</span>
+                      </button>
+                      <button
+                        onClick={() => navigateUrl('', tab.id)}
+                        className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 hover:text-white transition-colors cursor-pointer"
+                      >
+                        Start Page
+                      </button>
+                    </div>
+
+                    <div className="text-[11px] text-gray-500 max-w-sm pt-2">
+                      💡 <strong>Tip:</strong> Need to access a service on the remote server (e.g. <code className="text-gray-300">localhost:8080</code>)? Toggle <span className="text-emerald-400 font-semibold">SSH: ON</span> above.
+                    </div>
+                  </div>
+                </div>
               ) : tab.error ? (
-                <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-[#1e1e2e] text-center select-none">
+                <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-[#1e1e2e] text-center select-none overflow-y-auto">
                   <div className="p-4 rounded-3xl bg-rose-500/10 border border-rose-500/20 text-rose-400 mb-4 shadow-xl">
                     <AlertCircle className="w-12 h-12" />
                   </div>
@@ -878,8 +1013,16 @@ export default function BrowserApp() {
                       className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
                     >
                       <ExternalLink className="w-3.5 h-3.5" />
-                      <span>Open in Desktop Browser</span>
+                      <span>Open in PC Browser (Redirects Supported)</span>
                     </button>
+                    {tab.networkMode === 'server' && (
+                      <button
+                        onClick={() => handleToggleNetworkMode(tab.id)}
+                        className="px-4 py-2 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 text-xs font-semibold border border-emerald-500/30 transition-colors cursor-pointer"
+                      >
+                        Switch to SSH: OFF
+                      </button>
+                    )}
                     <button
                       onClick={() => navigateUrl('', tab.id)}
                       className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-semibold border border-white/10 transition-colors cursor-pointer"
@@ -887,28 +1030,42 @@ export default function BrowserApp() {
                       Return to Start Page
                     </button>
                   </div>
-                  {!tab.isTunneled && (
-                    <p className="text-[11px] text-gray-500 mt-6 max-w-sm">
-                      Notice: Public websites like GitHub, Wikipedia, Reddit, and banking sites send security headers (X-Frame-Options) that prevent embedding inside applications. Click "Open in Desktop Browser" to view them directly without restrictions.
-                    </p>
-                  )}
+                  <p className="text-[11px] text-gray-500 mt-6 max-w-sm">
+                    Notice: Public websites like Google, GitHub, Wikipedia, and banking sites send security headers (X-Frame-Options) that prevent embedding. Click "Open in PC Browser" where all redirects and features work seamlessly.
+                  </p>
                 </div>
               ) : (
-                <iframe
-                  src={tab.iframeSrc || tab.url}
-                  sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals"
-                  className="w-full h-full border-none bg-white"
-                  style={{ 
-                    transform: `scale(${zoomLevel / 100})`, 
-                    transformOrigin: 'top left', 
-                    width: `${100 * (100 / zoomLevel)}%`, 
-                    height: `${100 * (100 / zoomLevel)}%` 
-                  }}
-                  title={tab.title}
-                  onLoad={() => {
-                    setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, isLoading: false } : t));
-                  }}
-                />
+                <div className="w-full h-full relative">
+                  {/* Floating Open in PC Browser Pill when in embedded frame */}
+                  {tab.networkMode === 'user' && (
+                    <div className="absolute top-2 right-2 z-10">
+                      <button
+                        onClick={() => openExternalUrl(tab.displayUrl || tab.url)}
+                        className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-[#181825]/90 hover:bg-[#11111b] border border-white/15 text-blue-300 hover:text-white text-xs font-medium shadow-2xl backdrop-blur-md transition-all cursor-pointer"
+                        title="Open in your PC Browser (all redirects and features work)"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5 text-blue-400" />
+                        <span>Open in PC Browser</span>
+                      </button>
+                    </div>
+                  )}
+
+                  <iframe
+                    src={tab.iframeSrc || tab.url}
+                    sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-top-navigation-by-user-activation"
+                    className="w-full h-full border-none bg-white"
+                    style={{ 
+                      transform: `scale(${zoomLevel / 100})`, 
+                      transformOrigin: 'top left', 
+                      width: `${100 * (100 / zoomLevel)}%`, 
+                      height: `${100 * (100 / zoomLevel)}%` 
+                    }}
+                    title={tab.title}
+                    onLoad={() => {
+                      setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, isLoading: false } : t));
+                    }}
+                  />
+                </div>
               )}
             </div>
           );
@@ -946,21 +1103,21 @@ export default function BrowserApp() {
               </span>
             )
           ) : (
-            <span className="flex items-center space-x-1 text-blue-400">
+            <span className="flex items-center space-x-1 text-blue-400 font-semibold">
               <Globe className="w-3 h-3 text-blue-400" />
-              <span>User Network (SSH: OFF): {activeTab.displayUrl || 'Start Page'}</span>
+              <span>User Network (SSH: OFF) ➔ PC Browser Mode (All Redirects & Features Active)</span>
             </span>
           )}
 
-          {/* Open in Desktop Browser link */}
+          {/* Open in PC Browser link */}
           {Boolean(activeTab.displayUrl || activeTab.url) && (
             <button
               onClick={() => openExternalUrl(activeTab.displayUrl || activeTab.url)}
               className="flex items-center space-x-1 text-blue-400 hover:text-blue-300 transition-colors cursor-pointer ml-1"
-              title="Open current page in your desktop Chrome/Edge browser"
+              title="Open current page in your PC desktop browser (Chrome/Edge)"
             >
               <ExternalLink className="w-3 h-3" />
-              <span>Open in Desktop Browser</span>
+              <span>Open in PC Browser</span>
             </button>
           )}
 
