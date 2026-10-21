@@ -184,10 +184,10 @@ export default function ResponseViewer({ response, isLoading, error }: ResponseV
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#181825]/90 backdrop-blur-sm z-20 space-y-3">
             <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
             <div className="text-xs text-blue-400 font-semibold tracking-wide">
-              Sending request via SSH port forwarding tunnel...
+              Sending API request...
             </div>
             <div className="text-[11px] text-gray-500">
-              Native Rust HTTP client executing request (zero curl command used)
+              Executing request via SSH connection
             </div>
           </div>
         )}

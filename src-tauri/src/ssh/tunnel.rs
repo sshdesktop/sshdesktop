@@ -29,7 +29,8 @@ fn is_port_available(port: u16) -> bool {
 }
 
 fn find_available_port(preferred: u16) -> u16 {
-    if preferred > 0 && is_port_available(preferred) {
+    // Only bind non-privileged ports (>= 1024) to avoid OS permission issues on Windows/Unix
+    if preferred >= 1024 && is_port_available(preferred) {
         return preferred;
     }
     if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", 0)) {
@@ -37,7 +38,7 @@ fn find_available_port(preferred: u16) -> u16 {
             return addr.port();
         }
     }
-    if preferred > 0 { preferred } else { 18080 }
+    if preferred >= 1024 { preferred } else { 18080 }
 }
 
 /// Start an SSH port forwarding tunnel: binds 127.0.0.1:local_port -> remote_host:remote_port
@@ -67,7 +68,7 @@ pub async fn ssh_start_tunnel(
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or_else(|| format!("No active SSH connection found for '{}'. Please connect to a server first.", conn_id))?;
 
-    let effective_local_port = find_available_port(if local_port > 0 { local_port } else { remote_port });
+    let effective_local_port = find_available_port(if local_port >= 1024 { local_port } else if remote_port >= 1024 { remote_port } else { 0 });
     let host = conn.config.host.clone();
     let ssh_port = conn.config.port.to_string();
     let user = conn.config.username.clone();
