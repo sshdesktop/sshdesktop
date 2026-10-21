@@ -22,6 +22,7 @@ pub struct ActiveTunnel {
 
 lazy_static! {
     static ref ACTIVE_TUNNELS: Mutex<HashMap<String, ActiveTunnel>> = Mutex::new(HashMap::new());
+    static ref ACTIVE_SOCKS5: Mutex<HashMap<String, ActiveTunnel>> = Mutex::new(HashMap::new());
 }
 
 fn is_port_available(port: u16) -> bool {
@@ -302,4 +303,193 @@ pub async fn ssh_stop_tunnel(tunnel_id: String) -> Result<(), String> {
 pub async fn ssh_list_tunnels() -> Result<Vec<TunnelInfo>, String> {
     let lock = ACTIVE_TUNNELS.lock();
     Ok(lock.values().map(|a| a.info.clone()).collect())
+}
+
+/// Start an SSH Dynamic SOCKS5 Proxy: binds 127.0.0.1:local_port (via ssh -D)
+#[tauri::command]
+pub async fn ssh_start_socks5(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    preferred_port: Option<u16>,
+) -> Result<u16, String> {
+    // 1. If an active SOCKS5 proxy already exists and is responsive for this connection, return its port
+    {
+        let lock = ACTIVE_SOCKS5.lock();
+        if let Some(active) = lock.get(&conn_id) {
+            if std::net::TcpStream::connect(("127.0.0.1", active.info.local_port)).is_ok() {
+                log::info!("SSH Desktop: Reusing active SOCKS5 proxy on 127.0.0.1:{}", active.info.local_port);
+                return Ok(active.info.local_port);
+            }
+        }
+    }
+
+    // 2. Resolve SSH connection configuration
+    let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
+        .ok_or_else(|| format!("No active SSH connection found for '{}'. Please connect to a server first.", conn_id))?;
+
+    let preferred = preferred_port.unwrap_or(1080);
+    let effective_local_port = find_available_port(if preferred >= 1024 { preferred } else { 10800 });
+    let host = conn.config.host.clone();
+    let ssh_port = conn.config.port.to_string();
+    let user = conn.config.username.clone();
+
+    log::info!(
+        "SSH Desktop: Spawning SSH SOCKS5 Proxy -D 127.0.0.1:{} via {}@{}:{}",
+        effective_local_port, user, host, ssh_port
+    );
+
+    let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    let mut spawned = false;
+    let mut child_handle: Option<tokio::process::Child> = None;
+    let mut last_error = String::new();
+
+    // Approach A: Try Plink (best for Windows with passwords or PPK keys)
+    let plink_bin = crate::ssh::connection::get_plink_path();
+    if plink_bin != "plink" || std::path::Path::new(plink_bin).exists() || conn.config.password.is_some() || is_ppk {
+        let mut cmd = tokio::process::Command::new(plink_bin);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+        cmd.arg("-ssh")
+            .arg("-N")
+            .arg("-P").arg(&ssh_port)
+            .arg("-l").arg(&user)
+            .arg("-D").arg(format!("127.0.0.1:{}", effective_local_port));
+
+        if let Some(pwd) = &conn.config.password {
+            if !pwd.is_empty() {
+                cmd.arg("-pw").arg(pwd);
+            }
+        }
+
+        if let Some(key) = &conn.config.private_key_path {
+            if crate::ssh::connection::resolve_key_path(key).is_some() {
+                cmd.arg("-i").arg(key);
+            }
+        }
+
+        cmd.arg(&host);
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::piped());
+
+        match cmd.spawn() {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    tokio::spawn(async move {
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
+                        let _ = tokio::io::AsyncWriteExt::flush(&mut stdin).await;
+                    });
+                }
+                child_handle = Some(child);
+                spawned = true;
+            }
+            Err(e) => {
+                last_error = format!("Plink SOCKS5 launch error: {}", e);
+            }
+        }
+    }
+
+    // Approach B: Try OpenSSH ssh (built into Windows 10/11)
+    if !spawned {
+        let mut cmd = tokio::process::Command::new("ssh");
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+        cmd.arg("-N")
+            .arg("-D").arg(format!("127.0.0.1:{}", effective_local_port))
+            .arg("-p").arg(&ssh_port)
+            .arg("-o").arg("StrictHostKeyChecking=no")
+            .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
+            .arg("-o").arg("ExitOnForwardFailure=yes");
+
+        if let Some(key) = &conn.config.private_key_path {
+            if crate::ssh::connection::resolve_key_path(key).is_some() {
+                cmd.arg("-i").arg(key);
+            }
+        }
+
+        cmd.arg(format!("{}@{}", user, host));
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::piped());
+
+        match cmd.spawn() {
+            Ok(child) => {
+                child_handle = Some(child);
+                spawned = true;
+            }
+            Err(e) => {
+                last_error = format!("OpenSSH SOCKS5 launch error: {}", e);
+            }
+        }
+    }
+
+    if !spawned {
+        return Err(format!("Could not spawn SSH SOCKS5 proxy: {}", last_error));
+    }
+
+    // Wait up to 3 seconds for the SOCKS5 proxy port to start listening
+    let mut bound = false;
+    for _ in 0..30 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        if std::net::TcpStream::connect(("127.0.0.1", effective_local_port)).is_ok() {
+            bound = true;
+            break;
+        }
+    }
+
+    if !bound {
+        if let Some(mut child) = child_handle.take() {
+            let _ = child.kill().await;
+        }
+        return Err(format!("SOCKS5 proxy port {} did not start listening in time.", effective_local_port));
+    }
+
+    let tunnel_info = TunnelInfo {
+        tunnel_id: format!("socks5:{}", conn_id),
+        conn_id: conn_id.clone(),
+        local_port: effective_local_port,
+        remote_host: "0.0.0.0".to_string(),
+        remote_port: 0,
+        created_at: chrono::Utc::now().timestamp(),
+    };
+
+    {
+        let mut lock = ACTIVE_SOCKS5.lock();
+        lock.insert(conn_id.clone(), ActiveTunnel {
+            info: tunnel_info,
+            child: child_handle,
+        });
+    }
+
+    log::info!("SSH Desktop: SSH SOCKS5 Proxy active on 127.0.0.1:{}", effective_local_port);
+    Ok(effective_local_port)
+}
+
+/// Stop an active SSH SOCKS5 proxy
+#[tauri::command]
+pub async fn ssh_stop_socks5(conn_id: String) -> Result<(), String> {
+    let maybe_child = {
+        let mut lock = ACTIVE_SOCKS5.lock();
+        lock.remove(&conn_id).and_then(|mut active| active.child.take())
+    };
+
+    if let Some(mut child) = maybe_child {
+        let _ = child.kill().await;
+        log::info!("SSH Desktop: Stopped SSH SOCKS5 Proxy for {}", conn_id);
+    }
+    Ok(())
+}
+
+/// Get the active SOCKS5 port for a connection if running
+#[tauri::command]
+pub async fn ssh_get_socks5(conn_id: String) -> Result<Option<u16>, String> {
+    let lock = ACTIVE_SOCKS5.lock();
+    if let Some(active) = lock.get(&conn_id) {
+        if std::net::TcpStream::connect(("127.0.0.1", active.info.local_port)).is_ok() {
+            return Ok(Some(active.info.local_port));
+        }
+    }
+    Ok(None)
 }

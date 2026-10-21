@@ -502,11 +502,14 @@ pub async fn ssh_disconnect(state: tauri::State<'_, AppState>, conn_id: String) 
             sessions.remove("default");
         }
     }
-    let mut map = state.connections.lock();
-    map.remove(&conn_id);
-    if map.len() == 1 && map.contains_key("default") {
-        map.remove("default");
+    {
+        let mut map = state.connections.lock();
+        map.remove(&conn_id);
+        if map.len() == 1 && map.contains_key("default") {
+            map.remove("default");
+        }
     }
+    let _ = crate::ssh::tunnel::ssh_stop_socks5(conn_id.clone()).await;
     log::info!("SSH Desktop: SSH Session disconnected for ID: {}", conn_id);
     Ok(())
 }
