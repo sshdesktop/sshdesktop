@@ -86,12 +86,37 @@ pub async fn ssh_start_tunnel(
     // Approach A: Try Plink (best for Windows with passwords or PPK keys)
     let plink_bin = crate::ssh::connection::get_plink_path();
     if plink_bin != "plink" || std::path::Path::new(plink_bin).exists() || conn.config.password.is_some() || is_ppk {
+        // Pre-cache host key in PuTTY registry to prevent batch mode / host key rejection
+        #[cfg(windows)]
+        {
+            let mut probe = tokio::process::Command::new(plink_bin);
+            probe.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            probe.arg("-ssh").arg("-P").arg(&ssh_port).arg("-l").arg(&user);
+            if let Some(pwd) = &conn.config.password {
+                if !pwd.is_empty() { probe.arg("-pw").arg(pwd); }
+            }
+            if let Some(key) = &conn.config.private_key_path {
+                if crate::ssh::connection::resolve_key_path(key).is_some() { probe.arg("-i").arg(key); }
+            }
+            probe.arg(&host).arg("echo sshdesktop-tunnel-ok");
+            probe.stdin(std::process::Stdio::piped());
+            probe.stdout(std::process::Stdio::piped());
+            probe.stderr(std::process::Stdio::piped());
+
+            if let Ok(mut ch) = probe.spawn() {
+                if let Some(mut stdin) = ch.stdin.take() {
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
+                }
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(3), ch.wait()).await;
+            }
+        }
+
         let mut cmd = tokio::process::Command::new(plink_bin);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
+        // NOTE: We do NOT pass -batch so Plink accepts host keys via piped stdin
         cmd.arg("-ssh")
-            .arg("-batch")
             .arg("-N") // do not open a remote command or shell
             .arg("-P").arg(&ssh_port)
             .arg("-l").arg(&user)
@@ -110,12 +135,19 @@ pub async fn ssh_start_tunnel(
         }
 
         cmd.arg(&host);
-        cmd.stdin(std::process::Stdio::null());
+        cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::piped());
 
         match cmd.spawn() {
-            Ok(child) => {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    tokio::spawn(async move {
+                        // Automatically answer "y" to accept host key caching prompt if prompted
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
+                        let _ = tokio::io::AsyncWriteExt::flush(&mut stdin).await;
+                    });
+                }
                 child_handle = Some(child);
                 spawned = true;
             }
@@ -184,7 +216,46 @@ pub async fn ssh_start_tunnel(
                         err_msg = format!("{}: {}", err_msg, text);
                     }
                 }
-                return Err(err_msg);
+                log::warn!("SSH Desktop: Tunnel process exited ({}). Attempting OpenSSH fallback...", err_msg);
+
+                // Fallback attempt: OpenSSH
+                let mut alt_cmd = tokio::process::Command::new("ssh");
+                #[cfg(windows)]
+                alt_cmd.creation_flags(0x08000000);
+                alt_cmd.arg("-N")
+                    .arg("-L").arg(format!("127.0.0.1:{}:{}:{}", effective_local_port, remote_target, remote_port))
+                    .arg("-p").arg(&ssh_port)
+                    .arg("-o").arg("StrictHostKeyChecking=no")
+                    .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
+                    .arg("-o").arg("ExitOnForwardFailure=yes");
+
+                if let Some(key) = &conn.config.private_key_path {
+                    if crate::ssh::connection::resolve_key_path(key).is_some() {
+                        alt_cmd.arg("-i").arg(key);
+                    }
+                }
+
+                alt_cmd.arg(format!("{}@{}", user, host));
+                alt_cmd.stdin(std::process::Stdio::null());
+                alt_cmd.stdout(std::process::Stdio::null());
+                alt_cmd.stderr(std::process::Stdio::piped());
+
+                if let Ok(alt_child) = alt_cmd.spawn() {
+                    for _ in 0..20 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        if std::net::TcpStream::connect(("127.0.0.1", effective_local_port)).is_ok() {
+                            bound = true;
+                            child_handle = Some(alt_child);
+                            break;
+                        }
+                    }
+                }
+
+                if !bound {
+                    return Err(err_msg);
+                } else {
+                    break;
+                }
             }
         }
     }

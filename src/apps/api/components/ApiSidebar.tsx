@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { 
   Folder, Plus, Trash2, History, Settings2, Search, 
-  ChevronRight, ChevronDown, Clock, Play, FileCode, Check, X 
+  ChevronRight, ChevronDown, Clock, Play, FileCode, Check, X, Shield 
 } from 'lucide-react';
 import { useApiStore } from '../apiStore';
 import { HttpMethod } from '../types';
@@ -34,23 +34,30 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
     loadSavedRequest, 
     loadHistoryItem, 
     clearHistory,
-    updateEnvironment
+    deleteHistoryItem,
+    updateEnvironment,
+    createEnvironment,
+    deleteEnvironment
   } = useApiStore();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [expandedCollections, setExpandedCollections] = useState<Record<string, boolean>>({
-    'col-sample-1': true,
-    'col-sample-2': true,
-  });
+  const [expandedCollections, setExpandedCollections] = useState<Record<string, boolean>>({});
+  const [showAddEnvModal, setShowAddEnvModal] = useState(false);
+  const [newEnvName, setNewEnvName] = useState('');
 
   const toggleCollection = (id: string) => {
     setExpandedCollections(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
+  const handleTabSwitch = (tab: 'collections' | 'history' | 'env') => {
+    setSidebarTab(tab);
+    setSearchQuery('');
+  };
+
   const currentEnv = environments.find(e => e.id === selectedEnvId) || environments[0];
 
   return (
-    <div className="w-64 bg-[#14141e] border-r border-white/[0.08] flex flex-col h-full select-none shrink-0 overflow-hidden">
+    <div className="w-full bg-[#14141e] border-r border-white/[0.08] flex flex-col h-full select-none shrink-0 overflow-hidden">
       {/* Sidebar Header with Switcher Tabs */}
       <div className="p-3 border-b border-white/[0.08] space-y-2">
         <div className="flex items-center justify-between">
@@ -61,7 +68,7 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
             <button
               type="button"
               onClick={onOpenCreateCollectionModal}
-              className="p-1 hover:bg-white/10 text-gray-300 hover:text-white rounded-lg transition-colors"
+              className="p-1 hover:bg-white/10 text-gray-300 hover:text-white rounded-lg transition-colors cursor-pointer"
               title="Create New Collection"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -70,11 +77,25 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
           {sidebarTab === 'history' && history.length > 0 && (
             <button
               type="button"
-              onClick={clearHistory}
-              className="text-[11px] text-gray-500 hover:text-rose-400 transition-colors"
+              onClick={() => {
+                if (window.confirm('Are you sure you want to delete all request history?')) {
+                  clearHistory();
+                }
+              }}
+              className="text-[11px] text-gray-500 hover:text-rose-400 transition-colors cursor-pointer font-medium"
               title="Clear All History"
             >
-              Clear
+              Clear All
+            </button>
+          )}
+          {sidebarTab === 'env' && (
+            <button
+              type="button"
+              onClick={() => setShowAddEnvModal(true)}
+              className="p-1 hover:bg-white/10 text-gray-300 hover:text-white rounded-lg transition-colors cursor-pointer"
+              title="Add New Environment"
+            >
+              <Plus className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
@@ -83,8 +104,8 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
         <div className="grid grid-cols-3 bg-[#11111b] p-0.5 rounded-xl border border-white/10 text-[11px] font-medium text-gray-400">
           <button
             type="button"
-            onClick={() => setSidebarTab('collections')}
-            className={`py-1 rounded-lg text-center transition-all ${
+            onClick={() => handleTabSwitch('collections')}
+            className={`py-1 rounded-lg text-center transition-all cursor-pointer ${
               sidebarTab === 'collections' ? 'bg-blue-600 text-white font-semibold shadow-sm' : 'hover:text-white'
             }`}
           >
@@ -92,8 +113,8 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
           </button>
           <button
             type="button"
-            onClick={() => setSidebarTab('history')}
-            className={`py-1 rounded-lg text-center transition-all ${
+            onClick={() => handleTabSwitch('history')}
+            className={`py-1 rounded-lg text-center transition-all cursor-pointer ${
               sidebarTab === 'history' ? 'bg-blue-600 text-white font-semibold shadow-sm' : 'hover:text-white'
             }`}
           >
@@ -101,8 +122,8 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
           </button>
           <button
             type="button"
-            onClick={() => setSidebarTab('env')}
-            className={`py-1 rounded-lg text-center transition-all ${
+            onClick={() => handleTabSwitch('env')}
+            className={`py-1 rounded-lg text-center transition-all cursor-pointer ${
               sidebarTab === 'env' ? 'bg-blue-600 text-white font-semibold shadow-sm' : 'hover:text-white'
             }`}
           >
@@ -115,7 +136,7 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
           <Search className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-2" />
           <input
             type="text"
-            placeholder="Filter requests..."
+            placeholder={sidebarTab === 'history' ? "Search history..." : "Filter requests..."}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-[#11111b] border border-white/10 rounded-xl pl-8 pr-3 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500/50"
@@ -138,8 +159,12 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
         {sidebarTab === 'collections' && (
           <div className="space-y-1">
             {collections.length === 0 ? (
-              <div className="p-6 text-center text-xs text-gray-500">
-                No collections found. Click + above to organize requests into collections.
+              <div className="p-6 text-center text-xs text-gray-500 space-y-2">
+                <Folder className="w-7 h-7 text-gray-600 mx-auto opacity-70" />
+                <div className="font-medium text-gray-400">No collections yet</div>
+                <div className="text-[11px] text-gray-500">
+                  Click the <span className="text-blue-400 font-bold">+</span> button above to create a collection and organize your requests.
+                </div>
               </div>
             ) : (
               collections.map((col) => {
@@ -170,11 +195,11 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (confirm(`Delete collection "${col.name}"?`)) {
+                          if (window.confirm(`Are you sure you want to delete collection "${col.name}" and all its requests?`)) {
                             deleteCollection(col.id);
                           }
                         }}
-                        className="opacity-0 group-hover:opacity-100 p-1 hover:text-rose-400 transition-opacity"
+                        className="opacity-0 group-hover:opacity-100 p-1 hover:text-rose-400 transition-opacity cursor-pointer"
                         title="Delete Collection"
                       >
                         <Trash2 className="w-3 h-3" />
@@ -208,9 +233,11 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
                                 type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  deleteSavedRequest(col.id, req.id);
+                                  if (window.confirm(`Are you sure you want to delete request "${req.name}"?`)) {
+                                    deleteSavedRequest(col.id, req.id);
+                                  }
                                 }}
-                                className="opacity-0 group-hover:opacity-100 p-1 hover:text-rose-400 transition-opacity"
+                                className="opacity-0 group-hover:opacity-100 p-1 hover:text-rose-400 transition-opacity cursor-pointer"
                                 title="Delete saved request"
                               >
                                 <Trash2 className="w-3 h-3" />
@@ -243,7 +270,7 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
                   <div
                     key={item.id}
                     onClick={() => loadHistoryItem(item)}
-                    className="p-2 bg-white/[0.02] hover:bg-white/5 border border-white/5 rounded-xl cursor-pointer text-xs space-y-1 transition-colors group"
+                    className="p-2 bg-white/[0.02] hover:bg-white/5 border border-white/5 rounded-xl cursor-pointer text-xs space-y-1 transition-colors group relative"
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-1.5">
@@ -258,11 +285,26 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
                           {item.status || 'ERR'}
                         </span>
                       </div>
-                      <span className="text-[10px] text-gray-500 font-mono">{item.timestamp}</span>
+                      <div className="flex items-center space-x-1.5">
+                        <span className="text-[10px] text-gray-500 font-mono">{item.timestamp}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (window.confirm('Are you sure you want to delete this history item?')) {
+                              deleteHistoryItem(item.id);
+                            }
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-500 hover:text-rose-400 transition-opacity cursor-pointer"
+                          title="Delete history item"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
                     </div>
 
                     <div className="text-[11px] font-mono text-gray-300 truncate group-hover:text-blue-300">
-                      {item.url}
+                      {item.url || 'untitled'}
                     </div>
 
                     <div className="flex items-center justify-between text-[10px] text-gray-500 font-mono">
@@ -279,55 +321,172 @@ export default function ApiSidebar({ onOpenCreateCollectionModal }: ApiSidebarPr
         {sidebarTab === 'env' && (
           <div className="space-y-4 p-1">
             <div className="space-y-1">
-              <label className="text-[11px] font-semibold text-gray-400 uppercase">Active Environment</label>
-              <select
-                value={selectedEnvId || ''}
-                onChange={(e) => setSelectedEnvId(e.target.value || null)}
-                className="w-full bg-[#11111b] border border-white/10 rounded-xl px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none"
-              >
-                {environments.map(e => (
-                  <option key={e.id} value={e.id}>{e.name}</option>
-                ))}
-              </select>
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-semibold text-gray-400 uppercase">Active Environment</label>
+                {currentEnv && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm(`Are you sure you want to delete environment "${currentEnv.name}"?`)) {
+                        deleteEnvironment(currentEnv.id);
+                      }
+                    }}
+                    className="text-gray-500 hover:text-rose-400 text-xs transition-colors p-1"
+                    title="Delete environment"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+              {environments.length === 0 ? (
+                <div className="p-4 text-center text-xs text-gray-500 bg-[#11111b] border border-white/10 rounded-xl space-y-1">
+                  <div>No environments configured</div>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddEnvModal(true)}
+                    className="text-blue-400 text-[11px] hover:underline"
+                  >
+                    + Create an Environment
+                  </button>
+                </div>
+              ) : (
+                <select
+                  value={selectedEnvId || ''}
+                  onChange={(e) => setSelectedEnvId(e.target.value || null)}
+                  className="w-full bg-[#11111b] border border-white/10 rounded-xl px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none"
+                >
+                  {environments.map(e => (
+                    <option key={e.id} value={e.id}>{e.name}</option>
+                  ))}
+                </select>
+              )}
             </div>
 
             {currentEnv && (
               <div className="space-y-2">
-                <div className="text-[11px] font-semibold text-gray-400">Environment Variables</div>
+                <div className="flex items-center justify-between text-[11px] font-semibold text-gray-400">
+                  <span>Environment Variables</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const updated = [...currentEnv.variables, { key: 'newVar', value: 'value', enabled: true }];
+                      updateEnvironment({ ...currentEnv, variables: updated });
+                    }}
+                    className="text-blue-400 hover:text-blue-300 text-xs flex items-center space-x-1"
+                  >
+                    <Plus className="w-3 h-3" />
+                    <span>Add Var</span>
+                  </button>
+                </div>
                 <div className="space-y-1.5">
-                  {currentEnv.variables.map((v, idx) => (
-                    <div key={idx} className="p-2 bg-[#11111b] border border-white/5 rounded-xl space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="font-mono text-xs text-purple-400 font-bold">&#123;&#123;{v.key}&#125;&#125;</span>
+                  {currentEnv.variables.length === 0 ? (
+                    <div className="text-[11px] text-gray-500 py-2 italic text-center">
+                      No variables defined in this environment.
+                    </div>
+                  ) : (
+                    currentEnv.variables.map((v, idx) => (
+                      <div key={idx} className="p-2 bg-[#11111b] border border-white/5 rounded-xl space-y-1">
+                        <div className="flex items-center justify-between">
+                          <input
+                            type="text"
+                            value={v.key}
+                            onChange={(e) => {
+                              const updatedVars = [...currentEnv.variables];
+                              updatedVars[idx] = { ...v, key: e.target.value };
+                              updateEnvironment({ ...currentEnv, variables: updatedVars });
+                            }}
+                            className="bg-transparent font-mono text-xs text-purple-400 font-bold focus:outline-none border-b border-transparent focus:border-purple-400/50"
+                            placeholder="VAR_NAME"
+                          />
+                          <div className="flex items-center space-x-1">
+                            <input
+                              type="checkbox"
+                              checked={v.enabled}
+                              onChange={(e) => {
+                                const updatedVars = [...currentEnv.variables];
+                                updatedVars[idx] = { ...v, enabled: e.target.checked };
+                                updateEnvironment({ ...currentEnv, variables: updatedVars });
+                              }}
+                              className="rounded border-white/20 text-blue-600 focus:ring-0"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (window.confirm(`Are you sure you want to delete variable "${v.key}"?`)) {
+                                  const updatedVars = currentEnv.variables.filter((_, i) => i !== idx);
+                                  updateEnvironment({ ...currentEnv, variables: updatedVars });
+                                }
+                              }}
+                              className="text-gray-500 hover:text-rose-400 p-1"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </div>
                         <input
-                          type="checkbox"
-                          checked={v.enabled}
+                          type="text"
+                          value={v.value}
                           onChange={(e) => {
                             const updatedVars = [...currentEnv.variables];
-                            updatedVars[idx] = { ...v, enabled: e.target.checked };
+                            updatedVars[idx] = { ...v, value: e.target.value };
                             updateEnvironment({ ...currentEnv, variables: updatedVars });
                           }}
-                          className="rounded border-white/20 text-blue-600 focus:ring-0"
+                          className="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs font-mono text-gray-200 focus:outline-none"
+                          placeholder="value"
                         />
                       </div>
-                      <input
-                        type="text"
-                        value={v.value}
-                        onChange={(e) => {
-                          const updatedVars = [...currentEnv.variables];
-                          updatedVars[idx] = { ...v, value: e.target.value };
-                          updateEnvironment({ ...currentEnv, variables: updatedVars });
-                        }}
-                        className="w-full bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs font-mono text-gray-200 focus:outline-none"
-                      />
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </div>
               </div>
             )}
           </div>
         )}
       </div>
+
+      {/* Add Environment Modal */}
+      {showAddEnvModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm bg-[#1e1e2e] border border-white/15 rounded-2xl shadow-2xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-xs text-gray-200 uppercase tracking-wider">New Environment</span>
+              <button onClick={() => setShowAddEnvModal(false)} className="text-gray-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <input
+              type="text"
+              value={newEnvName}
+              onChange={(e) => setNewEnvName(e.target.value)}
+              placeholder="e.g. Staging, Development"
+              className="w-full bg-[#11111b] border border-white/10 rounded-xl px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+              autoFocus
+            />
+            <div className="flex justify-end space-x-2">
+              <button
+                type="button"
+                onClick={() => setShowAddEnvModal(false)}
+                className="px-3 py-1.5 text-xs text-gray-400 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (newEnvName.trim()) {
+                    createEnvironment(newEnvName.trim());
+                    setNewEnvName('');
+                    setShowAddEnvModal(false);
+                  }
+                }}
+                className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold"
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

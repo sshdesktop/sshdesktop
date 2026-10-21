@@ -37,6 +37,7 @@ export interface ApiTabState {
   response: ApiResponsePayload | null;
   error: string | null;
   isDirty?: boolean;
+  activeSubTab?: 'params' | 'headers' | 'auth' | 'body' | 'settings';
 }
 
 export interface SavedRequest {
