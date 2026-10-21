@@ -10,6 +10,7 @@ export interface BrowserTab {
   tunnelPort?: number;
   isTunneled?: boolean;
   networkMode: NetworkMode;
+  userBrowserMode?: 'external' | 'embedded';
   devToolsOpen?: boolean;
   activeDevToolsPanel?: DevToolsPanel;
   title: string;
