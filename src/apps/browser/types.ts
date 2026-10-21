@@ -1,4 +1,6 @@
 export type BrowserRoutingMode = 'ssh-gateway' | 'tunnel' | 'direct';
+export type DevToolsPanel = 'network' | 'source' | 'ssh-command' | 'console';
+export type NetworkMode = 'server' | 'user';
 
 export interface BrowserTab {
   id: string;
@@ -7,6 +9,9 @@ export interface BrowserTab {
   iframeSrc?: string;
   tunnelPort?: number;
   isTunneled?: boolean;
+  networkMode: NetworkMode;
+  devToolsOpen?: boolean;
+  activeDevToolsPanel?: DevToolsPanel;
   title: string;
   favicon?: string;
   isLoading: boolean;

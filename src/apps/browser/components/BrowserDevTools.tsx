@@ -3,20 +3,24 @@ import {
   Terminal, Code2, Globe, Shield, Copy, Check, X, 
   Clock, ArrowRight, Layers, FileText, Activity
 } from 'lucide-react';
-import { BrowserTab } from '../types';
+import { BrowserTab, DevToolsPanel } from '../types';
 
 interface BrowserDevToolsProps {
   activeTab: BrowserTab;
+  activePanel?: DevToolsPanel;
+  onPanelChange?: (panel: DevToolsPanel) => void;
   onClose: () => void;
   isLight?: boolean;
 }
 
 export default function BrowserDevTools({
   activeTab,
+  activePanel,
+  onPanelChange,
   onClose,
   isLight = false,
 }: BrowserDevToolsProps) {
-  const [activePanel, setActivePanel] = useState<'network' | 'source' | 'ssh-command' | 'console'>('network');
+  const currentPanel: DevToolsPanel = activePanel || activeTab.activeDevToolsPanel || 'network';
   const [copied, setCopied] = useState(false);
 
   const handleCopySource = () => {
@@ -24,6 +28,12 @@ export default function BrowserDevTools({
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handlePanelClick = (panel: DevToolsPanel) => {
+    if (onPanelChange) {
+      onPanelChange(panel);
+    }
   };
 
   return (
@@ -38,19 +48,19 @@ export default function BrowserDevTools({
 
           <div className="flex items-center space-x-1 border-l border-white/10 pl-2">
             {[
-              { id: 'network', label: 'Headers & Network', icon: Globe },
-              { id: 'source', label: 'Response Source', icon: Code2 },
-              { id: 'ssh-command', label: 'SSH Tunnel Info', icon: Terminal },
+              { id: 'network' as DevToolsPanel, label: 'Headers & Network', icon: Globe },
+              { id: 'source' as DevToolsPanel, label: 'Response Source', icon: Code2 },
+              { id: 'ssh-command' as DevToolsPanel, label: 'SSH Tunnel Info', icon: Terminal },
             ].map(tab => {
               const Icon = tab.icon;
-              const isSelected = activePanel === tab.id;
+              const isSelected = currentPanel === tab.id;
               return (
                 <button
                   key={tab.id}
-                  onClick={() => setActivePanel(tab.id as any)}
+                  onClick={() => handlePanelClick(tab.id)}
                   className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
                     isSelected
-                      ? 'bg-blue-600 text-white font-semibold'
+                      ? 'bg-blue-600 text-white font-semibold shadow-sm'
                       : 'text-gray-400 hover:text-white hover:bg-white/5'
                   }`}
                 >
@@ -63,7 +73,7 @@ export default function BrowserDevTools({
         </div>
 
         <div className="flex items-center space-x-1">
-          {activePanel === 'source' && (
+          {currentPanel === 'source' && (
             <button
               onClick={handleCopySource}
               className="flex items-center space-x-1 px-2 py-0.5 rounded text-[11px] text-gray-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 cursor-pointer mr-1"
@@ -85,7 +95,7 @@ export default function BrowserDevTools({
 
       {/* Panel Content */}
       <div className="flex-1 overflow-y-auto p-3">
-        {activePanel === 'network' && (
+        {currentPanel === 'network' && (
           <div className="space-y-3">
             {/* Summary status pill */}
             <div className="flex items-center space-x-3 text-xs font-mono">
@@ -121,7 +131,7 @@ export default function BrowserDevTools({
           </div>
         )}
 
-        {activePanel === 'source' && (
+        {currentPanel === 'source' && (
           <div className="h-full flex flex-col font-mono text-[11px]">
             <div className="flex-1 bg-black/40 rounded-xl p-3 border border-white/10 overflow-auto text-gray-200 select-all whitespace-pre leading-relaxed">
               {activeTab.htmlContent || (activeTab.jsonContent ? JSON.stringify(activeTab.jsonContent, null, 2) : activeTab.textContent) || (
@@ -131,7 +141,7 @@ export default function BrowserDevTools({
           </div>
         )}
 
-        {activePanel === 'ssh-command' && (
+        {currentPanel === 'ssh-command' && (
           <div className="space-y-2.5 font-mono text-xs">
             <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider font-sans">
               SSH Local Port Forwarding Tunnel
@@ -140,13 +150,14 @@ export default function BrowserDevTools({
             <div className="bg-black/40 rounded-xl p-3 border border-white/10 text-cyan-300 select-all whitespace-pre-wrap break-all">
               {activeTab.isTunneled
                 ? `ssh -N -L 127.0.0.1:${activeTab.tunnelPort || 'PORT'}:127.0.0.1:${activeTab.tunnelPort || 'PORT'} ${activeTab.serverHost || 'user@host'}`
-                : `Direct / Google Route: ${activeTab.url}`}
+                : `Direct Route: ${activeTab.displayUrl || activeTab.url || 'Start Page'}`}
             </div>
 
             <div className="text-[11px] text-gray-400 font-sans space-y-1">
-              <div>• <strong>Mode:</strong> {activeTab.isTunneled ? 'SSH Port Forwarding Tunnel (Active)' : 'Direct Web Access'}</div>
-              <div>• <strong>Local Listener:</strong> {activeTab.isTunneled ? `127.0.0.1:${activeTab.tunnelPort}` : 'N/A'}</div>
-              <div>• <strong>Target:</strong> {activeTab.url}</div>
+              <div>• <strong>Mode:</strong> {activeTab.networkMode === 'server' ? (activeTab.isTunneled ? 'SSH Port Forwarding Tunnel (Active)' : 'Server Network (Waiting for Tunnel)') : 'User Network (Direct Local Web Access)'}</div>
+              <div>• <strong>Local Listener:</strong> {activeTab.isTunneled ? `127.0.0.1:${activeTab.tunnelPort}` : 'N/A (Direct Access)'}</div>
+              <div>• <strong>Target:</strong> {activeTab.displayUrl || activeTab.url || 'Start Page'}</div>
+              <div>• <strong>Routing Network:</strong> {activeTab.networkMode === 'server' ? 'Server Network (SSH: ON)' : 'User Network (SSH: OFF)'}</div>
               <div>• <strong>Engine:</strong> Direct TCP socket tunnel. Native browser runtime with full JS, WebSockets, cookies and assets enabled.</div>
               <div>• <strong>Architecture:</strong> Zero cURL commands. Fully responsive bidirectional port forwarding through SSH.</div>
             </div>
