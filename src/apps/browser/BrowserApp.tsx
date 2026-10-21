@@ -34,6 +34,7 @@ interface ResolvedTarget {
   remotePort: number;
   subPath: string;
   isPublicHttps?: boolean;
+  protocol?: string;
 }
 
 /**
@@ -214,7 +215,9 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
   // 2. Pure port number like "8080" or ":8080"
   if (/^:?\d+$/.test(trimmed)) {
     const port = parseInt(trimmed.replace(':', ''), 10);
-    const display = `http://localhost:${port}`;
+    const isHttps = [443, 8443, 9443, 10000].includes(port);
+    const proto = isHttps ? 'https:' : 'http:';
+    const display = `${proto}//localhost:${port}`;
     if (networkMode === 'server') {
       return {
         url: display,
@@ -225,6 +228,7 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
         remoteHost: '127.0.0.1',
         remotePort: port,
         subPath: '/',
+        protocol: proto,
       };
     } else {
       return {
@@ -236,6 +240,7 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
         remoteHost: '',
         remotePort: 0,
         subPath: '/',
+        protocol: proto,
       };
     }
   }
@@ -344,6 +349,7 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
         remotePort: port,
         subPath,
         isPublicHttps,
+        protocol: parsed.protocol,
       };
     }
 
@@ -358,6 +364,7 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
       remotePort: 0,
       subPath,
       isPublicHttps: parsed.protocol === 'https:',
+      protocol: parsed.protocol,
     };
   } catch {
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
@@ -566,7 +573,8 @@ export default function BrowserApp() {
           );
 
           if (boundPort && boundPort > 0) {
-            const tunnelIframeSrc = `http://127.0.0.1:${boundPort}${resolved.subPath}`;
+            const scheme = resolved.protocol || ([443, 8443, 9443, 10000].includes(resolved.remotePort) ? 'https:' : 'http:');
+            const tunnelIframeSrc = `${scheme}//127.0.0.1:${boundPort}${resolved.subPath}`;
             setTunnelStatusText(`SSH Tunnel active on 127.0.0.1:${boundPort}`);
 
             setTabs(prev => prev.map(t => {
@@ -1180,8 +1188,7 @@ export default function BrowserApp() {
                   <div className="flex-1 w-full h-full relative">
                     <iframe
                       src={tab.iframeSrc || tab.url}
-                      sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-presentation"
-                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+                      allow="accelerometer; autoplay; clipboard-read; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
                       allowFullScreen={true}
                       referrerPolicy="no-referrer-when-downgrade"
                       className="w-full h-full border-none bg-white"
