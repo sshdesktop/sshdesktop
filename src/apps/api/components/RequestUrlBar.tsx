@@ -121,7 +121,7 @@ export default function RequestUrlBar({
               }`}
               title={
                 activeTab.useSshTunnel
-                  ? `SSH Tunnel ENABLED: Routes request through port-forwarding tunnel on ${activeServer?.name || activeServer?.host || 'active server'} (no curl used)`
+                  ? `SSH Tunnel ENABLED: Routes request through active SSH connection on ${activeServer?.name || activeServer?.host || 'active server'}`
                   : 'SSH Tunnel DISABLED: Sends request directly from local network'
               }
             >
