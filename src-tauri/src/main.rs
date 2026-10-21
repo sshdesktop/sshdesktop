@@ -23,7 +23,7 @@ fn main() {
     {
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--disable-web-security --allow-running-insecure-content --disable-features=IsolateOrigins,site-per-process --disable-site-isolation-trials",
+            "--disable-web-security --allow-running-insecure-content --ignore-certificate-errors --ignore-ssl-errors --disable-features=IsolateOrigins,site-per-process --disable-site-isolation-trials",
         );
     }
 
