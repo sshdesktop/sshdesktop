@@ -144,22 +144,33 @@ export default function BrowserDevTools({
         {currentPanel === 'ssh-command' && (
           <div className="space-y-2.5 font-mono text-xs">
             <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider font-sans">
-              SSH Local Port Forwarding Tunnel
+              SSH Dynamic SOCKS5 Proxy & Port Forwarding
             </div>
 
             <div className="bg-black/40 rounded-xl p-3 border border-white/10 text-cyan-300 select-all whitespace-pre-wrap break-all">
-              {activeTab.isTunneled
-                ? `ssh -N -L 127.0.0.1:${activeTab.tunnelPort || 'PORT'}:127.0.0.1:${activeTab.tunnelPort || 'PORT'} ${activeTab.serverHost || 'user@host'}`
-                : `Direct Route: ${activeTab.displayUrl || activeTab.url || 'Start Page'}`}
+              {activeTab.networkMode === 'server' ? (
+                <>
+                  <div className="text-emerald-400 font-semibold mb-1"># Dynamic SOCKS5 Proxy (Routes all TCP/Subnets/Web through SSH):</div>
+                  <div>ssh -N -D 127.0.0.1:{activeTab.socks5Port || 1080} {activeTab.serverHost || 'user@host'}</div>
+                  {activeTab.isTunneled && (
+                    <>
+                      <div className="text-emerald-400 font-semibold mt-2 mb-1"># Single Port Forwarding Tunnel:</div>
+                      <div>ssh -N -L 127.0.0.1:{activeTab.tunnelPort}:127.0.0.1:{activeTab.tunnelPort} {activeTab.serverHost || 'user@host'}</div>
+                    </>
+                  )}
+                </>
+              ) : (
+                <div className="text-blue-300"># Direct Route (SSH: OFF - Local PC Network): {activeTab.displayUrl || activeTab.url || 'Start Page'}</div>
+              )}
             </div>
 
             <div className="text-[11px] text-gray-400 font-sans space-y-1">
-              <div>• <strong>Mode:</strong> {activeTab.networkMode === 'server' ? (activeTab.isTunneled ? 'SSH Port Forwarding Tunnel (Active)' : 'Server Network (Waiting for Tunnel)') : 'User Network (Direct Local Web Access)'}</div>
-              <div>• <strong>Local Listener:</strong> {activeTab.isTunneled ? `127.0.0.1:${activeTab.tunnelPort}` : 'N/A (Direct Access)'}</div>
+              <div>• <strong>Mode:</strong> {activeTab.networkMode === 'server' ? (activeTab.isTunneled ? 'SSH Port Tunnel & SOCKS5 (Active)' : 'Server Network with SOCKS5 Proxy (Active)') : 'User Network (Direct Local PC Access)'}</div>
+              <div>• <strong>SOCKS5 Proxy:</strong> {activeTab.networkMode === 'server' && activeTab.socks5Port ? `127.0.0.1:${activeTab.socks5Port} (Listening)` : 'Disabled (SSH: OFF)'}</div>
+              <div>• <strong>Local Listener:</strong> {activeTab.isTunneled ? `127.0.0.1:${activeTab.tunnelPort}` : (activeTab.socks5Port ? `127.0.0.1:${activeTab.socks5Port} (SOCKS5)` : 'Direct')}</div>
               <div>• <strong>Target:</strong> {activeTab.displayUrl || activeTab.url || 'Start Page'}</div>
               <div>• <strong>Routing Network:</strong> {activeTab.networkMode === 'server' ? 'Server Network (SSH: ON)' : 'User Network (SSH: OFF)'}</div>
-              <div>• <strong>Engine:</strong> Direct TCP socket tunnel. Native browser runtime with full JS, WebSockets, cookies and assets enabled.</div>
-              <div>• <strong>Architecture:</strong> Zero cURL commands. Fully responsive bidirectional port forwarding through SSH.</div>
+              <div>• <strong>Engine:</strong> SSH Dynamic Port Forwarding (-D SOCKS5) and TCP socket tunnel. Native browser runtime with full JS, WebSockets, cookies and assets enabled.</div>
             </div>
           </div>
         )}

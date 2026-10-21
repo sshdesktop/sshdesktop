@@ -8,6 +8,7 @@ export interface BrowserTab {
   displayUrl: string;
   iframeSrc?: string;
   tunnelPort?: number;
+  socks5Port?: number;
   isTunneled?: boolean;
   networkMode: NetworkMode;
   userBrowserMode?: 'external' | 'embedded';

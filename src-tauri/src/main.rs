@@ -69,6 +69,9 @@ fn main() {
             ssh::tunnel::ssh_start_tunnel,
             ssh::tunnel::ssh_stop_tunnel,
             ssh::tunnel::ssh_list_tunnels,
+            ssh::tunnel::ssh_start_socks5,
+            ssh::tunnel::ssh_stop_socks5,
+            ssh::tunnel::ssh_get_socks5,
             
             // System commands
             system::monitor::system_get_stats,

@@ -1218,6 +1218,28 @@ export async function sshListTunnels(): Promise<SshTunnelInfo[]> {
   return safeInvoke<SshTunnelInfo[]>('ssh_list_tunnels', {}, []);
 }
 
+export async function sshStartSocks5(
+  connId: string,
+  preferredPort?: number
+): Promise<number> {
+  return safeInvoke<number>(
+    'ssh_start_socks5',
+    {
+      connId,
+      preferredPort: preferredPort ? Number(preferredPort) : undefined,
+    },
+    0
+  );
+}
+
+export async function sshStopSocks5(connId: string): Promise<void> {
+  return safeInvoke<void>('ssh_stop_socks5', { connId }, undefined);
+}
+
+export async function sshGetSocks5(connId: string): Promise<number | null> {
+  return safeInvoke<number | null>('ssh_get_socks5', { connId }, null);
+}
+
 export async function openExternalUrl(url: string): Promise<void> {
   try {
     if (isTauri()) {

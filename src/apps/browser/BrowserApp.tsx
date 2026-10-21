@@ -4,7 +4,7 @@ import {
   ShieldCheck, Star, Plus, X, Search, Activity, Terminal, 
   Layers, Code2, Server, ExternalLink, ZoomIn, ZoomOut,
   AlertCircle, Check, Sparkles, ChevronDown, Radio, Bookmark as BookmarkIcon,
-  Laptop, Compass, Copy, ArrowUpRight, Play
+  Laptop, Compass, Copy, ArrowUpRight
 } from 'lucide-react';
 import { BrowserTab, BrowserRoutingMode, BrowserBookmark, DevToolsPanel } from './types';
 import { useBrowserStore } from './browserStore';
@@ -12,6 +12,9 @@ import { useConnectionStore } from '../../lib/store';
 import { 
   sshStartTunnel, 
   sshStopTunnel, 
+  sshStartSocks5,
+  sshStopSocks5,
+  sshGetSocks5,
   sftpReadTextFile, 
   sftpWriteTextFile, 
   sftpMkdir,
@@ -106,18 +109,7 @@ function extractYouTubeEmbedInfo(input: string): { isYouTube: boolean; embedSrc:
       };
     }
 
-    // 5. Search results: /results?search_query=<q>
-    if (parsed.pathname === '/results' && parsed.searchParams.has('search_query')) {
-      const q = parsed.searchParams.get('search_query') || 'trending';
-      return {
-        isYouTube: true,
-        embedSrc: `https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(q)}`,
-        displayUrl: cleanDisplay,
-        title: `${q} - YouTube Search`,
-      };
-    }
-
-    // 6. Already an embed URL: /embed/<id>
+    // 5. Already an embed URL: /embed/<id>
     if (parsed.pathname.startsWith('/embed/')) {
       return {
         isYouTube: true,
@@ -127,17 +119,17 @@ function extractYouTubeEmbedInfo(input: string): { isYouTube: boolean; embedSrc:
       };
     }
 
-    // 7. General root or channel: youtube.com
+    // 6. General root, search, or channel: youtube.com
     return {
       isYouTube: true,
-      embedSrc: 'https://www.youtube.com/embed?listType=search&list=trending+music+entertainment',
+      embedSrc: cleanDisplay,
       displayUrl: cleanDisplay,
       title: 'YouTube',
     };
   } catch {
     return {
       isYouTube: true,
-      embedSrc: 'https://www.youtube.com/embed?listType=search&list=trending',
+      embedSrc: 'https://www.youtube.com',
       displayUrl: 'https://www.youtube.com',
       title: 'YouTube',
     };
@@ -151,7 +143,7 @@ function extractGoogleEmbedInfo(input: string): { isGoogle: boolean; embedSrc: s
   const trimmed = input.trim();
   const lower = trimmed.toLowerCase();
 
-  const isGoogleDomain = lower.includes('google.com');
+  const isGoogleDomain = lower.includes('google.');
   if (!isGoogleDomain) {
     return { isGoogle: false, embedSrc: '', displayUrl: '', title: '' };
   }
@@ -250,22 +242,6 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
 
   // 3. Multi-word search or words without dot/colon/protocol -> Search query
   if (!hasProtocol && !isLocalHost && !isIpWithPort && (hasSpace || (!hasDot && !trimmed.includes(':')))) {
-    // If query starts with "youtube <query>", route directly to YouTube search embed
-    if (trimmed.toLowerCase().startsWith('youtube ')) {
-      const ytQuery = trimmed.slice(8).trim();
-      return {
-        url: `https://www.youtube.com/results?search_query=${encodeURIComponent(ytQuery)}`,
-        displayUrl: `https://www.youtube.com/results?search_query=${encodeURIComponent(ytQuery)}`,
-        iframeSrc: `https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(ytQuery)}`,
-        title: `${ytQuery} - YouTube Search`,
-        isTunneled: false,
-        remoteHost: '',
-        remotePort: 0,
-        subPath: '',
-        isPublicHttps: true,
-      };
-    }
-
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
     return {
       url: searchUrl,
@@ -537,9 +513,21 @@ export default function BrowserApp() {
     }
 
     // -------------------------------------------------------------
-    // Branch 1: Server Network Mode (SSH: ON) - Carefully Managed
+    // Branch 1: Server Network Mode (SSH: ON) - SOCKS5 Dynamic Proxy & Tunnels
     // -------------------------------------------------------------
     if (effectiveNetworkMode === 'server') {
+      let currentSocks5Port: number | undefined = undefined;
+      if (activeConnectionId) {
+        try {
+          const sPort = await sshStartSocks5(activeConnectionId);
+          if (sPort && sPort > 0) {
+            currentSocks5Port = sPort;
+          }
+        } catch (sErr) {
+          console.warn('[SSH Desktop] SOCKS5 dynamic proxy launch notice:', sErr);
+        }
+      }
+
       if (resolved.isTunneled) {
         if (!activeConnectionId) {
           setTabs(prev => prev.map(t => {
@@ -576,6 +564,7 @@ export default function BrowserApp() {
                 title: `${resolved.displayUrl.replace(/^https?:\/\//, '')} (Tunnel)`,
                 iframeSrc: tunnelIframeSrc,
                 tunnelPort: boundPort,
+                socks5Port: currentSocks5Port,
                 isTunneled: true,
                 isLoading: false,
                 statusCode: 200,
@@ -621,10 +610,11 @@ export default function BrowserApp() {
             iframeSrc: resolved.iframeSrc || resolved.url,
             isTunneled: false,
             tunnelPort: undefined,
+            socks5Port: currentSocks5Port,
             userBrowserMode: 'embedded',
             isLoading: false,
             statusCode: 200,
-            statusText: 'Direct TLS (Public Web)',
+            statusText: currentSocks5Port ? `SOCKS5 Active (:${currentSocks5Port})` : 'Direct TLS (Server Network)',
             error: null,
           };
         }));
@@ -653,6 +643,7 @@ export default function BrowserApp() {
           iframeSrc: resolved.iframeSrc || resolved.url,
           isTunneled: false,
           tunnelPort: undefined,
+          socks5Port: undefined,
           userBrowserMode: 'embedded',
           isLoading: false,
           statusCode: 200,
@@ -676,11 +667,22 @@ export default function BrowserApp() {
     if (!currentTab) return;
     const newMode: 'server' | 'user' = currentTab.networkMode === 'server' ? 'user' : 'server';
 
+    let socks5Port: number | undefined = undefined;
+    if (newMode === 'server' && activeConnectionId) {
+      try {
+        const p = await sshStartSocks5(activeConnectionId);
+        if (p && p > 0) socks5Port = p;
+      } catch (err) {
+        console.warn('[SSH Desktop] SOCKS5 dynamic proxy launch notice:', err);
+      }
+    }
+
     setTabs(prev => prev.map(t => {
       if (t.id !== tabId) return t;
       return {
         ...t,
         networkMode: newMode,
+        socks5Port: newMode === 'server' ? socks5Port : undefined,
         routingMode: newMode === 'server' ? 'tunnel' : 'direct',
         userBrowserMode: 'embedded',
       };
@@ -925,7 +927,11 @@ export default function BrowserApp() {
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
               <Server className="w-3.5 h-3.5 text-emerald-400" />
               <span className="font-bold">SSH: ON</span>
-              <span className="text-[10px] text-emerald-400/90 font-mono hidden md:inline">(Server)</span>
+              {activeTab.socks5Port ? (
+                <span className="text-[10px] text-emerald-300 font-mono hidden md:inline">(:{activeTab.socks5Port})</span>
+              ) : (
+                <span className="text-[10px] text-emerald-400/90 font-mono hidden md:inline">(Server)</span>
+              )}
             </>
           ) : (
             <>
@@ -974,7 +980,13 @@ export default function BrowserApp() {
             className="flex-1 bg-transparent border-none text-xs text-white font-mono focus:outline-none placeholder-gray-500 select-all"
           />
 
-          {/* Active Tunnel Port Badge */}
+          {/* Active SOCKS5 / Tunnel Port Badge */}
+          {activeTab.networkMode === 'server' && activeTab.socks5Port && (
+            <div className="flex items-center space-x-1 px-2 py-0.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-[10px] font-mono text-emerald-300 mr-2 shrink-0" title={`SOCKS5 Dynamic Proxy: 127.0.0.1:${activeTab.socks5Port}`}>
+              <Radio className="w-2.5 h-2.5 text-emerald-400 animate-pulse" />
+              <span>SOCKS5 :{activeTab.socks5Port}</span>
+            </div>
+          )}
           {activeTab.isTunneled && activeTab.tunnelPort && (
             <div className="flex items-center space-x-1 px-2 py-0.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-[10px] font-mono text-emerald-300 mr-2 shrink-0">
               <Radio className="w-2.5 h-2.5 text-emerald-400 animate-pulse" />
@@ -1074,11 +1086,6 @@ export default function BrowserApp() {
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
           const isNewTab = !tab.url || tab.url === 'about:newtab';
-          const isYouTube = Boolean(
-            (tab.url && (tab.url.includes('youtube.com') || tab.url.includes('youtu.be'))) ||
-            (tab.displayUrl && (tab.displayUrl.includes('youtube.com') || tab.displayUrl.includes('youtu.be'))) ||
-            (tab.iframeSrc && tab.iframeSrc.includes('youtube.com/embed'))
-          );
           const isPublicOnSSH = tab.networkMode === 'server' && !tab.isTunneled && Boolean(tab.url);
 
           return (
@@ -1135,32 +1142,6 @@ export default function BrowserApp() {
                 </div>
               ) : (
                 <div className="w-full h-full flex flex-col relative overflow-hidden">
-                  {/* YouTube Helper Header Bar when viewing YouTube */}
-                  {isYouTube && (
-                    <div className="flex items-center justify-between px-3 py-1.5 bg-[#0f0f0f] border-b border-red-500/20 text-xs shrink-0 select-none">
-                      <div className="flex items-center space-x-2">
-                        <div className="flex items-center space-x-1 px-2 py-0.5 rounded bg-red-600 text-white font-bold text-[10px] tracking-wider uppercase shadow-sm">
-                          <Play className="w-3 h-3 fill-current" />
-                          <span>YouTube</span>
-                        </div>
-                        <div className="flex items-center space-x-1 overflow-x-auto no-scrollbar">
-                          {['Trending', 'Lofi Music', 'Coding Beats', 'Tech News', 'Podcasts'].map(topic => (
-                            <button
-                              key={topic}
-                              onClick={() => navigateUrl(`https://www.youtube.com/results?search_query=${encodeURIComponent(topic)}`, tab.id, tab.networkMode)}
-                              className="px-2 py-0.5 rounded-full bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white text-[11px] transition-colors cursor-pointer shrink-0"
-                            >
-                              {topic}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                      <div className="flex items-center space-x-2 text-[11px] text-gray-400">
-                        <span className="hidden sm:inline font-mono text-[10px] text-emerald-400">● Embedded Player Active</span>
-                      </div>
-                    </div>
-                  )}
-
                   {/* Advisory banner if accessing public website with SSH ON */}
                   {isPublicOnSSH && (
                     <div className="flex items-center justify-between px-3 py-1 bg-amber-500/10 border-b border-amber-500/20 text-amber-300 text-[11px] shrink-0">
@@ -1227,11 +1208,22 @@ export default function BrowserApp() {
               <span className="flex items-center space-x-1.5 text-emerald-400 font-semibold">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                 <span>SSH Port Tunnel: 127.0.0.1:{activeTab.tunnelPort} ➔ remote:{activeTab.url.split(':')[2]?.split('/')[0] || 'app'}</span>
+                {activeTab.socks5Port && (
+                  <span className="text-[10px] text-emerald-300/80 font-mono ml-2 border-l border-emerald-500/30 pl-2">
+                    SOCKS5: 127.0.0.1:{activeTab.socks5Port}
+                  </span>
+                )}
               </span>
             ) : (
-              <span className="flex items-center space-x-1 text-emerald-400/90 font-semibold">
+              <span className="flex items-center space-x-1 text-emerald-400 font-semibold">
                 <Server className="w-3 h-3 text-emerald-400" />
-                <span>Server Network (SSH: ON): {activeTab.displayUrl || 'Start Page'}</span>
+                <span>Server Network (SSH: ON)</span>
+                {activeTab.socks5Port && (
+                  <span className="text-[10px] text-emerald-300 font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30 ml-1">
+                    SOCKS5: 127.0.0.1:{activeTab.socks5Port}
+                  </span>
+                )}
+                <span className="text-gray-400 text-[10px] hidden sm:inline ml-1">➔ {activeTab.displayUrl || 'Start Page'}</span>
               </span>
             )
           ) : (
