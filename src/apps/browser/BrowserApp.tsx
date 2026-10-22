@@ -19,7 +19,9 @@ import {
   sftpWriteTextFile, 
   sftpMkdir,
   openExternalUrl,
-  openBrowserWindow
+  openBrowserWindow,
+  closeBrowserWindow,
+  focusBrowserWindow
 } from '../../lib/tauri-bridge';
 import DiscoveredServicesBar from './components/DiscoveredServicesBar';
 import BrowserDevTools from './components/BrowserDevTools';
@@ -526,8 +528,12 @@ export default function BrowserApp() {
     }
 
     // -------------------------------------------------------------
-    // Branch 1: Server Network Mode (SSH: ON) - SOCKS5 Dynamic Proxy & Tunnels
+    // Universal WebviewWindow Architecture (Every Tab) - ZERO IFRAMES
     // -------------------------------------------------------------
+    const windowId = `browser-tab-${currentTabId}`;
+    let targetUrlToLoad = resolved.displayUrl || resolved.url;
+    let proxyUrl: string | undefined = undefined;
+
     if (effectiveNetworkMode === 'server') {
       let currentSocks5Port: number | undefined = undefined;
       if (activeConnectionId) {
@@ -558,7 +564,6 @@ export default function BrowserApp() {
         setTunnelStatusText(`Establishing SSH Tunnel to ${resolved.remoteHost}:${resolved.remotePort}...`);
 
         try {
-          // Starts tunnel with dynamic unprivileged port (>= 1024)
           const boundPort = await sshStartTunnel(
             activeConnectionId,
             0,
@@ -567,32 +572,8 @@ export default function BrowserApp() {
           );
 
           if (boundPort && boundPort > 0) {
-            const tunnelIframeSrc = `http://127.0.0.1:${boundPort}${resolved.subPath}`;
+            targetUrlToLoad = `http://127.0.0.1:${boundPort}${resolved.subPath}`;
             setTunnelStatusText(`SSH Tunnel active on 127.0.0.1:${boundPort}`);
-
-            setTabs(prev => prev.map(t => {
-              if (t.id !== currentTabId) return t;
-              return {
-                ...t,
-                title: `${resolved.displayUrl.replace(/^https?:\/\//, '')} (Tunnel)`,
-                iframeSrc: tunnelIframeSrc,
-                tunnelPort: boundPort,
-                socks5Port: currentSocks5Port,
-                isTunneled: true,
-                isLoading: false,
-                statusCode: 200,
-                statusText: 'SSH Tunnel Active',
-                serverHost,
-                error: null,
-              };
-            }));
-
-            addHistoryItem({
-              url: resolved.displayUrl,
-              title: `${resolved.displayUrl.replace(/^https?:\/\//, '')} (Tunnel)`,
-              statusCode: 200,
-              serverHost,
-            });
           } else {
             throw new Error(`Tunnel initialization failed. Remote port ${resolved.remotePort} might not be listening on server.`);
           }
@@ -610,67 +591,47 @@ export default function BrowserApp() {
               tunnelPort: undefined,
             };
           }));
+          return;
         }
       } else {
-        // Public website accessed while in SSH: ON mode
-        // Renders directly in embedded window with full TLS
-        setTunnelStatusText(null);
-        setTabs(prev => prev.map(t => {
-          if (t.id !== currentTabId) return t;
-          return {
-            ...t,
-            title: resolved.title,
-            iframeSrc: resolved.iframeSrc || resolved.url,
-            isTunneled: false,
-            tunnelPort: undefined,
-            socks5Port: currentSocks5Port,
-            userBrowserMode: 'embedded',
-            isLoading: false,
-            statusCode: 200,
-            statusText: currentSocks5Port ? `SOCKS5 Active (:${currentSocks5Port})` : 'Direct TLS (Server Network)',
-            error: null,
-          };
-        }));
-
-        addHistoryItem({
-          url: resolved.displayUrl,
-          title: resolved.title,
-          statusCode: 200,
-          serverHost,
-        });
+        if (currentSocks5Port) {
+          proxyUrl = `socks5://127.0.0.1:${currentSocks5Port}`;
+        }
       }
-    } 
-    // -------------------------------------------------------------
-    // Branch 2: User Network Mode (SSH: OFF) - Direct inside App
-    // Runs DIRECTLY inside this tab in the desktop application window (NO new window!)
-    // -------------------------------------------------------------
-    else {
-      setTunnelStatusText(null);
-
-      setTabs(prev => prev.map(t => {
-        if (t.id !== currentTabId) return t;
-        return {
-          ...t,
-          title: resolved.title,
-          iframeSrc: resolved.iframeSrc || resolved.url,
-          isTunneled: false,
-          tunnelPort: undefined,
-          socks5Port: undefined,
-          userBrowserMode: 'embedded',
-          isLoading: false,
-          statusCode: 200,
-          statusText: 'SSH: OFF (Direct)',
-          error: null,
-        };
-      }));
-
-      addHistoryItem({
-        url: resolved.displayUrl,
-        title: resolved.title,
-        statusCode: 200,
-        serverHost: 'PC Network',
-      });
     }
+
+    // Launch or navigate WebviewWindow for this tab (bypasses all iframe restrictions & preserves origin headers)
+    openBrowserWindow(
+      targetUrlToLoad,
+      `CloudDesk Browser - ${resolved.title} (${effectiveNetworkMode === 'server' ? 'SSH: ON SOCKS5' : 'SSH: OFF Direct'})`,
+      proxyUrl,
+      windowId
+    ).catch(err => {
+      console.warn('[SSH Desktop] openBrowserWindow failed:', err);
+    });
+
+    setTabs(prev => prev.map(t => {
+      if (t.id !== currentTabId) return t;
+      return {
+        ...t,
+        url: targetUrlToLoad,
+        displayUrl: resolved.displayUrl,
+        title: resolved.title,
+        userBrowserMode: 'native',
+        nativeWindowId: windowId,
+        isLoading: false,
+        statusCode: 200,
+        statusText: effectiveNetworkMode === 'server' ? 'SSH: ON (WebviewWindow SOCKS5)' : 'SSH: OFF (WebviewWindow Direct)',
+        error: null,
+      };
+    }));
+
+    addHistoryItem({
+      url: resolved.displayUrl,
+      title: resolved.title,
+      statusCode: 200,
+      serverHost: effectiveNetworkMode === 'server' ? serverHost : 'PC Network',
+    });
   };
 
   // Toggle SSH Network mode (Server Network vs User Network) on specific tab
@@ -754,11 +715,16 @@ export default function BrowserApp() {
 
   const handleCloseTab = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    closeBrowserWindow(`browser-tab-${id}`).catch(() => {});
     if (tabs.length === 1) return;
     const remaining = tabs.filter(t => t.id !== id);
     setTabs(remaining);
     if (activeTabId === id) {
-      setActiveTabId(remaining[remaining.length - 1].id);
+      const nextTab = remaining[remaining.length - 1];
+      setActiveTabId(nextTab.id);
+      if (nextTab.url && nextTab.url !== 'about:newtab') {
+        focusBrowserWindow(`browser-tab-${nextTab.id}`).catch(() => {});
+      }
     }
   };
 
@@ -908,7 +874,12 @@ export default function BrowserApp() {
             return (
               <div
                 key={tab.id}
-                onClick={() => setActiveTabId(tab.id)}
+                onClick={() => {
+                  setActiveTabId(tab.id);
+                  if (tab.url && tab.url !== 'about:newtab') {
+                    focusBrowserWindow(`browser-tab-${tab.id}`).catch(() => {});
+                  }
+                }}
                 className={`flex items-center space-x-2 px-3 py-1.5 rounded-t-xl text-xs transition-all cursor-pointer group max-w-[220px] border-t border-x ${
                   isActive
                     ? 'bg-[#1e1e2e] text-white border-white/10 font-medium shadow-sm'
@@ -1284,8 +1255,8 @@ export default function BrowserApp() {
                     </button>
                   </div>
                 </div>
-              ) : tab.userBrowserMode === 'native' ? (
-                /* Interactive Native WebView2 Session Controller for this tab */
+              ) : (
+                /* Native WebviewWindow Session Controller - ZERO IFRAMES */
                 <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-gradient-to-b from-[#181825] via-[#1e1e2e] to-[#11111b] text-center select-none overflow-y-auto">
                   <div className="relative mb-5">
                     <div className="w-20 h-20 rounded-3xl bg-gradient-to-tr from-emerald-500 via-teal-500 to-cyan-400 p-0.5 shadow-2xl shadow-emerald-500/20">
@@ -1300,7 +1271,7 @@ export default function BrowserApp() {
 
                   <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-semibold mb-3">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                    <span>Native WebView2 Window Active</span>
+                    <span>WebviewWindow Active (Zero Iframes)</span>
                     <span className="text-[10px] text-emerald-400/80 font-mono">
                       ({tab.networkMode === 'server' ? 'SSH SOCKS5 Proxy' : 'Direct PC Internet'})
                     </span>
@@ -1318,41 +1289,54 @@ export default function BrowserApp() {
                   {/* Highlights Grid */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 max-w-xl mb-6 text-left">
                     <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/5">
-                      <div className="text-emerald-400 font-bold text-xs mb-0.5">Zero Iframe Block</div>
+                      <div className="text-emerald-400 font-bold text-xs mb-0.5">Top-Level Origin</div>
+                      <div className="text-[11px] text-gray-400">Solves 'missing origin header' on login</div>
+                    </div>
+                    <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/5">
+                      <div className="text-emerald-400 font-bold text-xs mb-0.5">Session Cookies</div>
+                      <div className="text-[11px] text-gray-400">First-party cookies & CSRF tokens allowed</div>
+                    </div>
+                    <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/5">
+                      <div className="text-emerald-400 font-bold text-xs mb-0.5">Zero Iframe Blocks</div>
                       <div className="text-[11px] text-gray-400">X-Frame-Options & CSP bypassed</div>
                     </div>
                     <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/5">
-                      <div className="text-emerald-400 font-bold text-xs mb-0.5">Fullscreen Video</div>
-                      <div className="text-[11px] text-gray-400">YouTube, Vimeo, Twitch 4K</div>
-                    </div>
-                    <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/5">
-                      <div className="text-emerald-400 font-bold text-xs mb-0.5">Full Login Support</div>
-                      <div className="text-[11px] text-gray-400">Google, GitHub, SSO & cookies</div>
-                    </div>
-                    <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/5">
-                      <div className="text-emerald-400 font-bold text-xs mb-0.5">Direct PC Speed</div>
-                      <div className="text-[11px] text-gray-400">Full GPU hardware acceleration</div>
+                      <div className="text-emerald-400 font-bold text-xs mb-0.5">Direct GPU Speed</div>
+                      <div className="text-[11px] text-gray-400">4K 60fps YouTube, Netflix & PC audio</div>
                     </div>
                   </div>
 
                   {/* Action Controls */}
                   <div className="flex flex-wrap items-center justify-center gap-3">
                     <button
-                      onClick={() => handleLaunchNativeBrowser(tab.displayUrl || tab.url, tab.id)}
+                      onClick={() => {
+                        focusBrowserWindow(`browser-tab-${tab.id}`).catch(() => {
+                          handleLaunchNativeBrowser(tab.displayUrl || tab.url, tab.id);
+                        });
+                      }}
                       className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-semibold shadow-lg shadow-emerald-600/30 transition-all cursor-pointer flex items-center space-x-2"
-                      title="Bring this tab's dedicated Native WebView2 Window to the front"
+                      title="Bring this tab's dedicated WebviewWindow to the front"
                     >
                       <Compass className="w-4 h-4" />
-                      <span>Bring Window to Front / Focus</span>
+                      <span>Bring WebviewWindow to Front</span>
                     </button>
 
                     <button
-                      onClick={() => setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, userBrowserMode: 'embedded' } : t))}
+                      onClick={() => handleLaunchNativeBrowser(tab.displayUrl || tab.url, tab.id)}
                       className="px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-semibold border border-white/10 transition-colors cursor-pointer flex items-center space-x-1.5"
-                      title="Try rendering inside the desktop tab viewport"
+                      title="Relaunch / Reload WebviewWindow"
                     >
-                      <Layers className="w-3.5 h-3.5" />
-                      <span>Switch to Embedded View</span>
+                      <RotateCw className="w-3.5 h-3.5" />
+                      <span>Reload Window</span>
+                    </button>
+
+                    <button
+                      onClick={() => closeBrowserWindow(`browser-tab-${tab.id}`).catch(() => {})}
+                      className="px-4 py-2.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 text-xs font-semibold border border-rose-500/20 transition-colors cursor-pointer flex items-center space-x-1.5"
+                      title="Close this WebviewWindow"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      <span>Close Window</span>
                     </button>
 
                     <button
@@ -1370,70 +1354,6 @@ export default function BrowserApp() {
                     >
                       Return to Start Page
                     </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="w-full h-full flex flex-col relative overflow-hidden">
-                  {/* Advisory banner if accessing public website with SSH ON */}
-                  {isPublicOnSSH && (
-                    <div className="flex items-center justify-between px-3 py-1 bg-amber-500/10 border-b border-amber-500/20 text-amber-300 text-[11px] shrink-0">
-                      <div className="flex items-center space-x-1.5 truncate">
-                        <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                        <span>SSH: ON is active. Public websites connect via direct TLS.</span>
-                      </div>
-                      <button
-                        onClick={() => handleToggleNetworkMode(tab.id)}
-                        className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 text-[10px] font-semibold transition-colors cursor-pointer shrink-0 ml-2"
-                      >
-                        Switch to SSH: OFF
-                      </button>
-                    </div>
-                  )}
-
-                  <div className="flex-1 w-full h-full relative">
-                    <iframe
-                      src={tab.iframeSrc || tab.url}
-                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
-                      allowFullScreen={true}
-                      referrerPolicy="unsafe-url"
-                      className="w-full h-full border-none bg-white"
-                      style={{ 
-                        transform: `scale(${zoomLevel / 100})`, 
-                        transformOrigin: 'top left', 
-                        width: `${100 * (100 / zoomLevel)}%`, 
-                        height: `${100 * (100 / zoomLevel)}%` 
-                      }}
-                      title={tab.title}
-                      onLoad={(e) => {
-                        const iframeEl = e.currentTarget;
-                        let newLocation = '';
-                        try {
-                          const href = iframeEl.contentWindow?.location?.href;
-                          if (href && href !== 'about:blank') {
-                            newLocation = href;
-                          }
-                        } catch {
-                          // Cross-origin iframe security prevents reading location.href
-                        }
-
-                        setTabs(prev => prev.map(t => {
-                          if (t.id !== tab.id) return t;
-                          if (newLocation && newLocation !== t.url && !t.isTunneled) {
-                            return { 
-                              ...t, 
-                              isLoading: false,
-                              url: newLocation,
-                              displayUrl: newLocation,
-                            };
-                          }
-                          return { ...t, isLoading: false };
-                        }));
-
-                        if (newLocation && tab.id === activeTabId && !tab.isTunneled) {
-                          setUrlInput(newLocation);
-                        }
-                      }}
-                    />
                   </div>
                 </div>
               )}
