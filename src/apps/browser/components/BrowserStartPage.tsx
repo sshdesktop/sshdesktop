@@ -2,12 +2,13 @@ import React, { useState } from 'react';
 import { 
   Globe, Server, Search, ArrowRight, Sparkles, 
   ExternalLink, Bookmark as BookmarkIcon, Radio, 
-  ShieldCheck, Laptop, Cpu, Check
+  ShieldCheck, Laptop, Cpu, Check, Compass
 } from 'lucide-react';
 import { BrowserBookmark } from '../types';
 
 interface BrowserStartPageProps {
   onNavigate: (url: string) => void;
+  onLaunchNative?: (url?: string) => void;
   networkMode: 'server' | 'user';
   onToggleNetworkMode: () => void;
   serverHost: string;
@@ -27,6 +28,7 @@ const COMMON_PORT_PRESETS = [
 
 export default function BrowserStartPage({
   onNavigate,
+  onLaunchNative,
   networkMode,
   onToggleNetworkMode,
   serverHost,
@@ -127,10 +129,24 @@ export default function BrowserStartPage({
               type="submit"
               disabled={!searchInput.trim()}
               className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:hover:bg-blue-600 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1 shrink-0"
+              title="Open destination in tab viewport"
             >
               <span>Open</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
+
+            {/* Launch Native WebView2 Window Button */}
+            {onLaunchNative && (
+              <button
+                type="button"
+                onClick={() => onLaunchNative(searchInput.trim() || undefined)}
+                className="px-3 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-xs font-semibold transition-all cursor-pointer flex items-center space-x-1.5 shrink-0 ml-1.5"
+                title={`Launch in Native WebView2 Window (${networkMode === 'server' ? 'SSH SOCKS5 Proxy' : 'Direct PC'}) - zero iframe blocks, full video & logins`}
+              >
+                <Compass className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="hidden sm:inline">Native Window</span>
+              </button>
+            )}
           </div>
         </form>
 

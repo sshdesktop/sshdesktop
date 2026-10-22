@@ -1240,6 +1240,18 @@ export async function sshGetSocks5(connId: string): Promise<number | null> {
   return safeInvoke<number | null>('ssh_get_socks5', { connId }, null);
 }
 
+export async function openBrowserWindow(
+  url: string,
+  title?: string,
+  proxyUrl?: string
+): Promise<string> {
+  return safeInvoke<string>(
+    'open_browser_window',
+    { url, title, proxyUrl },
+    ''
+  );
+}
+
 export async function openExternalUrl(url: string): Promise<void> {
   try {
     if (isTauri()) {

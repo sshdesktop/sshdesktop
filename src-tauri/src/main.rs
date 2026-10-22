@@ -18,6 +18,33 @@ pub struct AppState {
     pub sessions: Arc<tokio::sync::Mutex<HashMap<String, Arc<ssh::session::ClientHandle>>>>,
 }
 
+#[tauri::command]
+async fn open_browser_window(
+    app: tauri::AppHandle,
+    url: String,
+    title: Option<String>,
+    proxy_url: Option<String>,
+) -> Result<String, String> {
+    let window_label = format!("browser-{}", uuid::Uuid::new_v4());
+    let parsed_url = url::Url::parse(&url).map_err(|e| format!("Invalid URL: {}", e))?;
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        &app,
+        &window_label,
+        tauri::WebviewUrl::External(parsed_url),
+    )
+    .title(title.unwrap_or_else(|| "SSH Desktop Browser".to_string()))
+    .inner_size(1280.0, 800.0);
+
+    if let Some(proxy_str) = proxy_url {
+        if let Ok(proxy) = url::Url::parse(&proxy_str) {
+            builder = builder.proxy_url(proxy);
+        }
+    }
+
+    builder.build().map_err(|e| format!("Failed to create browser window: {}", e))?;
+    Ok(window_label)
+}
+
 fn main() {
     env_logger::init();
 
@@ -193,6 +220,9 @@ fn main() {
 
             // API Studio commands (Native HTTP Engine over SSH Port Forwarding Tunnel)
             api_client::api_send_request,
+
+            // Browser commands
+            open_browser_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

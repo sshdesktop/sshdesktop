@@ -18,7 +18,8 @@ import {
   sftpReadTextFile, 
   sftpWriteTextFile, 
   sftpMkdir,
-  openExternalUrl
+  openExternalUrl,
+  openBrowserWindow
 } from '../../lib/tauri-bridge';
 import DiscoveredServicesBar from './components/DiscoveredServicesBar';
 import BrowserDevTools from './components/BrowserDevTools';
@@ -746,6 +747,38 @@ export default function BrowserApp() {
     }
   };
 
+  // Launch dedicated native WebView2 browser window (SSH: ON with SOCKS5 or SSH: OFF direct)
+  const handleLaunchNativeBrowser = async (targetUrl?: string) => {
+    const dest = targetUrl || activeTab.displayUrl || activeTab.url || 'https://www.google.com';
+    let proxyUrl: string | undefined = undefined;
+
+    if (activeTab.networkMode === 'server') {
+      let socksPort = activeTab.socks5Port;
+      if (!socksPort && activeConnectionId) {
+        try {
+          const p = await sshStartSocks5(activeConnectionId);
+          if (p && p > 0) socksPort = p;
+        } catch (err) {
+          console.warn('[SSH Desktop] Failed to start SOCKS5 for native browser:', err);
+        }
+      }
+      if (socksPort) {
+        proxyUrl = `socks5://127.0.0.1:${socksPort}`;
+      }
+    }
+
+    try {
+      await openBrowserWindow(
+        dest,
+        `CloudDesk Browser - ${activeTab.networkMode === 'server' ? 'SSH: ON (SOCKS5)' : 'SSH: OFF (Direct)'}`,
+        proxyUrl
+      );
+    } catch (err) {
+      console.warn('Failed to open native WebView2 window, falling back to external browser:', err);
+      openExternalUrl(dest);
+    }
+  };
+
   // Bookmark toggling and auto-saving to server ~/.sshdesktop/browser_bookmarks.json
   const isCurrentBookmarked = bookmarks.some(
     b => (activeTab.displayUrl && b.url === activeTab.displayUrl) || (activeTab.url && b.url === activeTab.url)
@@ -1011,12 +1044,23 @@ export default function BrowserApp() {
             </button>
           )}
 
+          {/* Launch Native WebView2 Window (SSH: ON SOCKS5 or SSH: OFF Direct) */}
+          {Boolean(activeTab.displayUrl || activeTab.url) && (
+            <button
+              onClick={() => handleLaunchNativeBrowser()}
+              className="p-1 rounded-lg ml-1 text-gray-400 hover:text-emerald-300 hover:bg-emerald-500/10 transition-colors cursor-pointer flex items-center space-x-1"
+              title={`Launch in Native WebView2 Window (${activeTab.networkMode === 'server' ? 'SSH SOCKS5 Proxy' : 'Direct PC'}) - zero iframe blocks, full video & logins`}
+            >
+              <Compass className="w-3.5 h-3.5 text-emerald-400" />
+            </button>
+          )}
+
           {/* Open in Desktop PC Browser (Chrome/Edge/Firefox) */}
           {Boolean(activeTab.displayUrl || activeTab.url) && (
             <button
               onClick={() => openExternalUrl(activeTab.displayUrl || activeTab.url)}
               className="p-1 rounded-lg ml-1 text-gray-400 hover:text-blue-300 hover:bg-white/10 transition-colors cursor-pointer flex items-center space-x-1"
-              title="Open in your PC Browser (Chrome/Edge/Firefox) - all redirects, logins, and web features work"
+              title="Open in your default external browser (Chrome/Edge/Firefox)"
             >
               <ExternalLink className="w-3.5 h-3.5" />
             </button>
@@ -1098,6 +1142,7 @@ export default function BrowserApp() {
                 /* Clean Start / New Tab Page (NO forced Google!) */
                 <BrowserStartPage
                   onNavigate={(target) => navigateUrl(target, tab.id, tab.networkMode)}
+                  onLaunchNative={handleLaunchNativeBrowser}
                   networkMode={tab.networkMode}
                   onToggleNetworkMode={() => handleToggleNetworkMode(tab.id)}
                   serverHost={serverHost}
@@ -1117,6 +1162,14 @@ export default function BrowserApp() {
                     {tab.error}
                   </p>
                   <div className="flex items-center space-x-3">
+                    <button
+                      onClick={() => handleLaunchNativeBrowser(tab.displayUrl || tab.url)}
+                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
+                      title="Open in dedicated Native WebView2 Window (zero iframe restrictions, full video & logins)"
+                    >
+                      <Compass className="w-3.5 h-3.5" />
+                      <span>Open in Native WebView2</span>
+                    </button>
                     <button
                       onClick={() => openExternalUrl(tab.displayUrl || tab.url)}
                       className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
@@ -1257,6 +1310,18 @@ export default function BrowserApp() {
               <Globe className="w-3 h-3 text-blue-400" />
               <span>User Network (SSH: OFF) ➔ PC Browser Mode (All Redirects & Features Active)</span>
             </span>
+          )}
+
+          {/* Launch Native WebView2 Window */}
+          {Boolean(activeTab.displayUrl || activeTab.url) && (
+            <button
+              onClick={() => handleLaunchNativeBrowser()}
+              className="flex items-center space-x-1 text-emerald-400 hover:text-emerald-300 transition-colors cursor-pointer ml-1"
+              title={`Launch current destination in dedicated Native WebView2 window with ${activeTab.networkMode === 'server' ? 'SSH SOCKS5 Proxy' : 'PC Direct Network'}`}
+            >
+              <Compass className="w-3 h-3 text-emerald-400" />
+              <span>Native Window ({activeTab.networkMode === 'server' ? 'SOCKS5' : 'Direct'})</span>
+            </button>
           )}
 
           {/* Open in PC Browser link */}
