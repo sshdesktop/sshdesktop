@@ -1243,11 +1243,12 @@ export async function sshGetSocks5(connId: string): Promise<number | null> {
 export async function openBrowserWindow(
   url: string,
   title?: string,
-  proxyUrl?: string
+  proxyUrl?: string,
+  windowId?: string
 ): Promise<string> {
   return safeInvoke<string>(
     'open_browser_window',
-    { url, title, proxyUrl },
+    { url, title, proxyUrl, windowId },
     ''
   );
 }
