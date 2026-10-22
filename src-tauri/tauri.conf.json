@@ -18,7 +18,8 @@
         "minHeight": 768,
         "decorations": false,
         "transparent": false,
-        "center": true
+        "center": true,
+        "additionalBrowserArgs": "--disable-web-security --disable-features=IsolateOrigins,site-per-process"
       }
     ],
     "security": {

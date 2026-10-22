@@ -120,17 +120,29 @@ function extractYouTubeEmbedInfo(input: string): { isYouTube: boolean; embedSrc:
       };
     }
 
-    // 6. General root, search, or channel: youtube.com
+    // 6. Search query on YouTube: /results?search_query=...
+    if (parsed.pathname === '/results' && parsed.searchParams.has('search_query')) {
+      const q = parsed.searchParams.get('search_query') || '';
+      return {
+        isYouTube: true,
+        embedSrc: `https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(q)}&autoplay=1`,
+        displayUrl: cleanDisplay,
+        title: `${q} - YouTube Search`,
+      };
+    }
+
+    // 7. General root or channel: youtube.com
+    // Uses YouTube official embed player to render directly inside the tab without X-Frame-Options blocking
     return {
       isYouTube: true,
-      embedSrc: cleanDisplay,
+      embedSrc: 'https://www.youtube.com/embed?listType=search&list=trending',
       displayUrl: cleanDisplay,
       title: 'YouTube',
     };
   } catch {
     return {
       isYouTube: true,
-      embedSrc: 'https://www.youtube.com',
+      embedSrc: 'https://www.youtube.com/embed?listType=search&list=trending',
       displayUrl: 'https://www.youtube.com',
       title: 'YouTube',
     };
@@ -630,22 +642,10 @@ export default function BrowserApp() {
     } 
     // -------------------------------------------------------------
     // Branch 2: User Network Mode (SSH: OFF) - Direct inside App
-    // Automatically launches dedicated native WebView2 window with ZERO iframe blocks!
+    // Runs DIRECTLY inside this tab in the desktop application window (NO new window!)
     // -------------------------------------------------------------
     else {
       setTunnelStatusText(null);
-      const destUrl = resolved.displayUrl || resolved.url;
-      const windowId = `browser-tab-${currentTabId}`;
-
-      // Automatically launch Native WebView2 Window for Direct PC browsing (zero iframe blocks, full video & logins)
-      openBrowserWindow(
-        destUrl,
-        `CloudDesk Browser - ${resolved.title} (SSH: OFF Direct)`,
-        undefined,
-        windowId
-      ).catch(err => {
-        console.warn('[SSH Desktop] Failed to launch native window, fallback to embedded:', err);
-      });
 
       setTabs(prev => prev.map(t => {
         if (t.id !== currentTabId) return t;
@@ -656,11 +656,10 @@ export default function BrowserApp() {
           isTunneled: false,
           tunnelPort: undefined,
           socks5Port: undefined,
-          userBrowserMode: 'native',
-          nativeWindowId: windowId,
+          userBrowserMode: 'embedded',
           isLoading: false,
           statusCode: 200,
-          statusText: 'SSH: OFF (Native WebView2)',
+          statusText: 'SSH: OFF (Direct)',
           error: null,
         };
       }));
@@ -1393,7 +1392,6 @@ export default function BrowserApp() {
                   <div className="flex-1 w-full h-full relative">
                     <iframe
                       src={tab.iframeSrc || tab.url}
-                      sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-presentation"
                       allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
                       allowFullScreen={true}
                       referrerPolicy="no-referrer-when-downgrade"
