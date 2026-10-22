@@ -1253,6 +1253,14 @@ export async function openBrowserWindow(
   );
 }
 
+export async function closeBrowserWindow(windowId: string): Promise<void> {
+  return safeInvoke<void>('close_browser_window', { windowId }, undefined);
+}
+
+export async function focusBrowserWindow(windowId: string): Promise<void> {
+  return safeInvoke<void>('focus_browser_window', { windowId }, undefined);
+}
+
 export async function openExternalUrl(url: string): Promise<void> {
   try {
     if (isTauri()) {

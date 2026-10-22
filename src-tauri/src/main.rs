@@ -56,6 +56,31 @@ async fn open_browser_window(
     Ok(window_label)
 }
 
+#[tauri::command]
+async fn close_browser_window(
+    app: tauri::AppHandle,
+    window_id: String,
+) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(existing) = app.get_webview_window(&window_id) {
+        let _ = existing.close();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn focus_browser_window(
+    app: tauri::AppHandle,
+    window_id: String,
+) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(existing) = app.get_webview_window(&window_id) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+    }
+    Ok(())
+}
+
 fn main() {
     env_logger::init();
 
@@ -234,6 +259,8 @@ fn main() {
 
             // Browser commands
             open_browser_window,
+            close_browser_window,
+            focus_browser_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
