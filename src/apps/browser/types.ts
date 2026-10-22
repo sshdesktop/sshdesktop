@@ -11,7 +11,8 @@ export interface BrowserTab {
   socks5Port?: number;
   isTunneled?: boolean;
   networkMode: NetworkMode;
-  userBrowserMode?: 'external' | 'embedded';
+  userBrowserMode?: 'external' | 'embedded' | 'native';
+  nativeWindowId?: string;
   devToolsOpen?: boolean;
   activeDevToolsPanel?: DevToolsPanel;
   title: string;

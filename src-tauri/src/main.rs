@@ -24,16 +24,27 @@ async fn open_browser_window(
     url: String,
     title: Option<String>,
     proxy_url: Option<String>,
+    window_id: Option<String>,
 ) -> Result<String, String> {
-    let window_label = format!("browser-{}", uuid::Uuid::new_v4());
+    use tauri::Manager;
+    let window_label = window_id.unwrap_or_else(|| format!("browser-{}", uuid::Uuid::new_v4()));
     let parsed_url = url::Url::parse(&url).map_err(|e| format!("Invalid URL: {}", e))?;
+
+    if let Some(existing) = app.get_webview_window(&window_label) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        let _ = existing.navigate(parsed_url);
+        return Ok(window_label);
+    }
+
     let mut builder = tauri::WebviewWindowBuilder::new(
         &app,
         &window_label,
         tauri::WebviewUrl::External(parsed_url),
     )
     .title(title.unwrap_or_else(|| "SSH Desktop Browser".to_string()))
-    .inner_size(1280.0, 800.0);
+    .inner_size(1280.0, 800.0)
+    .center();
 
     if let Some(proxy_str) = proxy_url {
         if let Ok(proxy) = url::Url::parse(&proxy_str) {

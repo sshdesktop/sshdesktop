@@ -630,11 +630,22 @@ export default function BrowserApp() {
     } 
     // -------------------------------------------------------------
     // Branch 2: User Network Mode (SSH: OFF) - Direct inside App
-    // Renders DIRECTLY inside SSH Desktop application window!
-    // NO EXTERNAL CHROME POPUP!
+    // Automatically launches dedicated native WebView2 window with ZERO iframe blocks!
     // -------------------------------------------------------------
     else {
       setTunnelStatusText(null);
+      const destUrl = resolved.displayUrl || resolved.url;
+      const windowId = `browser-tab-${currentTabId}`;
+
+      // Automatically launch Native WebView2 Window for Direct PC browsing (zero iframe blocks, full video & logins)
+      openBrowserWindow(
+        destUrl,
+        `CloudDesk Browser - ${resolved.title} (SSH: OFF Direct)`,
+        undefined,
+        windowId
+      ).catch(err => {
+        console.warn('[SSH Desktop] Failed to launch native window, fallback to embedded:', err);
+      });
 
       setTabs(prev => prev.map(t => {
         if (t.id !== currentTabId) return t;
@@ -645,10 +656,11 @@ export default function BrowserApp() {
           isTunneled: false,
           tunnelPort: undefined,
           socks5Port: undefined,
-          userBrowserMode: 'embedded',
+          userBrowserMode: 'native',
+          nativeWindowId: windowId,
           isLoading: false,
           statusCode: 200,
-          statusText: 'SSH: OFF (Direct)',
+          statusText: 'SSH: OFF (Native WebView2)',
           error: null,
         };
       }));
@@ -685,7 +697,6 @@ export default function BrowserApp() {
         networkMode: newMode,
         socks5Port: newMode === 'server' ? socks5Port : undefined,
         routingMode: newMode === 'server' ? 'tunnel' : 'direct',
-        userBrowserMode: 'embedded',
       };
     }));
 
@@ -695,10 +706,31 @@ export default function BrowserApp() {
     }
   };
 
+  // Switch all open tabs to SSH: OFF or SSH: ON simultaneously
+  const handleSetAllTabsNetworkMode = async (mode: 'server' | 'user') => {
+    let socks5Port: number | undefined = undefined;
+    if (mode === 'server' && activeConnectionId) {
+      try {
+        const p = await sshStartSocks5(activeConnectionId);
+        if (p && p > 0) socks5Port = p;
+      } catch (err) {
+        console.warn('[SSH Desktop] SOCKS5 dynamic proxy launch notice:', err);
+      }
+    }
+
+    setTabs(prev => prev.map(t => ({
+      ...t,
+      networkMode: mode,
+      socks5Port: mode === 'server' ? socks5Port : undefined,
+      routingMode: mode === 'server' ? 'tunnel' : 'direct',
+    })));
+  };
+
   // Add new tab with clean Start Page (Shows what user types, NO forced Google)
+  // Inherits active tab's network mode (so if SSH: OFF, new tab stays SSH: OFF!)
   const handleAddNewTab = () => {
     const newId = `tab-${Date.now()}`;
-    const defaultMode: 'server' | 'user' = activeConnectionId ? 'server' : 'user';
+    const defaultMode: 'server' | 'user' = activeTab ? activeTab.networkMode : (activeConnectionId ? 'server' : 'user');
     const newTab: BrowserTab = {
       id: newId,
       url: '',
@@ -748,12 +780,14 @@ export default function BrowserApp() {
   };
 
   // Launch dedicated native WebView2 browser window (SSH: ON with SOCKS5 or SSH: OFF direct)
-  const handleLaunchNativeBrowser = async (targetUrl?: string) => {
-    const dest = targetUrl || activeTab.displayUrl || activeTab.url || 'https://www.google.com';
+  const handleLaunchNativeBrowser = async (targetUrl?: string, tabId?: string) => {
+    const targetTab = (tabId ? tabs.find(t => t.id === tabId) : null) || activeTab;
+    const dest = targetUrl || targetTab.displayUrl || targetTab.url || 'https://www.google.com';
+    const windowId = `browser-tab-${targetTab.id}`;
     let proxyUrl: string | undefined = undefined;
 
-    if (activeTab.networkMode === 'server') {
-      let socksPort = activeTab.socks5Port;
+    if (targetTab.networkMode === 'server') {
+      let socksPort = targetTab.socks5Port;
       if (!socksPort && activeConnectionId) {
         try {
           const p = await sshStartSocks5(activeConnectionId);
@@ -770,9 +804,22 @@ export default function BrowserApp() {
     try {
       await openBrowserWindow(
         dest,
-        `CloudDesk Browser - ${activeTab.networkMode === 'server' ? 'SSH: ON (SOCKS5)' : 'SSH: OFF (Direct)'}`,
-        proxyUrl
+        `CloudDesk Browser - ${targetTab.networkMode === 'server' ? 'SSH: ON (SOCKS5)' : 'SSH: OFF (Direct)'}`,
+        proxyUrl,
+        windowId
       );
+
+      // Update target tab to native mode so viewport displays the interactive session controller
+      setTabs(prev => prev.map(t => {
+        if (t.id !== targetTab.id) return t;
+        return {
+          ...t,
+          userBrowserMode: 'native',
+          nativeWindowId: windowId,
+          isLoading: false,
+          error: null,
+        };
+      }));
     } catch (err) {
       console.warn('Failed to open native WebView2 window, falling back to external browser:', err);
       openExternalUrl(dest);
@@ -863,7 +910,7 @@ export default function BrowserApp() {
               <div
                 key={tab.id}
                 onClick={() => setActiveTabId(tab.id)}
-                className={`flex items-center space-x-2 px-3 py-1.5 rounded-t-xl text-xs transition-all cursor-pointer group max-w-[210px] border-t border-x ${
+                className={`flex items-center space-x-2 px-3 py-1.5 rounded-t-xl text-xs transition-all cursor-pointer group max-w-[220px] border-t border-x ${
                   isActive
                     ? 'bg-[#1e1e2e] text-white border-white/10 font-medium shadow-sm'
                     : 'bg-[#11111b] text-gray-400 hover:text-gray-200 border-transparent hover:bg-white/5'
@@ -871,16 +918,43 @@ export default function BrowserApp() {
               >
                 {tab.isLoading ? (
                   <div className="w-3.5 h-3.5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
-                ) : tab.networkMode === 'server' ? (
-                  <span title="Server Network (SSH: ON)">
-                    <Server className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                  </span>
                 ) : (
-                  <span title="User Network (SSH: OFF - PC Browser)">
-                    <Globe className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-blue-400' : 'text-gray-500'}`} />
-                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleToggleNetworkMode(tab.id);
+                    }}
+                    className="p-0.5 rounded hover:bg-white/15 transition-colors cursor-pointer"
+                    title={
+                      tab.networkMode === 'server'
+                        ? 'Server Network (SSH: ON) - Click to toggle this tab to SSH: OFF (Direct PC)'
+                        : 'User Network (SSH: OFF) - Click to toggle this tab to SSH: ON (Server Network)'
+                    }
+                  >
+                    {tab.networkMode === 'server' ? (
+                      <Server className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    ) : (
+                      <Globe className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-blue-400' : 'text-gray-500'}`} />
+                    )}
+                  </button>
                 )}
-                <span className="truncate text-xs">{tab.title || tab.displayUrl || 'New Tab'}</span>
+                <span className="truncate text-xs flex-1">{tab.title || tab.displayUrl || 'New Tab'}</span>
+
+                {/* Pop out to native window button on each tab */}
+                {Boolean(tab.displayUrl || tab.url) && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleLaunchNativeBrowser(tab.displayUrl || tab.url, tab.id);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 hover:text-emerald-400 p-0.5 rounded transition-opacity"
+                    title={`Launch in Native WebView2 Window (${tab.networkMode === 'server' ? 'SOCKS5' : 'Direct PC'}) - zero iframe blocks, full video & logins`}
+                  >
+                    <Compass className="w-3 h-3 text-emerald-400" />
+                  </button>
+                )}
+
                 {tabs.length > 1 && (
                   <button
                     onClick={(e) => handleCloseTab(tab.id, e)}
@@ -897,9 +971,26 @@ export default function BrowserApp() {
           <button
             onClick={handleAddNewTab}
             className="p-1.5 rounded-xl hover:bg-white/10 text-gray-400 hover:text-white transition-colors cursor-pointer"
-            title="New Tab"
+            title="New Tab (inherits current network mode)"
           >
             <Plus className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        {/* Global Network Mode Switcher for All Tabs */}
+        <div className="flex items-center space-x-1.5 pb-1 pr-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => handleSetAllTabsNetworkMode(activeTab.networkMode === 'server' ? 'user' : 'server')}
+            className={`flex items-center space-x-1 px-2.5 py-1 rounded-xl text-[10px] font-medium border transition-colors cursor-pointer shadow-sm ${
+              activeTab.networkMode === 'server'
+                ? 'bg-blue-500/10 hover:bg-blue-500/20 text-blue-300 border-blue-500/30'
+                : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+            }`}
+            title={`Set all open tabs to ${activeTab.networkMode === 'server' ? 'SSH: OFF (Direct PC)' : 'SSH: ON (Server Network)'}`}
+          >
+            <Laptop className="w-3 h-3" />
+            <span>Set All: {activeTab.networkMode === 'server' ? 'SSH: OFF' : 'SSH: ON'}</span>
           </button>
         </div>
       </div>
@@ -1188,6 +1279,94 @@ export default function BrowserApp() {
                     <button
                       onClick={() => navigateUrl('', tab.id)}
                       className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-semibold border border-white/10 transition-colors cursor-pointer"
+                    >
+                      Return to Start Page
+                    </button>
+                  </div>
+                </div>
+              ) : tab.userBrowserMode === 'native' ? (
+                /* Interactive Native WebView2 Session Controller for this tab */
+                <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-gradient-to-b from-[#181825] via-[#1e1e2e] to-[#11111b] text-center select-none overflow-y-auto">
+                  <div className="relative mb-5">
+                    <div className="w-20 h-20 rounded-3xl bg-gradient-to-tr from-emerald-500 via-teal-500 to-cyan-400 p-0.5 shadow-2xl shadow-emerald-500/20">
+                      <div className="w-full h-full bg-[#1e1e2e] rounded-3xl flex items-center justify-center">
+                        <Compass className="w-10 h-10 text-emerald-400" />
+                      </div>
+                    </div>
+                    <div className="absolute -bottom-1 -right-1 p-1 rounded-full bg-[#11111b] border border-emerald-500/30 shadow-md">
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 block animate-pulse" />
+                    </div>
+                  </div>
+
+                  <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-semibold mb-3">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                    <span>Native WebView2 Window Active</span>
+                    <span className="text-[10px] text-emerald-400/80 font-mono">
+                      ({tab.networkMode === 'server' ? 'SSH SOCKS5 Proxy' : 'Direct PC Internet'})
+                    </span>
+                  </div>
+
+                  <h2 className="text-xl font-bold text-white mb-1 max-w-lg truncate">
+                    {tab.title || tab.displayUrl || 'Web Page'}
+                  </h2>
+
+                  <div className="flex items-center space-x-2 bg-white/5 border border-white/10 px-3 py-1.5 rounded-xl font-mono text-xs text-gray-300 max-w-md truncate mb-6">
+                    <Globe className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                    <span className="truncate">{tab.displayUrl || tab.url}</span>
+                  </div>
+
+                  {/* Highlights Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 max-w-xl mb-6 text-left">
+                    <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/5">
+                      <div className="text-emerald-400 font-bold text-xs mb-0.5">Zero Iframe Block</div>
+                      <div className="text-[11px] text-gray-400">X-Frame-Options & CSP bypassed</div>
+                    </div>
+                    <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/5">
+                      <div className="text-emerald-400 font-bold text-xs mb-0.5">Fullscreen Video</div>
+                      <div className="text-[11px] text-gray-400">YouTube, Vimeo, Twitch 4K</div>
+                    </div>
+                    <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/5">
+                      <div className="text-emerald-400 font-bold text-xs mb-0.5">Full Login Support</div>
+                      <div className="text-[11px] text-gray-400">Google, GitHub, SSO & cookies</div>
+                    </div>
+                    <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/5">
+                      <div className="text-emerald-400 font-bold text-xs mb-0.5">Direct PC Speed</div>
+                      <div className="text-[11px] text-gray-400">Full GPU hardware acceleration</div>
+                    </div>
+                  </div>
+
+                  {/* Action Controls */}
+                  <div className="flex flex-wrap items-center justify-center gap-3">
+                    <button
+                      onClick={() => handleLaunchNativeBrowser(tab.displayUrl || tab.url, tab.id)}
+                      className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-semibold shadow-lg shadow-emerald-600/30 transition-all cursor-pointer flex items-center space-x-2"
+                      title="Bring this tab's dedicated Native WebView2 Window to the front"
+                    >
+                      <Compass className="w-4 h-4" />
+                      <span>Bring Window to Front / Focus</span>
+                    </button>
+
+                    <button
+                      onClick={() => setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, userBrowserMode: 'embedded' } : t))}
+                      className="px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-semibold border border-white/10 transition-colors cursor-pointer flex items-center space-x-1.5"
+                      title="Try rendering inside the desktop tab viewport"
+                    >
+                      <Layers className="w-3.5 h-3.5" />
+                      <span>Switch to Embedded View</span>
+                    </button>
+
+                    <button
+                      onClick={() => openExternalUrl(tab.displayUrl || tab.url)}
+                      className="px-4 py-2.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 text-xs font-semibold border border-blue-500/30 transition-colors cursor-pointer flex items-center space-x-1.5"
+                      title="Open in your default external desktop browser (Chrome/Edge)"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Open in Chrome/Edge</span>
+                    </button>
+
+                    <button
+                      onClick={() => navigateUrl('', tab.id)}
+                      className="px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white text-xs font-semibold border border-white/5 transition-colors cursor-pointer"
                     >
                       Return to Start Page
                     </button>
