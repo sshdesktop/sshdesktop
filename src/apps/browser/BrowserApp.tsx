@@ -1134,14 +1134,15 @@ export default function BrowserApp() {
             </button>
           )}
 
-          {/* Launch Native WebView2 Window (SSH: ON SOCKS5 or SSH: OFF Direct) */}
+          {/* Launch Native WebView2 Window (Fixes 'Missing Origin Header' & Enables Full Logins) */}
           {Boolean(activeTab.displayUrl || activeTab.url) && (
             <button
               onClick={() => handleLaunchNativeBrowser()}
-              className="p-1 rounded-lg ml-1 text-gray-400 hover:text-emerald-300 hover:bg-emerald-500/10 transition-colors cursor-pointer flex items-center space-x-1"
-              title={`Launch in Native WebView2 Window (${activeTab.networkMode === 'server' ? 'SSH SOCKS5 Proxy' : 'Direct PC'}) - zero iframe blocks, full video & logins`}
+              className="px-2 py-0.5 rounded-lg ml-1 text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-[11px] font-medium transition-colors cursor-pointer flex items-center space-x-1 shrink-0"
+              title={`Open in Native Window (${activeTab.networkMode === 'server' ? 'SSH SOCKS5 Proxy' : 'Direct PC'}) - Fixes 'missing origin header', enables session cookies & logins`}
             >
               <Compass className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden md:inline">Native Window (Login)</span>
             </button>
           )}
 
@@ -1394,7 +1395,7 @@ export default function BrowserApp() {
                       src={tab.iframeSrc || tab.url}
                       allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
                       allowFullScreen={true}
-                      referrerPolicy="no-referrer-when-downgrade"
+                      referrerPolicy="unsafe-url"
                       className="w-full h-full border-none bg-white"
                       style={{ 
                         transform: `scale(${zoomLevel / 100})`, 
