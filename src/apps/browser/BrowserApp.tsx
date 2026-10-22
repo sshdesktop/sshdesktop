@@ -1173,8 +1173,34 @@ export default function BrowserApp() {
                         height: `${100 * (100 / zoomLevel)}%` 
                       }}
                       title={tab.title}
-                      onLoad={() => {
-                        setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, isLoading: false } : t));
+                      onLoad={(e) => {
+                        const iframeEl = e.currentTarget;
+                        let newLocation = '';
+                        try {
+                          const href = iframeEl.contentWindow?.location?.href;
+                          if (href && href !== 'about:blank') {
+                            newLocation = href;
+                          }
+                        } catch {
+                          // Cross-origin iframe security prevents reading location.href
+                        }
+
+                        setTabs(prev => prev.map(t => {
+                          if (t.id !== tab.id) return t;
+                          if (newLocation && newLocation !== t.url && !t.isTunneled) {
+                            return { 
+                              ...t, 
+                              isLoading: false,
+                              url: newLocation,
+                              displayUrl: newLocation,
+                            };
+                          }
+                          return { ...t, isLoading: false };
+                        }));
+
+                        if (newLocation && tab.id === activeTabId && !tab.isTunneled) {
+                          setUrlInput(newLocation);
+                        }
                       }}
                     />
                   </div>
