@@ -19,237 +19,24 @@ import {
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
 
-interface ContainerItem {
-  id: string;
-  name: string;
-  image: string;
-  status: 'running' | 'paused' | 'stopped';
-  statusText: string;
-  ports: string;
-  created: string;
-  cpu: string;
-  mem: string;
-}
-
-interface ImageItem {
-  id: string;
-  repository: string;
-  tag: string;
-  size: string;
-  created: string;
-}
-
-interface VolumeItem {
-  name: string;
-  driver: string;
-  scope: string;
-  mountpoint?: string;
-  size?: string;
-}
-
-interface NetworkItem {
-  id: string;
-  name: string;
-  driver: string;
-  scope: string;
-  subnet?: string;
-}
-
-interface ContainerInspectData {
-  id: string;
-  name: string;
-  image: string;
-  status: string;
-  startedAt: string;
-  ipAddress: string;
-  gateway: string;
-  macAddress: string;
-  restartPolicy: string;
-  env: string[];
-  ports: { hostPort: string; containerPort: string; protocol: string }[];
-  mounts: { source: string; destination: string; mode: string; type: string }[];
-}
-
-export interface DockerAuthInfo {
-  username: string;
-  registry: string;
-  loggedIn: boolean;
-}
-
-export interface SavedDockerCredential {
-  id: string;
-  registry: string;
-  username: string;
-  savedAt: string;
-}
-
-export const DOCKERFILE_TEMPLATES: Record<string, string> = {
-  nodejs: `# Multi-stage Node.js & React Build
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
-
-FROM nginx:alpine
-COPY --from=builder /app/dist /usr/share/nginx/html
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]`,
-
-  python: `# Lightweight Python FastAPI / Flask Application
-FROM python:3.11-slim
-WORKDIR /app
-ENV PYTHONUNBUFFERED=1 \\
-    PYTHONDONTWRITEBYTECODE=1
-
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-EXPOSE 8000
-CMD ["python", "main.py"]`,
-
-  golang: `# Go Alpine Microservice Builder
-FROM golang:1.22-alpine AS builder
-WORKDIR /app
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o server .
-
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates
-WORKDIR /root/
-COPY --from=builder /app/server .
-EXPOSE 8080
-CMD ["./server"]`,
-
-  nginx: `# Nginx Web Server Static Site
-FROM nginx:alpine
-COPY ./html /usr/share/nginx/html
-COPY ./nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80 443
-CMD ["nginx", "-g", "daemon off;"]`,
-
-  rust: `# Rust Musl Scratch Statically-Linked Binary
-FROM rust:1.78-alpine AS builder
-WORKDIR /usr/src/app
-COPY . .
-RUN cargo build --release
-
-FROM alpine:latest
-WORKDIR /app
-COPY --from=builder /usr/src/app/target/release/app /app/
-CMD ["./app"]`,
-
-  blank: `# Custom Dockerfile
-FROM ubuntu:22.04
-WORKDIR /app
-RUN apt-get update && apt-get install -y curl
-CMD ["echo", "Hello from Docker!"]`
-};
-
-export const COMPOSE_TEMPLATES: Record<string, string> = {
-  web_db_redis: `version: '3.8'
-
-services:
-  web:
-    build: .
-    ports:
-      - "3000:3000"
-    environment:
-      - DATABASE_URL=postgres://postgres:secret@db:5432/app
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - db
-      - redis
-    restart: unless-stopped
-
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: secret
-      POSTGRES_DB: app
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    restart: unless-stopped
-
-  redis:
-    image: redis:alpine
-    ports:
-      - "6379:6379"
-    restart: unless-stopped
-
-volumes:
-  pgdata:`,
-
-  lamp: `version: '3.8'
-
-services:
-  web:
-    image: php:8.2-apache
-    ports:
-      - "8080:80"
-    volumes:
-      - ./src:/var/www/html
-    depends_on:
-      - db
-    restart: always
-
-  db:
-    image: mariadb:11
-    environment:
-      MYSQL_ROOT_PASSWORD: root_secret
-      MYSQL_DATABASE: app_db
-      MYSQL_USER: app_user
-      MYSQL_PASSWORD: app_secret
-    volumes:
-      - db_data:/var/lib/mysql
-    restart: always
-
-  phpmyadmin:
-    image: phpmyadmin/phpmyadmin
-    ports:
-      - "8081:80"
-    environment:
-      PMA_HOST: db
-    depends_on:
-      - db
-
-volumes:
-  db_data:`,
-
-  monitoring: `version: '3.8'
-
-services:
-  prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090"
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3001:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    depends_on:
-      - prometheus
-    restart: unless-stopped`,
-
-  blank: `version: '3.8'
-
-services:
-  app:
-    image: alpine:latest
-    command: ["sh", "-c", "echo 'Container is running...' && tail -f /dev/null"]
-    restart: unless-stopped`
-};
+export * from './types';
+export * from './templates';
+import { 
+  ContainerItem, ImageItem, VolumeItem, NetworkItem, ContainerInspectData,
+  DockerAuthInfo, SavedDockerCredential, ResourceDeleteTarget, ResourceInUseItem
+} from './types';
+import { DOCKERFILE_TEMPLATES, COMPOSE_TEMPLATES, POPULAR_IMAGES } from './templates';
+import { DockerDeleteModal } from './components/DockerDeleteModal';
+import { DockerInspectModal } from './components/DockerInspectModal';
+import { DockerPruneModal } from './components/DockerPruneModal';
+import { DockerVolumeCreateModal } from './components/DockerVolumeCreateModal';
+import { DockerNetworkCreateModal } from './components/DockerNetworkCreateModal';
+import { DockerTagModal } from './components/DockerTagModal';
+import { DockerCommitModal } from './components/DockerCommitModal';
+import { DockerPullModal } from './components/DockerPullModal';
+import { DockerLogsModal } from './components/DockerLogsModal';
+import { DockerRunModal } from './components/DockerRunModal';
+import { DockerAuthModal } from './components/DockerAuthModal';
 
 export default function DockerManager() {
   const [activeTab, setActiveTab] = useState<'containers' | 'images' | 'volumes' | 'networks' | 'editor' | 'system'>('containers');
@@ -262,6 +49,10 @@ export default function DockerManager() {
   const [isLoading, setIsLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  // Unified Resource Delete Confirmation State
+  const [resourceToDelete, setResourceToDelete] = useState<ResourceDeleteTarget | null>(null);
+  const [isDeletingResource, setIsDeletingResource] = useState(false);
 
   // Table Row Keyboard & Click Selection State
   const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
@@ -1486,7 +1277,8 @@ export default function DockerManager() {
   const handleBulkAction = async (action: 'start' | 'stop' | 'restart' | 'delete') => {
     if (selectedContainerIds.size === 0) return;
     if (action === 'delete') {
-      if (!confirm(`Are you sure you want to permanently delete ${selectedContainerIds.size} selected container(s)?`)) return;
+      promptDeleteBulkContainers();
+      return;
     }
 
     setActionLoadingId('bulk');
@@ -1496,11 +1288,7 @@ export default function DockerManager() {
 
     for (const id of ids) {
       try {
-        if (action === 'delete') {
-          await dockerAction(activeConnId, id, 'rm -f');
-        } else {
-          await dockerAction(activeConnId, id, action);
-        }
+        await dockerAction(activeConnId, id, action);
         successCount++;
       } catch (err) {
         console.warn(`Bulk action ${action} failed for ${id}:`, err);
@@ -1763,65 +1551,180 @@ export default function DockerManager() {
     }
   };
 
-  // Delete Volume
-  const handleDeleteVolume = async (volName: string) => {
-    if (!confirm(`Are you sure you want to permanently delete volume "${volName}"?`)) return;
-    try {
-      const res = await sshExec(activeConnId, `docker volume rm ${volName}`);
-      if (res.exit_code === 0) {
-        showNotification(`Volume ${volName} removed`);
-        await loadDockerData();
-      } else {
-        alert(`Failed to delete volume: ${res.stderr}`);
-      }
-    } catch (err: any) {
-      alert(`Error: ${err?.message || err}`);
-    }
+  // ================= UNIFIED DOCKER RESOURCE DELETION =================
+  const promptDeleteContainer = (c: ContainerItem) => {
+    setResourceToDelete({
+      type: 'container',
+      id: c.id,
+      name: c.name,
+      subText: `Image: ${c.image} • Status: ${c.statusText}`,
+      isRunning: c.status === 'running' || c.status === 'paused',
+      allowForce: true,
+    });
   };
 
-  // Delete Network
-  const handleDeleteNetwork = async (netId: string, netName: string) => {
-    if (!confirm(`Are you sure you want to delete network "${netName}"?`)) return;
-    try {
-      const res = await sshExec(activeConnId, `docker network rm ${netId}`);
-      if (res.exit_code === 0) {
-        showNotification(`Network ${netName} removed`);
-        await loadDockerData();
-      } else {
-        alert(`Failed to delete network: ${res.stderr}`);
-      }
-    } catch (err: any) {
-      alert(`Error: ${err?.message || err}`);
-    }
+  const promptDeleteBulkContainers = () => {
+    if (selectedContainerIds.size === 0) return;
+    const selectedList = containers.filter(c => selectedContainerIds.has(c.id));
+    const runningList = selectedList.filter(c => c.status === 'running' || c.status === 'paused');
+    setResourceToDelete({
+      type: 'bulk-containers',
+      id: `${selectedContainerIds.size} containers`,
+      name: `${selectedContainerIds.size} Selected Container(s)`,
+      subText: runningList.length > 0 ? `${runningList.length} of ${selectedList.length} container(s) are currently running` : 'All selected containers are stopped',
+      isRunning: runningList.length > 0,
+      bulkIds: Array.from(selectedContainerIds),
+      allowForce: true,
+      inUseBy: runningList.map(c => ({
+        name: c.name,
+        id: c.id,
+        status: c.statusText,
+      })),
+    });
   };
 
-  // Delete Image - blocks deletion if any active or stopped container uses the image
-  const handleDeleteImage = async (img: ImageItem) => {
+  const promptDeleteImage = (img: ImageItem) => {
     const usingContainers = getContainersUsingImage(img);
-    if (usingContainers.length > 0) {
-      alert(
-        `Cannot delete Docker image "${img.repository}:${img.tag}":\n\n` +
-        `It is currently being used by ${usingContainers.length} container(s):\n` +
-        usingContainers.map(c => `• ${c.name} (${c.id}) [Status: ${c.status}]`).join('\n') +
-        `\n\nPlease stop and remove these containers first before deleting the image.`
-      );
-      showNotification(`Image "${img.repository}" is protected: in use by containers`, 'error');
-      return;
+    setResourceToDelete({
+      type: 'image',
+      id: img.id,
+      name: `${img.repository}:${img.tag}`,
+      subText: `Size: ${img.size} • Created: ${img.created}`,
+      inUseBy: usingContainers.map(c => ({
+        name: c.name,
+        id: c.id,
+        status: c.statusText,
+      })),
+      allowForce: usingContainers.length === 0,
+    });
+  };
+
+  const promptDeleteVolume = async (vol: VolumeItem) => {
+    let usingContainers: ResourceInUseItem[] = [];
+    try {
+      const res = await sshExec(activeConnId, `docker ps -a --filter volume="${vol.name}" --format "{{.ID}}|{{.Names}}|{{.Status}}"`);
+      if (res.stdout && res.stdout.trim()) {
+        usingContainers = res.stdout.trim().split('\n').filter(Boolean).map(l => {
+          const [id, name, status] = l.split('|');
+          return { name: name || '', id: id?.slice(0, 12), status: status || 'Mounted' };
+        });
+      }
+    } catch {}
+
+    setResourceToDelete({
+      type: 'volume',
+      id: vol.name,
+      name: vol.name,
+      subText: `Driver: ${vol.driver} • Scope: ${vol.scope}`,
+      inUseBy: usingContainers,
+      allowForce: usingContainers.length === 0,
+    });
+  };
+
+  const promptDeleteNetwork = async (net: NetworkItem) => {
+    const isSystemNetwork = ['bridge', 'host', 'none'].includes(net.name.toLowerCase());
+    let usingContainers: ResourceInUseItem[] = [];
+    if (!isSystemNetwork) {
+      try {
+        const res = await sshExec(activeConnId, `docker network inspect ${net.id} --format "{{range .Containers}}{{.Name}}|{{.IPv4Address}},{{end}}"`);
+        if (res.stdout && res.stdout.trim()) {
+          const parts = res.stdout.trim().split(',').filter(Boolean);
+          usingContainers = parts.map(p => {
+            const [name, ip] = p.split('|');
+            return { name: name?.trim() || '', status: ip?.trim() ? `IP: ${ip.trim()}` : 'Connected' };
+          });
+        }
+      } catch {}
     }
 
-    if (!confirm(`Are you sure you want to permanently delete image "${img.repository}:${img.tag}" (${img.id})?`)) return;
+    setResourceToDelete({
+      type: 'network',
+      id: net.id,
+      name: net.name,
+      subText: isSystemNetwork ? 'Default Docker Predefined Network' : `Driver: ${net.driver} • Scope: ${net.scope}`,
+      inUseBy: isSystemNetwork 
+        ? [{ name: 'Default system network (cannot be removed by Docker)', status: 'System' }]
+        : usingContainers,
+      allowForce: !isSystemNetwork && usingContainers.length === 0,
+    });
+  };
 
-    setActionLoadingId(`img-del-${img.id}`);
+  const executeDeleteResource = async (target: ResourceDeleteTarget, force?: boolean) => {
+    setIsDeletingResource(true);
     try {
-      await dockerImageRemove(activeConnId, img.id);
-      showNotification(`Image ${img.repository}:${img.tag} removed successfully`);
+      switch (target.type) {
+        case 'container': {
+          const act = force || target.isRunning ? 'rm -f' : 'rm';
+          await dockerAction(activeConnId, target.id, act);
+          showNotification(`Container "${target.name}" removed successfully`);
+          break;
+        }
+        case 'bulk-containers': {
+          if (target.bulkIds && target.bulkIds.length > 0) {
+            let ok = 0;
+            let failed = 0;
+            for (const cid of target.bulkIds) {
+              try {
+                await dockerAction(activeConnId, cid, 'rm -f');
+                ok++;
+              } catch {
+                failed++;
+              }
+            }
+            setSelectedContainerIds(new Set());
+            if (failed > 0) {
+              showNotification(`Bulk remove: ${ok} succeeded, ${failed} failed`, 'error');
+            } else {
+              showNotification(`Successfully removed ${ok} container(s)`);
+            }
+          }
+          break;
+        }
+        case 'image': {
+          await dockerImageRemove(activeConnId, target.id);
+          showNotification(`Image "${target.name}" removed successfully`);
+          break;
+        }
+        case 'volume': {
+          const res = await sshExec(activeConnId, `docker volume rm ${target.id}`);
+          if (res.exit_code === 0) {
+            showNotification(`Volume "${target.name}" removed successfully`);
+          } else {
+            showNotification(`Failed to delete volume: ${res.stderr || res.stdout}`, 'error');
+          }
+          break;
+        }
+        case 'network': {
+          const res = await sshExec(activeConnId, `docker network rm ${target.id}`);
+          if (res.exit_code === 0) {
+            showNotification(`Network "${target.name}" removed successfully`);
+          } else {
+            showNotification(`Failed to delete network: ${res.stderr || res.stdout}`, 'error');
+          }
+          break;
+        }
+      }
+      setResourceToDelete(null);
       await loadDockerData();
     } catch (err: any) {
-      alert(`Failed to delete image:\n${err?.message || err}`);
-      showNotification(`Error deleting image: ${err?.message || err}`, 'error');
+      showNotification(`Failed to delete: ${err?.message || err}`, 'error');
     } finally {
-      setActionLoadingId(null);
+      setIsDeletingResource(false);
     }
+  };
+
+  const handleDeleteVolume = (volName: string) => {
+    const v = volumes.find(x => x.name === volName) || { name: volName, driver: 'local', scope: 'local' };
+    promptDeleteVolume(v);
+  };
+
+  const handleDeleteNetwork = (netId: string, netName: string) => {
+    const n = networks.find(x => x.id === netId) || { id: netId, name: netName, driver: 'bridge', scope: 'local' };
+    promptDeleteNetwork(n);
+  };
+
+  const handleDeleteImage = (img: ImageItem) => {
+    promptDeleteImage(img);
   };
 
   // Tag Image Handlers
@@ -1965,14 +1868,7 @@ export default function DockerManager() {
   };
 
   // Common popular images catalog
-  const popularImages = [
-    { name: 'nginx:alpine', desc: 'Lightweight high-performance HTTP web server' },
-    { name: 'redis:alpine', desc: 'In-memory fast key-value database & cache' },
-    { name: 'postgres:16-alpine', desc: 'Advanced relational SQL database' },
-    { name: 'node:20-alpine', desc: 'JavaScript runtime with lightweight Alpine base' },
-    { name: 'python:3.11-slim', desc: 'Python 3.11 environment with pip' },
-    { name: 'rabbitmq:3-management', desc: 'Messaging broker with web management UI' },
-  ];
+  const popularImages = POPULAR_IMAGES;
 
   return (
     <div className={`flex flex-col h-full bg-[#181825] text-[#cdd6f4] select-none overflow-hidden font-sans ${(isLoading || !!actionLoadingId) ? 'cursor-wait' : ''}`}>
@@ -2693,22 +2589,14 @@ export default function DockerManager() {
                               <GitCommit className="w-3.5 h-3.5" />
                             </button>
 
-                            {/* Force Delete */}
+                            {/* Delete Container */}
                             <button
-                              onClick={() => {
-                                if (confirm(`Force remove container "${c.name}"?`)) {
-                                  handleAction(c.id, 'rm -f', c.name);
-                                }
-                              }}
-                              disabled={actionLoadingId === `c-rm -f-${c.id}`}
-                              className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 disabled:opacity-50 text-rose-400 transition-all border border-rose-500/20 active:scale-95"
-                              title="Force Remove Container"
+                              onClick={() => promptDeleteContainer(c)}
+                              disabled={actionLoadingId === `c-rm -f-${c.id}` || isDeletingResource}
+                              className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 disabled:opacity-50 text-rose-400 transition-all border border-rose-500/20 active:scale-95 cursor-pointer"
+                              title="Delete Container"
                             >
-                              {actionLoadingId === `c-rm -f-${c.id}` ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-400" />
-                              ) : (
-                                <Trash2 className="w-3.5 h-3.5" />
-                              )}
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
                         </td>
@@ -3469,500 +3357,64 @@ export default function DockerManager() {
       </div>
 
       {/* ================= MODAL: RUN NEW CONTAINER ================= */}
-      {showRunModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-200">
-          <div className="bg-[#1c1d2e] border border-white/20 rounded-3xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col">
-            {/* Modal Header */}
-            <div className="px-6 py-4 bg-[#141422] border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <div className="w-8 h-8 rounded-xl bg-blue-600/30 border border-blue-400/30 flex items-center justify-center">
-                  <Play className="w-4 h-4 text-blue-400 fill-current" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">Launch New Container</h3>
-                  <p className="text-[11px] text-gray-400">Configure ports, environment variables, and volumes</p>
-                </div>
-              </div>
-              <button 
-                onClick={() => setShowRunModal(false)}
-                className="w-7 h-7 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-gray-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Modal Form */}
-            <form onSubmit={handleRunSubmit} className="p-6 space-y-4 overflow-y-auto max-h-[75vh]">
-              <div>
-                <label className="block text-xs font-medium text-gray-300 mb-1">
-                  Docker Image <span className="text-rose-400">*</span>
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. nginx:alpine, redis:latest, postgres:16"
-                  value={runImage}
-                  onChange={e => setRunImage(e.target.value)}
-                  required
-                  className="w-full bg-[#13131c] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-300 mb-1">Container Name (Optional)</label>
-                <input
-                  type="text"
-                  placeholder="e.g. web-server-1"
-                  value={runName}
-                  onChange={e => setRunName(e.target.value)}
-                  className="w-full bg-[#13131c] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-gray-300 mb-1">Port Bindings (-p)</label>
-                  <input
-                    type="text"
-                    placeholder="8080:80, 443:443"
-                    value={runPorts}
-                    onChange={e => setRunPorts(e.target.value)}
-                    className="w-full bg-[#13131c] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono"
-                  />
-                  <span className="text-[10px] text-gray-500 mt-1 block">Format: hostPort:containerPort</span>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-gray-300 mb-1">Restart Policy</label>
-                  <select
-                    value={runRestart}
-                    onChange={e => setRunRestart(e.target.value)}
-                    className="w-full bg-[#13131c] border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500"
-                  >
-                    <option value="unless-stopped">Unless Stopped</option>
-                    <option value="always">Always</option>
-                    <option value="on-failure">On Failure</option>
-                    <option value="no">Never (no)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-300 mb-1">Volumes / Mounts (-v)</label>
-                <input
-                  type="text"
-                  placeholder="/var/www/html:/usr/share/nginx/html, /host/data:/data"
-                  value={runVolumes}
-                  onChange={e => setRunVolumes(e.target.value)}
-                  className="w-full bg-[#13131c] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono"
-                />
-                <span className="text-[10px] text-gray-500 mt-1 block">Comma separated list of hostPath:containerPath</span>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-300 mb-1">Environment Variables (-e)</label>
-                <input
-                  type="text"
-                  placeholder="NODE_ENV=production, PORT=3000, DB_HOST=localhost"
-                  value={runEnv}
-                  onChange={e => setRunEnv(e.target.value)}
-                  className="w-full bg-[#13131c] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono"
-                />
-              </div>
-
-              {runModalError && (
-                <div className="p-3 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-start space-x-2.5 animate-in fade-in duration-150">
-                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                  <div className="flex-1 font-mono text-[11px] leading-relaxed break-words">{runModalError}</div>
-                </div>
-              )}
-
-              {/* Submit Buttons */}
-              <div className="pt-3 border-t border-white/10 flex items-center justify-end space-x-3">
-                <button
-                  type="button"
-                  onClick={() => { setShowRunModal(false); setRunModalError(null); }}
-                  className="px-4 py-2 rounded-xl text-xs font-medium text-gray-300 hover:text-white bg-white/5 hover:bg-white/10 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmittingRun}
-                  className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-blue-600 hover:bg-blue-500 active:scale-95 transition-all shadow-lg shadow-blue-600/30 flex items-center space-x-2"
-                >
-                  {isSubmittingRun && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                  <span>{isSubmittingRun ? 'Launching...' : 'Run Container'}</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <DockerRunModal
+        isOpen={showRunModal}
+        image={runImage}
+        name={runName}
+        ports={runPorts}
+        restart={runRestart}
+        volumes={runVolumes}
+        env={runEnv}
+        error={runModalError}
+        isSubmitting={isSubmittingRun}
+        onImageChange={setRunImage}
+        onNameChange={setRunName}
+        onPortsChange={setRunPorts}
+        onRestartChange={setRunRestart}
+        onVolumesChange={setRunVolumes}
+        onEnvChange={setRunEnv}
+        onClose={() => { setShowRunModal(false); setRunModalError(null); }}
+        onSubmit={handleRunSubmit}
+      />
 
       {/* ================= MODAL: PULL IMAGE ================= */}
-      {showPullModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-200">
-          <div className="bg-[#1c1d2e] border border-white/20 rounded-3xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col">
-            {/* Modal Header */}
-            <div className="px-6 py-4 bg-[#141422] border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <div className="w-8 h-8 rounded-xl bg-purple-600/30 border border-purple-400/30 flex items-center justify-center">
-                  <Download className="w-4 h-4 text-purple-400" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">Pull Docker Image</h3>
-                  <p className="text-[11px] text-gray-400">Download from Docker Hub or private container registries</p>
-                </div>
-              </div>
-              <button 
-                onClick={() => setShowPullModal(false)}
-                className="w-7 h-7 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-gray-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4">
-              <div className="flex space-x-2">
-                <input
-                  type="text"
-                  placeholder="e.g. nginx:latest, redis:alpine, ubuntu:22.04"
-                  value={pullImageInput}
-                  onChange={e => setPullImageInput(e.target.value)}
-                  className="flex-1 bg-[#13131c] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono"
-                />
-                <button
-                  onClick={() => handlePullSubmit()}
-                  disabled={isPulling || !pullImageInput.trim()}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-md active:scale-95"
-                >
-                  {isPulling && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                  <span>{isPulling ? 'Pulling...' : 'Pull'}</span>
-                </button>
-              </div>
-
-              {/* Popular Curated Images */}
-              <div>
-                <span className="text-[11px] text-gray-400 block mb-2 font-medium">Popular Docker Images:</span>
-                <div className="grid grid-cols-2 gap-2">
-                  {popularImages.map(item => (
-                    <button
-                      key={item.name}
-                      onClick={() => {
-                        setPullImageInput(item.name);
-                        handlePullSubmit(item.name);
-                      }}
-                      disabled={isPulling}
-                      className="p-2 bg-[#13131c] hover:bg-white/5 rounded-xl border border-white/5 text-left transition-all group flex flex-col justify-between"
-                    >
-                      <div className="flex items-center justify-between w-full">
-                        <span className="font-mono text-xs font-bold text-white group-hover:text-blue-400 transition-colors">
-                          {item.name}
-                        </span>
-                        <ArrowDownToLine className="w-3.5 h-3.5 text-gray-500 group-hover:text-blue-400" />
-                      </div>
-                      <span className="text-[10px] text-gray-500 mt-1 line-clamp-1">{item.desc}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Pull Logs Preview */}
-              {pullLogs && (
-                <div className="bg-[#11111a] border border-white/10 rounded-xl p-3 max-h-40 overflow-y-auto font-mono text-[11px] text-gray-300 whitespace-pre-wrap select-text">
-                  {pullLogs}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <DockerPullModal
+        isOpen={showPullModal}
+        pullImageInput={pullImageInput}
+        isPulling={isPulling}
+        pullLogs={pullLogs}
+        popularImages={popularImages}
+        onInputChange={setPullImageInput}
+        onPull={handlePullSubmit}
+        onClose={() => setShowPullModal(false)}
+      />
 
       {/* ================= MODAL: LIVE STREAMING LOGS ================= */}
-      {selectedLogs && (
-        <div className="fixed inset-0 bg-black/75 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-200">
-          <div className="bg-[#181825] border border-white/20 rounded-3xl w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col h-[600px]">
-            {/* Terminal Window Header (macOS Traffic Lights) */}
-            <div className="px-5 py-3.5 bg-[#12121a] border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                {/* Traffic lights */}
-                <div className="flex items-center space-x-1.5">
-                  <button onClick={() => setSelectedLogs(null)} className="w-3 h-3 rounded-full bg-[#ff5f56] hover:opacity-80 transition-opacity" />
-                  <span className="w-3 h-3 rounded-full bg-[#ffbd2e]" />
-                  <span className="w-3 h-3 rounded-full bg-[#27c93f]" />
-                </div>
-                <div className="flex items-center space-x-2 pl-2">
-                  <FileText className="w-4 h-4 text-blue-400" />
-                  <span className="text-xs font-mono font-bold text-white">docker logs {selectedLogs.name}</span>
-                </div>
-              </div>
-
-              {/* Controls */}
-              <div className="flex items-center space-x-2">
-                {/* Tail line count */}
-                <select
-                  value={logsLines}
-                  onChange={e => {
-                    setLogsLines(Number(e.target.value));
-                    setTimeout(() => refreshCurrentLogs(), 50);
-                  }}
-                  className="bg-[#1e1e2e] border border-white/10 rounded-lg px-2 py-1 text-[11px] text-gray-300 focus:outline-none"
-                >
-                  <option value={50}>Tail 50</option>
-                  <option value={100}>Tail 100</option>
-                  <option value={250}>Tail 250</option>
-                  <option value={500}>Tail 500</option>
-                  <option value={1000}>Tail 1000</option>
-                </select>
-
-                {/* Auto Refresh Toggle */}
-                <button
-                  onClick={() => setLogsAutoRefresh(!logsAutoRefresh)}
-                  className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-all border ${
-                    logsAutoRefresh 
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' 
-                      : 'bg-white/5 text-gray-400 border-white/10 hover:text-white'
-                  }`}
-                  title="Auto-refresh logs every 2.5 seconds"
-                >
-                  <Zap className={`w-3 h-3 inline mr-1 ${logsAutoRefresh ? 'animate-pulse text-emerald-400' : ''}`} />
-                  Live (2.5s)
-                </button>
-
-                {/* Copy logs */}
-                <button
-                  onClick={copyLogsToClipboard}
-                  className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 text-[11px] flex items-center space-x-1"
-                >
-                  {logsCopied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-                  <span>{logsCopied ? 'Copied' : 'Copy'}</span>
-                </button>
-
-                {/* Refresh */}
-                <button
-                  onClick={refreshCurrentLogs}
-                  className="p-1 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10"
-                  title="Reload Logs Now"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Filter Sub-header */}
-            <div className="px-4 py-2 bg-[#161622] border-b border-white/5 flex items-center justify-between">
-              <div className="flex items-center space-x-2 text-xs text-gray-400">
-                <Search className="w-3.5 h-3.5" />
-                <input
-                  type="text"
-                  placeholder="Grep / filter logs output..."
-                  value={logsFilter}
-                  onChange={e => setLogsFilter(e.target.value)}
-                  className="bg-transparent border-none text-xs text-white placeholder-gray-500 focus:outline-none w-64"
-                />
-              </div>
-              <span className="text-[11px] text-gray-500 font-mono">
-                {logsText.split('\n').length} lines
-              </span>
-            </div>
-
-            {/* Terminal Body */}
-            <div className="flex-1 p-4 font-mono text-[11px] text-gray-300 bg-[#0d0e15] overflow-y-auto whitespace-pre-wrap leading-relaxed select-text">
-              {logsText
-                .split('\n')
-                .filter(l => !logsFilter || l.toLowerCase().includes(logsFilter.toLowerCase()))
-                .map((line, idx) => {
-                  let colorClass = 'text-gray-300';
-                  if (line.includes('ERROR') || line.includes('ERR') || line.includes('FATAL')) colorClass = 'text-rose-400 font-semibold';
-                  else if (line.includes('WARN')) colorClass = 'text-amber-400';
-                  else if (line.includes('INFO')) colorClass = 'text-cyan-300';
-                  return (
-                    <div key={idx} className={`${colorClass} hover:bg-white/[0.04] px-1 py-0.2 rounded transition-colors`}>
-                      {line}
-                    </div>
-                  );
-                })}
-              <div ref={logsEndRef} />
-            </div>
-          </div>
-        </div>
-      )}
+      <DockerLogsModal
+        container={selectedLogs}
+        logsText={logsText}
+        logsLines={logsLines}
+        logsAutoRefresh={logsAutoRefresh}
+        logsCopied={logsCopied}
+        logsFilter={logsFilter}
+        onClose={() => setSelectedLogs(null)}
+        onLinesChange={l => {
+          setLogsLines(l);
+          setTimeout(() => refreshCurrentLogs(), 50);
+        }}
+        onToggleAutoRefresh={() => setLogsAutoRefresh(!logsAutoRefresh)}
+        onCopyLogs={copyLogsToClipboard}
+        onRefresh={refreshCurrentLogs}
+        onFilterChange={setLogsFilter}
+      />
 
       {/* ================= MODAL: CONTAINER INSPECTOR ================= */}
-      {inspectTarget && (
-        <div className="fixed inset-0 bg-black/75 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-200">
-          <div className="bg-[#181825] border border-white/20 rounded-3xl w-full max-w-3xl shadow-2xl overflow-hidden flex flex-col h-[580px]">
-            {/* Header */}
-            <div className="px-6 py-4 bg-[#141422] border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <div className="w-8 h-8 rounded-xl bg-purple-600/30 border border-purple-400/30 flex items-center justify-center">
-                  <Info className="w-4 h-4 text-purple-400" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white flex items-center space-x-2">
-                    <span>{inspectTarget.name}</span>
-                    <span className="font-mono text-xs text-gray-400 font-normal">({inspectTarget.id})</span>
-                  </h3>
-                  <p className="text-[11px] text-gray-400">Detailed container inspection & metadata</p>
-                </div>
-              </div>
-              <button 
-                onClick={() => setInspectTarget(null)}
-                className="w-7 h-7 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-gray-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Inspector Navigation Tabs */}
-            <div className="px-6 bg-[#161622] border-b border-white/10 flex items-center space-x-4">
-              <button
-                onClick={() => setInspectTab('overview')}
-                className={`py-2.5 text-xs font-medium border-b-2 transition-all ${
-                  inspectTab === 'overview' ? 'border-blue-500 text-blue-400 font-semibold' : 'border-transparent text-gray-400 hover:text-white'
-                }`}
-              >
-                Overview & Network
-              </button>
-              <button
-                onClick={() => setInspectTab('env')}
-                className={`py-2.5 text-xs font-medium border-b-2 transition-all ${
-                  inspectTab === 'env' ? 'border-blue-500 text-blue-400 font-semibold' : 'border-transparent text-gray-400 hover:text-white'
-                }`}
-              >
-                Environment ({inspectData?.env.length || 0})
-              </button>
-              <button
-                onClick={() => setInspectTab('ports')}
-                className={`py-2.5 text-xs font-medium border-b-2 transition-all ${
-                  inspectTab === 'ports' ? 'border-blue-500 text-blue-400 font-semibold' : 'border-transparent text-gray-400 hover:text-white'
-                }`}
-              >
-                Port Bindings ({inspectData?.ports.length || 0})
-              </button>
-              <button
-                onClick={() => setInspectTab('mounts')}
-                className={`py-2.5 text-xs font-medium border-b-2 transition-all ${
-                  inspectTab === 'mounts' ? 'border-blue-500 text-blue-400 font-semibold' : 'border-transparent text-gray-400 hover:text-white'
-                }`}
-              >
-                Mounts & Volumes ({inspectData?.mounts.length || 0})
-              </button>
-            </div>
-
-            {/* Tab Contents */}
-            <div className="flex-1 p-6 overflow-y-auto">
-              {inspectLoading ? (
-                <div className="flex items-center justify-center h-full space-x-2 text-gray-400 text-xs">
-                  <RefreshCw className="w-4 h-4 animate-spin text-blue-400" />
-                  <span>Loading container metadata...</span>
-                </div>
-              ) : inspectData ? (
-                <>
-                  {inspectTab === 'overview' && (
-                    <div className="space-y-4">
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="bg-[#14141e] p-3.5 rounded-xl border border-white/10 space-y-2">
-                          <span className="text-[11px] text-gray-400 block font-medium">Container Identity</span>
-                          <div className="text-xs font-mono"><span className="text-gray-500">Image:</span> {inspectData.image}</div>
-                          <div className="text-xs font-mono"><span className="text-gray-500">Status:</span> {inspectData.status}</div>
-                          <div className="text-xs font-mono"><span className="text-gray-500">Restart:</span> {inspectData.restartPolicy}</div>
-                          <div className="text-xs font-mono"><span className="text-gray-500">Started:</span> {inspectData.startedAt}</div>
-                        </div>
-
-                        <div className="bg-[#14141e] p-3.5 rounded-xl border border-white/10 space-y-2">
-                          <span className="text-[11px] text-gray-400 block font-medium">Networking</span>
-                          <div className="text-xs font-mono"><span className="text-gray-500">IP Address:</span> {inspectData.ipAddress}</div>
-                          <div className="text-xs font-mono"><span className="text-gray-500">Gateway:</span> {inspectData.gateway}</div>
-                          <div className="text-xs font-mono"><span className="text-gray-500">MAC Addr:</span> {inspectData.macAddress}</div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {inspectTab === 'env' && (
-                    <div className="bg-[#14141e] rounded-xl border border-white/10 overflow-hidden">
-                      <table className="w-full text-left text-xs font-mono">
-                        <thead className="bg-[#11111a] text-gray-400 border-b border-white/10 text-[10px] uppercase">
-                          <tr>
-                            <th className="py-2.5 px-3 w-1/3">Key</th>
-                            <th className="py-2.5 px-3">Value</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/[0.05]">
-                          {inspectData.env.map((eStr, i) => {
-                            const [k, ...v] = eStr.split('=');
-                            return (
-                              <tr key={i} className="hover:bg-white/[0.02]">
-                                <td className="py-2 px-3 text-cyan-400 font-semibold">{k}</td>
-                                <td className="py-2 px-3 text-gray-300 break-all select-text">{v.join('=')}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-
-                  {inspectTab === 'ports' && (
-                    <div className="bg-[#14141e] rounded-xl border border-white/10 overflow-hidden">
-                      <table className="w-full text-left text-xs font-mono">
-                        <thead className="bg-[#11111a] text-gray-400 border-b border-white/10 text-[10px] uppercase">
-                          <tr>
-                            <th className="py-2.5 px-3">Host Port</th>
-                            <th className="py-2.5 px-3">Direction</th>
-                            <th className="py-2.5 px-3">Container Port</th>
-                            <th className="py-2.5 px-3">Protocol</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/[0.05]">
-                          {inspectData.ports.map((p, i) => (
-                            <tr key={i} className="hover:bg-white/[0.02]">
-                              <td className="py-2.5 px-3 text-emerald-400 font-bold">{p.hostPort}</td>
-                              <td className="py-2.5 px-3 text-gray-500">→</td>
-                              <td className="py-2.5 px-3 text-white font-bold">{p.containerPort}</td>
-                              <td className="py-2.5 px-3 uppercase text-gray-400">{p.protocol}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-
-                  {inspectTab === 'mounts' && (
-                    <div className="bg-[#14141e] rounded-xl border border-white/10 overflow-hidden">
-                      <table className="w-full text-left text-xs font-mono">
-                        <thead className="bg-[#11111a] text-gray-400 border-b border-white/10 text-[10px] uppercase">
-                          <tr>
-                            <th className="py-2.5 px-3">Host Source</th>
-                            <th className="py-2.5 px-3">Container Destination</th>
-                            <th className="py-2.5 px-3 w-20">Mode</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/[0.05]">
-                          {inspectData.mounts.map((m, i) => (
-                            <tr key={i} className="hover:bg-white/[0.02]">
-                              <td className="py-2.5 px-3 text-gray-300 break-all">{m.source}</td>
-                              <td className="py-2.5 px-3 text-blue-400 break-all">{m.destination}</td>
-                              <td className="py-2.5 px-3">
-                                <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${
-                                  m.mode.includes('rw') ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
-                                }`}>
-                                  {m.mode}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </>
-              ) : null}
-            </div>
-          </div>
-        </div>
-      )}
+      <DockerInspectModal
+        container={inspectTarget}
+        inspectData={inspectData}
+        isLoading={inspectLoading}
+        onClose={() => setInspectTarget(null)}
+      />
 
       {/* ================= MODAL: EXEC QUICK COMMAND ================= */}
       {execTarget && (
@@ -4016,736 +3468,180 @@ export default function DockerManager() {
       )}
 
       {/* ================= MODAL: SYSTEM PRUNE ASSISTANT ================= */}
-      {showPruneModal && (
-        <div className="fixed inset-0 bg-black/75 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-200">
-          <div className="bg-[#1c1d2e] border border-white/20 rounded-3xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col">
-            <div className="px-6 py-4 bg-[#141422] border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <div className="w-8 h-8 rounded-xl bg-rose-600/30 border border-rose-400/30 flex items-center justify-center">
-                  <Trash2 className="w-4 h-4 text-rose-400" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">Docker Prune Assistant</h3>
-                  <p className="text-[11px] text-gray-400">Reclaim wasted disk storage on your Linux host</p>
-                </div>
-              </div>
-              <button 
-                onClick={() => setShowPruneModal(false)}
-                className="w-7 h-7 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-gray-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4">
-              <div className="bg-[#13131c] p-3 rounded-xl border border-white/10 font-mono text-[11px] text-gray-300 whitespace-pre-wrap">
-                {systemDfText}
-              </div>
-
-              <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-200 flex items-start space-x-2.5">
-                <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-semibold block mb-0.5">Warning</span>
-                  Pruning will permanently delete stopped containers, dangling images, and unreferenced build cache.
-                </div>
-              </div>
-
-              <div className="pt-2 flex items-center justify-end space-x-3">
-                <button
-                  onClick={() => setShowPruneModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-medium text-gray-300 hover:text-white bg-white/5"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => executePrune('all')}
-                  disabled={isPruning}
-                  className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 active:scale-95 transition-all shadow-lg shadow-rose-600/30 flex items-center space-x-2"
-                >
-                  {isPruning && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                  <span>{isPruning ? 'Pruning...' : 'Prune All Unused'}</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <DockerPruneModal
+        isOpen={showPruneModal}
+        systemDfText={systemDfText}
+        isPruning={isPruning}
+        onClose={() => setShowPruneModal(false)}
+        onPrune={executePrune}
+      />
 
       {/* ================= DOCKER LOGIN & ACCOUNT MODAL ================= */}
-      {showLoginModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-[#1e1e2e] border border-white/15 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200">
-            <div className="px-6 py-4 bg-[#14141e] border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <div className="w-8 h-8 rounded-xl bg-blue-500/20 border border-blue-500/30 flex items-center justify-center">
-                  <User className="w-4 h-4 text-blue-400" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">Docker Registry Account</h3>
-                  <p className="text-[11px] text-gray-400">Authenticate against Docker Hub or private registries</p>
-                </div>
-              </div>
-              <button 
-                onClick={() => {
-                  setShowLoginModal(false);
-                  setLoginError(null);
-                }} 
-                className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-white/10"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
-              {/* Active Logged-in Status Card */}
-              {dockerAuth?.loggedIn ? (
-                <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-2xl flex items-center justify-between">
-                  <div className="flex items-center space-x-3">
-                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
-                    <div>
-                      <div className="text-xs font-bold text-emerald-300">Active Account: {dockerAuth.username}</div>
-                      <div className="text-[10px] text-emerald-400/80 font-mono mt-0.5">Registry: {dockerAuth.registry}</div>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => handleDockerLogout(dockerAuth.registry)}
-                    className="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/30 border border-rose-500/30 text-rose-300 text-xs font-semibold transition-all active:scale-95 flex items-center space-x-1"
-                  >
-                    <LogOut className="w-3.5 h-3.5" />
-                    <span>Log Out</span>
-                  </button>
-                </div>
-              ) : (
-                <div className="p-3 bg-white/5 border border-white/10 rounded-2xl flex items-center space-x-2.5 text-xs text-gray-300">
-                  <Lock className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span>Not currently logged into any Docker registry on this server.</span>
-                </div>
-              )}
-
-              {/* Login Form */}
-              <form onSubmit={handleDockerLogin} className="space-y-3.5 pt-2 border-t border-white/10">
-                <div className="text-xs font-semibold text-white">Log in to Registry</div>
-
-                {loginError && (
-                  <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-start space-x-2">
-                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                    <span className="whitespace-pre-wrap">{loginError}</span>
-                  </div>
-                )}
-
-                {/* Popular Cloud & Git Registries */}
-                <div>
-                  <label className="block text-[11px] font-medium text-gray-400 mb-1.5">Select Popular Registry</label>
-                  <div className="grid grid-cols-4 gap-1.5 mb-2.5">
-                    {[
-                      { label: 'Docker Hub', reg: 'docker.io', user: '', hint: 'Docker Hub official cloud registry' },
-                      { label: 'AWS ECR', reg: '<account-id>.dkr.ecr.<region>.amazonaws.com', user: 'AWS', hint: 'AWS Elastic Container Registry (Username must be AWS; Password from aws ecr get-login-password)' },
-                      { label: 'Azure ACR', reg: '<name>.azurecr.io', user: '', hint: 'Azure Container Registry (Admin credentials or SP App ID)' },
-                      { label: 'Google GCP', reg: 'gcr.io', user: '_json_key', hint: 'Google Cloud Registry (Username _json_key with JSON key file content)' },
-                      { label: 'Google Artifact', reg: 'us-docker.pkg.dev', user: '_json_key', hint: 'Google Cloud Artifact Registry (*.pkg.dev)' },
-                      { label: 'GitHub GHCR', reg: 'ghcr.io', user: '', hint: 'GitHub Container Registry (Use GitHub username & PAT)' },
-                      { label: 'GitLab', reg: 'registry.gitlab.com', user: '', hint: 'GitLab Container Registry (PAT or Deploy Token)' },
-                      { label: 'Quay.io', reg: 'quay.io', user: '', hint: 'Red Hat Quay Container Registry' },
-                    ].map(p => (
-                      <button
-                        key={p.label}
-                        type="button"
-                        onClick={() => {
-                          setLoginRegistry(p.reg);
-                          if (p.user) setLoginUsername(p.user);
-                        }}
-                        className={`px-2 py-1.5 rounded-lg text-[10px] font-semibold border transition-all truncate text-center ${
-                          loginRegistry === p.reg
-                            ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
-                            : 'bg-white/5 text-gray-300 border-white/10 hover:bg-white/10 hover:text-white'
-                        }`}
-                        title={p.hint}
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* Dynamic Cloud Provider Instruction Callout */}
-                  {loginRegistry.includes('ecr.') && (
-                    <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-300 mb-2 leading-relaxed">
-                      🟧 <strong>AWS ECR:</strong> Username is fixed to <code className="bg-black/30 px-1 rounded">AWS</code>. Generate the temporary password using the AWS CLI: <code className="bg-black/30 px-1 rounded">aws ecr get-login-password --region &lt;region&gt;</code>
-                    </div>
-                  )}
-                  {loginRegistry.includes('azurecr.io') && (
-                    <div className="p-2.5 rounded-xl bg-blue-500/10 border border-blue-500/20 text-[11px] text-blue-300 mb-2 leading-relaxed">
-                      🔷 <strong>Azure ACR:</strong> Replace <code className="bg-black/30 px-1 rounded">&lt;name&gt;</code> with your registry name. Username is your ACR admin username or Service Principal Client ID; Password is the access key or secret.
-                    </div>
-                  )}
-                  {(loginRegistry.includes('gcr.io') || loginRegistry.includes('pkg.dev')) && (
-                    <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-[11px] text-rose-300 mb-2 leading-relaxed">
-                      🔴 <strong>Google Cloud (GCP):</strong> For service account key authentication, set username to <code className="bg-black/30 px-1 rounded">_json_key</code> and paste your downloaded JSON key directly into Password.
-                    </div>
-                  )}
-                  {loginRegistry === 'ghcr.io' && (
-                    <div className="p-2.5 rounded-xl bg-purple-500/10 border border-purple-500/20 text-[11px] text-purple-300 mb-2 leading-relaxed">
-                      🐙 <strong>GitHub (ghcr.io):</strong> Username is your GitHub handle. Password must be a Personal Access Token with <code className="bg-black/30 px-1 rounded">read:packages</code> and <code className="bg-black/30 px-1 rounded">write:packages</code> permissions.
-                    </div>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-medium text-gray-400 mb-1">Registry Endpoint</label>
-                  <div className="flex items-center space-x-2">
-                    <input
-                      type="text"
-                      value={loginRegistry}
-                      onChange={(e) => setLoginRegistry(e.target.value)}
-                      className="flex-1 px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono"
-                      placeholder="e.g. docker.io, 12345.dkr.ecr.us-east-1.amazonaws.com"
-                    />
-                    <select
-                      onChange={(e) => {
-                        if (e.target.value) {
-                          setLoginRegistry(e.target.value);
-                          if (e.target.value.includes('ecr.')) setLoginUsername('AWS');
-                          if (e.target.value.includes('gcr.io') || e.target.value.includes('pkg.dev')) setLoginUsername('_json_key');
-                        }
-                      }}
-                      className="px-2 py-2 rounded-xl bg-[#14141e] border border-white/10 text-xs text-gray-300 focus:outline-none cursor-pointer max-w-[120px]"
-                    >
-                      <option value="">Presets</option>
-                      <option value="docker.io">🐳 Docker Hub</option>
-                      <option value="<account-id>.dkr.ecr.<region>.amazonaws.com">🟧 AWS ECR</option>
-                      <option value="public.ecr.aws">🟧 AWS Public</option>
-                      <option value="<name>.azurecr.io">🔷 Azure ACR</option>
-                      <option value="gcr.io">🔴 GCP (gcr.io)</option>
-                      <option value="us-docker.pkg.dev">🔴 GCP Artifact</option>
-                      <option value="ghcr.io">🐙 GitHub GHCR</option>
-                      <option value="registry.gitlab.com">🦊 GitLab</option>
-                      <option value="quay.io">Quay.io</option>
-                      <option value="registry.digitalocean.com">DigitalOcean</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-medium text-gray-400 mb-1">Username</label>
-                  <input
-                    type="text"
-                    value={loginUsername}
-                    onChange={(e) => setLoginUsername(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                    placeholder="Docker ID or username"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-medium text-gray-400 mb-1">Password / Personal Access Token</label>
-                  <div className="relative">
-                    <input
-                      type={showPassword ? 'text' : 'password'}
-                      value={loginPassword}
-                      onChange={(e) => setLoginPassword(e.target.value)}
-                      className="w-full px-3 py-2 pr-10 rounded-xl bg-black/30 border border-white/10 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono"
-                      placeholder="••••••••••••"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(!showPassword)}
-                      className="absolute right-3 top-2.5 text-gray-400 hover:text-white"
-                    >
-                      {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex items-center space-x-2 pt-1">
-                  <input
-                    type="checkbox"
-                    id="saveDockerCreds"
-                    checked={saveCredentials}
-                    onChange={(e) => setSaveCredentials(e.target.checked)}
-                    className="rounded border-white/20 bg-white/10 text-blue-500 focus:ring-0 cursor-pointer"
-                  />
-                  <label htmlFor="saveDockerCreds" className="text-xs text-gray-300 cursor-pointer">
-                    Save credential profile in SSH Desktop
-                  </label>
-                </div>
-
-                <div className="pt-3 flex items-center justify-end space-x-3">
-                  <button
-                    type="button"
-                    onClick={() => setShowLoginModal(false)}
-                    className="px-4 py-2 rounded-xl text-xs font-medium text-gray-400 hover:text-white hover:bg-white/5"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isLoggingIn}
-                    className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold shadow-md active:scale-95 transition-all flex items-center space-x-1.5"
-                  >
-                    {isLoggingIn ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LogIn className="w-3.5 h-3.5" />}
-                    <span>{isLoggingIn ? 'Logging In...' : 'Log In'}</span>
-                  </button>
-                </div>
-              </form>
-
-              {/* Saved Profiles */}
-              {savedCredentialsList.length > 0 && (
-                <div className="pt-3 border-t border-white/10">
-                  <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-2">Saved Accounts</div>
-                  <div className="space-y-1.5 max-h-32 overflow-y-auto">
-                    {savedCredentialsList.map((cred) => (
-                      <div key={cred.id} className="p-2.5 bg-black/20 border border-white/5 rounded-xl flex items-center justify-between text-xs">
-                        <div>
-                          <div className="font-semibold text-white">{cred.username}</div>
-                          <div className="text-[10px] text-gray-400 font-mono">{cred.registry}</div>
-                        </div>
-                        <div className="flex items-center space-x-1">
-                          <button
-                            onClick={() => {
-                              setLoginUsername(cred.username);
-                              setLoginRegistry(cred.registry);
-                            }}
-                            className="px-2 py-1 rounded bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 text-[11px]"
-                          >
-                            Use
-                          </button>
-                          <button
-                            onClick={() => {
-                              const updated = savedCredentialsList.filter(c => c.id !== cred.id);
-                              localStorage.setItem('sshdesktop_docker_credentials', JSON.stringify(updated));
-                              setSavedCredentialsList(updated);
-                            }}
-                            className="p-1 rounded text-gray-400 hover:text-rose-400 hover:bg-white/5"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <DockerAuthModal
+        isOpen={showLoginModal}
+        dockerAuth={dockerAuth}
+        savedCredentialsList={savedCredentialsList}
+        onClose={() => setShowLoginModal(false)}
+        onLogin={async (reg: string, user: string, pwd: string, save: boolean) => {
+          const escapedPwd = pwd.replace(/'/g, "'\\''");
+          const cmd = `printf '%s\\n' '${escapedPwd}' | docker login -u '${user.trim()}' --password-stdin ${reg === 'docker.io' ? '' : `'${reg}'`}`.trim();
+          const res = await sshExec(activeConnId, cmd);
+          if (res.exit_code === 0 && (res.stdout.toLowerCase().includes('succeeded') || !res.stderr)) {
+            showNotification(`Logged in to Docker registry as ${user.trim()}`);
+            if (save) {
+              const newCred: SavedDockerCredential = {
+                id: `${reg}_${user.trim()}`,
+                registry: reg,
+                username: user.trim(),
+                savedAt: new Date().toLocaleDateString(),
+              };
+              const existing = JSON.parse(
+                localStorage.getItem('sshdesktop_docker_credentials') ||
+                localStorage.getItem('clouddesk_docker_credentials') ||
+                '[]'
+              );
+              const filtered = existing.filter((c: any) => c.id !== newCred.id);
+              const updated = [newCred, ...filtered];
+              localStorage.setItem('sshdesktop_docker_credentials', JSON.stringify(updated));
+              setSavedCredentialsList(updated);
+            }
+            await checkDockerAuth();
+          } else {
+            throw new Error(res.stderr || res.stdout || 'Docker login failed. Please verify credentials.');
+          }
+        }}
+        onLogout={handleDockerLogout}
+        onDeleteCredential={(id: string) => {
+          const updated = savedCredentialsList.filter(c => c.id !== id);
+          localStorage.setItem('sshdesktop_docker_credentials', JSON.stringify(updated));
+          setSavedCredentialsList(updated);
+        }}
+      />
 
       {/* ================= CREATE VOLUME MODAL ================= */}
-      {showCreateVolumeModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-[#1e1e2e] border border-white/15 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200">
-            <div className="px-6 py-4 bg-[#14141e] border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center">
-                  <HardDrive className="w-4 h-4 text-amber-400" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">Create Docker Volume</h3>
-                  <p className="text-[11px] text-gray-400">Initialize a persistent storage volume</p>
-                </div>
-              </div>
-              <button onClick={() => setShowCreateVolumeModal(false)} className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-white/10">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateVolume} className="p-6 space-y-4">
-              <div>
-                <label className="block text-[11px] font-medium text-gray-400 mb-1">Volume Name *</label>
-                <input
-                  type="text"
-                  required
-                  value={volCreateName}
-                  onChange={(e) => setVolCreateName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                  placeholder="e.g. pg_data_production"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium text-gray-400 mb-1">Driver</label>
-                <input
-                  type="text"
-                  value={volCreateDriver}
-                  onChange={(e) => setVolCreateDriver(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                  placeholder="local"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium text-gray-400 mb-1">Driver Options (comma separated key=value)</label>
-                <input
-                  type="text"
-                  value={volCreateOpts}
-                  onChange={(e) => setVolCreateOpts(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                  placeholder="type=tmpfs,device=tmpfs,o=size=100m"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium text-gray-400 mb-1">Labels (comma separated key=value)</label>
-                <input
-                  type="text"
-                  value={volCreateLabels}
-                  onChange={(e) => setVolCreateLabels(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                  placeholder="env=prod,team=backend"
-                />
-              </div>
-
-              <div className="pt-3 flex items-center justify-end space-x-3">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateVolumeModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-medium text-gray-400 hover:text-white hover:bg-white/5"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmittingVol}
-                  className="px-5 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-semibold shadow-md active:scale-95 transition-all flex items-center space-x-1.5"
-                >
-                  {isSubmittingVol ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-                  <span>{isSubmittingVol ? 'Creating...' : 'Create Volume'}</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <DockerVolumeCreateModal
+        isOpen={showCreateVolumeModal}
+        isSubmitting={isSubmittingVol}
+        onClose={() => setShowCreateVolumeModal(false)}
+        onCreate={async (vName, vDriver, vOpts, vLabels) => {
+          setIsSubmittingVol(true);
+          try {
+            const driverFlag = vDriver ? `-d ${vDriver}` : '';
+            const optFlags = vOpts ? vOpts.split(',').map(o => `--opt ${o.trim()}`).join(' ') : '';
+            const labelFlags = vLabels ? vLabels.split(',').map(l => `--label ${l.trim()}`).join(' ') : '';
+            const cmd = `docker volume create ${driverFlag} ${optFlags} ${labelFlags} ${vName}`.trim().replace(/\s+/g, ' ');
+            const res = await sshExec(activeConnId, cmd);
+            if (res.exit_code === 0) {
+              showNotification(`Volume ${vName} created successfully`);
+              setShowCreateVolumeModal(false);
+              await loadDockerData();
+            } else {
+              showNotification(`Failed to create volume: ${res.stderr || res.stdout}`, 'error');
+            }
+          } catch (err: any) {
+            showNotification(`Error: ${err?.message || err}`, 'error');
+          } finally {
+            setIsSubmittingVol(false);
+          }
+        }}
+      />
 
       {/* ================= CREATE NETWORK MODAL ================= */}
-      {showCreateNetworkModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-[#1e1e2e] border border-white/15 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200">
-            <div className="px-6 py-4 bg-[#14141e] border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <div className="w-8 h-8 rounded-xl bg-cyan-500/20 border border-cyan-500/30 flex items-center justify-center">
-                  <Network className="w-4 h-4 text-cyan-400" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">Create Docker Network</h3>
-                  <p className="text-[11px] text-gray-400">Configure bridge, overlay or custom container network</p>
-                </div>
-              </div>
-              <button onClick={() => setShowCreateNetworkModal(false)} className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-white/10">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateNetwork} className="p-6 space-y-3.5">
-              <div>
-                <label className="block text-[11px] font-medium text-gray-400 mb-1">Network Name *</label>
-                <input
-                  type="text"
-                  required
-                  value={netCreateName}
-                  onChange={(e) => setNetCreateName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                  placeholder="e.g. app_isolated_net"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium text-gray-400 mb-1">Driver</label>
-                <select
-                  value={netCreateDriver}
-                  onChange={(e) => setNetCreateDriver(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-[#14141e] border border-white/10 text-xs text-white focus:outline-none focus:border-blue-500 cursor-pointer"
-                >
-                  <option value="bridge">bridge (default standalone)</option>
-                  <option value="overlay">overlay (swarm multi-host)</option>
-                  <option value="macvlan">macvlan (physical MAC assignment)</option>
-                  <option value="ipvlan">ipvlan (L2/L3 virtual LAN)</option>
-                  <option value="host">host (native host interface)</option>
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[11px] font-medium text-gray-400 mb-1">Subnet (CIDR)</label>
-                  <input
-                    type="text"
-                    value={netCreateSubnet}
-                    onChange={(e) => setNetCreateSubnet(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                    placeholder="172.28.0.0/16"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-medium text-gray-400 mb-1">Gateway</label>
-                  <input
-                    type="text"
-                    value={netCreateGateway}
-                    onChange={(e) => setNetCreateGateway(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                    placeholder="172.28.0.1"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium text-gray-400 mb-1">IP Range (Optional)</label>
-                <input
-                  type="text"
-                  value={netCreateIpRange}
-                  onChange={(e) => setNetCreateIpRange(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                  placeholder="172.28.5.0/24"
-                />
-              </div>
-
-              <div className="flex items-center space-x-4 pt-1">
-                <label className="flex items-center space-x-2 text-xs text-gray-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={netCreateInternal}
-                    onChange={(e) => setNetCreateInternal(e.target.checked)}
-                    className="rounded border-white/20 bg-white/10 text-blue-500 focus:ring-0 cursor-pointer"
-                  />
-                  <span>Internal Network</span>
-                </label>
-                <label className="flex items-center space-x-2 text-xs text-gray-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={netCreateAttachable}
-                    onChange={(e) => setNetCreateAttachable(e.target.checked)}
-                    className="rounded border-white/20 bg-white/10 text-blue-500 focus:ring-0 cursor-pointer"
-                  />
-                  <span>Attachable</span>
-                </label>
-                <label className="flex items-center space-x-2 text-xs text-gray-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={netCreateIpv6}
-                    onChange={(e) => setNetCreateIpv6(e.target.checked)}
-                    className="rounded border-white/20 bg-white/10 text-blue-500 focus:ring-0 cursor-pointer"
-                  />
-                  <span>IPv6</span>
-                </label>
-              </div>
-
-              <div className="pt-3 flex items-center justify-end space-x-3">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateNetworkModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-medium text-gray-400 hover:text-white hover:bg-white/5"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isSubmittingNet}
-                  className="px-5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs font-semibold shadow-md active:scale-95 transition-all flex items-center space-x-1.5"
-                >
-                  {isSubmittingNet ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-                  <span>{isSubmittingNet ? 'Creating...' : 'Create Network'}</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <DockerNetworkCreateModal
+        isOpen={showCreateNetworkModal}
+        isSubmitting={isSubmittingNet}
+        onClose={() => setShowCreateNetworkModal(false)}
+        onCreate={async (netData) => {
+          setIsSubmittingNet(true);
+          try {
+            const driverFlag = `-d ${netData.driver}`;
+            const subnetFlag = netData.subnet ? `--subnet=${netData.subnet}` : '';
+            const gatewayFlag = netData.gateway ? `--gateway=${netData.gateway}` : '';
+            const ipRangeFlag = netData.ipRange ? `--ip-range=${netData.ipRange}` : '';
+            const internalFlag = netData.internal ? '--internal' : '';
+            const attachableFlag = netData.attachable ? '--attachable' : '';
+            const ipv6Flag = netData.ipv6 ? '--ipv6' : '';
+            const cmd = `docker network create ${driverFlag} ${subnetFlag} ${gatewayFlag} ${ipRangeFlag} ${internalFlag} ${attachableFlag} ${ipv6Flag} ${netData.name}`.trim().replace(/\s+/g, ' ');
+            const res = await sshExec(activeConnId, cmd);
+            if (res.exit_code === 0) {
+              showNotification(`Network ${netData.name} created successfully`);
+              setShowCreateNetworkModal(false);
+              await loadDockerData();
+            } else {
+              showNotification(`Failed to create network: ${res.stderr || res.stdout}`, 'error');
+            }
+          } catch (err: any) {
+            showNotification(`Error: ${err?.message || err}`, 'error');
+          } finally {
+            setIsSubmittingNet(false);
+          }
+        }}
+      />
 
       {/* ================= DOCKER TAG IMAGE MODAL ================= */}
-      {showTagModal && tagTargetImage && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-[#1e1e2e] border border-white/15 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200">
-            <div className="px-6 py-4 bg-[#14141e] border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <div className="w-8 h-8 rounded-xl bg-cyan-500/20 border border-cyan-500/30 flex items-center justify-center">
-                  <Tag className="w-4 h-4 text-cyan-400" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">Tag Docker Image</h3>
-                  <p className="text-[11px] text-gray-400 font-mono truncate max-w-[260px]">
-                    {tagTargetImage.repository === '<none>' ? tagTargetImage.id : `${tagTargetImage.repository}:${tagTargetImage.tag}`}
-                  </p>
-                </div>
-              </div>
-              <button 
-                onClick={() => { setShowTagModal(false); setTagTargetImage(null); }} 
-                className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-white/10"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleExecuteTag} className="p-6 space-y-4">
-              <div className="p-3 rounded-2xl bg-black/30 border border-white/10 space-y-1">
-                <div className="text-[10px] uppercase font-bold text-gray-400 tracking-wider">Source Image</div>
-                <div className="text-xs font-mono text-cyan-300 font-medium">
-                  {tagTargetImage.repository === '<none>' ? tagTargetImage.id : `${tagTargetImage.repository}:${tagTargetImage.tag}`}
-                </div>
-                <div className="text-[10px] text-gray-500 font-mono">ID: {tagTargetImage.id} | Size: {tagTargetImage.size}</div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium text-gray-400 mb-1">Target Repository *</label>
-                <input
-                  type="text"
-                  required
-                  value={tagNewRepo}
-                  onChange={(e) => setTagNewRepo(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500"
-                  placeholder="e.g. myregistry.azurecr.io/myapp or username/repo"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium text-gray-400 mb-1">Target Tag</label>
-                <input
-                  type="text"
-                  value={tagNewTag}
-                  onChange={(e) => setTagNewTag(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-cyan-500"
-                  placeholder="latest or v1.0.0"
-                />
-              </div>
-
-              <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/20 text-[11px] font-mono text-cyan-200">
-                Command: docker tag {tagTargetImage.repository === '<none>' ? tagTargetImage.id : `${tagTargetImage.repository}:${tagTargetImage.tag}`} {tagNewRepo || '<repo>'}:{tagNewTag || 'latest'}
-              </div>
-
-              <div className="pt-2 flex items-center justify-end space-x-3">
-                <button
-                  type="button"
-                  onClick={() => { setShowTagModal(false); setTagTargetImage(null); }}
-                  className="px-4 py-2 rounded-xl text-xs font-medium text-gray-400 hover:text-white hover:bg-white/5"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isTagging || !tagNewRepo.trim()}
-                  className="px-5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs font-semibold shadow-md active:scale-95 transition-all flex items-center space-x-1.5"
-                >
-                  {isTagging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Tag className="w-3.5 h-3.5" />}
-                  <span>{isTagging ? 'Tagging...' : 'Apply Tag'}</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <DockerTagModal
+        image={showTagModal ? tagTargetImage : null}
+        isTagging={isTagging}
+        onClose={() => { setShowTagModal(false); setTagTargetImage(null); }}
+        onTag={async (img, targetRepo, targetTag) => {
+          setIsTagging(true);
+          try {
+            const src = img.repository === '<none>' ? img.id : `${img.repository}:${img.tag}`;
+            const target = `${targetRepo}:${targetTag}`;
+            const res = await sshExec(activeConnId, `docker tag ${src} ${target}`);
+            if (res.exit_code === 0) {
+              showNotification(`Tagged ${src} as ${target}`);
+              setShowTagModal(false);
+              setTagTargetImage(null);
+              await loadDockerData();
+            } else {
+              showNotification(`Tag failed: ${res.stderr || res.stdout}`, 'error');
+            }
+          } catch (err: any) {
+            showNotification(`Tag error: ${err?.message || err}`, 'error');
+          } finally {
+            setIsTagging(false);
+          }
+        }}
+      />
 
       {/* ================= DOCKER COMMIT CONTAINER MODAL ================= */}
-      {showCommitModal && commitTargetContainer && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-[#1e1e2e] border border-white/15 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200">
-            <div className="px-6 py-4 bg-[#14141e] border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center">
-                  <GitCommit className="w-4 h-4 text-indigo-400" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">Commit Container to Image</h3>
-                  <p className="text-[11px] text-gray-400 font-mono truncate max-w-[260px]">
-                    Container: {commitTargetContainer.name} ({commitTargetContainer.id.substring(0, 12)})
-                  </p>
-                </div>
-              </div>
-              <button 
-                onClick={() => { setShowCommitModal(false); setCommitTargetContainer(null); }} 
-                className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-white/10"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+      <DockerCommitModal
+        container={showCommitModal ? commitTargetContainer : null}
+        isCommitting={isCommitting}
+        onClose={() => { setShowCommitModal(false); setCommitTargetContainer(null); }}
+        onCommit={async (c, targetRepo, targetTag, msg, author, pause) => {
+          setIsCommitting(true);
+          try {
+            const pauseFlag = pause ? '' : '--pause=false';
+            const authorFlag = author ? `-a "${author.replace(/"/g, '\\"')}"` : '';
+            const msgFlag = msg ? `-m "${msg.replace(/"/g, '\\"')}"` : '';
+            const targetRef = `${targetRepo}:${targetTag || 'latest'}`;
+            const cmd = `docker commit ${pauseFlag} ${authorFlag} ${msgFlag} ${c.id} "${targetRef}"`.trim();
+            const res = await sshExec(activeConnId, cmd);
+            if (res.exit_code === 0) {
+              showNotification(`Container committed to ${targetRef}`);
+              setShowCommitModal(false);
+              setCommitTargetContainer(null);
+              await loadDockerData();
+            } else {
+              showNotification(`Commit failed: ${res.stderr || res.stdout}`, 'error');
+            }
+          } catch (err: any) {
+            showNotification(`Commit error: ${err?.message || err}`, 'error');
+          } finally {
+            setIsCommitting(false);
+          }
+        }}
+      />
 
-            <form onSubmit={handleExecuteCommit} className="p-6 space-y-3.5 max-h-[80vh] overflow-y-auto">
-              <div className="p-3 rounded-2xl bg-black/30 border border-white/10 space-y-1">
-                <div className="text-[10px] uppercase font-bold text-gray-400 tracking-wider">Source Container</div>
-                <div className="text-xs font-mono text-indigo-300 font-medium">
-                  {commitTargetContainer.name}
-                </div>
-                <div className="text-[10px] text-gray-500 font-mono">
-                  Base Image: {commitTargetContainer.image} | Status: {commitTargetContainer.status}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2">
-                <div className="col-span-2">
-                  <label className="block text-[11px] font-medium text-gray-400 mb-1">New Image Repository *</label>
-                  <input
-                    type="text"
-                    required
-                    value={commitRepo}
-                    onChange={(e) => setCommitRepo(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"
-                    placeholder="e.g. my-custom-image"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-medium text-gray-400 mb-1">Tag</label>
-                  <input
-                    type="text"
-                    value={commitTag}
-                    onChange={(e) => setCommitTag(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 text-center"
-                    placeholder="latest"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium text-gray-400 mb-1">Commit Message</label>
-                <input
-                  type="text"
-                  value={commitMessage}
-                  onChange={(e) => setCommitMessage(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"
-                  placeholder="e.g. Installed dependencies and updated nginx config"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium text-gray-400 mb-1">Author</label>
-                <input
-                  type="text"
-                  value={commitAuthor}
-                  onChange={(e) => setCommitAuthor(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 font-mono"
-                  placeholder="e.g. John Doe <john@example.com>"
-                />
-              </div>
-
-              <div className="flex items-center space-x-2 pt-1">
-                <input
-                  type="checkbox"
-                  id="commitPauseCheck"
-                  checked={commitPause}
-                  onChange={(e) => setCommitPause(e.target.checked)}
-                  className="rounded border-white/20 bg-white/10 text-indigo-500 focus:ring-0 cursor-pointer"
-                />
-                <label htmlFor="commitPauseCheck" className="text-xs text-gray-300 cursor-pointer">
-                  Pause container during commit (recommended for data consistency)
-                </label>
-              </div>
-
-              <div className="pt-2 flex items-center justify-end space-x-3">
-                <button
-                  type="button"
-                  onClick={() => { setShowCommitModal(false); setCommitTargetContainer(null); }}
-                  className="px-4 py-2 rounded-xl text-xs font-medium text-gray-400 hover:text-white hover:bg-white/5"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isCommitting || !commitRepo.trim()}
-                  className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold shadow-md active:scale-95 transition-all flex items-center space-x-1.5"
-                >
-                  {isCommitting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <GitCommit className="w-3.5 h-3.5" />}
-                  <span>{isCommitting ? 'Committing...' : 'Commit Container'}</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* ================= DOCKER RESOURCE DELETE & IN-USE CONFIRMATION MODAL ================= */}
+      <DockerDeleteModal
+        target={resourceToDelete}
+        isDeleting={isDeletingResource}
+        onClose={() => setResourceToDelete(null)}
+        onConfirm={executeDeleteResource}
+      />
 
       {/* ================= DOWNLOAD IMAGE LOCAL MODAL ================= */}
       {isDownloadingImage && downloadTargetImage && (
@@ -4954,11 +3850,9 @@ export default function DockerManager() {
                 onClick={() => {
                   const c = contextMenu.container!;
                   setContextMenu(null);
-                  if (confirm(`Force remove container "${c.name}"?`)) {
-                    handleAction(c.id, 'rm -f', c.name);
-                  }
+                  promptDeleteContainer(c);
                 }}
-                className="w-full px-3 py-1.5 text-left flex items-center space-x-2 hover:bg-rose-500/20 text-rose-400 transition-colors"
+                className="w-full px-3 py-1.5 text-left flex items-center space-x-2 hover:bg-rose-500/20 text-rose-400 transition-colors cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>Delete Container</span>

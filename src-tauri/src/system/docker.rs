@@ -140,14 +140,15 @@ pub async fn docker_action(
     action: String,
 ) -> Result<String, String> {
     // Validate action
-    let safe_action = match action.as_str() {
-        "start" | "stop" | "restart" | "pause" | "unpause" | "kill" => action.as_str(),
-        "remove" | "rm" => "rm",
+    let action_clean = action.trim().to_lowercase();
+    let safe_action = match action_clean.as_str() {
+        "start" | "stop" | "restart" | "pause" | "unpause" | "kill" => action_clean.as_str().to_string(),
+        "remove" | "rm" | "rm -f" | "delete" => "rm".to_string(),
         _ => return Err(format!("Invalid docker action: {}", action)),
     };
 
     // Sanitize container id (hex or name)
-    if container_id.chars().any(|c| c == ';' || c == '&' || c == '`' || c == '$') {
+    if container_id.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')' | ' ' | '\n' | '\r')) {
         return Err("Invalid container ID.".into());
     }
 
@@ -155,7 +156,7 @@ pub async fn docker_action(
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        &format!("docker {}{} {} 2>&1", safe_action, force, container_id),
+        &format!("docker {}{} '{}' 2>&1", safe_action, force, container_id.replace('\'', "")),
     ).await;
 
     if code == -1 {
