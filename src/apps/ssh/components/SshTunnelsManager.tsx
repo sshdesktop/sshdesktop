@@ -1,22 +1,31 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   ArrowRightLeft, Plus, Play, Square, Copy, Check, Trash2, 
   Settings, AlertCircle, ArrowRight, ShieldCheck, Globe, Database,
-  Cpu, HardDrive, RefreshCw, Radio, Terminal
+  Cpu, HardDrive, RefreshCw, Radio, Terminal, ExternalLink, Loader2,
+  CheckCircle2
 } from 'lucide-react';
 import { SshTunnelRule, TunnelType } from '../types';
 import { useSshStore } from '../sshStore';
 import { useConnectionStore } from '../../../lib/store';
-import { sshExec } from '../../../lib/tauri-bridge';
+import { 
+  sshStartTunnel, 
+  sshStopTunnel, 
+  sshListTunnels, 
+  sshStartSocks5, 
+  sshStopSocks5,
+  openExternalUrl,
+  sshExec 
+} from '../../../lib/tauri-bridge';
 
 const PRESETS: { name: string; type: TunnelType; localPort: number; remotePort: number; remoteHost: string; desc: string }[] = [
-  { name: 'PostgreSQL Database', type: 'local', localPort: 5432, remotePort: 5432, remoteHost: '127.0.0.1', desc: 'Forward remote PostgreSQL port 5432' },
-  { name: 'MySQL / MariaDB', type: 'local', localPort: 3306, remotePort: 3306, remoteHost: '127.0.0.1', desc: 'Forward remote MySQL port 3306' },
-  { name: 'Redis Cache Server', type: 'local', localPort: 6379, remotePort: 6379, remoteHost: '127.0.0.1', desc: 'Forward remote Redis in-memory cache' },
-  { name: 'MongoDB Server', type: 'local', localPort: 27017, remotePort: 27017, remoteHost: '127.0.0.1', desc: 'Forward remote MongoDB database' },
-  { name: 'Web Dev Proxy (HTTP)', type: 'local', localPort: 8080, remotePort: 80, remoteHost: '127.0.0.1', desc: 'Forward remote HTTP server to localhost:8080' },
+  { name: 'Web Dev Proxy (Port 80)', type: 'local', localPort: 8080, remotePort: 80, remoteHost: '127.0.0.1', desc: 'Forward remote HTTP web server port 80 to localhost:8080' },
+  { name: 'PostgreSQL Database', type: 'local', localPort: 5432, remotePort: 5432, remoteHost: '127.0.0.1', desc: 'Forward remote PostgreSQL port 5432 to localhost:5432' },
+  { name: 'MySQL / MariaDB', type: 'local', localPort: 3306, remotePort: 3306, remoteHost: '127.0.0.1', desc: 'Forward remote MySQL port 3306 to localhost:3306' },
+  { name: 'Redis Cache Server', type: 'local', localPort: 6379, remotePort: 6379, remoteHost: '127.0.0.1', desc: 'Forward remote Redis in-memory cache to localhost:6379' },
+  { name: 'MongoDB Server', type: 'local', localPort: 27017, remotePort: 27017, remoteHost: '127.0.0.1', desc: 'Forward remote MongoDB database to localhost:27017' },
   { name: 'Remote Webhook Ingress', type: 'remote', localPort: 3000, remotePort: 9000, remoteHost: '127.0.0.1', desc: 'Expose local port 3000 to remote port 9000' },
-  { name: 'Encrypted SOCKS5 Proxy', type: 'dynamic', localPort: 1080, remotePort: 1080, remoteHost: '127.0.0.1', desc: 'Secure browser and app tunneling via SOCKS5' },
+  { name: 'Encrypted SOCKS5 Proxy', type: 'dynamic', localPort: 1080, remotePort: 1080, remoteHost: '127.0.0.1', desc: 'Secure browser and app tunneling via SOCKS5 port 1080' },
 ];
 
 export default function SshTunnelsManager({ isLight = false }: { isLight?: boolean }) {
@@ -28,14 +37,54 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [loadingTunnelId, setLoadingTunnelId] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // Form State
   const [ruleName, setRuleName] = useState('');
   const [ruleType, setRuleType] = useState<TunnelType>('local');
-  const [localPort, setLocalPort] = useState<number>(5432);
+  const [localPort, setLocalPort] = useState<number>(8080);
   const [remoteHost, setRemoteHost] = useState('127.0.0.1');
-  const [remotePort, setRemotePort] = useState<number>(5432);
+  const [remotePort, setRemotePort] = useState<number>(80);
   const [ruleDescription, setRuleDescription] = useState('');
+
+  // Synchronize active background tunnels with local rules
+  useEffect(() => {
+    let isMounted = true;
+    const syncActiveTunnels = async () => {
+      try {
+        const activeTunnels = await sshListTunnels();
+        if (isMounted && activeTunnels && activeTunnels.length > 0) {
+          tunnels.forEach(rule => {
+            const match = activeTunnels.find(at => {
+              if (rule.type === 'dynamic') {
+                return at.tunnel_id.includes('socks5');
+              }
+              if (rule.type === 'local') {
+                return at.local_port === rule.localPort || at.remote_port === rule.remotePort;
+              }
+              if (rule.type === 'remote') {
+                return at.tunnel_id.includes(`remote:${rule.remotePort}`) || at.local_port === rule.localPort;
+              }
+              return false;
+            });
+            if (match && rule.status !== 'active') {
+              updateTunnel(rule.id, {
+                status: 'active',
+                activeTunnelId: match.tunnel_id,
+                localPort: match.local_port || rule.localPort,
+              });
+            }
+          });
+        }
+      } catch (err) {
+        console.warn('Failed to sync active tunnels:', err);
+      }
+    };
+    syncActiveTunnels();
+    return () => { isMounted = false; };
+  }, [activeConnectionId]);
 
   const filteredTunnels = tunnels.filter(t => {
     const matchesFilter = activeFilter === 'all' || t.type === activeFilter;
@@ -70,30 +119,149 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
   };
 
   const handleToggleTunnel = async (t: SshTunnelRule) => {
-    if (t.status === 'active') {
-      setTunnelStatus(t.id, 'inactive');
-      addAuditLog({
-        action: 'Stopped SSH Tunnel',
-        host: activeServer?.host || 'remote',
-        username: activeServer?.username || 'user',
-        status: 'warning',
-        details: `Stopped ${t.type.toUpperCase()} tunnel ${t.name} (Port ${t.localPort})`,
-      });
-    } else {
-      setTunnelStatus(t.id, 'active');
-      // If connected, test connectivity or probe listening sockets
-      if (activeConnectionId) {
-        try {
-          await sshExec(activeConnectionId, `ss -tuln | grep -q ":${t.remotePort} " || nc -z -w 1 127.0.0.1 ${t.remotePort} 2>/dev/null || true`);
-        } catch {}
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    // If starting and not connected to an SSH server
+    if (t.status !== 'active' && !activeConnectionId) {
+      setErrorMessage(`No active SSH connection. Please connect to your server (${activeServer?.host || '13.233.150.163'}) in SSH Desktop before starting tunnels.`);
+      return;
+    }
+
+    setLoadingTunnelId(t.id);
+
+    try {
+      if (t.status === 'active') {
+        // STOP TUNNEL
+        if (t.type === 'dynamic') {
+          if (activeConnectionId) {
+            await sshStopSocks5(activeConnectionId);
+          }
+          await sshStopTunnel(`socks5:${activeConnectionId}`);
+        } else {
+          const keyToStop = t.activeTunnelId || `${activeConnectionId || ''}:${t.remoteHost || '127.0.0.1'}:${t.remotePort}`;
+          await sshStopTunnel(keyToStop);
+          await sshStopTunnel(String(t.localPort));
+        }
+
+        updateTunnel(t.id, {
+          status: 'inactive',
+          activeTunnelId: undefined,
+          error: undefined,
+        });
+
+        addAuditLog({
+          action: 'Stopped SSH Tunnel',
+          host: activeServer?.host || 'remote',
+          username: activeServer?.username || 'user',
+          status: 'warning',
+          details: `Stopped ${t.type.toUpperCase()} tunnel: ${t.name} (Port ${t.localPort})`,
+        });
+
+        setSuccessMessage(`Tunnel "${t.name}" stopped successfully.`);
+      } else {
+        // START TUNNEL
+        if (t.type === 'dynamic') {
+          const boundPort = await sshStartSocks5(activeConnectionId!, t.localPort || 1080);
+          if (boundPort && boundPort > 0) {
+            updateTunnel(t.id, {
+              status: 'active',
+              localPort: boundPort,
+              activeTunnelId: `socks5:${activeConnectionId}`,
+              serverId: activeConnectionId,
+              serverName: activeServer?.name || activeServer?.host,
+              error: undefined,
+            });
+
+            addAuditLog({
+              action: 'Started SOCKS5 Proxy',
+              host: activeServer?.host || 'remote',
+              username: activeServer?.username || 'user',
+              status: 'success',
+              details: `Active SOCKS5 dynamic proxy on 127.0.0.1:${boundPort}`,
+            });
+
+            setSuccessMessage(`Dynamic SOCKS5 Proxy active on port ${boundPort}!`);
+          } else {
+            throw new Error(`Failed to bind SOCKS5 proxy on port ${t.localPort}`);
+          }
+        } else if (t.type === 'local') {
+          // If destination is remote host or empty, map to 127.0.0.1 on the remote machine
+          const targetHost = (!t.remoteHost || t.remoteHost === activeServer?.host || t.remoteHost === 'localhost') 
+            ? '127.0.0.1' 
+            : t.remoteHost;
+
+          const boundPort = await sshStartTunnel(
+            activeConnectionId!,
+            t.localPort || 0,
+            targetHost,
+            t.remotePort,
+            'local'
+          );
+
+          if (boundPort && boundPort > 0) {
+            const tunnelKey = `${activeConnectionId}:${targetHost}:${t.remotePort}`;
+            updateTunnel(t.id, {
+              status: 'active',
+              localPort: boundPort,
+              activeTunnelId: tunnelKey,
+              serverId: activeConnectionId,
+              serverName: activeServer?.name || activeServer?.host,
+              error: undefined,
+            });
+
+            addAuditLog({
+              action: 'Started SSH Tunnel',
+              host: activeServer?.host || 'remote',
+              username: activeServer?.username || 'user',
+              status: 'success',
+              details: `Forwarding local port ${boundPort} -> remote ${targetHost}:${t.remotePort}`,
+            });
+
+            setSuccessMessage(`Tunnel "${t.name}" active! Local port ${boundPort} forwards to remote port ${t.remotePort}.`);
+          } else {
+            throw new Error(`Failed to bind local tunnel port ${t.localPort} -> remote port ${t.remotePort}. Remote service might not be listening.`);
+          }
+        } else {
+          // REMOTE TUNNEL (-R)
+          const boundPort = await sshStartTunnel(
+            activeConnectionId!,
+            t.localPort || 0,
+            t.remoteHost || '127.0.0.1',
+            t.remotePort,
+            'remote'
+          );
+
+          if (boundPort && boundPort > 0) {
+            const tunnelKey = `${activeConnectionId}:remote:${t.remotePort}:${t.localPort}`;
+            updateTunnel(t.id, {
+              status: 'active',
+              activeTunnelId: tunnelKey,
+              serverId: activeConnectionId,
+              serverName: activeServer?.name || activeServer?.host,
+              error: undefined,
+            });
+
+            addAuditLog({
+              action: 'Started Remote Tunnel',
+              host: activeServer?.host || 'remote',
+              username: activeServer?.username || 'user',
+              status: 'success',
+              details: `Exposing local port ${t.localPort} to remote port ${t.remotePort}`,
+            });
+
+            setSuccessMessage(`Remote Tunnel active! Server port ${t.remotePort} forwards to local port ${t.localPort}.`);
+          } else {
+            throw new Error(`Failed to bind remote tunnel on port ${t.remotePort}`);
+          }
+        }
       }
-      addAuditLog({
-        action: 'Started SSH Tunnel',
-        host: activeServer?.host || 'remote',
-        username: activeServer?.username || 'user',
-        status: 'success',
-        details: `Activated ${t.type.toUpperCase()} tunnel ${t.name} (Port ${t.localPort} -> ${t.remotePort})`,
-      });
+    } catch (err: any) {
+      const msg = String(err?.message || err);
+      setErrorMessage(`Tunnel failed: ${msg}`);
+      updateTunnel(t.id, { status: 'error', error: msg });
+    } finally {
+      setLoadingTunnelId(null);
     }
   };
 
@@ -129,8 +297,8 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
 
     // Reset Form
     setRuleName('');
-    setLocalPort(5432);
-    setRemotePort(5432);
+    setLocalPort(8080);
+    setRemotePort(80);
     setRuleDescription('');
 
     addAuditLog({
@@ -195,6 +363,37 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
         ))}
       </div>
 
+      {/* Alert / Notification Banners */}
+      {errorMessage && (
+        <div className="mx-6 mt-3 px-4 py-2.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between animate-in fade-in">
+          <div className="flex items-center space-x-2">
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{errorMessage}</span>
+          </div>
+          <button 
+            onClick={() => setErrorMessage(null)}
+            className="text-rose-400 hover:text-white ml-2 cursor-pointer font-bold"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {successMessage && (
+        <div className="mx-6 mt-3 px-4 py-2.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs flex items-center justify-between animate-in fade-in">
+          <div className="flex items-center space-x-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>{successMessage}</span>
+          </div>
+          <button 
+            onClick={() => setSuccessMessage(null)}
+            className="text-emerald-400 hover:text-white ml-2 cursor-pointer font-bold"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Tunnels Grid / List */}
       <div className="flex-1 overflow-y-auto p-6 space-y-3">
         {filteredTunnels.length === 0 ? (
@@ -214,6 +413,7 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
         ) : (
           filteredTunnels.map(t => {
             const isRunning = t.status === 'active';
+            const hasError = t.status === 'error';
             const typeColor = 
               t.type === 'local' ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' :
               t.type === 'remote' ? 'bg-purple-500/15 text-purple-300 border-purple-500/30' :
@@ -236,10 +436,12 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
                     <span className={`flex items-center space-x-1 px-2 py-0.5 rounded-full text-[10px] font-medium ${
                       isRunning 
                         ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
+                        : hasError
+                        ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
                         : 'bg-gray-500/20 text-gray-400 border border-gray-500/30'
                     }`}>
-                      <span className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-gray-400'}`} />
-                      <span>{isRunning ? 'Active Forwarding' : 'Stopped'}</span>
+                      <span className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-emerald-400 animate-pulse' : hasError ? 'bg-rose-400' : 'bg-gray-400'}`} />
+                      <span>{isRunning ? 'Active Forwarding' : hasError ? 'Error' : 'Stopped'}</span>
                     </span>
                   </div>
 
@@ -250,28 +452,55 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
                     </span>
                     <ArrowRight className="w-3.5 h-3.5 text-gray-500" />
                     <span className="bg-white/5 px-2 py-0.5 rounded text-amber-300">
-                      {t.type === 'dynamic' ? 'Dynamic SOCKS5' : `${t.remoteHost}:${t.remotePort}`}
+                      {t.type === 'dynamic' ? 'Dynamic SOCKS5' : `${t.remoteHost || '127.0.0.1'}:${t.remotePort}`}
                     </span>
                   </div>
 
                   {t.description && (
                     <p className="text-xs text-gray-400 line-clamp-1">{t.description}</p>
                   )}
+
+                  {t.error && (
+                    <div className="flex items-center space-x-1.5 text-[11px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2.5 py-1 rounded-lg mt-1">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">{t.error}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Right: Actions */}
                 <div className="flex items-center space-x-2 shrink-0">
+                  {/* Direct Browser Button for Active Local Tunnels */}
+                  {isRunning && t.type === 'local' && (
+                    <button
+                      onClick={() => openExternalUrl(`http://127.0.0.1:${t.localPort}`)}
+                      className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-medium transition-colors cursor-pointer"
+                      title={`Open http://127.0.0.1:${t.localPort} in browser`}
+                    >
+                      <Globe className="w-3.5 h-3.5 text-blue-400" />
+                      <span>Open http://localhost:{t.localPort}</span>
+                      <ExternalLink className="w-3 h-3 text-blue-400/80" />
+                    </button>
+                  )}
+
                   {/* Start / Stop Toggle */}
                   <button
                     onClick={() => handleToggleTunnel(t)}
-                    className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-all cursor-pointer shadow-sm ${
+                    disabled={loadingTunnelId === t.id}
+                    className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-all cursor-pointer shadow-sm disabled:opacity-50 ${
                       isRunning
                         ? 'bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30'
                         : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-900/30'
                     }`}
                   >
-                    {isRunning ? <Square className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-                    <span>{isRunning ? 'Stop' : 'Start'}</span>
+                    {loadingTunnelId === t.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : isRunning ? (
+                      <Square className="w-3.5 h-3.5" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5" />
+                    )}
+                    <span>{loadingTunnelId === t.id ? 'Connecting...' : isRunning ? 'Stop' : 'Start'}</span>
                   </button>
 
                   {/* Copy CLI Command */}
@@ -286,7 +515,12 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
 
                   {/* Delete Rule */}
                   <button
-                    onClick={() => removeTunnel(t.id)}
+                    onClick={() => {
+                      if (isRunning) {
+                        handleToggleTunnel(t);
+                      }
+                      removeTunnel(t.id);
+                    }}
                     className="p-1.5 rounded-xl hover:bg-rose-500/20 text-gray-400 hover:text-rose-300 transition-colors cursor-pointer"
                     title="Delete tunnel rule"
                   >

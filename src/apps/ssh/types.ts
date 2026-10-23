@@ -37,6 +37,8 @@ export interface SshTunnelRule {
   serverName?: string;
   status: 'active' | 'inactive' | 'error';
   autoStart?: boolean;
+  activeTunnelId?: string;
+  activePort?: number;
   bytesIn?: number;
   bytesOut?: number;
   error?: string;
