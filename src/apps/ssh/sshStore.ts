@@ -79,6 +79,17 @@ const DEFAULT_SNIPPETS: SshSnippet[] = [
 
 const DEFAULT_TUNNELS: SshTunnelRule[] = [
   {
+    id: 'tun-web-80',
+    name: 'Web Application (HTTP Port 80)',
+    type: 'local',
+    localPort: 8080,
+    remoteHost: '127.0.0.1',
+    remotePort: 80,
+    description: 'Forward remote Apache / Nginx port 80 to localhost:8080',
+    status: 'inactive',
+    createdAt: Date.now() - 120000000,
+  },
+  {
     id: 'tun-pg',
     name: 'PostgreSQL Direct Forward',
     type: 'local',

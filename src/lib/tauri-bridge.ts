@@ -1196,7 +1196,8 @@ export async function sshStartTunnel(
   connId: string,
   localPort: number = 0,
   remoteHost: string = '127.0.0.1',
-  remotePort: number
+  remotePort: number,
+  tunnelType?: 'local' | 'remote' | 'dynamic'
 ): Promise<number> {
   return safeInvoke<number>(
     'ssh_start_tunnel',
@@ -1204,7 +1205,8 @@ export async function sshStartTunnel(
       connId,
       localPort: Number(localPort) || 0,
       remoteHost: remoteHost || '127.0.0.1',
-      remotePort: Number(remotePort)
+      remotePort: Number(remotePort),
+      tunnelType: tunnelType || 'local',
     },
     0
   );

@@ -30,8 +30,7 @@ fn is_port_available(port: u16) -> bool {
 }
 
 fn find_available_port(preferred: u16) -> u16 {
-    // Only bind non-privileged ports (>= 1024) to avoid OS permission issues on Windows/Unix
-    if preferred >= 1024 && is_port_available(preferred) {
+    if preferred > 0 && is_port_available(preferred) {
         return preferred;
     }
     if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", 0)) {
@@ -39,10 +38,11 @@ fn find_available_port(preferred: u16) -> u16 {
             return addr.port();
         }
     }
-    if preferred >= 1024 { preferred } else { 18080 }
+    if preferred > 0 { preferred } else { 18080 }
 }
 
-/// Start an SSH port forwarding tunnel: binds 127.0.0.1:local_port -> remote_host:remote_port
+/// Start an SSH port forwarding tunnel: binds 127.0.0.1:local_port -> remote_host:remote_port (Local),
+/// or remote_port -> 127.0.0.1:local_port (Remote), or SOCKS5 (Dynamic)
 #[tauri::command]
 pub async fn ssh_start_tunnel(
     state: tauri::State<'_, AppState>,
@@ -50,15 +50,27 @@ pub async fn ssh_start_tunnel(
     local_port: u16,
     remote_host: String,
     remote_port: u16,
+    tunnel_type: Option<String>,
 ) -> Result<u16, String> {
-    let tunnel_key = format!("{}:{}:{}", conn_id, remote_host, remote_port);
+    let ftype = tunnel_type.as_deref().unwrap_or("local").to_lowercase();
+    if ftype == "dynamic" || ftype == "socks" || ftype == "socks5" {
+        return ssh_start_socks5(state, conn_id, Some(if local_port > 0 { local_port } else { 1080 })).await;
+    }
+
+    let is_remote_forward = ftype == "remote" || ftype == "reverse" || ftype == "-r";
+    let tunnel_key = if is_remote_forward {
+        format!("{}:remote:{}:{}", conn_id, remote_port, local_port)
+    } else {
+        format!("{}:{}:{}", conn_id, remote_host, remote_port)
+    };
 
     // 1. If an active tunnel for this server and remote port already exists, return its port
     {
         let lock = ACTIVE_TUNNELS.lock();
         if let Some(active) = lock.get(&tunnel_key) {
-            // Verify if still listening
-            if std::net::TcpStream::connect(("127.0.0.1", active.info.local_port)).is_ok() {
+            if is_remote_forward {
+                return Ok(active.info.local_port);
+            } else if std::net::TcpStream::connect(("127.0.0.1", active.info.local_port)).is_ok() {
                 log::info!("SSH Desktop: Reusing active SSH tunnel for {}:{} on local port {}", remote_host, remote_port, active.info.local_port);
                 return Ok(active.info.local_port);
             }
@@ -69,7 +81,12 @@ pub async fn ssh_start_tunnel(
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or_else(|| format!("No active SSH connection found for '{}'. Please connect to a server first.", conn_id))?;
 
-    let effective_local_port = find_available_port(if local_port >= 1024 { local_port } else if remote_port >= 1024 { remote_port } else { 0 });
+    let effective_local_port = if is_remote_forward {
+        if local_port > 0 { local_port } else { 3000 }
+    } else {
+        find_available_port(if local_port > 0 { local_port } else if remote_port > 0 { remote_port } else { 0 })
+    };
+
     let host = conn.config.host.clone();
     let ssh_port = conn.config.port.to_string();
     let user = conn.config.username.clone();
@@ -82,8 +99,8 @@ pub async fn ssh_start_tunnel(
     };
 
     log::info!(
-        "SSH Desktop: Spawning SSH Tunnel -L 127.0.0.1:{}:{}:{} via {}@{}:{}",
-        effective_local_port, remote_target, remote_port, user, host, ssh_port
+        "SSH Desktop: Spawning SSH Tunnel [{}] (type: {}) via {}@{}:{}",
+        tunnel_key, ftype, user, host, ssh_port
     );
 
     let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
@@ -96,15 +113,26 @@ pub async fn ssh_start_tunnel(
     let mut last_error = String::new();
     let mut used_plink_first = false;
 
+    let forward_arg = if is_remote_forward {
+        format!("{}:127.0.0.1:{}", remote_port, effective_local_port)
+    } else {
+        format!("127.0.0.1:{}:{}:{}", effective_local_port, remote_target, remote_port)
+    };
+
     // Helper closure to build OpenSSH tunnel command
     let make_openssh_cmd = || {
         let mut cmd = tokio::process::Command::new("ssh");
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
-        cmd.arg("-N")
-            .arg("-L").arg(format!("127.0.0.1:{}:{}:{}", effective_local_port, remote_target, remote_port))
-            .arg("-p").arg(&ssh_port)
+        cmd.arg("-N");
+        if is_remote_forward {
+            cmd.arg("-R").arg(&forward_arg);
+        } else {
+            cmd.arg("-L").arg(&forward_arg);
+        }
+
+        cmd.arg("-p").arg(&ssh_port)
             .arg("-o").arg("StrictHostKeyChecking=no")
             .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
             .arg("-o").arg("ExitOnForwardFailure=yes");
@@ -131,8 +159,13 @@ pub async fn ssh_start_tunnel(
         cmd.arg("-ssh")
             .arg("-N")
             .arg("-P").arg(&ssh_port)
-            .arg("-l").arg(&user)
-            .arg("-L").arg(format!("127.0.0.1:{}:{}:{}", effective_local_port, remote_target, remote_port));
+            .arg("-l").arg(&user);
+
+        if is_remote_forward {
+            cmd.arg("-R").arg(&forward_arg);
+        } else {
+            cmd.arg("-L").arg(&forward_arg);
+        }
 
         if let Some(pwd) = &conn.config.password {
             if !pwd.is_empty() {
@@ -239,16 +272,12 @@ pub async fn ssh_start_tunnel(
 
     // Wait up to 3 seconds for the port to start listening
     let mut bound = false;
-    for _ in 0..30 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        if std::net::TcpStream::connect(("127.0.0.1", effective_local_port)).is_ok() {
-            bound = true;
-            break;
-        }
-        // Check if child exited prematurely
+    if is_remote_forward {
+        // For remote port forwarding (-R), verify child process stays alive without immediate error
+        tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
         if let Some(ref mut ch) = child_handle {
             if let Ok(Some(status)) = ch.try_wait() {
-                let mut err_msg = format!("SSH Tunnel process exited early with status: {}", status);
+                let mut err_msg = format!("Remote tunnel exited early: {}", status);
                 if let Some(mut stderr) = ch.stderr.take() {
                     let mut buf = Vec::new();
                     let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf).await;
@@ -257,34 +286,58 @@ pub async fn ssh_start_tunnel(
                         err_msg = format!("{}: {}", err_msg, text);
                     }
                 }
-                log::warn!("SSH Desktop: Primary tunnel process exited ({}). Attempting alternative fallback...", err_msg);
-
-                // Alternate fallback attempt
-                let alt_spawned = if used_plink_first {
-                    let mut alt_cmd = make_openssh_cmd();
-                    alt_cmd.spawn().ok()
-                } else if plink_available {
-                    let mut alt_cmd = make_plink_cmd();
-                    alt_cmd.spawn().ok()
-                } else {
-                    None
-                };
-
-                if let Some(alt_child) = alt_spawned {
-                    for _ in 0..20 {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                        if std::net::TcpStream::connect(("127.0.0.1", effective_local_port)).is_ok() {
-                            bound = true;
-                            child_handle = Some(alt_child);
-                            break;
+                return Err(err_msg);
+            }
+        }
+        bound = true;
+    } else {
+        for _ in 0..30 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            if std::net::TcpStream::connect(("127.0.0.1", effective_local_port)).is_ok() {
+                bound = true;
+                break;
+            }
+            // Check if child exited prematurely
+            if let Some(ref mut ch) = child_handle {
+                if let Ok(Some(status)) = ch.try_wait() {
+                    let mut err_msg = format!("SSH Tunnel process exited early with status: {}", status);
+                    if let Some(mut stderr) = ch.stderr.take() {
+                        let mut buf = Vec::new();
+                        let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf).await;
+                        let text = String::from_utf8_lossy(&buf).trim().to_string();
+                        if !text.is_empty() {
+                            err_msg = format!("{}: {}", err_msg, text);
                         }
                     }
-                }
+                    log::warn!("SSH Desktop: Primary tunnel process exited ({}). Attempting alternative fallback...", err_msg);
 
-                if !bound {
-                    return Err(err_msg);
-                } else {
-                    break;
+                    // Alternate fallback attempt
+                    let alt_spawned = if used_plink_first {
+                        let mut alt_cmd = make_openssh_cmd();
+                        alt_cmd.spawn().ok()
+                    } else if plink_available {
+                        let mut alt_cmd = make_plink_cmd();
+                        alt_cmd.spawn().ok()
+                    } else {
+                        None
+                    };
+
+                    if let Some(alt_child) = alt_spawned {
+                        for _ in 0..20 {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            if std::net::TcpStream::connect(("127.0.0.1", effective_local_port)).is_ok() {
+                                bound = true;
+                                child_handle = Some(alt_child);
+                                break;
+                            }
+                        }
+                    }
+
+                    if !bound {
+                        return Err(err_msg);
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -316,21 +369,69 @@ pub async fn ssh_start_tunnel(
 pub async fn ssh_stop_tunnel(tunnel_id: String) -> Result<(), String> {
     let maybe_child = {
         let mut lock = ACTIVE_TUNNELS.lock();
-        lock.remove(&tunnel_id).and_then(|mut active| active.child.take())
+        if let Some(mut active) = lock.remove(&tunnel_id) {
+            active.child.take()
+        } else {
+            let matching_key = lock.iter().find(|(k, v)| {
+                *k == &tunnel_id 
+                || v.info.tunnel_id == tunnel_id 
+                || v.info.local_port.to_string() == tunnel_id
+                || k.ends_with(&format!(":{}", tunnel_id))
+            }).map(|(k, _)| k.clone());
+            
+            if let Some(k) = matching_key {
+                lock.remove(&k).and_then(|mut active| active.child.take())
+            } else {
+                None
+            }
+        }
     };
 
     if let Some(mut child) = maybe_child {
         let _ = child.kill().await;
         log::info!("SSH Desktop: Stopped SSH Tunnel {}", tunnel_id);
+        return Ok(());
+    }
+
+    let maybe_socks = {
+        let mut lock = ACTIVE_SOCKS5.lock();
+        if let Some(mut active) = lock.remove(&tunnel_id) {
+            active.child.take()
+        } else {
+            let matching_key = lock.iter().find(|(k, v)| {
+                *k == &tunnel_id 
+                || v.info.tunnel_id == tunnel_id 
+                || v.info.local_port.to_string() == tunnel_id
+                || k.contains(&tunnel_id)
+            }).map(|(k, _)| k.clone());
+            if let Some(k) = matching_key {
+                lock.remove(&k).and_then(|mut active| active.child.take())
+            } else {
+                None
+            }
+        }
+    };
+
+    if let Some(mut child) = maybe_socks {
+        let _ = child.kill().await;
+        log::info!("SSH Desktop: Stopped SOCKS5 Tunnel {}", tunnel_id);
     }
     Ok(())
 }
 
-/// List all active SSH port forwarding tunnels
+/// List all active SSH port forwarding tunnels and proxies
 #[tauri::command]
 pub async fn ssh_list_tunnels() -> Result<Vec<TunnelInfo>, String> {
-    let lock = ACTIVE_TUNNELS.lock();
-    Ok(lock.values().map(|a| a.info.clone()).collect())
+    let mut list = Vec::new();
+    {
+        let lock = ACTIVE_TUNNELS.lock();
+        list.extend(lock.values().map(|a| a.info.clone()));
+    }
+    {
+        let lock = ACTIVE_SOCKS5.lock();
+        list.extend(lock.values().map(|a| a.info.clone()));
+    }
+    Ok(list)
 }
 
 /// Start an SSH Dynamic SOCKS5 Proxy: binds 127.0.0.1:local_port (via ssh -D)
