@@ -73,7 +73,13 @@ pub async fn ssh_start_tunnel(
     let host = conn.config.host.clone();
     let ssh_port = conn.config.port.to_string();
     let user = conn.config.username.clone();
-    let remote_target = if remote_host.trim().is_empty() { "127.0.0.1".to_string() } else { remote_host.trim().to_string() };
+    let remote_target = if remote_host.trim().is_empty()
+        || remote_host.trim().eq_ignore_ascii_case(&host)
+        || remote_host.trim().eq_ignore_ascii_case("localhost") {
+        "127.0.0.1".to_string()
+    } else {
+        remote_host.trim().to_string()
+    };
 
     log::info!(
         "SSH Desktop: Spawning SSH Tunnel -L 127.0.0.1:{}:{}:{} via {}@{}:{}",
@@ -81,86 +87,17 @@ pub async fn ssh_start_tunnel(
     );
 
     let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    let plink_bin = crate::ssh::connection::get_plink_path();
+    let plink_available = plink_bin != "plink" || std::path::Path::new(plink_bin).exists();
+    let prefer_plink = (conn.config.password.is_some() || is_ppk) && plink_available;
+
     let mut spawned = false;
     let mut child_handle: Option<tokio::process::Child> = None;
     let mut last_error = String::new();
+    let mut used_plink_first = false;
 
-    // Approach A: Try Plink (best for Windows with passwords or PPK keys)
-    let plink_bin = crate::ssh::connection::get_plink_path();
-    if plink_bin != "plink" || std::path::Path::new(plink_bin).exists() || conn.config.password.is_some() || is_ppk {
-        // Pre-cache host key in PuTTY registry to prevent batch mode / host key rejection
-        #[cfg(windows)]
-        {
-            let mut probe = tokio::process::Command::new(plink_bin);
-            probe.creation_flags(0x08000000); // CREATE_NO_WINDOW
-            probe.arg("-ssh").arg("-P").arg(&ssh_port).arg("-l").arg(&user);
-            if let Some(pwd) = &conn.config.password {
-                if !pwd.is_empty() { probe.arg("-pw").arg(pwd); }
-            }
-            if let Some(key) = &conn.config.private_key_path {
-                if crate::ssh::connection::resolve_key_path(key).is_some() { probe.arg("-i").arg(key); }
-            }
-            probe.arg(&host).arg("echo sshdesktop-tunnel-ok");
-            probe.stdin(std::process::Stdio::piped());
-            probe.stdout(std::process::Stdio::piped());
-            probe.stderr(std::process::Stdio::piped());
-
-            if let Ok(mut ch) = probe.spawn() {
-                if let Some(mut stdin) = ch.stdin.take() {
-                    let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
-                }
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(3), ch.wait()).await;
-            }
-        }
-
-        let mut cmd = tokio::process::Command::new(plink_bin);
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-
-        // NOTE: We do NOT pass -batch so Plink accepts host keys via piped stdin
-        cmd.arg("-ssh")
-            .arg("-N") // do not open a remote command or shell
-            .arg("-P").arg(&ssh_port)
-            .arg("-l").arg(&user)
-            .arg("-L").arg(format!("127.0.0.1:{}:{}:{}", effective_local_port, remote_target, remote_port));
-
-        if let Some(pwd) = &conn.config.password {
-            if !pwd.is_empty() {
-                cmd.arg("-pw").arg(pwd);
-            }
-        }
-
-        if let Some(key) = &conn.config.private_key_path {
-            if crate::ssh::connection::resolve_key_path(key).is_some() {
-                cmd.arg("-i").arg(key);
-            }
-        }
-
-        cmd.arg(&host);
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::piped());
-
-        match cmd.spawn() {
-            Ok(mut child) => {
-                if let Some(mut stdin) = child.stdin.take() {
-                    tokio::spawn(async move {
-                        // Automatically answer "y" to accept host key caching prompt if prompted
-                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
-                        let _ = tokio::io::AsyncWriteExt::flush(&mut stdin).await;
-                    });
-                }
-                child_handle = Some(child);
-                spawned = true;
-            }
-            Err(e) => {
-                last_error = format!("Plink tunnel launch error: {}", e);
-            }
-        }
-    }
-
-    // Approach B: Try OpenSSH ssh (built into Windows 10/11)
-    if !spawned {
+    // Helper closure to build OpenSSH tunnel command
+    let make_openssh_cmd = || {
         let mut cmd = tokio::process::Command::new("ssh");
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
@@ -182,7 +119,86 @@ pub async fn ssh_start_tunnel(
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::piped());
+        cmd
+    };
 
+    // Helper closure to build Plink tunnel command
+    let make_plink_cmd = || {
+        let mut cmd = tokio::process::Command::new(plink_bin);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+        cmd.arg("-ssh")
+            .arg("-N")
+            .arg("-P").arg(&ssh_port)
+            .arg("-l").arg(&user)
+            .arg("-L").arg(format!("127.0.0.1:{}:{}:{}", effective_local_port, remote_target, remote_port));
+
+        if let Some(pwd) = &conn.config.password {
+            if !pwd.is_empty() {
+                cmd.arg("-pw").arg(pwd);
+            }
+        }
+
+        if let Some(key) = &conn.config.private_key_path {
+            if crate::ssh::connection::resolve_key_path(key).is_some() {
+                cmd.arg("-i").arg(key);
+            }
+        }
+
+        cmd.arg(&host);
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd
+    };
+
+    if prefer_plink {
+        used_plink_first = true;
+        // Pre-cache host key in PuTTY registry to prevent batch mode / host key rejection
+        #[cfg(windows)]
+        {
+            let mut probe = tokio::process::Command::new(plink_bin);
+            probe.creation_flags(0x08000000);
+            probe.arg("-ssh").arg("-P").arg(&ssh_port).arg("-l").arg(&user);
+            if let Some(pwd) = &conn.config.password {
+                if !pwd.is_empty() { probe.arg("-pw").arg(pwd); }
+            }
+            if let Some(key) = &conn.config.private_key_path {
+                if crate::ssh::connection::resolve_key_path(key).is_some() { probe.arg("-i").arg(key); }
+            }
+            probe.arg(&host).arg("echo sshdesktop-tunnel-ok");
+            probe.stdin(std::process::Stdio::piped());
+            probe.stdout(std::process::Stdio::piped());
+            probe.stderr(std::process::Stdio::piped());
+
+            if let Ok(mut ch) = probe.spawn() {
+                if let Some(mut stdin) = ch.stdin.take() {
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
+                }
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(3), ch.wait()).await;
+            }
+        }
+
+        let mut cmd = make_plink_cmd();
+        match cmd.spawn() {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    tokio::spawn(async move {
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
+                        let _ = tokio::io::AsyncWriteExt::flush(&mut stdin).await;
+                    });
+                }
+                child_handle = Some(child);
+                spawned = true;
+            }
+            Err(e) => {
+                last_error = format!("Plink tunnel launch error: {}", e);
+            }
+        }
+    } else {
+        // OpenSSH preferred for OpenSSH PEM keys or keyless/agent auth
+        let mut cmd = make_openssh_cmd();
         match cmd.spawn() {
             Ok(child) => {
                 child_handle = Some(child);
@@ -190,6 +206,29 @@ pub async fn ssh_start_tunnel(
             }
             Err(e) => {
                 last_error = format!("OpenSSH tunnel launch error: {}", e);
+            }
+        }
+    }
+
+    // Fallback if primary tool failed to spawn
+    if !spawned {
+        if used_plink_first {
+            let mut cmd = make_openssh_cmd();
+            if let Ok(child) = cmd.spawn() {
+                child_handle = Some(child);
+                spawned = true;
+            }
+        } else if plink_available {
+            let mut cmd = make_plink_cmd();
+            if let Ok(mut child) = cmd.spawn() {
+                if let Some(mut stdin) = child.stdin.take() {
+                    tokio::spawn(async move {
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
+                        let _ = tokio::io::AsyncWriteExt::flush(&mut stdin).await;
+                    });
+                }
+                child_handle = Some(child);
+                spawned = true;
             }
         }
     }
@@ -218,31 +257,20 @@ pub async fn ssh_start_tunnel(
                         err_msg = format!("{}: {}", err_msg, text);
                     }
                 }
-                log::warn!("SSH Desktop: Tunnel process exited ({}). Attempting OpenSSH fallback...", err_msg);
+                log::warn!("SSH Desktop: Primary tunnel process exited ({}). Attempting alternative fallback...", err_msg);
 
-                // Fallback attempt: OpenSSH
-                let mut alt_cmd = tokio::process::Command::new("ssh");
-                #[cfg(windows)]
-                alt_cmd.creation_flags(0x08000000);
-                alt_cmd.arg("-N")
-                    .arg("-L").arg(format!("127.0.0.1:{}:{}:{}", effective_local_port, remote_target, remote_port))
-                    .arg("-p").arg(&ssh_port)
-                    .arg("-o").arg("StrictHostKeyChecking=no")
-                    .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
-                    .arg("-o").arg("ExitOnForwardFailure=yes");
+                // Alternate fallback attempt
+                let alt_spawned = if used_plink_first {
+                    let mut alt_cmd = make_openssh_cmd();
+                    alt_cmd.spawn().ok()
+                } else if plink_available {
+                    let mut alt_cmd = make_plink_cmd();
+                    alt_cmd.spawn().ok()
+                } else {
+                    None
+                };
 
-                if let Some(key) = &conn.config.private_key_path {
-                    if crate::ssh::connection::resolve_key_path(key).is_some() {
-                        alt_cmd.arg("-i").arg(key);
-                    }
-                }
-
-                alt_cmd.arg(format!("{}@{}", user, host));
-                alt_cmd.stdin(std::process::Stdio::null());
-                alt_cmd.stdout(std::process::Stdio::null());
-                alt_cmd.stderr(std::process::Stdio::piped());
-
-                if let Ok(alt_child) = alt_cmd.spawn() {
+                if let Some(alt_child) = alt_spawned {
                     for _ in 0..20 {
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                         if std::net::TcpStream::connect(("127.0.0.1", effective_local_port)).is_ok() {
@@ -339,13 +367,43 @@ pub async fn ssh_start_socks5(
     );
 
     let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    let plink_bin = crate::ssh::connection::get_plink_path();
+    let plink_available = plink_bin != "plink" || std::path::Path::new(plink_bin).exists();
+    let prefer_plink = (conn.config.password.is_some() || is_ppk) && plink_available;
+
     let mut spawned = false;
     let mut child_handle: Option<tokio::process::Child> = None;
     let mut last_error = String::new();
+    let mut used_plink_first = false;
 
-    // Approach A: Try Plink (best for Windows with passwords or PPK keys)
-    let plink_bin = crate::ssh::connection::get_plink_path();
-    if plink_bin != "plink" || std::path::Path::new(plink_bin).exists() || conn.config.password.is_some() || is_ppk {
+    // Helper closure to build OpenSSH SOCKS5 command
+    let make_openssh_cmd = || {
+        let mut cmd = tokio::process::Command::new("ssh");
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+        cmd.arg("-N")
+            .arg("-D").arg(format!("127.0.0.1:{}", effective_local_port))
+            .arg("-p").arg(&ssh_port)
+            .arg("-o").arg("StrictHostKeyChecking=no")
+            .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
+            .arg("-o").arg("ExitOnForwardFailure=yes");
+
+        if let Some(key) = &conn.config.private_key_path {
+            if crate::ssh::connection::resolve_key_path(key).is_some() {
+                cmd.arg("-i").arg(key);
+            }
+        }
+
+        cmd.arg(format!("{}@{}", user, host));
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd
+    };
+
+    // Helper closure to build Plink SOCKS5 command
+    let make_plink_cmd = || {
         let mut cmd = tokio::process::Command::new(plink_bin);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
@@ -372,7 +430,12 @@ pub async fn ssh_start_socks5(
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::piped());
+        cmd
+    };
 
+    if prefer_plink {
+        used_plink_first = true;
+        let mut cmd = make_plink_cmd();
         match cmd.spawn() {
             Ok(mut child) => {
                 if let Some(mut stdin) = child.stdin.take() {
@@ -388,32 +451,9 @@ pub async fn ssh_start_socks5(
                 last_error = format!("Plink SOCKS5 launch error: {}", e);
             }
         }
-    }
-
-    // Approach B: Try OpenSSH ssh (built into Windows 10/11)
-    if !spawned {
-        let mut cmd = tokio::process::Command::new("ssh");
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-
-        cmd.arg("-N")
-            .arg("-D").arg(format!("127.0.0.1:{}", effective_local_port))
-            .arg("-p").arg(&ssh_port)
-            .arg("-o").arg("StrictHostKeyChecking=no")
-            .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
-            .arg("-o").arg("ExitOnForwardFailure=yes");
-
-        if let Some(key) = &conn.config.private_key_path {
-            if crate::ssh::connection::resolve_key_path(key).is_some() {
-                cmd.arg("-i").arg(key);
-            }
-        }
-
-        cmd.arg(format!("{}@{}", user, host));
-        cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::piped());
-
+    } else {
+        // OpenSSH preferred for OpenSSH PEM keys or keyless/agent auth
+        let mut cmd = make_openssh_cmd();
         match cmd.spawn() {
             Ok(child) => {
                 child_handle = Some(child);
@@ -421,6 +461,29 @@ pub async fn ssh_start_socks5(
             }
             Err(e) => {
                 last_error = format!("OpenSSH SOCKS5 launch error: {}", e);
+            }
+        }
+    }
+
+    // Fallback if primary tool failed to spawn
+    if !spawned {
+        if used_plink_first {
+            let mut cmd = make_openssh_cmd();
+            if let Ok(child) = cmd.spawn() {
+                child_handle = Some(child);
+                spawned = true;
+            }
+        } else if plink_available {
+            let mut cmd = make_plink_cmd();
+            if let Ok(mut child) = cmd.spawn() {
+                if let Some(mut stdin) = child.stdin.take() {
+                    tokio::spawn(async move {
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
+                        let _ = tokio::io::AsyncWriteExt::flush(&mut stdin).await;
+                    });
+                }
+                child_handle = Some(child);
+                spawned = true;
             }
         }
     }
@@ -436,6 +499,50 @@ pub async fn ssh_start_socks5(
         if std::net::TcpStream::connect(("127.0.0.1", effective_local_port)).is_ok() {
             bound = true;
             break;
+        }
+
+        // Check if child exited prematurely
+        if let Some(ref mut ch) = child_handle {
+            if let Ok(Some(status)) = ch.try_wait() {
+                let mut err_msg = format!("SSH SOCKS5 process exited early with status: {}", status);
+                if let Some(mut stderr) = ch.stderr.take() {
+                    let mut buf = Vec::new();
+                    let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf).await;
+                    let text = String::from_utf8_lossy(&buf).trim().to_string();
+                    if !text.is_empty() {
+                        err_msg = format!("{}: {}", err_msg, text);
+                    }
+                }
+                log::warn!("SSH Desktop: Primary SOCKS5 process exited ({}). Attempting alternative fallback...", err_msg);
+
+                // Alternate fallback attempt
+                let alt_spawned = if used_plink_first {
+                    let mut alt_cmd = make_openssh_cmd();
+                    alt_cmd.spawn().ok()
+                } else if plink_available {
+                    let mut alt_cmd = make_plink_cmd();
+                    alt_cmd.spawn().ok()
+                } else {
+                    None
+                };
+
+                if let Some(alt_child) = alt_spawned {
+                    for _ in 0..20 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        if std::net::TcpStream::connect(("127.0.0.1", effective_local_port)).is_ok() {
+                            bound = true;
+                            child_handle = Some(alt_child);
+                            break;
+                        }
+                    }
+                }
+
+                if !bound {
+                    return Err(err_msg);
+                } else {
+                    break;
+                }
+            }
         }
     }
 

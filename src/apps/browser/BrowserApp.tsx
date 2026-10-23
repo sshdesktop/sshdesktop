@@ -201,7 +201,7 @@ function extractGoogleEmbedInfo(input: string): { isGoogle: boolean; embedSrc: s
 /**
  * Resolves user typed text into logical URL, display URL, and iframe destination based on network mode
  */
-function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'): ResolvedTarget {
+function resolveNavigationTarget(input: string, networkMode: 'server' | 'user', activeServerHost?: string): ResolvedTarget {
   const trimmed = input.trim();
 
   // 1. Empty or newtab
@@ -319,17 +319,23 @@ function resolveNavigationTarget(input: string, networkMode: 'server' | 'user'):
 
     // If Server Network mode (SSH: ON):
     if (networkMode === 'server') {
-      const isPublicHttps = !isLocal && !isIpWithPort && !isCustomPort;
+      const isConnectedServer = Boolean(
+        activeServerHost && (
+          hostname === activeServerHost.toLowerCase() ||
+          (hostname === '127.0.0.1' || hostname === 'localhost')
+        )
+      );
+      const isPublicHttps = !isLocal && !isIpWithPort && !isCustomPort && !isConnectedServer;
       const port = parsed.port 
         ? parseInt(parsed.port, 10) 
         : (parsed.protocol === 'https:' ? 443 : 80);
-      const targetHost = isLocal ? '127.0.0.1' : hostname;
+      const targetHost = (isLocal || isConnectedServer) ? '127.0.0.1' : hostname;
 
       return {
         url: cleanDisplay,
         displayUrl: cleanDisplay,
         iframeSrc: isPublicHttps ? formatted : '', // Assigned after sshStartTunnel if tunneled
-        title: `${parsed.host}${parsed.pathname !== '/' ? parsed.pathname : ''}`,
+        title: isConnectedServer ? `${activeServerHost}:${port} (Server App)` : `${parsed.host}${parsed.pathname !== '/' ? parsed.pathname : ''}`,
         isTunneled: !isPublicHttps,
         remoteHost: targetHost,
         remotePort: port,
@@ -501,7 +507,7 @@ export default function BrowserApp() {
       return;
     }
 
-    const resolved = resolveNavigationTarget(targetInput, effectiveNetworkMode);
+    const resolved = resolveNavigationTarget(targetInput, effectiveNetworkMode, activeServer?.host);
 
     // Update active tab loading state & history
     setTabs(prev => prev.map(t => {
@@ -662,6 +668,7 @@ export default function BrowserApp() {
 
     // If tab currently has an address loaded, re-navigate using the newly selected network mode
     if (currentTab.displayUrl || currentTab.url) {
+      await closeBrowserWindow(`browser-tab-${tabId}`).catch(() => {});
       await navigateUrl(currentTab.displayUrl || currentTab.url, tabId, newMode);
     }
   };
