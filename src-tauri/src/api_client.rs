@@ -390,6 +390,7 @@ async fn execute_local_tunneled_request(
         0,
         "127.0.0.1".to_string(),
         original_port,
+        None,
     ).await.map_err(|e| format!("Failed to establish SSH tunnel for API request: {}", e))?;
 
     let path_and_query = match parsed_url.query() {
