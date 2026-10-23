@@ -40,6 +40,7 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
   const [loadingTunnelId, setLoadingTunnelId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [ruleToDelete, setRuleToDelete] = useState<SshTunnelRule | null>(null);
 
   // Form State
   const [ruleName, setRuleName] = useState('');
@@ -62,10 +63,10 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
                 return at.tunnel_id.includes('socks5');
               }
               if (rule.type === 'local') {
-                return at.local_port === rule.localPort || at.remote_port === rule.remotePort;
+                return at.tunnel_id === rule.activeTunnelId || (rule.localPort > 0 && at.local_port === rule.localPort);
               }
               if (rule.type === 'remote') {
-                return at.tunnel_id.includes(`remote:${rule.remotePort}`) || at.local_port === rule.localPort;
+                return at.tunnel_id === rule.activeTunnelId || at.tunnel_id.includes(`remote:${rule.remotePort}`) || (rule.localPort > 0 && at.local_port === rule.localPort);
               }
               return false;
             });
@@ -73,7 +74,7 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
               updateTunnel(rule.id, {
                 status: 'active',
                 activeTunnelId: match.tunnel_id,
-                localPort: match.local_port || rule.localPort,
+                localPort: rule.localPort || match.local_port,
               });
             }
           });
@@ -166,7 +167,7 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
           if (boundPort && boundPort > 0) {
             updateTunnel(t.id, {
               status: 'active',
-              localPort: boundPort,
+              localPort: t.localPort || boundPort,
               activeTunnelId: `socks5:${activeConnectionId}`,
               serverId: activeConnectionId || undefined,
               serverName: activeServer?.name || activeServer?.host || undefined,
@@ -203,7 +204,7 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
             const tunnelKey = `${activeConnectionId}:${targetHost}:${t.remotePort}`;
             updateTunnel(t.id, {
               status: 'active',
-              localPort: boundPort,
+              localPort: t.localPort || boundPort,
               activeTunnelId: tunnelKey,
               serverId: activeConnectionId || undefined,
               serverName: activeServer?.name || activeServer?.host || undefined,
@@ -515,12 +516,7 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
 
                   {/* Delete Rule */}
                   <button
-                    onClick={() => {
-                      if (isRunning) {
-                        handleToggleTunnel(t);
-                      }
-                      removeTunnel(t.id);
-                    }}
+                    onClick={() => setRuleToDelete(t)}
                     className="p-1.5 rounded-xl hover:bg-rose-500/20 text-gray-400 hover:text-rose-300 transition-colors cursor-pointer"
                     title="Delete tunnel rule"
                   >
@@ -691,6 +687,82 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Rule Confirmation Modal */}
+      {ruleToDelete && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in"
+          onClick={() => setRuleToDelete(null)}
+        >
+          <div 
+            className="bg-[#181825] border border-rose-500/30 rounded-3xl w-full max-w-md p-6 shadow-2xl space-y-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center space-x-3 text-rose-400">
+              <div className="p-2.5 rounded-2xl bg-rose-500/10 border border-rose-500/20">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-white">Confirm Rule Deletion</h3>
+                <p className="text-xs text-gray-400">Are you sure you want to delete this rule?</p>
+              </div>
+            </div>
+
+            <div className="bg-white/5 rounded-2xl p-4 border border-white/10 space-y-2.5 text-xs">
+              <div className="flex justify-between items-center">
+                <span className="text-gray-400">Rule Name:</span>
+                <span className="font-semibold text-white">{ruleToDelete.name}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-gray-400">Tunnel Type:</span>
+                <span className="uppercase font-mono text-[11px] px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                  {ruleToDelete.type}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-gray-400">Port Mapping:</span>
+                <span className="font-mono text-emerald-400">
+                  {ruleToDelete.type === 'dynamic' 
+                    ? `127.0.0.1:${ruleToDelete.localPort} (SOCKS5)`
+                    : `127.0.0.1:${ruleToDelete.localPort} ➔ ${ruleToDelete.remoteHost || '127.0.0.1'}:${ruleToDelete.remotePort}`}
+                </span>
+              </div>
+              {ruleToDelete.status === 'active' && (
+                <div className="pt-2 text-amber-400 border-t border-white/10 flex items-center space-x-1.5 text-[11px]">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>This tunnel is currently running and will be stopped before deletion.</span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setRuleToDelete(null)}
+                className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 text-xs font-medium transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const target = ruleToDelete;
+                  setRuleToDelete(null);
+                  if (target.status === 'active') {
+                    await handleToggleTunnel(target);
+                  }
+                  removeTunnel(target.id);
+                  setSuccessMessage(`Tunnel rule "${target.name}" has been deleted.`);
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold shadow-lg shadow-rose-600/30 transition-all cursor-pointer flex items-center space-x-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete Rule</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -65,16 +65,25 @@ pub async fn ssh_start_tunnel(
     };
 
     // 1. If an active tunnel for this server and remote port already exists, return its port
+    let mut stale_child_to_kill = None;
     {
-        let lock = ACTIVE_TUNNELS.lock();
+        let mut lock = ACTIVE_TUNNELS.lock();
         if let Some(active) = lock.get(&tunnel_key) {
             if is_remote_forward {
                 return Ok(active.info.local_port);
             } else if std::net::TcpStream::connect(("127.0.0.1", active.info.local_port)).is_ok() {
                 log::info!("SSH Desktop: Reusing active SSH tunnel for {}:{} on local port {}", remote_host, remote_port, active.info.local_port);
                 return Ok(active.info.local_port);
+            } else {
+                // Stale tunnel that is not listening, clean it up so we can recreate it
+                if let Some(mut stale) = lock.remove(&tunnel_key) {
+                    stale_child_to_kill = stale.child.take();
+                }
             }
         }
+    }
+    if let Some(mut ch) = stale_child_to_kill {
+        let _ = ch.kill().await;
     }
 
     // 2. Resolve SSH connection configuration
@@ -83,8 +92,40 @@ pub async fn ssh_start_tunnel(
 
     let effective_local_port = if is_remote_forward {
         if local_port > 0 { local_port } else { 3000 }
+    } else if local_port > 0 {
+        // If an existing tunnel is registered with this local_port, stop it first
+        let mut dead_children = Vec::new();
+        {
+            let mut lock = ACTIVE_TUNNELS.lock();
+            let dead_keys: Vec<String> = lock.iter()
+                .filter(|(k, v)| v.info.local_port == local_port && **k != tunnel_key)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in dead_keys {
+                if let Some(mut old) = lock.remove(&k) {
+                    if let Some(ch) = old.child.take() {
+                        dead_children.push(ch);
+                    }
+                }
+            }
+        }
+        for mut ch in dead_children {
+            let _ = ch.kill().await;
+        }
+
+        if !is_port_available(local_port) {
+            tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+        }
+
+        if !is_port_available(local_port) {
+            return Err(format!(
+                "Local port {} is already in use by another application. Please choose a different local port or stop the conflicting application.",
+                local_port
+            ));
+        }
+        local_port
     } else {
-        find_available_port(if local_port > 0 { local_port } else if remote_port > 0 { remote_port } else { 0 })
+        find_available_port(if remote_port > 0 { remote_port } else { 0 })
     };
 
     let host = conn.config.host.clone();
@@ -106,7 +147,10 @@ pub async fn ssh_start_tunnel(
     let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
     let plink_bin = crate::ssh::connection::get_plink_path();
     let plink_available = plink_bin != "plink" || std::path::Path::new(plink_bin).exists();
-    let prefer_plink = (conn.config.password.is_some() || is_ppk) && plink_available;
+    let has_password = conn.config.password.as_deref().map(|p| !p.trim().is_empty()).unwrap_or(false);
+    let is_pem_key = conn.config.private_key_path.as_deref().map(|k| !k.trim().is_empty() && !crate::ssh::connection::is_ppk_key(k)).unwrap_or(false);
+    // Never use Plink for PEM keys (Plink only supports PuTTY .ppk keys)
+    let prefer_plink = !is_pem_key && (is_ppk || has_password) && plink_available;
 
     let mut spawned = false;
     let mut child_handle: Option<tokio::process::Child> = None;
@@ -134,8 +178,12 @@ pub async fn ssh_start_tunnel(
 
         cmd.arg("-p").arg(&ssh_port)
             .arg("-o").arg("StrictHostKeyChecking=no")
-            .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
-            .arg("-o").arg("ExitOnForwardFailure=yes");
+            .arg("-o").arg("UserKnownHostsFile=/dev/null")
+            .arg("-o").arg("GlobalKnownHostsFile=/dev/null")
+            .arg("-o").arg("ExitOnForwardFailure=yes")
+            .arg("-o").arg("ConnectTimeout=10")
+            .arg("-o").arg("ServerAliveInterval=30")
+            .arg("-o").arg("ServerAliveCountMax=3");
 
         if let Some(key) = &conn.config.private_key_path {
             if crate::ssh::connection::resolve_key_path(key).is_some() {
@@ -251,7 +299,7 @@ pub async fn ssh_start_tunnel(
                 child_handle = Some(child);
                 spawned = true;
             }
-        } else if plink_available {
+        } else if plink_available && !is_pem_key {
             let mut cmd = make_plink_cmd();
             if let Ok(mut child) = cmd.spawn() {
                 if let Some(mut stdin) = child.stdin.take() {
@@ -270,7 +318,7 @@ pub async fn ssh_start_tunnel(
         return Err(format!("Could not spawn SSH tunnel: {}", last_error));
     }
 
-    // Wait up to 3 seconds for the port to start listening
+    // Wait up to 3.5 seconds for the port to start listening
     let mut bound = false;
     if is_remote_forward {
         // For remote port forwarding (-R), verify child process stays alive without immediate error
@@ -291,7 +339,7 @@ pub async fn ssh_start_tunnel(
         }
         bound = true;
     } else {
-        for _ in 0..30 {
+        for _ in 0..35 {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             if std::net::TcpStream::connect(("127.0.0.1", effective_local_port)).is_ok() {
                 bound = true;
@@ -309,13 +357,13 @@ pub async fn ssh_start_tunnel(
                             err_msg = format!("{}: {}", err_msg, text);
                         }
                     }
-                    log::warn!("SSH Desktop: Primary tunnel process exited ({}). Attempting alternative fallback...", err_msg);
+                    log::warn!("SSH Desktop: Primary tunnel process exited ({}).", err_msg);
 
-                    // Alternate fallback attempt
+                    // Alternate fallback attempt only if Plink wasn't already tried and not a PEM key
                     let alt_spawned = if used_plink_first {
                         let mut alt_cmd = make_openssh_cmd();
                         alt_cmd.spawn().ok()
-                    } else if plink_available {
+                    } else if plink_available && !is_pem_key {
                         let mut alt_cmd = make_plink_cmd();
                         alt_cmd.spawn().ok()
                     } else {
@@ -341,6 +389,25 @@ pub async fn ssh_start_tunnel(
                 }
             }
         }
+    }
+
+    if !bound {
+        if let Some(mut ch) = child_handle.take() {
+            let mut stderr_msg = String::new();
+            if let Some(mut stderr) = ch.stderr.take() {
+                let mut buf = Vec::new();
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf).await;
+                let text = String::from_utf8_lossy(&buf).trim().to_string();
+                if !text.is_empty() {
+                    stderr_msg = text;
+                }
+            }
+            let _ = ch.kill().await;
+            if !stderr_msg.is_empty() {
+                return Err(format!("Tunnel on port {} failed: {}", effective_local_port, stderr_msg));
+            }
+        }
+        return Err(format!("SSH Tunnel on local port {} timed out waiting to connect. Verify your server is running and port {} is accessible.", effective_local_port, remote_port));
     }
 
     let tunnel_info = TunnelInfo {
@@ -442,14 +509,22 @@ pub async fn ssh_start_socks5(
     preferred_port: Option<u16>,
 ) -> Result<u16, String> {
     // 1. If an active SOCKS5 proxy already exists and is responsive for this connection, return its port
+    let mut stale_socks_child = None;
     {
-        let lock = ACTIVE_SOCKS5.lock();
+        let mut lock = ACTIVE_SOCKS5.lock();
         if let Some(active) = lock.get(&conn_id) {
             if std::net::TcpStream::connect(("127.0.0.1", active.info.local_port)).is_ok() {
                 log::info!("SSH Desktop: Reusing active SOCKS5 proxy on 127.0.0.1:{}", active.info.local_port);
                 return Ok(active.info.local_port);
+            } else {
+                if let Some(mut stale) = lock.remove(&conn_id) {
+                    stale_socks_child = stale.child.take();
+                }
             }
         }
+    }
+    if let Some(mut ch) = stale_socks_child {
+        let _ = ch.kill().await;
     }
 
     // 2. Resolve SSH connection configuration
@@ -470,7 +545,9 @@ pub async fn ssh_start_socks5(
     let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
     let plink_bin = crate::ssh::connection::get_plink_path();
     let plink_available = plink_bin != "plink" || std::path::Path::new(plink_bin).exists();
-    let prefer_plink = (conn.config.password.is_some() || is_ppk) && plink_available;
+    let has_password = conn.config.password.as_deref().map(|p| !p.trim().is_empty()).unwrap_or(false);
+    let is_pem_key = conn.config.private_key_path.as_deref().map(|k| !k.trim().is_empty() && !crate::ssh::connection::is_ppk_key(k)).unwrap_or(false);
+    let prefer_plink = !is_pem_key && (is_ppk || has_password) && plink_available;
 
     let mut spawned = false;
     let mut child_handle: Option<tokio::process::Child> = None;
@@ -487,8 +564,12 @@ pub async fn ssh_start_socks5(
             .arg("-D").arg(format!("127.0.0.1:{}", effective_local_port))
             .arg("-p").arg(&ssh_port)
             .arg("-o").arg("StrictHostKeyChecking=no")
-            .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
-            .arg("-o").arg("ExitOnForwardFailure=yes");
+            .arg("-o").arg("UserKnownHostsFile=/dev/null")
+            .arg("-o").arg("GlobalKnownHostsFile=/dev/null")
+            .arg("-o").arg("ExitOnForwardFailure=yes")
+            .arg("-o").arg("ConnectTimeout=10")
+            .arg("-o").arg("ServerAliveInterval=30")
+            .arg("-o").arg("ServerAliveCountMax=3");
 
         if let Some(key) = &conn.config.private_key_path {
             if crate::ssh::connection::resolve_key_path(key).is_some() {
@@ -574,7 +655,7 @@ pub async fn ssh_start_socks5(
                 child_handle = Some(child);
                 spawned = true;
             }
-        } else if plink_available {
+        } else if plink_available && !is_pem_key {
             let mut cmd = make_plink_cmd();
             if let Ok(mut child) = cmd.spawn() {
                 if let Some(mut stdin) = child.stdin.take() {
@@ -614,13 +695,13 @@ pub async fn ssh_start_socks5(
                         err_msg = format!("{}: {}", err_msg, text);
                     }
                 }
-                log::warn!("SSH Desktop: Primary SOCKS5 process exited ({}). Attempting alternative fallback...", err_msg);
+                log::warn!("SSH Desktop: Primary SOCKS5 process exited ({}).", err_msg);
 
-                // Alternate fallback attempt
+                // Alternate fallback attempt only if Plink wasn't already tried and not a PEM key
                 let alt_spawned = if used_plink_first {
                     let mut alt_cmd = make_openssh_cmd();
                     alt_cmd.spawn().ok()
-                } else if plink_available {
+                } else if plink_available && !is_pem_key {
                     let mut alt_cmd = make_plink_cmd();
                     alt_cmd.spawn().ok()
                 } else {
