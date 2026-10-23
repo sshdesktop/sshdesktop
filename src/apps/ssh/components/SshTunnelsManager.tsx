@@ -168,8 +168,8 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
               status: 'active',
               localPort: boundPort,
               activeTunnelId: `socks5:${activeConnectionId}`,
-              serverId: activeConnectionId,
-              serverName: activeServer?.name || activeServer?.host,
+              serverId: activeConnectionId || undefined,
+              serverName: activeServer?.name || activeServer?.host || undefined,
               error: undefined,
             });
 
@@ -205,8 +205,8 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
               status: 'active',
               localPort: boundPort,
               activeTunnelId: tunnelKey,
-              serverId: activeConnectionId,
-              serverName: activeServer?.name || activeServer?.host,
+              serverId: activeConnectionId || undefined,
+              serverName: activeServer?.name || activeServer?.host || undefined,
               error: undefined,
             });
 
@@ -237,8 +237,8 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
             updateTunnel(t.id, {
               status: 'active',
               activeTunnelId: tunnelKey,
-              serverId: activeConnectionId,
-              serverName: activeServer?.name || activeServer?.host,
+              serverId: activeConnectionId || undefined,
+              serverName: activeServer?.name || activeServer?.host || undefined,
               error: undefined,
             });
 
@@ -287,7 +287,7 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
       remotePort: Number(remotePort),
       description: ruleDescription.trim(),
       serverId: activeConnectionId || undefined,
-      serverName: activeServer?.name || activeServer?.host,
+      serverName: activeServer?.name || activeServer?.host || undefined,
       status: 'inactive',
       createdAt: Date.now(),
     };
