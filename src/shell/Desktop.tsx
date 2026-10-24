@@ -23,6 +23,7 @@ import {
   useSettingsStore, useConnectionStore, useWindowStore, 
   useEditorStore, useFileClipboardStore, useTelemetryStore 
 } from '../lib/store';
+import { useUserPrivilege } from '../lib/permissions';
 import { 
   sftpMkdir, sftpWriteTextFile, sftpReadTextFile, sshExec, 
   sftpListDir, sftpRename, sftpDelete, systemGetDisks, systemGetStats 
@@ -33,8 +34,7 @@ import { getNextAvailableCopyName } from '../apps/filemanager/types';
 export default function Desktop() {
   const { activeConnectionId, connections } = useConnectionStore();
   const activeServer = connections.find(c => c.id === activeConnectionId);
-  const username = activeServer?.username || 'root';
-  const userHome = username === 'root' ? '/root' : `/home/${username}`;
+  const { username, homeDir: userHome, hasSudo, isRoot } = useUserPrivilege();
 
   const { wallpaper, theme, updateSettings, desktopIconSize } = useSettingsStore();
   const { openApp } = useWindowManager();

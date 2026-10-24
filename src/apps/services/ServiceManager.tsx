@@ -9,6 +9,9 @@ import {
 import { serviceList, serviceAction, serviceLogs, serviceStatus, sshExec } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
+import { useUserPrivilege } from '../../lib/permissions';
+import PermissionAlertBanner from '../../components/PermissionAlertBanner';
+import PermissionAlertModal from '../../components/PermissionAlertModal';
 import EditServiceModal from './modals/EditServiceModal';
 
 interface ServiceItem {
@@ -55,8 +58,10 @@ export default function ServiceManager() {
   const [isLoading, setIsLoading] = useState(false);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<{ text: string; isError: boolean } | null>(null);
+  const [restrictedAction, setRestrictedAction] = useState<string | null>(null);
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
+  const { hasSudo, isRoot, username } = useUserPrivilege();
   const { openApp } = useWindowManager();
   const { runTerminalCommand } = useEditorStore();
 
@@ -95,6 +100,11 @@ export default function ServiceManager() {
   }, []);
 
   const handleAction = async (name: string, action: 'start' | 'stop' | 'restart' | 'reload' | 'enable' | 'disable') => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`${action.toUpperCase()} service '${name}'`);
+      setContextMenu(null);
+      return;
+    }
     setActionInProgress(`${name}-${action}`);
     setContextMenu(null);
     try {
@@ -173,6 +183,11 @@ export default function ServiceManager() {
   };
 
   const handleEditServiceFile = (name: string) => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Edit service unit file '${name}'`);
+      setContextMenu(null);
+      return;
+    }
     setContextMenu(null);
     setEditingService(name);
   };
@@ -421,6 +436,9 @@ export default function ServiceManager() {
 
       {/* Main View Area: Table or Cards */}
       <div className={`flex-1 min-h-0 bg-[#161622] flex flex-col overflow-hidden relative ${isLoading ? 'cursor-mac-wait' : ''}`}>
+        <div className="px-4 pt-3 shrink-0">
+          <PermissionAlertBanner appName="Service Manager" />
+        </div>
         {isLoading && (
           <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-blue-500 via-indigo-400 to-blue-500 animate-top-progress z-20 pointer-events-none" />
         )}
@@ -1166,6 +1184,15 @@ export default function ServiceManager() {
           </div>
         </div>
       )}
+
+      {/* Permission Denied Alert Modal */}
+      <PermissionAlertModal
+        isOpen={!!restrictedAction}
+        onClose={() => setRestrictedAction(null)}
+        actionName={restrictedAction || ''}
+        username={username}
+        appName="Service Manager"
+      />
     </div>
   );
 }

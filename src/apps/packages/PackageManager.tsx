@@ -13,6 +13,9 @@ import {
 } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
+import { useUserPrivilege } from '../../lib/permissions';
+import PermissionAlertBanner from '../../components/PermissionAlertBanner';
+import PermissionAlertModal from '../../components/PermissionAlertModal';
 
 export interface PackageItem {
   name: string;
@@ -175,6 +178,7 @@ export default function PackageManager() {
   const [showInstallModal, setShowInstallModal] = useState(false);
   const [manualPkgInput, setManualPkgInput] = useState('');
   const [inspectPkg, setInspectPkg] = useState<PackageItem | null>(null);
+  const [restrictedAction, setRestrictedAction] = useState<string | null>(null);
 
   // Row Right-Click Context Menu State
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; pkg: PackageItem } | null>(null);
@@ -182,6 +186,7 @@ export default function PackageManager() {
   const terminalLogRef = useRef<HTMLDivElement | null>(null);
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
+  const { hasSudo, isRoot, username } = useUserPrivilege();
   const { openApp } = useWindowManager();
   const { runTerminalCommand } = useEditorStore();
 
@@ -293,6 +298,10 @@ export default function PackageManager() {
 
   // 1. Upgrade ALL packages
   const handleUpgradeAll = async () => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction('Upgrade All System Packages');
+      return;
+    }
     setActionInProgress('all');
     const cmdStr = pkgManager === 'dnf' ? 'dnf upgrade -y' : 'apt-get update && apt-get upgrade -y';
     setExecModal({
@@ -332,6 +341,10 @@ export default function PackageManager() {
 
   // 2. Upgrade SINGLE package
   const handleUpgradeSingle = async (name: string) => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Upgrade Package '${name}'`);
+      return;
+    }
     setActionInProgress(name);
     const cmdStr = pkgManager === 'dnf' ? `dnf upgrade -y '${name}'` : `apt-get install --only-upgrade -y '${name}'`;
     setExecModal({
@@ -371,6 +384,10 @@ export default function PackageManager() {
 
   // 3. Install package
   const handleInstallPackage = async (name: string) => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Install Package '${name}'`);
+      return;
+    }
     setActionInProgress(name);
     setShowInstallModal(false);
     setContextMenu(null);
@@ -413,6 +430,10 @@ export default function PackageManager() {
   // 4. Uninstall package
   const handleRemovePackage = async (name: string) => {
     setContextMenu(null);
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Uninstall Package '${name}'`);
+      return;
+    }
     if (!confirm(`Are you sure you want to uninstall '${name}' from server?`)) return;
     setActionInProgress(name);
     const cmdStr = pkgManager === 'dnf' ? `dnf remove -y '${name}'` : `apt-get remove -y '${name}'`;
@@ -633,6 +654,9 @@ export default function PackageManager() {
 
       {/* Main Content Area */}
       <div className="flex-1 min-h-0 bg-[#161622] flex flex-col overflow-hidden relative">
+        <div className="px-4 pt-3 shrink-0">
+          <PermissionAlertBanner appName="Package Manager" />
+        </div>
 
         {/* ──────────────────────────────────────────────────────────────────────────── */}
         {/* 1. CURATED APP STORE TAB (POPULAR SOFTWARES WITH CATEGORIES)                 */}
@@ -1389,6 +1413,15 @@ export default function PackageManager() {
           </div>
         </div>
       )}
+
+      {/* Permission Denied Alert Modal */}
+      <PermissionAlertModal
+        isOpen={!!restrictedAction}
+        onClose={() => setRestrictedAction(null)}
+        actionName={restrictedAction || ''}
+        username={username}
+        appName="Package Manager"
+      />
     </div>
   );
 }

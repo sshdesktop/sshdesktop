@@ -44,6 +44,10 @@ pub async fn docker_containers(
         return Err("Docker is not running or not installed on the remote server.".into());
     }
 
+    if stdout.contains("permission denied") || stdout.contains("Permission denied") {
+        return Err("Permission Denied: User does not have access to the Docker daemon socket (/var/run/docker.sock). Sudo privileges or membership in the 'docker' group is required.".into());
+    }
+
     let mut list = Vec::new();
     for line in stdout.lines() {
         let line = line.trim();

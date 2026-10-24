@@ -51,3 +51,15 @@ export interface SystemStats {
   memory: { total: number; used: number; free: number };
   uptime: number;
 }
+
+export interface UserPrivilegeInfo {
+  username: string;
+  uid: number;
+  gid: number;
+  home_dir: string;
+  is_root: boolean;
+  has_sudo: boolean;
+  sudo_type: 'root' | 'passwordless' | 'password' | 'none';
+  groups: string[];
+}
+

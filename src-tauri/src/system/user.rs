@@ -32,11 +32,20 @@ pub async fn user_list(
     }
 
     // Also fetch locked status from /etc/shadow (requires root/sudo; graceful failure)
-    let (shadow_out, _) = run_cmd_priv(
-        &state,
-        &conn_id,
-        "cat /etc/shadow 2>/dev/null || getent shadow 2>/dev/null",
-    ).await;
+    let can_read_shadow = crate::ssh::connection::get_cached_user_privilege(&conn_id)
+        .map(|p| p.is_root || p.has_sudo)
+        .unwrap_or(false);
+
+    let shadow_out = if can_read_shadow {
+        let (out, _) = run_cmd_priv(
+            &state,
+            &conn_id,
+            "cat /etc/shadow 2>/dev/null || getent shadow 2>/dev/null",
+        ).await;
+        out
+    } else {
+        String::new()
+    };
     let mut locked_users: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in shadow_out.lines() {
         let parts: Vec<&str> = line.split(':').collect();

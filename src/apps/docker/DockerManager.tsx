@@ -18,6 +18,9 @@ import {
 } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
+import { useUserPrivilege } from '../../lib/permissions';
+import PermissionAlertBanner from '../../components/PermissionAlertBanner';
+import PermissionAlertModal from '../../components/PermissionAlertModal';
 
 export * from './types';
 export * from './templates';
@@ -182,6 +185,9 @@ export default function DockerManager() {
   const [systemDfText, setSystemDfText] = useState('');
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
+  const { hasSudo, isRoot, username, userPrivilege } = useUserPrivilege();
+  const [restrictedAction, setRestrictedAction] = useState<string | null>(null);
+  const isDockerPermitted = hasSudo || isRoot || (userPrivilege?.groups || []).includes('docker');
   const { openApp } = useWindowManager();
   const runTerminalCommand = useEditorStore(s => s.runTerminalCommand);
   const openDockerTerminalInApp = useEditorStore(s => s.openDockerTerminalInApp);
@@ -370,6 +376,10 @@ export default function DockerManager() {
 
   // Service Management Actions (Start, Enable, Install)
   const handleStartDockerService = async () => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction('Start Docker Daemon Service');
+      return;
+    }
     setServiceActionLoading('start');
     showNotification('Starting Docker daemon service...');
     try {
@@ -389,6 +399,10 @@ export default function DockerManager() {
   };
 
   const handleEnableDockerService = async () => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction('Enable Docker Service on Boot');
+      return;
+    }
     setServiceActionLoading('enable');
     showNotification('Enabling Docker on system boot...');
     try {
@@ -406,6 +420,10 @@ export default function DockerManager() {
   };
 
   const handleInstallDocker = async () => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction('Install Docker Engine');
+      return;
+    }
     setServiceActionLoading('install');
     showNotification('Installing Docker Engine (official convenience script)...');
     try {
@@ -1227,6 +1245,10 @@ export default function DockerManager() {
 
   // Container Action Handler
   const handleAction = async (id: string, action: string, containerName?: string) => {
+    if (!isDockerPermitted) {
+      setRestrictedAction(`${action.toUpperCase()} Container '${containerName || id}'`);
+      return;
+    }
     const loadKey = `c-${action}-${id}`;
     setActionLoadingId(loadKey);
     try {
@@ -1650,6 +1672,11 @@ export default function DockerManager() {
   };
 
   const executeDeleteResource = async (target: ResourceDeleteTarget, force?: boolean) => {
+    if (!isDockerPermitted) {
+      setRestrictedAction(`Delete Docker ${target.type} '${target.name}'`);
+      setResourceToDelete(null);
+      return;
+    }
     setIsDeletingResource(true);
     try {
       switch (target.type) {
@@ -2314,6 +2341,14 @@ export default function DockerManager() {
               </button>
             </div>
           </div>
+        )}
+
+        {/* Permission Alert Banner for Non-Sudo Users without Docker group */}
+        {!isDockerPermitted && (
+          <PermissionAlertBanner 
+            appName="Docker Manager" 
+            customMessage={`Logged in as standard user '${username}'. Accessing the Docker daemon requires administrator (sudo) privileges or membership in the 'docker' group. Ask your server administrator to run: sudo usermod -aG docker ${username}`}
+          />
         )}
 
         {/* 1. CONTAINERS VIEW */}
@@ -4087,6 +4122,15 @@ export default function DockerManager() {
           )}
         </div>
       )}
+
+      {/* Permission Denied Alert Modal */}
+      <PermissionAlertModal
+        isOpen={!!restrictedAction}
+        onClose={() => setRestrictedAction(null)}
+        actionName={restrictedAction || ''}
+        username={username}
+        appName="Docker Manager"
+      />
 
     </div>
   );

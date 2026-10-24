@@ -7,6 +7,8 @@ import {
 } from 'lucide-react';
 import { logsJournal, logsFile, logsDmesg, sshExec } from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
+import { useUserPrivilege } from '../../lib/permissions';
+import PermissionAlertBanner from '../../components/PermissionAlertBanner';
 
 interface LogEntry {
   id: string;
@@ -109,14 +111,15 @@ export default function LogViewer() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const isFetchingRef = useRef(false);
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
+  const { hasSudo, isRoot, username } = useUserPrivilege();
 
   // Fetch Logs from Server
   const fetchLogs = useCallback(async () => {
     if (isFetchingRef.current || (typeof document !== 'undefined' && document.hidden)) return;
     isFetchingRef.current = true;
+    const selectedSource = PRESET_SOURCES.find(s => s.id === activeSourceId);
     try {
       let raw = '';
-      const selectedSource = PRESET_SOURCES.find(s => s.id === activeSourceId);
 
       if (activeSourceId === 'journalctl') {
         raw = await logsJournal(activeConnId, undefined, tailLines);
@@ -141,8 +144,19 @@ export default function LogViewer() {
       } else if (!raw) {
         setLogs([]);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.warn('Failed to fetch logs:', err);
+      const errStr = String(err?.message || err);
+      if (errStr.includes('Permission denied') || errStr.includes('permission denied')) {
+        setLogs([{
+          id: 'perm-err',
+          timestamp: new Date().toLocaleTimeString(),
+          level: 'warn',
+          subsystem: 'security',
+          message: `Permission Denied: User '${username}' cannot read '${selectedSource?.path || customPath}'. Elevated root privileges or membership in the 'adm' or 'systemd-journal' group is required.`,
+          raw: errStr
+        }]);
+      }
     } finally {
       isFetchingRef.current = false;
     }
@@ -474,6 +488,10 @@ export default function LogViewer() {
                 <span>Auto-Scroll {autoScroll ? 'ON' : 'OFF'}</span>
               </button>
             </div>
+          </div>
+
+          <div className="px-4 pt-3 shrink-0">
+            <PermissionAlertBanner appName="System Log Viewer" />
           </div>
 
           {/* Master Table of Logs */}

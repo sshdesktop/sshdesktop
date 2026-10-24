@@ -13,6 +13,9 @@ import {
 } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
+import { useUserPrivilege } from '../../lib/permissions';
+import PermissionAlertBanner from '../../components/PermissionAlertBanner';
+import PermissionAlertModal from '../../components/PermissionAlertModal';
 
 interface UserEntry {
   username: string;
@@ -117,8 +120,10 @@ export default function UserManager() {
 
   // Notification Toast
   const [notice, setNotice] = useState<{ text: string; isError: boolean } | null>(null);
+  const [restrictedAction, setRestrictedAction] = useState<string | null>(null);
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
+  const { hasSudo, isRoot, username: currentUsername } = useUserPrivilege();
   const { openApp } = useWindowManager();
   const { navigateFinder, runTerminalCommand } = useEditorStore();
 
@@ -226,6 +231,10 @@ export default function UserManager() {
   }, [users, selectedUsername]);
 
   const toggleLock = async (username: string, currentlyLocked: boolean) => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`${currentlyLocked ? 'Unlock' : 'Lock'} User Account '${username}'`);
+      return;
+    }
     if (username === 'root') {
       setNotice({ text: 'Cannot lock the root superuser account.', isError: true });
       return;
@@ -255,6 +264,10 @@ export default function UserManager() {
   };
 
   const toggleSudoPrivilege = async (username: string, currentlySudo: boolean) => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`${currentlySudo ? 'Revoke' : 'Grant'} Sudo Privileges for '${username}'`);
+      return;
+    }
     if (username === 'root') {
       setNotice({ text: 'Root superuser always has full administrative privileges.', isError: true });
       return;
@@ -286,6 +299,10 @@ export default function UserManager() {
 
   // Safe user delete with custom confirmation modal
   const promptDeleteUser = (username: string) => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Delete User Account '${username}'`);
+      return;
+    }
     if (username === 'root') {
       setNotice({ text: 'Cannot delete the root superuser account.', isError: true });
       return;
@@ -401,6 +418,10 @@ export default function UserManager() {
   const handleSetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!passwordModalUser || !newPassword) return;
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Change Password for '${passwordModalUser}'`);
+      return;
+    }
     setIsSubmittingPassword(true);
     setPasswordStatus({ text: 'Applying new password...' });
     try {
@@ -426,6 +447,10 @@ export default function UserManager() {
 
   const handleJoinGroup = async (groupName: string) => {
     if (!groupModalUser || !groupName) return;
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Add User '${groupModalUser.username}' to Group '${groupName}'`);
+      return;
+    }
     try {
       setGroupStatus(`Adding to ${groupName}...`);
       await groupAddUser(activeConnId, groupName, groupModalUser.username);
@@ -443,6 +468,10 @@ export default function UserManager() {
 
   const handleRemoveFromGroup = async (groupName: string) => {
     if (!groupModalUser || !groupName) return;
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Remove User '${groupModalUser.username}' from Group '${groupName}'`);
+      return;
+    }
     try {
       setGroupStatus(`Removing from ${groupName}...`);
       await groupRemoveUser(activeConnId, groupName, groupModalUser.username);
@@ -469,6 +498,10 @@ export default function UserManager() {
 
   // Safe group delete with active user prevention and confirmation modal
   const promptDeleteGroup = (grp: GroupEntry) => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Delete Group '${grp.name}'`);
+      return;
+    }
     const mems = getGroupMembers(grp);
     if (mems.length > 0) {
       setConfirmModal({
@@ -607,6 +640,10 @@ export default function UserManager() {
 
   // Safe session termination with confirmation modal
   const promptKickSession = (session: ActiveSession) => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Terminate Session for '${session.user}'`);
+      return;
+    }
     setConfirmModal({
       isOpen: true,
       title: 'Disconnect Active Session',
@@ -814,7 +851,13 @@ export default function UserManager() {
         <div className="flex items-center space-x-2 shrink-0 pb-1.5">
           {tab === 'users' && (
             <button
-              onClick={() => setShowAddModal(true)}
+              onClick={() => {
+                if (!hasSudo && !isRoot) {
+                  setRestrictedAction('Create User Account');
+                  return;
+                }
+                setShowAddModal(true);
+              }}
               className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded-xl transition-all font-medium shadow-md active:scale-95 cursor-pointer"
             >
               <UserPlus className="w-3.5 h-3.5" />
@@ -824,7 +867,13 @@ export default function UserManager() {
 
           {tab === 'groups' && (
             <button
-              onClick={() => setShowAddGroupModal(true)}
+              onClick={() => {
+                if (!hasSudo && !isRoot) {
+                  setRestrictedAction('Create New Group');
+                  return;
+                }
+                setShowAddGroupModal(true);
+              }}
               className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded-xl transition-all font-medium shadow-md active:scale-95 cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -879,6 +928,11 @@ export default function UserManager() {
           </button>
         </div>
       )}
+
+      {/* Permission Alert Banner */}
+      <div className="mx-4 mt-2.5 shrink-0">
+        <PermissionAlertBanner appName="User Manager" />
+      </div>
 
       {/* Main Content Area */}
       <div className="flex-1 min-h-0 bg-[#161622] flex overflow-hidden relative">
@@ -1991,6 +2045,15 @@ export default function UserManager() {
           </div>
         </div>
       )}
+
+      {/* Permission Denied Alert Modal */}
+      <PermissionAlertModal
+        isOpen={!!restrictedAction}
+        onClose={() => setRestrictedAction(null)}
+        actionName={restrictedAction || ''}
+        username={currentUsername}
+        appName="User & Group Manager"
+      />
     </div>
   );
 }
