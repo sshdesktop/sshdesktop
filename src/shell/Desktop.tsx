@@ -17,6 +17,8 @@ import DesktopContextMenu from './desktop/DesktopContextMenu';
 import DesktopDeleteModal from './desktop/DesktopDeleteModal';
 import DesktopIconGrid from './desktop/DesktopIconGrid';
 import DesktopActionModal, { DesktopActionType } from './desktop/DesktopActionModal';
+import AppSwitcher from './desktop/AppSwitcher';
+import MissionControl from './desktop/MissionControl';
 
 import { useWindowManager } from '../lib/hooks/useWindowManager';
 import { 
@@ -659,10 +661,21 @@ export default function Desktop() {
     } catch {}
   };
 
-  // Keyboard Shortcuts (Alt+Tab, Win+L, F2, Delete, Cmd+C, Cmd+V, etc.)
+  // Keyboard Shortcuts (Ctrl+F3, F3, Ctrl+Tab, Alt+Tab, Win+L, F2, Delete, Cmd+C, Cmd+V, etc.)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // 1. Lock Screen (Win+L / Ctrl+Alt+L / ⌃⌘Q)
+      // 1. Mission Control / Exposé (Ctrl+F3 / F3)
+      if (
+        e.key === 'F3' ||
+        e.code === 'F3' ||
+        (e.ctrlKey && (e.key === 'F3' || e.code === 'F3'))
+      ) {
+        e.preventDefault();
+        setShowMissionControl(prev => !prev);
+        return;
+      }
+
+      // 2. Lock Screen (Win+L / Ctrl+Alt+L / ⌃⌘Q)
       if (
         (e.ctrlKey && e.metaKey && e.key.toLowerCase() === 'q') ||
         (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'l') ||
@@ -673,21 +686,26 @@ export default function Desktop() {
         return;
       }
 
-      // 2. App Switcher HUD (Alt+Tab / Win+Tab)
+      // 3. App Switcher HUD (Ctrl+Tab / Alt+Tab / Win+Tab)
       if (
-        (e.altKey && e.code === 'Tab') ||
-        (e.metaKey && e.code === 'Tab')
+        (e.ctrlKey && (e.code === 'Tab' || e.key === 'Tab')) ||
+        (e.altKey && (e.code === 'Tab' || e.key === 'Tab')) ||
+        (e.metaKey && (e.code === 'Tab' || e.key === 'Tab'))
       ) {
         e.preventDefault();
         const curWindows = windows.filter(w => !w.serverId || w.serverId === activeConnectionId);
         if (curWindows.length > 0) {
           setShowAppSwitcher(true);
-          setAppSwitcherIndex(prev => (prev + 1) % curWindows.length);
+          if (e.shiftKey) {
+            setAppSwitcherIndex(prev => (prev - 1 + curWindows.length) % curWindows.length);
+          } else {
+            setAppSwitcherIndex(prev => (prev + 1) % curWindows.length);
+          }
         }
         return;
       }
 
-      // 3. Delete Selected Desktop Items
+      // 4. Delete Selected Desktop Items
       if (e.key === 'Delete' || (e.metaKey && e.key === 'Backspace')) {
         if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
         if (selectedDesktopIds.size === 1) {
@@ -699,7 +717,7 @@ export default function Desktop() {
         }
       }
 
-      // 4. Paste on Desktop (⌘V / Ctrl+V)
+      // 5. Paste on Desktop (⌘V / Ctrl+V)
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {
         if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
         handlePasteItems();
@@ -707,7 +725,7 @@ export default function Desktop() {
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.key === 'Alt' || e.key === 'Meta') {
+      if (e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') {
         if (showAppSwitcher) {
           setShowAppSwitcher(false);
           const curWindows = windows.filter(w => !w.serverId || w.serverId === activeConnectionId);
@@ -723,11 +741,11 @@ export default function Desktop() {
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('keyup', handleKeyUp, true);
     return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('keyup', handleKeyUp, true);
     };
   }, [windows, activeConnectionId, showAppSwitcher, appSwitcherIndex, selectedDesktopIds, allDesktopItems]);
 
@@ -929,6 +947,29 @@ export default function Desktop() {
 
       {/* App Launcher / Launchpad */}
       {showAppLauncher && <AppLauncher onClose={() => setShowAppLauncher(false)} />}
+
+      {/* App Switcher HUD (Ctrl+Tab / Alt+Tab) */}
+      <AppSwitcher
+        isOpen={showAppSwitcher}
+        windows={windows.filter(w => !w.serverId || w.serverId === activeConnectionId)}
+        selectedIndex={appSwitcherIndex}
+      />
+
+      {/* Mission Control / Exposé (Ctrl+F3 / F3) */}
+      <MissionControl
+        isOpen={showMissionControl}
+        onClose={() => setShowMissionControl(false)}
+        windows={windows.filter(w => !w.serverId || w.serverId === activeConnectionId)}
+        onSelectWindow={(winId) => {
+          restoreWindow(winId);
+          bringToFront(winId);
+          focusWindow(winId);
+          setShowMissionControl(false);
+        }}
+        onCloseWindow={(winId) => {
+          closeWindow(winId);
+        }}
+      />
     </div>
   );
 }
