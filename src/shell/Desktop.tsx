@@ -19,6 +19,7 @@ import DesktopIconGrid from './desktop/DesktopIconGrid';
 import DesktopActionModal, { DesktopActionType } from './desktop/DesktopActionModal';
 import AppSwitcher from './desktop/AppSwitcher';
 import MissionControl from './desktop/MissionControl';
+import { ensureServerDirectories } from '../lib/server-init';
 
 import { useWindowManager } from '../lib/hooks/useWindowManager';
 import { 
@@ -130,86 +131,12 @@ export default function Desktop() {
   const activeWallpaperItem = WALLPAPERS.find(w => w.id === wallpaper) || WALLPAPERS[0];
   const activeWallpaperUrl = isCustomWallpaper ? wallpaper : activeWallpaperItem.url;
 
-  // Initialize server directories on login: ~/.sshdesktop, ~/Desktop, ~/Downloads, ~/Documents
-  useEffect(() => {
-    if (!activeConnectionId) return;
-    const initServerDirectories = async () => {
-      try {
-        const cmd = `mkdir -p "${userHome}/.sshdesktop" "${userHome}/Desktop" "${userHome}/Downloads" "${userHome}/Documents" "${userHome}/.sshdesktop/wallpapers"`;
-        await sshExec(activeConnectionId, cmd).catch(() => {});
-
-        // Hydrate settings if ~/.sshdesktop/settings.json exists (with fallback to ~/.clouddesk)
-        try {
-          let configJson = await sftpReadTextFile(activeConnectionId, `${userHome}/.sshdesktop/settings.json`).catch(() => '');
-          if (!configJson) {
-            configJson = await sftpReadTextFile(activeConnectionId, `${userHome}/.clouddesk/settings.json`).catch(() => '');
-          }
-          if (configJson) {
-            const parsed = JSON.parse(configJson);
-            if (parsed.wallpaper && !isCustomWallpaper && parsed.wallpaper !== wallpaper) {
-              updateSettings({ wallpaper: parsed.wallpaper });
-            }
-            if (parsed.dock_position || parsed.dockPosition) {
-              updateSettings({ dockPosition: parsed.dock_position || parsed.dockPosition });
-            }
-            if (parsed.auto_hide_dock !== undefined || parsed.autoHideDock !== undefined) {
-              updateSettings({ autoHideDock: parsed.auto_hide_dock ?? parsed.autoHideDock });
-            }
-            if (parsed.terminal_font_size || parsed.terminalFontSize) {
-              updateSettings({ terminalFontSize: parsed.terminal_font_size || parsed.terminalFontSize });
-            }
-            if (parsed.theme && parsed.theme !== theme) {
-              updateSettings({ theme: parsed.theme });
-            }
-            if (parsed.desktop_icon_size || parsed.desktopIconSize) {
-              updateSettings({ desktopIconSize: parsed.desktop_icon_size || parsed.desktopIconSize });
-            }
-            if (parsed.icon_positions && Object.keys(parsed.icon_positions).length > 0) {
-              setIconPositions(prev => ({ ...parsed.icon_positions, ...prev }));
-            }
-            if (parsed.sticky_notes && !stickyNoteContent) {
-              setStickyNoteContent(parsed.sticky_notes);
-            }
-          }
-        } catch {}
-
-        // Hydrate stickies from ~/.sshdesktop/stickies.txt (with fallback to ~/.clouddesk)
-        try {
-          let stickiesTxt = await sftpReadTextFile(activeConnectionId, `${userHome}/.sshdesktop/stickies.txt`).catch(() => '');
-          if (!stickiesTxt) {
-            stickiesTxt = await sftpReadTextFile(activeConnectionId, `${userHome}/.clouddesk/stickies.txt`).catch(() => '');
-          }
-          if (stickiesTxt && stickiesTxt.trim().length > 0) {
-            setStickyNoteContent(stickiesTxt);
-            localStorage.setItem('sshdesktop_desktop_stickies', stickiesTxt);
-          }
-        } catch {}
-
-        // Save active settings to server ~/.sshdesktop/settings.json
-        const currentPayload = {
-          user: username,
-          theme,
-          wallpaper,
-          dockPosition: useSettingsStore.getState().dockPosition,
-          autoHideDock: useSettingsStore.getState().autoHideDock,
-          terminalFontSize: useSettingsStore.getState().terminalFontSize,
-          desktopIconSize: useSettingsStore.getState().desktopIconSize,
-          showHiddenFiles: useSettingsStore.getState().showHiddenFiles,
-          sticky_notes: stickyNoteContent,
-          updated_at: new Date().toISOString(),
-          client: 'SSH Desktop macOS Shell'
-        };
-        await sftpWriteTextFile(activeConnectionId, `${userHome}/.sshdesktop/settings.json`, JSON.stringify(currentPayload, null, 2)).catch(() => {});
-      } catch (err) {
-        console.warn('Server initialization notice:', err);
-      }
-    };
-    initServerDirectories();
-  }, [activeConnectionId, username]);
-
   // Load Remote Files strictly from ~/Desktop (Never list home root ~ so dotfiles & cache don't appear!)
   const loadDesktopFolder = useCallback(async () => {
-    if (!activeConnectionId) return;
+    if (!activeConnectionId || !userHome) {
+      setDesktopFolderItems([]);
+      return;
+    }
     try {
       const desktopDir = `${userHome}/Desktop`;
       let entries = await sftpListDir(activeConnectionId, desktopDir).catch(async () => {
@@ -255,6 +182,42 @@ export default function Desktop() {
       setDesktopFolderItems([]);
     }
   }, [activeConnectionId, userHome]);
+
+  // Initialize server directories on login: ~/.sshdesktop, ~/Desktop, ~/Downloads, ~/Documents
+  useEffect(() => {
+    if (!activeConnectionId || !userHome) return;
+    setDesktopFolderItems([]);
+    const initServer = async () => {
+      try {
+        await ensureServerDirectories(activeConnectionId, userHome);
+
+        // Hydrate icon positions if ~/.sshdesktop/icon_positions.json exists
+        try {
+          const iconJson = await sftpReadTextFile(activeConnectionId, `${userHome}/.sshdesktop/icon_positions.json`).catch(() => '');
+          if (iconJson) {
+            const parsed = JSON.parse(iconJson);
+            if (parsed && typeof parsed === 'object') {
+              setIconPositions(prev => ({ ...parsed, ...prev }));
+            }
+          }
+        } catch {}
+
+        // Hydrate stickies from ~/.sshdesktop/stickies.txt
+        try {
+          const stickiesTxt = await sftpReadTextFile(activeConnectionId, `${userHome}/.sshdesktop/stickies.txt`).catch(() => '');
+          if (stickiesTxt && stickiesTxt.trim().length > 0) {
+            setStickyNoteContent(stickiesTxt);
+            localStorage.setItem('sshdesktop_desktop_stickies', stickiesTxt);
+          }
+        } catch {}
+
+        loadDesktopFolder();
+      } catch (err) {
+        console.warn('Server initialization notice:', err);
+      }
+    };
+    initServer();
+  }, [activeConnectionId, userHome, loadDesktopFolder]);
 
   useEffect(() => {
     loadDesktopFolder();

@@ -7,11 +7,13 @@ import {
   storeSaveConnection, storeDeleteConnection, storeListConnections,
   sshGetUserPrivilege
 } from './tauri-bridge';
+import { ensureServerDirectories } from './server-init';
 
 interface ConnectionState {
   connections: SavedConnection[];
   activeConnectionId: string | null;
   userPrivilege: UserPrivilegeInfo | null;
+  userPrivileges: Record<string, UserPrivilegeInfo>;
   connectedServers: Map<string, { id: string; name: string; host: string; status: string }>;
   isDisconnected: boolean;
   disconnectReason: string | null;
@@ -19,7 +21,7 @@ interface ConnectionState {
   reconnectAttempts: number;
   reconnectError: string | null;
   disconnectedServerId: string | null;
-  setUserPrivilege: (priv: UserPrivilegeInfo | null) => void;
+  setUserPrivilege: (priv: UserPrivilegeInfo | null, connId?: string) => void;
   fetchUserPrivilege: (connId?: string) => Promise<UserPrivilegeInfo>;
   addConnection: (conn: SavedConnection) => void;
   updateConnection: (id: string, updates: Partial<SavedConnection>) => void;
@@ -42,6 +44,7 @@ export const useConnectionStore = create<ConnectionState>()(
       connections: [],
       activeConnectionId: null,
       userPrivilege: null,
+      userPrivileges: {},
       connectedServers: new Map(),
       isDisconnected: false,
       disconnectReason: null,
@@ -49,25 +52,44 @@ export const useConnectionStore = create<ConnectionState>()(
       reconnectAttempts: 0,
       reconnectError: null,
       disconnectedServerId: null,
-      setUserPrivilege: (priv) => set({ userPrivilege: priv }),
+      setUserPrivilege: (priv, connId) => {
+        const targetId = connId || get().activeConnectionId;
+        if (!targetId) {
+          set({ userPrivilege: priv });
+          return;
+        }
+        set(state => ({
+          userPrivileges: priv ? { ...state.userPrivileges, [targetId]: priv } : state.userPrivileges,
+          userPrivilege: state.activeConnectionId === targetId ? priv : state.userPrivilege,
+        }));
+      },
       fetchUserPrivilege: async (connId) => {
         const id = connId || get().activeConnectionId || 'default';
         try {
           const priv = await sshGetUserPrivilege(id);
-          set({ userPrivilege: priv });
+          set(state => ({
+            userPrivileges: { ...state.userPrivileges, [id]: priv },
+            userPrivilege: state.activeConnectionId === id ? priv : state.userPrivilege,
+          }));
           return priv;
         } catch (err) {
           console.warn('Failed to fetch user privilege:', err);
+          const conn = get().connections.find(c => c.id === id);
+          const uname = conn?.username || 'root';
           const fallback: UserPrivilegeInfo = {
-            username: 'root',
-            uid: 0,
-            gid: 0,
-            home_dir: '/root',
-            is_root: true,
-            has_sudo: true,
-            sudo_type: 'root',
-            groups: ['root'],
+            username: uname,
+            uid: uname === 'root' ? 0 : 1000,
+            gid: uname === 'root' ? 0 : 1000,
+            home_dir: uname === 'root' ? '/root' : `/home/${uname}`,
+            is_root: uname === 'root',
+            has_sudo: uname === 'root',
+            sudo_type: uname === 'root' ? 'root' : 'none',
+            groups: [uname],
           };
+          set(state => ({
+            userPrivileges: { ...state.userPrivileges, [id]: fallback },
+            userPrivilege: state.activeConnectionId === id ? fallback : state.userPrivilege,
+          }));
           return fallback;
         }
       },
@@ -133,7 +155,25 @@ export const useConnectionStore = create<ConnectionState>()(
           disconnectedServerId: state.disconnectedServerId === id ? null : state.disconnectedServerId
         }));
       },
-      setActive: (id) => set({ activeConnectionId: id }),
+      setActive: (id) => {
+        if (!id) {
+          set({ activeConnectionId: null, userPrivilege: null });
+          return;
+        }
+        const cachedPriv = get().userPrivileges[id] || null;
+        set({
+          activeConnectionId: id,
+          userPrivilege: cachedPriv,
+          isDisconnected: false,
+          disconnectReason: null,
+          disconnectedServerId: null,
+        });
+        get().fetchUserPrivilege(id).then(priv => {
+          if (priv?.home_dir) {
+            ensureServerDirectories(id, priv.home_dir);
+          }
+        }).catch(() => {});
+      },
       setDisconnected: (isDisconnected, reason, serverId) => {
         const targetId = serverId || get().activeConnectionId || get().disconnectedServerId;
         set({
@@ -214,9 +254,15 @@ export const useConnectionStore = create<ConnectionState>()(
         // Only mark connected when backend verification succeeds
         const newMap = new Map(get().connectedServers);
         newMap.set(id, { id, name: target.name || target.host, host: target.host, status: 'connected' });
+
+        // Resolve user privilege immediately for this specific server
+        const priv = await get().fetchUserPrivilege(id).catch(() => null);
+        const homeDir = priv?.home_dir || (target.username === 'root' ? '/root' : `/home/${target.username}`);
+
         set({
           connectedServers: newMap,
           activeConnectionId: id,
+          userPrivilege: priv,
           isDisconnected: false,
           disconnectReason: null,
           disconnectedServerId: null,
@@ -225,8 +271,11 @@ export const useConnectionStore = create<ConnectionState>()(
           reconnectError: null,
         });
 
-        // Eagerly resolve and cache remote user privileges (root, sudoers, standard user)
-        get().fetchUserPrivilege(id).catch(() => {});
+        // Ensure ~/.sshdesktop, ~/Desktop, ~/Downloads, ~/Documents exist on server
+        await ensureServerDirectories(id, homeDir).catch(() => {});
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
+        }
       },
       reconnect: async (targetServerId) => {
         const targetId = targetServerId || get().disconnectedServerId || get().activeConnectionId;
@@ -251,10 +300,17 @@ export const useConnectionStore = create<ConnectionState>()(
         } catch {}
         const newMap = new Map(get().connectedServers);
         newMap.delete(id);
+        const nextPrivs = { ...get().userPrivileges };
+        delete nextPrivs[id];
+        const remaining = Array.from(newMap.keys());
+        const nextActiveId = get().activeConnectionId === id ? (remaining[0] || null) : get().activeConnectionId;
+        const nextPriv = nextActiveId ? nextPrivs[nextActiveId] || null : null;
+
         set({
           connectedServers: newMap,
-          activeConnectionId: get().activeConnectionId === id ? null : get().activeConnectionId,
-          userPrivilege: get().activeConnectionId === id ? null : get().userPrivilege,
+          userPrivileges: nextPrivs,
+          activeConnectionId: nextActiveId,
+          userPrivilege: nextPriv,
           isDisconnected: false,
           disconnectReason: null,
           disconnectedServerId: null,
@@ -269,13 +325,18 @@ export const useConnectionStore = create<ConnectionState>()(
         } catch {}
         const newMap = new Map(get().connectedServers);
         newMap.delete(id);
+        const nextPrivs = { ...get().userPrivileges };
+        delete nextPrivs[id];
 
         const remainingConnected = Array.from(newMap.keys());
         const nextActiveId = remainingConnected.length > 0 ? remainingConnected[0] : null;
+        const nextPriv = nextActiveId ? nextPrivs[nextActiveId] || null : null;
 
         set({
           connectedServers: newMap,
+          userPrivileges: nextPrivs,
           activeConnectionId: nextActiveId,
+          userPrivilege: nextPriv,
           isDisconnected: false,
           disconnectReason: null,
           disconnectedServerId: null,
@@ -295,16 +356,19 @@ export const useConnectionStore = create<ConnectionState>()(
         if (failedId && failedId !== targetId) {
           newMap.delete(failedId);
         }
+        const cachedPriv = get().userPrivileges[targetId] || null;
         set({
           isDisconnected: false,
           disconnectReason: null,
           disconnectedServerId: null,
           activeConnectionId: targetId,
+          userPrivilege: cachedPriv,
           connectedServers: newMap,
           isReconnecting: false,
           reconnectAttempts: 0,
           reconnectError: null,
         });
+        get().fetchUserPrivilege(targetId).catch(() => {});
         const targetConn = get().connections.find(c => c.id === targetId);
         if (targetConn && !newMap.has(targetId)) {
           try {
