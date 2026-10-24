@@ -1,8 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { Palette, Plus, Check, Image as ImageIcon, Sparkles, X, Globe, Upload } from 'lucide-react';
 import { WALLPAPERS, WallpaperItem } from './types';
-import { useSettingsStore, useConnectionStore } from '../../lib/store';
-import { sftpMkdir, sftpWriteTextFile, sftpWriteFile } from '../../lib/tauri-bridge';
+import { useSettingsStore } from '../../lib/store';
 
 interface WallpaperModalProps {
   isOpen: boolean;
@@ -11,17 +10,12 @@ interface WallpaperModalProps {
 
 export default function WallpaperModal({ isOpen, onClose }: WallpaperModalProps) {
   const { wallpaper, updateSettings, theme } = useSettingsStore();
-  const { activeConnectionId, connections } = useConnectionStore();
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [customUrlInput, setCustomUrlInput] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   if (!isOpen) return null;
-
-  const activeServer = connections.find(c => c.id === activeConnectionId);
-  const username = activeServer?.username || 'root';
-  const userHome = username === 'root' ? '/root' : `/home/${username}`;
 
   const categories = ['All', 'macOS Official', 'Nature 4K', 'Cyberpunk & Sci-Fi 4K', 'Minimal & Dark 4K', 'Anime & Artistic 4K'];
 
@@ -31,33 +25,16 @@ export default function WallpaperModal({ isOpen, onClose }: WallpaperModalProps)
 
   const isCustom = wallpaper?.startsWith('data:') || wallpaper?.startsWith('http') || wallpaper?.startsWith('blob:');
 
-  const handleSelectWallpaper = async (wpId: string) => {
+  const handleSelectWallpaper = (wpId: string) => {
     updateSettings({ wallpaper: wpId });
-    // Persist to server ~/.sshdesktop/settings.json
-    if (activeConnectionId) {
-      try {
-        const configDir = `${userHome}/.sshdesktop`;
-        await sftpMkdir(activeConnectionId, configDir).catch(() => {});
-        const patch = { wallpaper: wpId, updated_at: new Date().toISOString() };
-        await sftpWriteTextFile(activeConnectionId, `${configDir}/settings_wallpaper.json`, JSON.stringify(patch, null, 2)).catch(() => {});
-      } catch {}
-    }
   };
 
-  const handleApplyCustomUrl = async (e: React.FormEvent) => {
+  const handleApplyCustomUrl = (e: React.FormEvent) => {
     e.preventDefault();
     const url = customUrlInput.trim();
     if (!url) return;
     updateSettings({ wallpaper: url });
     setCustomUrlInput('');
-    if (activeConnectionId) {
-      try {
-        const configDir = `${userHome}/.sshdesktop`;
-        await sftpMkdir(activeConnectionId, configDir).catch(() => {});
-        const patch = { wallpaper: url, updated_at: new Date().toISOString() };
-        await sftpWriteTextFile(activeConnectionId, `${configDir}/settings_wallpaper.json`, JSON.stringify(patch, null, 2)).catch(() => {});
-      } catch {}
-    }
   };
 
   const handleCustomFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -66,29 +43,10 @@ export default function WallpaperModal({ isOpen, onClose }: WallpaperModalProps)
     setIsUploading(true);
 
     const reader = new FileReader();
-    reader.onload = async (event) => {
+    reader.onload = (event) => {
       const dataUrl = event.target?.result;
       if (typeof dataUrl === 'string') {
         updateSettings({ wallpaper: dataUrl });
-
-        // Save wallpaper image data directly to ~/.sshdesktop/wallpapers/
-        if (activeConnectionId) {
-          try {
-            const configDir = `${userHome}/.sshdesktop`;
-            const wpDir = `${configDir}/wallpapers`;
-            await sftpMkdir(activeConnectionId, configDir).catch(() => {});
-            await sftpMkdir(activeConnectionId, wpDir).catch(() => {});
-            const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-            await sftpWriteTextFile(activeConnectionId, `${wpDir}/current_wallpaper.txt`, dataUrl).catch(() => {});
-            await sftpWriteTextFile(activeConnectionId, `${configDir}/settings_wallpaper.json`, JSON.stringify({
-              wallpaper: dataUrl,
-              filename: safeName,
-              updated_at: new Date().toISOString()
-            }, null, 2)).catch(() => {});
-          } catch (err) {
-            console.warn('Failed to save wallpaper to server:', err);
-          }
-        }
       }
       setIsUploading(false);
     };
@@ -114,7 +72,7 @@ export default function WallpaperModal({ isOpen, onClose }: WallpaperModalProps)
                 macOS 4K Ultra-HD Wallpapers
               </h3>
               <p className={`text-xs ${isLight ? 'text-slate-500' : 'text-gray-400'}`}>
-                Authentic Apple 4K imagery and custom photo upload synced to server ~/.sshdesktop
+                Authentic Apple 4K dynamic desktop wallpapers and custom background photos
               </p>
             </div>
           </div>
@@ -138,7 +96,7 @@ export default function WallpaperModal({ isOpen, onClose }: WallpaperModalProps)
             className="px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center space-x-2 shadow-lg transition-all cursor-pointer disabled:opacity-50"
           >
             <Upload className="w-4 h-4" />
-            <span>{isUploading ? 'Uploading to Server...' : 'Upload Wallpaper to Server'}</span>
+            <span>{isUploading ? 'Applying Wallpaper...' : 'Upload Custom Image'}</span>
           </button>
 
           <form onSubmit={handleApplyCustomUrl} className="flex items-center space-x-2 flex-1 max-w-md">

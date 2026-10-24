@@ -306,11 +306,14 @@ export default function Taskbar({
                 <div
                   key={c.id}
                   onClick={async () => {
+                    if (c.id === activeConnectionId) return;
                     setActive(c.id);
-                    try {
-                      await connect(c.id, c);
-                    } catch (e) {
-                      console.warn('Switch server connect notice:', e);
+                    if (!connectedServers?.has(c.id)) {
+                      try {
+                        await connect(c.id, c);
+                      } catch (e) {
+                        console.warn('Switch server connect notice:', e);
+                      }
                     }
                   }}
                   className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-sans transition-all cursor-pointer select-none group shrink-0 ${
