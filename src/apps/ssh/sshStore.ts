@@ -139,6 +139,7 @@ interface SshStoreState {
   markKeyPushedToServer: (keyId: string, serverHost: string) => void;
 
   // Tunnel Actions
+  setTunnels: (tunnels: SshTunnelRule[]) => void;
   addTunnel: (tunnel: SshTunnelRule) => void;
   updateTunnel: (id: string, updates: Partial<SshTunnelRule>) => void;
   removeTunnel: (id: string) => void;
@@ -187,6 +188,7 @@ export const useSshStore = create<SshStoreState>()(
         })
       })),
 
+      setTunnels: (tunnels) => set({ tunnels }),
       addTunnel: (tunnel) => set((s) => ({ tunnels: [tunnel, ...s.tunnels.filter(t => t.id !== tunnel.id)] })),
       updateTunnel: (id, updates) => set((s) => ({
         tunnels: s.tunnels.map(t => t.id === id ? { ...t, ...updates } : t)
