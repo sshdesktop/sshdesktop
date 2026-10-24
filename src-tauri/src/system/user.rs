@@ -132,35 +132,117 @@ pub async fn user_add(
     }
 
     let sh = shell.unwrap_or_else(|| "/bin/bash".into());
-    let mut cmd = format!("useradd -m -s '{}' '{}'", sh, username);
-
-    if let Some(grps) = &groups {
-        if !grps.is_empty() {
-            cmd = format!("useradd -m -s '{}' -G '{}' '{}'", sh, grps.join(","), username);
-        }
+    let mut effective_groups = groups.unwrap_or_default();
+    // If sudo group was requested, add wheel as well for cross-distribution compatibility (Ubuntu/Debian vs RHEL/CentOS/Fedora/Arch/Amazon Linux)
+    if effective_groups.iter().any(|g| g == "sudo") && !effective_groups.iter().any(|g| g == "wheel") {
+        effective_groups.push("wheel".to_string());
     }
+
+    let grp_arg = if !effective_groups.is_empty() {
+        format!(" -G '{}'", effective_groups.join(","))
+    } else {
+        String::new()
+    };
+
+    let cmd = if let Some(ref pwd) = password {
+        if !pwd.trim().is_empty() {
+            let escaped_pwd = pwd.replace('\'', r"'\''");
+            format!(
+                "HASH=$(openssl passwd -6 '{pwd}' 2>/dev/null || openssl passwd -1 '{pwd}' 2>/dev/null); \
+                 if [ -n \"$HASH\" ]; then \
+                     useradd -m -p \"$HASH\" -s '{sh}'{grp_arg} '{username}' 2>&1 || (useradd -m -s '{sh}'{grp_arg} '{username}' 2>&1 && usermod -p \"$HASH\" '{username}' 2>&1); \
+                 else \
+                     useradd -m -s '{sh}'{grp_arg} '{username}' 2>&1 && echo '{username}:{pwd}' | chpasswd 2>&1; \
+                 fi",
+                pwd = escaped_pwd,
+                sh = sh,
+                grp_arg = grp_arg,
+                username = username
+            )
+        } else {
+            format!("useradd -m -s '{}'{} '{}' 2>&1", sh, grp_arg, username)
+        }
+    } else {
+        format!("useradd -m -s '{}'{} '{}' 2>&1", sh, grp_arg, username)
+    };
 
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
     if code != 0 && !stdout.is_empty() {
-        return Err(format!("useradd failed: {}", stdout.trim()));
-    }
-
-    // Set password if provided
-    if let Some(pwd) = &password {
-        if !pwd.is_empty() {
-            let escaped_pwd = pwd.replace('\'', r"'\''");
-            let pwd_cmd = format!("echo '{}:{}' | chpasswd 2>&1", username, escaped_pwd);
-            let (pwd_out, pwd_code) = run_cmd_priv(&state, &conn_id, &pwd_cmd).await;
-            if pwd_code != 0 && !pwd_out.is_empty() {
-                log::warn!("SSH Desktop: chpasswd warning for {}: {}", username, pwd_out.trim());
-            }
-        }
+        return Err(format!("Failed to create user: {}", stdout.trim()));
     }
 
     log::info!("SSH Desktop: Added user {}", username);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn user_set_password(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    username: String,
+    password: String,
+) -> Result<(), String> {
+    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid username.".into());
+    }
+    if password.is_empty() {
+        return Err("Password cannot be empty.".into());
+    }
+
+    let escaped_pwd = password.replace('\'', r"'\''");
+    let cmd = format!(
+        "HASH=$(openssl passwd -6 '{pwd}' 2>/dev/null || openssl passwd -1 '{pwd}' 2>/dev/null); \
+         if [ -n \"$HASH\" ]; then \
+             usermod -p \"$HASH\" '{username}' 2>&1; \
+         else \
+             echo '{username}:{pwd}' | chpasswd 2>&1; \
+         fi",
+        pwd = escaped_pwd,
+        username = username
+    );
+
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 && !stdout.is_empty() {
+        return Err(format!("Failed to set password: {}", stdout.trim()));
+    }
+    log::info!("SSH Desktop: Changed password for user {}", username);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn user_toggle_sudo(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    username: String,
+    grant: bool,
+) -> Result<(), String> {
+    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+        return Err("Invalid username.".into());
+    }
+    if username == "root" {
+        return Err("Cannot modify privileges for root user.".into());
+    }
+
+    let cmd = if grant {
+        format!("usermod -aG sudo '{username}' 2>&1 || usermod -aG wheel '{username}' 2>&1")
+    } else {
+        format!("gpasswd -d '{username}' sudo 2>&1; gpasswd -d '{username}' wheel 2>&1; deluser '{username}' sudo 2>/dev/null; deluser '{username}' wheel 2>/dev/null; true")
+    };
+
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 && !stdout.is_empty() && !stdout.contains("is not a member") {
+        return Err(format!("Failed to update administrative privileges: {}", stdout.trim()));
+    }
+    log::info!("SSH Desktop: Toggled sudo for {} (grant={})", username, grant);
     Ok(())
 }
 
