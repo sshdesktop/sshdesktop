@@ -26,6 +26,7 @@ interface ConnectionState {
   setActive: (id: string | null) => void;
   setDisconnected: (isDisconnected: boolean, reason?: string | null, serverId?: string | null) => void;
   triggerDisconnectAlert: (reason?: string, serverId?: string | null) => void;
+  resetReconnectAttempts: () => void;
   connect: (id: string, overrideConfig?: Partial<SavedConnection>) => Promise<void>;
   reconnect: (targetServerId?: string) => Promise<void>;
   disconnect: (id: string) => Promise<void>;
@@ -139,6 +140,7 @@ export const useConnectionStore = create<ConnectionState>()(
           disconnectReason: reason || (isDisconnected ? 'Connection to remote server was lost or stopped.' : null),
           disconnectedServerId: isDisconnected ? (targetId || null) : null,
           isReconnecting: false,
+          reconnectAttempts: isDisconnected ? 0 : get().reconnectAttempts,
           reconnectError: null,
         });
       },
@@ -154,8 +156,12 @@ export const useConnectionStore = create<ConnectionState>()(
           disconnectedServerId: targetId || null,
           connectedServers: newMap,
           isReconnecting: false,
+          reconnectAttempts: 0,
           reconnectError: null,
         });
+      },
+      resetReconnectAttempts: () => {
+        set({ reconnectAttempts: 0, reconnectError: null });
       },
       connect: async (id, overrideConfig) => {
         const conn = get().connections.find(c => c.id === id);

@@ -7,6 +7,8 @@ import {
 import { useConnectionStore } from '../lib/store';
 import { sshTestConnection } from '../lib/tauri-bridge';
 
+const MAX_RECONNECT_ATTEMPTS = 3;
+
 export default function DisconnectAlertModal() {
   const { 
     isDisconnected, 
@@ -16,6 +18,7 @@ export default function DisconnectAlertModal() {
     reconnectAttempts, 
     reconnectError, 
     reconnect, 
+    resetReconnectAttempts,
     closeServer,
     switchToOtherServer,
     returnToServersList, 
@@ -45,7 +48,7 @@ export default function DisconnectAlertModal() {
   const otherConnected = connections.filter(c => c.id !== targetServerId && connectedServers.has(c.id));
   const otherSaved = connections.filter(c => c.id !== targetServerId && !connectedServers.has(c.id));
 
-  // Auto-reconnect countdown timer
+  // Auto-reconnect countdown timer (Stops strictly after MAX_RECONNECT_ATTEMPTS = 3)
   useEffect(() => {
     if (!isDisconnected) {
       setCountdown(8);
@@ -55,7 +58,8 @@ export default function DisconnectAlertModal() {
       return;
     }
 
-    if (isReconnecting || isAutoPaused) {
+    // Stop timer if reconnecting, user paused, or maximum attempts (3) reached
+    if (isReconnecting || isAutoPaused || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
       if (timerRef.current) clearInterval(timerRef.current);
       return;
     }
@@ -64,7 +68,7 @@ export default function DisconnectAlertModal() {
       setCountdown(prev => {
         if (prev <= 1) {
           clearInterval(timerRef.current!);
-          handleManualReconnect();
+          handleAutoReconnect();
           return 8;
         }
         return prev - 1;
@@ -74,16 +78,31 @@ export default function DisconnectAlertModal() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [isDisconnected, isReconnecting, isAutoPaused]);
+  }, [isDisconnected, isReconnecting, isAutoPaused, reconnectAttempts]);
 
-  const handleManualReconnect = useCallback(async () => {
+  const handleAutoReconnect = useCallback(async () => {
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      return;
+    }
     try {
       await reconnect(targetServerId || undefined);
     } catch {
-      // Reconnect failed, reset countdown to 10s for next auto-retry
+      // Reconnect failed, reset countdown to 10s for next auto-retry if under limit
       setCountdown(10);
     }
-  }, [reconnect, targetServerId]);
+  }, [reconnect, targetServerId, reconnectAttempts]);
+
+  const handleManualReconnect = useCallback(async () => {
+    // If limit was reached, reset attempts so user gets another clean cycle of attempts on explicit manual retry
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      resetReconnectAttempts();
+    }
+    try {
+      await reconnect(targetServerId || undefined);
+    } catch {
+      setCountdown(10);
+    }
+  }, [reconnect, resetReconnectAttempts, targetServerId, reconnectAttempts]);
 
   // Test reachability probe
   const handleTestProbe = async () => {
@@ -253,9 +272,14 @@ export default function DisconnectAlertModal() {
           {/* Reconnection Error if previous attempt failed */}
           {reconnectError && (
             <div className="w-full bg-rose-500/10 border border-rose-500/20 rounded-2xl p-3 text-left text-xs text-rose-300 space-y-1 animate-in fade-in">
-              <div className="font-semibold text-[11px] text-rose-400 flex items-center space-x-1">
-                <X className="w-3 h-3" />
-                <span>Reconnection Attempt #{reconnectAttempts} Failed</span>
+              <div className="font-semibold text-[11px] text-rose-400 flex items-center justify-between">
+                <div className="flex items-center space-x-1">
+                  <X className="w-3 h-3" />
+                  <span>Reconnection Attempt #{reconnectAttempts} of {MAX_RECONNECT_ATTEMPTS} Failed</span>
+                </div>
+                <span className="text-[10px] font-mono text-rose-300/80 bg-rose-500/20 px-1.5 py-0.5 rounded">
+                  {reconnectAttempts >= MAX_RECONNECT_ATTEMPTS ? 'Max 3 reached' : `Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`}
+                </span>
               </div>
               <p className="text-[11px] font-mono opacity-90 truncate">
                 {reconnectError}
@@ -263,33 +287,53 @@ export default function DisconnectAlertModal() {
             </div>
           )}
 
-          {/* Auto-reconnect Countdown Bar */}
-          {!reconnectError && !isReconnecting && (
-            <div className="w-full bg-white/[0.02] border border-white/[0.06] rounded-2xl p-3 space-y-2">
-              <div className="flex items-center justify-between text-xs text-gray-400">
-                <span className="flex items-center space-x-1.5">
-                  <span className="inline-block w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
-                  <span>
-                    {isAutoPaused ? 'Auto-reconnect paused' : `Auto-reconnecting in ${countdown}s...`}
-                  </span>
+          {/* Auto-reconnect Stopped Banner (Max 3 attempts reached) */}
+          {reconnectAttempts >= MAX_RECONNECT_ATTEMPTS ? (
+            <div className="w-full bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3.5 text-left space-y-1.5 animate-in fade-in">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2 text-amber-400 font-semibold text-xs">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>Auto-Reconnect Stopped (Limit: {MAX_RECONNECT_ATTEMPTS}/{MAX_RECONNECT_ATTEMPTS})</span>
+                </div>
+                <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  Stopped
                 </span>
-                <button
-                  onClick={() => setIsAutoPaused(!isAutoPaused)}
-                  className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center space-x-1 px-1.5 py-0.5 rounded hover:bg-white/5 transition-colors"
-                >
-                  {isAutoPaused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
-                  <span>{isAutoPaused ? 'Resume' : 'Pause'}</span>
-                </button>
               </div>
-
-              {/* Progress bar */}
-              <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-1000 ease-linear rounded-full"
-                  style={{ width: `${Math.max(0, Math.min(100, (countdown / 8) * 100))}%` }}
-                />
-              </div>
+              <p className="text-xs text-gray-300 leading-relaxed font-sans">
+                Automatic reconnection stopped after {MAX_RECONNECT_ATTEMPTS} failed attempts to prevent connection flooding. Verify your server is online, or click <strong>Retry Reconnect</strong> to try again.
+              </p>
             </div>
+          ) : (
+            /* Auto-reconnect Countdown Bar (while attempts < 3) */
+            !isReconnecting && (
+              <div className="w-full bg-white/[0.02] border border-white/[0.06] rounded-2xl p-3 space-y-2">
+                <div className="flex items-center justify-between text-xs text-gray-400">
+                  <span className="flex items-center space-x-1.5">
+                    <span className="inline-block w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
+                    <span>
+                      {isAutoPaused 
+                        ? 'Auto-reconnect paused' 
+                        : `Auto-reconnecting (Attempt ${reconnectAttempts + 1} of ${MAX_RECONNECT_ATTEMPTS}) in ${countdown}s...`}
+                    </span>
+                  </span>
+                  <button
+                    onClick={() => setIsAutoPaused(!isAutoPaused)}
+                    className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center space-x-1 px-1.5 py-0.5 rounded hover:bg-white/5 transition-colors"
+                  >
+                    {isAutoPaused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
+                    <span>{isAutoPaused ? 'Resume' : 'Pause'}</span>
+                  </button>
+                </div>
+
+                {/* Progress bar */}
+                <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-1000 ease-linear rounded-full"
+                    style={{ width: `${Math.max(0, Math.min(100, (countdown / 8) * 100))}%` }}
+                  />
+                </div>
+              </div>
+            )
           )}
 
           {/* Reachability Probe Result */}
@@ -319,11 +363,20 @@ export default function DisconnectAlertModal() {
             <button
               onClick={handleManualReconnect}
               disabled={isReconnecting}
-              className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 active:scale-[0.98] text-white font-semibold text-xs shadow-lg shadow-blue-500/25 flex items-center justify-center space-x-2 transition-all disabled:opacity-60 disabled:pointer-events-none"
+              className={`w-full py-2.5 px-4 rounded-xl text-white font-semibold text-xs shadow-lg flex items-center justify-center space-x-2 transition-all disabled:opacity-60 disabled:pointer-events-none active:scale-[0.98] ${
+                reconnectAttempts >= MAX_RECONNECT_ATTEMPTS
+                  ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/25'
+                  : 'bg-blue-600 hover:bg-blue-500 shadow-blue-500/25'
+              }`}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isReconnecting ? 'animate-spin' : ''}`} />
               <span>
-                {isReconnecting ? 'Reconnecting to Server...' : `Reconnect to ${serverName}`}
+                {isReconnecting 
+                  ? 'Reconnecting to Server...' 
+                  : reconnectAttempts >= MAX_RECONNECT_ATTEMPTS
+                    ? `Retry Reconnect to ${serverName} (Manual)`
+                    : `Reconnect to ${serverName} (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`
+                }
               </span>
             </button>
 
