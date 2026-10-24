@@ -9,7 +9,8 @@ import {
 } from 'lucide-react';
 import { 
   userList, groupList, userAdd, userDelete, userLock, userUnlock, sshExec,
-  groupAdd, groupDelete, groupAddUser, groupRemoveUser, whoIsLoggedIn 
+  groupAdd, groupDelete, groupAddUser, groupRemoveUser, whoIsLoggedIn,
+  userSetPassword, userToggleSudo
 } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
@@ -121,6 +122,27 @@ export default function UserManager() {
   // Notification Toast
   const [notice, setNotice] = useState<{ text: string; isError: boolean } | null>(null);
   const [restrictedAction, setRestrictedAction] = useState<string | null>(null);
+
+  // Popup Window Error Alert Modal
+  const showErrorModal = useCallback((title: string, message: string) => {
+    setConfirmModal({
+      isOpen: true,
+      title,
+      icon: ShieldAlert,
+      confirmVariant: 'danger',
+      isAlertOnly: true,
+      confirmText: 'Dismiss',
+      onConfirm: () => setConfirmModal(null),
+      message: (
+        <div className="space-y-3 text-xs text-left">
+          <p className="text-gray-300 font-sans">An error occurred while executing this administrative action on the server:</p>
+          <div className="p-3 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-200 font-mono text-[11px] leading-relaxed break-words max-h-48 overflow-y-auto">
+            {message}
+          </div>
+        </div>
+      )
+    });
+  }, []);
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
   const { hasSudo, isRoot, username: currentUsername } = useUserPrivilege();
@@ -258,6 +280,7 @@ export default function UserManager() {
     } catch (err: any) {
       const msg = err?.message || String(err);
       setNotice({ text: `Failed to ${currentlyLocked ? 'unlock' : 'lock'} user '${username}': ${msg}`, isError: true });
+      showErrorModal(`Failed to ${currentlyLocked ? 'Unlock' : 'Lock'} User`, msg);
     } finally {
       setLockingUser(null);
     }
@@ -269,29 +292,24 @@ export default function UserManager() {
       return;
     }
     if (username === 'root') {
-      setNotice({ text: 'Root superuser always has full administrative privileges.', isError: true });
+      showErrorModal('Operation Restricted', 'Root superuser always has full administrative privileges.');
       return;
     }
     setTogglingSudoUser(username);
     try {
-      if (currentlySudo) {
-        const res = await sshExec(activeConnId, `sudo gpasswd -d '${username}' sudo 2>&1 || sudo gpasswd -d '${username}' wheel 2>&1`);
-        if (res.exit_code !== 0) {
-          throw new Error(res.stderr || res.stdout || 'Failed to revoke administrative privileges');
-        }
-        setNotice({ text: `Revoked sudo administrative privileges from '${username}'.`, isError: false });
-      } else {
-        const res = await sshExec(activeConnId, `sudo usermod -aG sudo '${username}' 2>&1 || sudo usermod -aG wheel '${username}' 2>&1`);
-        if (res.exit_code !== 0) {
-          throw new Error(res.stderr || res.stdout || 'Failed to grant administrative privileges');
-        }
-        setNotice({ text: `Granted sudo administrative privileges to '${username}'.`, isError: false });
-      }
+      await userToggleSudo(activeConnId, username, !currentlySudo);
+      setNotice({ 
+        text: currentlySudo 
+          ? `Revoked sudo administrative privileges from '${username}'.` 
+          : `Granted sudo administrative privileges to '${username}'.`, 
+        isError: false 
+      });
       setTimeout(() => setNotice(null), 4000);
       await loadData();
     } catch (err: any) {
       const msg = err?.message || String(err);
       setNotice({ text: `Failed to change administrative privileges for '${username}': ${msg}`, isError: true });
+      showErrorModal('Failed to Modify Administrative Privileges', msg);
     } finally {
       setTogglingSudoUser(null);
     }
@@ -350,6 +368,7 @@ export default function UserManager() {
         } catch (err: any) {
           const msg = err?.message || String(err);
           setNotice({ text: `Failed to delete user '${username}': ${msg}`, isError: true });
+          showErrorModal('Failed to Delete User', msg);
           setConfirmModal(prev => prev ? { ...prev, isExecuting: false } : null);
         }
       }
@@ -365,15 +384,10 @@ export default function UserManager() {
       await userAdd(
         activeConnId,
         newUser.username.trim(),
+        newUser.password.trim() || undefined,
         newUser.shell,
-        newUser.sudo ? ['sudo'] : []
+        newUser.sudo ? ['sudo', 'wheel'] : []
       );
-      if (newUser.password.trim()) {
-        const res = await sshExec(activeConnId, `echo "${newUser.username.trim()}:${newUser.password.trim()}" | sudo chpasswd 2>&1`);
-        if (res.exit_code !== 0) {
-          throw new Error(res.stderr || res.stdout || 'Password initialization failed');
-        }
-      }
       setShowAddModal(false);
       setAddUserError(null);
       const createdUsername = newUser.username.trim();
@@ -386,6 +400,7 @@ export default function UserManager() {
       const msg = err?.message || String(err);
       setAddUserError(msg);
       setNotice({ text: `Failed to create user: ${msg}`, isError: true });
+      showErrorModal('Failed to Create User', msg);
     } finally {
       setIsAddingUser(false);
     }
@@ -410,6 +425,7 @@ export default function UserManager() {
       const msg = err?.message || String(err);
       setAddGroupError(msg);
       setNotice({ text: `Failed to create group: ${msg}`, isError: true });
+      showErrorModal('Failed to Create Group', msg);
     } finally {
       setIsAddingGroup(false);
     }
@@ -425,10 +441,7 @@ export default function UserManager() {
     setIsSubmittingPassword(true);
     setPasswordStatus({ text: 'Applying new password...' });
     try {
-      const res = await sshExec(activeConnId, `echo "${passwordModalUser}:${newPassword}" | sudo chpasswd 2>&1`);
-      if (res.exit_code !== 0) {
-        throw new Error(res.stderr || res.stdout || 'Password change failed');
-      }
+      await userSetPassword(activeConnId, passwordModalUser, newPassword);
       setPasswordStatus({ text: 'Password updated successfully!' });
       setNotice({ text: `Password for '${passwordModalUser}' updated successfully!`, isError: false });
       setTimeout(() => {
@@ -441,6 +454,7 @@ export default function UserManager() {
       const msg = err?.message || String(err);
       setPasswordStatus({ text: `Failed: ${msg}`, isError: true });
       setNotice({ text: `Failed to update password: ${msg}`, isError: true });
+      showErrorModal('Failed to Change Password', msg);
       setIsSubmittingPassword(false);
     }
   };
@@ -463,6 +477,7 @@ export default function UserManager() {
       const msg = err?.message || String(err);
       setGroupStatus(`Failed: ${msg}`);
       setNotice({ text: `Failed to join group: ${msg}`, isError: true });
+      showErrorModal('Failed to Join Group', msg);
     }
   };
 
@@ -484,6 +499,7 @@ export default function UserManager() {
       const msg = err?.message || String(err);
       setGroupStatus(`Failed: ${msg}`);
       setNotice({ text: `Failed to remove from group: ${msg}`, isError: true });
+      showErrorModal('Failed to Remove from Group', msg);
     }
   };
 
@@ -587,6 +603,7 @@ export default function UserManager() {
         } catch (err: any) {
           const msg = err?.message || String(err);
           setNotice({ text: `Failed to delete group '${grp.name}': ${msg}`, isError: true });
+          showErrorModal('Failed to Delete Group', msg);
           setConfirmModal(prev => prev ? { ...prev, isExecuting: false } : null);
         }
       }
@@ -686,6 +703,7 @@ export default function UserManager() {
         } catch (err: any) {
           const msg = err?.message || String(err);
           setNotice({ text: `Failed to disconnect session: ${msg}`, isError: true });
+          showErrorModal('Failed to Terminate Session', msg);
           setConfirmModal(prev => prev ? { ...prev, isExecuting: false } : null);
         }
       }

@@ -421,8 +421,16 @@ export async function userList(connId: string): Promise<any[]> {
   }
 }
 
-export async function userAdd(connId: string, username: string, shell?: string, groups?: string[]): Promise<void> {
-  return safeInvoke<void>('user_add', { connId, username, shell, groups }, undefined);
+export async function userAdd(connId: string, username: string, password?: string, shell?: string, groups?: string[]): Promise<void> {
+  return safeInvoke<void>('user_add', { connId, username, password: password || undefined, shell, groups }, undefined);
+}
+
+export async function userSetPassword(connId: string, username: string, password: string): Promise<void> {
+  return safeInvoke<void>('user_set_password', { connId, username, password }, undefined);
+}
+
+export async function userToggleSudo(connId: string, username: string, grant: boolean): Promise<void> {
+  return safeInvoke<void>('user_toggle_sudo', { connId, username, grant }, undefined);
 }
 
 export async function userDelete(connId: string, username: string, removeHome: boolean = false): Promise<void> {

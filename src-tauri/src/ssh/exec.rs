@@ -285,10 +285,16 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
     let conn_opt = crate::ssh::connection::resolve_connection(state, conn_id);
     let trimmed_cmd = command.trim();
     let raw_cmd = trimmed_cmd.strip_prefix("sudo ").unwrap_or(trimmed_cmd).trim();
+    // Normalize nested sudo in pipes/chains since the entire subshell will be elevated
+    let normalized_cmd = raw_cmd
+        .replace("| sudo ", "| ")
+        .replace("; sudo ", "; ")
+        .replace("&& sudo ", "&& ")
+        .replace("|| sudo ", "|| ");
 
     let conn = match conn_opt {
         Some(c) => c,
-        None => return run_cmd(state, conn_id, raw_cmd).await,
+        None => return run_cmd(state, conn_id, &normalized_cmd).await,
     };
 
     let username = &conn.config.username;
@@ -308,11 +314,11 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
     // ── 1st Condition: Is the user root? ────────────────────────────────────
     // If username is "root", execute directly without sudo (never needs sudo, avoids "sudo: command not found")
     if username == "root" {
-        return run_cmd(state, conn_id, raw_cmd).await;
+        return run_cmd(state, conn_id, &normalized_cmd).await;
     }
 
     // ── 2nd Condition: Does the user have Passwordless Sudo? (sudo -n) ─────
-    let escaped_raw = raw_cmd.replace('\'', r"'\''");
+    let escaped_raw = normalized_cmd.replace('\'', r"'\''");
     let sudo_n_cmd = format!("sudo -n -- sh -c '{}' 2>&1", escaped_raw);
     let (n_out, n_code) = run_cmd(state, conn_id, &sudo_n_cmd).await;
 
@@ -647,8 +653,9 @@ pub async fn ssh_exec(
         ));
     }
 
-    // If command explicitly starts with sudo, execute via run_cmd_priv
-    let (stdout, exit_code) = if trimmed.starts_with("sudo ") {
+    // If command explicitly starts with sudo or contains sudo in pipeline, execute via run_cmd_priv
+    let needs_priv = trimmed.starts_with("sudo ") || trimmed.contains(" sudo ") || trimmed.contains("| sudo ");
+    let (stdout, exit_code) = if needs_priv {
         run_cmd_priv(&state, &conn_id, trimmed).await
     } else {
         // Run direct command first
@@ -662,6 +669,7 @@ pub async fn ssh_exec(
             || direct_out.contains("Operation not permitted")
             || direct_out.contains("must be root")
             || direct_out.contains("You need to be root")
+            || direct_out.contains("a terminal is required")
         );
 
         if is_permission_denial {

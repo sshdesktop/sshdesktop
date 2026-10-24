@@ -171,6 +171,8 @@ fn main() {
             system::package::package_detect_manager,
             system::user::user_list,
             system::user::user_add,
+            system::user::user_set_password,
+            system::user::user_toggle_sudo,
             system::user::user_delete,
             system::user::user_modify,
             system::user::user_lock,

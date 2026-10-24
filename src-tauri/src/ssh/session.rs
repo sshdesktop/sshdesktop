@@ -23,6 +23,8 @@ pub async fn run_exec_channel(
     cmd: &str,
 ) -> Result<(String, i32), Box<dyn std::error::Error + Send + Sync>> {
     let mut channel = handle.channel_open_session().await?;
+    // Request a pseudo-terminal (PTY) so sudo, PAM, systemctl, and TTY-requiring commands succeed without "a terminal is required" errors
+    let _ = channel.request_pty(false, "xterm-256color", 80, 24, 0, 0, &[]).await;
     channel.exec(true, cmd).await?;
     let mut stdout = Vec::new();
     let mut exit_code = 0;
@@ -42,7 +44,8 @@ pub async fn run_exec_channel(
         }
     }
 
-    Ok((String::from_utf8_lossy(&stdout).to_string(), exit_code))
+    let clean_out = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
+    Ok((clean_out, exit_code))
 }
 
 pub async fn run_exec_channel_with_stdin(
@@ -51,6 +54,7 @@ pub async fn run_exec_channel_with_stdin(
     stdin_data: &[u8],
 ) -> Result<(String, i32), Box<dyn std::error::Error + Send + Sync>> {
     let mut channel = handle.channel_open_session().await?;
+    let _ = channel.request_pty(false, "xterm-256color", 80, 24, 0, 0, &[]).await;
     channel.exec(true, cmd).await?;
     if !stdin_data.is_empty() {
         channel.data(stdin_data).await?;
@@ -74,7 +78,8 @@ pub async fn run_exec_channel_with_stdin(
         }
     }
 
-    Ok((String::from_utf8_lossy(&stdout).to_string(), exit_code))
+    let clean_out = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
+    Ok((clean_out, exit_code))
 }
 
 pub async fn run_stream_channel(
