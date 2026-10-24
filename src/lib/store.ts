@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { SavedConnection, WindowState, Notification, UserPrivilegeInfo } from './types';
+export type { WindowState } from './types';
 import { 
   sshConnect, sshDisconnect, settingsGet, settingsSave, 
   storeSaveConnection, storeDeleteConnection, storeListConnections,
