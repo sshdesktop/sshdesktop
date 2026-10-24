@@ -264,6 +264,15 @@ fn main() {
             open_browser_window,
             close_browser_window,
             focus_browser_window,
+
+            // Web Auth & Server Security commands
+            store::auth::auth_get_status,
+            store::auth::auth_login,
+            store::auth::auth_change_credentials,
+            store::auth::auth_logout,
+
+            // Browser Reverse Proxy command
+            store::proxy::browser_proxy_fetch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

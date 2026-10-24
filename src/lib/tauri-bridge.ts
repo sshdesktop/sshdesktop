@@ -1364,5 +1364,75 @@ export async function apiSendRequest(req: ApiRequestPayload): Promise<ApiRespons
   });
 }
 
+// ----------------- Web Auth & Server Security -----------------
+export interface AuthStatusResponse {
+  is_configured: boolean;
+  is_authenticated: boolean;
+  must_change_password: boolean;
+  username: string;
+  storage_path: string;
+}
+
+export interface AuthActionResult {
+  success: boolean;
+  must_change_password: boolean;
+  username: string;
+  message?: string;
+}
+
+export async function authGetStatus(): Promise<AuthStatusResponse> {
+  return safeInvoke<AuthStatusResponse>('auth_get_status', {}, {
+    is_configured: false,
+    is_authenticated: false,
+    must_change_password: false,
+    username: 'admin',
+    storage_path: '/etc/sshdesktop/auth.json',
+  });
+}
+
+export async function authLogin(username: string, password: string): Promise<AuthActionResult> {
+  return safeInvoke<AuthActionResult>('auth_login', { username, password }, {
+    success: false,
+    must_change_password: false,
+    username,
+    message: 'Authentication unavailable',
+  });
+}
+
+export async function authChangeCredentials(currentPassword: string, newUsername: string, newPassword: string): Promise<AuthActionResult> {
+  return safeInvoke<AuthActionResult>('auth_change_credentials', {
+    currentPassword,
+    newUsername,
+    newPassword,
+  }, {
+    success: false,
+    must_change_password: false,
+    username: newUsername,
+    message: 'Change credentials unavailable',
+  });
+}
+
+export async function authLogout(): Promise<boolean> {
+  return safeInvoke<boolean>('auth_logout', {}, true);
+}
+
+// ----------------- Browser Reverse Proxy -----------------
+export interface ProxiedPageResponse {
+  status: number;
+  content_type: string;
+  body: string;
+  final_url: string;
+}
+
+export async function browserProxyFetch(url: string): Promise<ProxiedPageResponse> {
+  return safeInvoke<ProxiedPageResponse>('browser_proxy_fetch', { url }, {
+    status: 500,
+    content_type: 'text/html',
+    body: '<html><body><h3>Proxy unavailable</h3></body></html>',
+    final_url: url,
+  });
+}
+
+
 
 
