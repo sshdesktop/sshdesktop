@@ -1,4 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { UserPrivilegeInfo } from './types';
+export type { UserPrivilegeInfo } from './types';
 
 export function isTauri(): boolean {
   return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
@@ -67,6 +69,19 @@ export async function sshListConnections(): Promise<any[]> {
 
 export async function sshTestConnection(config: any): Promise<boolean> {
   return safeInvoke<boolean>('ssh_test_connection', { config }, true);
+}
+
+export async function sshGetUserPrivilege(connId: string): Promise<UserPrivilegeInfo> {
+  return safeInvoke<UserPrivilegeInfo>('ssh_get_user_privilege', { connId }, {
+    username: 'root',
+    uid: 0,
+    gid: 0,
+    home_dir: '/root',
+    is_root: true,
+    has_sudo: true,
+    sudo_type: 'root',
+    groups: ['root'],
+  });
 }
 
 export async function sshExec(connId: string, command: string): Promise<{ stdout: string; stderr: string; exit_code: number; duration_ms: number }> {

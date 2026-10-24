@@ -8,6 +8,9 @@ import {
 } from 'lucide-react';
 import { sshExec } from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
+import { useUserPrivilege } from '../../lib/permissions';
+import PermissionAlertBanner from '../../components/PermissionAlertBanner';
+import PermissionAlertModal from '../../components/PermissionAlertModal';
 
 interface SecurityCheck {
   id: string;
@@ -68,8 +71,10 @@ export default function SecurityAuditor() {
   const [showAddKeyModal, setShowAddKeyModal] = useState(false);
   const [newPublicKey, setNewPublicKey] = useState('');
   const [feedback, setFeedback] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
+  const [restrictedAction, setRestrictedAction] = useState<string | null>(null);
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
+  const { hasSudo, isRoot, username } = useUserPrivilege();
 
   const showNotification = (msg: string, type: 'success' | 'error' = 'success') => {
     setFeedback({ msg, type });
@@ -372,6 +377,10 @@ export default function SecurityAuditor() {
   // Apply Auto-Fix
   const handleApplyFix = async () => {
     if (!fixModalTarget?.fixCommand) return;
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Apply Remediation for '${fixModalTarget.title}'`);
+      return;
+    }
     setIsApplyingFix(true);
     try {
       const res = await sshExec(activeConnId, fixModalTarget.fixCommand);
@@ -391,6 +400,10 @@ export default function SecurityAuditor() {
 
   // Block Attacking IP with UFW
   const handleBlockIp = async (ip: string) => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Block Attacking IP ${ip} via Firewall`);
+      return;
+    }
     if (!confirm(`Permanently block IP address ${ip} using UFW firewall?`)) return;
     try {
       const res = await sshExec(activeConnId, `sudo ufw insert 1 deny from ${ip} to any comment "Brute-force attacker"`);
@@ -556,6 +569,11 @@ export default function SecurityAuditor() {
           </button>
         </div>
       </header>
+
+      {/* Permission Alert Banner */}
+      <div className="px-6 pt-4 shrink-0">
+        <PermissionAlertBanner appName="Security Auditor" />
+      </div>
 
       {/* 2. Top Hardening Benchmark Metric Card */}
       <div className="px-5 py-3 bg-[#161622] border-b border-white/[0.06] flex items-center justify-between shrink-0 overflow-x-auto no-scrollbar gap-4">
@@ -1047,6 +1065,15 @@ export default function SecurityAuditor() {
           </div>
         </div>
       )}
+
+      {/* Permission Denied Alert Modal */}
+      <PermissionAlertModal
+        isOpen={!!restrictedAction}
+        onClose={() => setRestrictedAction(null)}
+        actionName={restrictedAction || ''}
+        username={username}
+        appName="Security Auditor"
+      />
 
     </div>
   );

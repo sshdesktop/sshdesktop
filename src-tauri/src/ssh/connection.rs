@@ -45,6 +45,33 @@ pub struct SshConnection {
     pub connected_at: i64,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UserPrivilegeInfo {
+    pub username: String,
+    pub uid: u32,
+    pub gid: u32,
+    pub home_dir: String,
+    pub is_root: bool,
+    pub has_sudo: bool,
+    pub sudo_type: String, // "root" | "passwordless" | "password" | "none"
+    pub groups: Vec<String>,
+}
+
+lazy_static::lazy_static! {
+    static ref USER_PRIVILEGE_CACHE: parking_lot::Mutex<std::collections::HashMap<String, UserPrivilegeInfo>> = parking_lot::Mutex::new(std::collections::HashMap::new());
+}
+
+pub fn get_cached_user_privilege(conn_id: &str) -> Option<UserPrivilegeInfo> {
+    let map = USER_PRIVILEGE_CACHE.lock();
+    map.get(conn_id).cloned().or_else(|| map.get("default").cloned())
+}
+
+pub fn set_cached_user_privilege(conn_id: &str, info: UserPrivilegeInfo) {
+    let mut map = USER_PRIVILEGE_CACHE.lock();
+    map.insert(conn_id.to_string(), info.clone());
+    map.insert("default".to_string(), info);
+}
+
 pub fn get_plink_path() -> &'static str {
     if std::path::Path::new(r"C:\Program Files\PuTTY\plink.exe").exists() {
         r"C:\Program Files\PuTTY\plink.exe"
@@ -507,6 +534,13 @@ pub async fn ssh_disconnect(state: tauri::State<'_, AppState>, conn_id: String) 
             map.remove("default");
         }
     }
+    {
+        let mut priv_map = USER_PRIVILEGE_CACHE.lock();
+        priv_map.remove(&conn_id);
+        if conn_id == "default" || priv_map.len() <= 1 {
+            priv_map.remove("default");
+        }
+    }
     let _ = crate::ssh::tunnel::ssh_stop_socks5(conn_id.clone()).await;
     log::info!("SSH Desktop: SSH Session disconnected for ID: {}", conn_id);
     Ok(())
@@ -637,4 +671,112 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
 
     Ok(true)
 }
+
+#[tauri::command]
+pub async fn ssh_get_user_privilege(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+) -> Result<UserPrivilegeInfo, String> {
+    // 1. Check cache first
+    if let Some(cached) = get_cached_user_privilege(&conn_id) {
+        return Ok(cached);
+    }
+
+    // 2. Resolve connection
+    let conn = match resolve_connection(&state, &conn_id) {
+        Some(c) => c,
+        None => return Err(format!("No active SSH connection found for '{}'.", conn_id)),
+    };
+
+    let configured_user = conn.config.username.clone();
+
+    // 3. Fast identity probe via basic shell commands (runs as unprivileged user)
+    // Output:
+    // Line 1: UID
+    // Line 2: GID
+    // Line 3: Username
+    // Line 4: Groups
+    // Line 5: $HOME
+    let probe_script = r#"id -u; id -g; id -un; id -Gn; echo "$HOME""#;
+    let (stdout, _) = crate::ssh::exec::run_cmd(&state, &conn_id, probe_script).await;
+
+    let lines: Vec<&str> = stdout.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+
+    let uid = lines.get(0).and_then(|s| s.parse::<u32>().ok()).unwrap_or_else(|| {
+        if configured_user == "root" { 0 } else { 1000 }
+    });
+    let gid = lines.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(uid);
+    let username = lines.get(2).map(|s| s.to_string()).unwrap_or(configured_user.clone());
+    let groups: Vec<String> = lines.get(3)
+        .map(|s| s.split_whitespace().map(|g| g.to_string()).collect())
+        .unwrap_or_default();
+    let home_dir = lines.get(4).map(|s| s.to_string()).unwrap_or_else(|| {
+        if uid == 0 || username == "root" { "/root".to_string() } else { format!("/home/{}", username) }
+    });
+
+    // 4. If root, return immediately
+    if uid == 0 || username == "root" {
+        let info = UserPrivilegeInfo {
+            username,
+            uid: 0,
+            gid: 0,
+            home_dir: if home_dir.is_empty() { "/root".into() } else { home_dir },
+            is_root: true,
+            has_sudo: true,
+            sudo_type: "root".to_string(),
+            groups,
+        };
+        set_cached_user_privilege(&conn_id, info.clone());
+        return Ok(info);
+    }
+
+    // 5. Test passwordless sudo
+    let (_sudo_n_out, sudo_n_code) = crate::ssh::exec::run_cmd(&state, &conn_id, "sudo -n true 2>&1").await;
+    if sudo_n_code == 0 {
+        let info = UserPrivilegeInfo {
+            username,
+            uid,
+            gid,
+            home_dir,
+            is_root: false,
+            has_sudo: true,
+            sudo_type: "passwordless".to_string(),
+            groups,
+        };
+        set_cached_user_privilege(&conn_id, info.clone());
+        return Ok(info);
+    }
+
+    // 6. Test password sudo if session has password
+    let mut has_sudo = false;
+    let mut sudo_type = "none".to_string();
+
+    if let Some(pwd) = &conn.config.password {
+        if !pwd.is_empty() {
+            let test_pwd_cmd = format!(
+                "printf '%s\\n' '{}' | sudo -S -k -p '' true 2>&1",
+                pwd.replace('\'', r"'\''")
+            );
+            let (_pwd_out, pwd_code) = crate::ssh::exec::run_cmd(&state, &conn_id, &test_pwd_cmd).await;
+            if pwd_code == 0 {
+                has_sudo = true;
+                sudo_type = "password".to_string();
+            }
+        }
+    }
+
+    let info = UserPrivilegeInfo {
+        username,
+        uid,
+        gid,
+        home_dir,
+        is_root: false,
+        has_sudo,
+        sudo_type,
+        groups,
+    };
+    set_cached_user_privilege(&conn_id, info.clone());
+    Ok(info)
+}
+
 

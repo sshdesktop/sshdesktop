@@ -13,6 +13,9 @@ import {
   FirewallStatusInfo, FirewallRuleItem, AddRuleRequest
 } from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
+import { useUserPrivilege } from '../../lib/permissions';
+import PermissionAlertBanner from '../../components/PermissionAlertBanner';
+import PermissionAlertModal from '../../components/PermissionAlertModal';
 
 // Subcomponents and Modals
 import FirewallContextMenu from './components/FirewallContextMenu';
@@ -74,8 +77,10 @@ export default function FirewallManager() {
 
   // Listening ports from server (ss -tulpn)
   const [listeningPorts, setListeningPorts] = useState<ListeningPort[]>([]);
+  const [restrictedAction, setRestrictedAction] = useState<string | null>(null);
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
+  const { hasSudo, isRoot, username } = useUserPrivilege();
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setToastMessage({ message, type });
@@ -87,8 +92,21 @@ export default function FirewallManager() {
     setLoading(true);
     try {
       const [detected, rList] = await Promise.all([
-        firewallDetectBackend(activeConnId),
-        firewallRules(activeConnId)
+        firewallDetectBackend(activeConnId).catch((): FirewallStatusInfo => ({
+          backend: 'ufw',
+          installed: false,
+          active: false,
+          ufw_installed: false,
+          ufw_active: false,
+          firewalld_installed: false,
+          firewalld_active: false,
+          default_incoming: 'deny',
+          default_outgoing: 'allow',
+          default_routed: 'disabled',
+          all_zones: [],
+          raw_status: '',
+        })),
+        firewallRules(activeConnId).catch(() => [])
       ]);
 
       setStatusInfo(detected);
@@ -155,6 +173,10 @@ export default function FirewallManager() {
 
   // Toggle firewall power
   const handleToggle = async () => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction('Toggle Firewall Power State');
+      return;
+    }
     const nextState = !statusInfo.active;
 
     // Safety check: if enabling firewall without SSH port 22 allowed, warn user
@@ -193,6 +215,10 @@ export default function FirewallManager() {
 
   // Toggle rule action (Allow <-> Deny)
   const handleToggleRuleAction = async (rule: FirewallRuleItem) => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction('Modify Firewall Rule');
+      return;
+    }
     const newAct = rule.action === 'ALLOW' ? 'deny' : 'allow';
     try {
       // Delete old and add new
@@ -216,6 +242,10 @@ export default function FirewallManager() {
 
   // Install Firewall Software
   const handleInstallFirewall = async (tool: 'ufw' | 'firewalld') => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Install ${tool.toUpperCase()} Firewall`);
+      return;
+    }
     setInstallingTool(tool);
     try {
       const res = await firewallInstall(activeConnId, tool);
@@ -230,6 +260,10 @@ export default function FirewallManager() {
 
   // Reload rules
   const handleReload = async () => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction('Reload Firewall');
+      return;
+    }
     try {
       const res = await firewallReload(activeConnId);
       showToast(res || 'Firewall reloaded successfully.');
@@ -241,6 +275,10 @@ export default function FirewallManager() {
 
   // Reset firewall
   const handleReset = async () => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction('Reset Firewall');
+      return;
+    }
     try {
       const res = await firewallReset(activeConnId);
       showToast(res || 'Firewall reset to default.');
@@ -253,6 +291,10 @@ export default function FirewallManager() {
 
   // Quick allow port
   const handleQuickAllow = async (port: string, proto: string = 'tcp', comment: string = '') => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Allow Port ${port}/${proto}`);
+      return;
+    }
     try {
       await firewallAddRuleAdvanced(activeConnId, {
         port,
@@ -271,6 +313,10 @@ export default function FirewallManager() {
 
   // Unban Fail2ban IP
   const handleUnban = async (ip: string) => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Unban IP ${ip}`);
+      return;
+    }
     setUnbanningIp(ip);
     try {
       await sshExec(activeConnId, `sudo fail2ban-client set sshd unbanip ${ip}`);
@@ -445,7 +491,13 @@ export default function FirewallManager() {
 
               {/* Policy Settings Button */}
               <button
-                onClick={() => setShowPolicyModal(true)}
+                onClick={() => {
+                  if (!hasSudo && !isRoot) {
+                    setRestrictedAction('Configure Default Policies');
+                    return;
+                  }
+                  setShowPolicyModal(true);
+                }}
                 className="p-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 transition-colors"
                 title="Configure default policies"
               >
@@ -467,6 +519,7 @@ export default function FirewallManager() {
 
       {/* Main Content Area */}
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
+        <PermissionAlertBanner appName="Firewall Manager" />
         {/* Toast Notification */}
         {toastMessage && (
           <div className={`p-3 rounded-2xl text-xs flex items-center space-x-2 animate-in fade-in duration-200 ${
@@ -593,7 +646,13 @@ export default function FirewallManager() {
 
               <div className="flex items-center space-x-2">
                 <button
-                  onClick={() => setShowResetConfirm(true)}
+                  onClick={() => {
+                    if (!hasSudo && !isRoot) {
+                      setRestrictedAction('Reset Firewall Defaults');
+                      return;
+                    }
+                    setShowResetConfirm(true);
+                  }}
                   className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-rose-500/20 text-gray-400 hover:text-rose-300 border border-white/10 transition-colors text-xs"
                   title="Reset firewall to default"
                 >
@@ -601,7 +660,14 @@ export default function FirewallManager() {
                 </button>
 
                 <button
-                  onClick={() => { setEditingRule(null); setShowAddModal(true); }}
+                  onClick={() => {
+                    if (!hasSudo && !isRoot) {
+                      setRestrictedAction('Add Firewall Rule');
+                      return;
+                    }
+                    setEditingRule(null);
+                    setShowAddModal(true);
+                  }}
                   className="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md active:scale-95 transition-all"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -671,14 +737,27 @@ export default function FirewallManager() {
                         <td className="py-3 px-4 text-right">
                           <div className="flex items-center justify-end space-x-2">
                             <button
-                              onClick={() => { setEditingRule(rule); setShowAddModal(true); }}
+                              onClick={() => {
+                                if (!hasSudo && !isRoot) {
+                                  setRestrictedAction('Edit Firewall Rule');
+                                  return;
+                                }
+                                setEditingRule(rule);
+                                setShowAddModal(true);
+                              }}
                               className="p-1 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
                               title="Edit rule"
                             >
                               <Edit className="w-3.5 h-3.5" />
                             </button>
                             <button
-                              onClick={() => setDeletingRule(rule)}
+                              onClick={() => {
+                                if (!hasSudo && !isRoot) {
+                                  setRestrictedAction('Delete Firewall Rule');
+                                  return;
+                                }
+                                setDeletingRule(rule);
+                              }}
                               className="p-1 rounded-lg hover:bg-rose-500/20 text-gray-400 hover:text-rose-400 transition-colors"
                               title="Delete rule"
                             >
@@ -857,8 +936,21 @@ export default function FirewallManager() {
           rule={contextMenu.rule}
           backend={activeBackend}
           onClose={() => setContextMenu(null)}
-          onDelete={(r) => setDeletingRule(r)}
-          onEdit={(r) => { setEditingRule(r); setShowAddModal(true); }}
+          onDelete={(r) => {
+            if (!hasSudo && !isRoot) {
+              setRestrictedAction('Delete Firewall Rule');
+              return;
+            }
+            setDeletingRule(r);
+          }}
+          onEdit={(r) => {
+            if (!hasSudo && !isRoot) {
+              setRestrictedAction('Edit Firewall Rule');
+              return;
+            }
+            setEditingRule(r);
+            setShowAddModal(true);
+          }}
           onToggleAction={handleToggleRuleAction}
           onTestPort={(r) => {
             const isListening = listeningPorts.some(lp => lp.port === r.to_port);
@@ -945,6 +1037,15 @@ export default function FirewallManager() {
           </div>
         </div>
       )}
+
+      {/* Permission Denied Alert Modal */}
+      <PermissionAlertModal
+        isOpen={!!restrictedAction}
+        onClose={() => setRestrictedAction(null)}
+        actionName={restrictedAction || ''}
+        username={username}
+        appName="Firewall Manager"
+      />
     </div>
   );
 }

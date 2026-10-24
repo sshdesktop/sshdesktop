@@ -1,14 +1,16 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { SavedConnection, WindowState, Notification } from './types';
+import { SavedConnection, WindowState, Notification, UserPrivilegeInfo } from './types';
 import { 
   sshConnect, sshDisconnect, settingsGet, settingsSave, 
-  storeSaveConnection, storeDeleteConnection, storeListConnections 
+  storeSaveConnection, storeDeleteConnection, storeListConnections,
+  sshGetUserPrivilege
 } from './tauri-bridge';
 
 interface ConnectionState {
   connections: SavedConnection[];
   activeConnectionId: string | null;
+  userPrivilege: UserPrivilegeInfo | null;
   connectedServers: Map<string, { id: string; name: string; host: string; status: string }>;
   isDisconnected: boolean;
   disconnectReason: string | null;
@@ -16,6 +18,8 @@ interface ConnectionState {
   reconnectAttempts: number;
   reconnectError: string | null;
   disconnectedServerId: string | null;
+  setUserPrivilege: (priv: UserPrivilegeInfo | null) => void;
+  fetchUserPrivilege: (connId?: string) => Promise<UserPrivilegeInfo>;
   addConnection: (conn: SavedConnection) => void;
   updateConnection: (id: string, updates: Partial<SavedConnection>) => void;
   removeConnection: (id: string) => void;
@@ -35,6 +39,7 @@ export const useConnectionStore = create<ConnectionState>()(
     (set, get) => ({
       connections: [],
       activeConnectionId: null,
+      userPrivilege: null,
       connectedServers: new Map(),
       isDisconnected: false,
       disconnectReason: null,
@@ -42,6 +47,28 @@ export const useConnectionStore = create<ConnectionState>()(
       reconnectAttempts: 0,
       reconnectError: null,
       disconnectedServerId: null,
+      setUserPrivilege: (priv) => set({ userPrivilege: priv }),
+      fetchUserPrivilege: async (connId) => {
+        const id = connId || get().activeConnectionId || 'default';
+        try {
+          const priv = await sshGetUserPrivilege(id);
+          set({ userPrivilege: priv });
+          return priv;
+        } catch (err) {
+          console.warn('Failed to fetch user privilege:', err);
+          const fallback: UserPrivilegeInfo = {
+            username: 'root',
+            uid: 0,
+            gid: 0,
+            home_dir: '/root',
+            is_root: true,
+            has_sudo: true,
+            sudo_type: 'root',
+            groups: ['root'],
+          };
+          return fallback;
+        }
+      },
       addConnection: (conn) => {
         const fullConn: SavedConnection = {
           ...conn,
@@ -190,6 +217,9 @@ export const useConnectionStore = create<ConnectionState>()(
           reconnectAttempts: 0,
           reconnectError: null,
         });
+
+        // Eagerly resolve and cache remote user privileges (root, sudoers, standard user)
+        get().fetchUserPrivilege(id).catch(() => {});
       },
       reconnect: async (targetServerId) => {
         const targetId = targetServerId || get().disconnectedServerId || get().activeConnectionId;
@@ -217,6 +247,7 @@ export const useConnectionStore = create<ConnectionState>()(
         set({
           connectedServers: newMap,
           activeConnectionId: get().activeConnectionId === id ? null : get().activeConnectionId,
+          userPrivilege: get().activeConnectionId === id ? null : get().userPrivilege,
           isDisconnected: false,
           disconnectReason: null,
           disconnectedServerId: null,

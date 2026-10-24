@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::AppState;
-use crate::ssh::exec::run_cmd_priv;
+use crate::ssh::exec::{run_cmd, run_cmd_priv};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FirewallRule {
@@ -46,7 +46,7 @@ pub struct AddRulePayload {
 
 /// Detect whether ufw or firewalld is available on the remote system.
 pub async fn detect_firewall(state: &AppState, conn_id: &str) -> &'static str {
-    let (out, _) = run_cmd_priv(
+    let (out, _) = run_cmd(
         state,
         conn_id,
         "if command -v ufw >/dev/null 2>&1; then echo 'ufw'; elif command -v firewall-cmd >/dev/null 2>&1; then echo 'firewalld'; elif command -v iptables >/dev/null 2>&1; then echo 'iptables'; else echo 'none'; fi",
@@ -78,7 +78,7 @@ echo "---ALL_ZONES---"
 firewall-cmd --get-zones 2>/dev/null
 "#;
 
-    let (stdout, _) = run_cmd_priv(&state, &conn_id, check_script).await;
+    let (stdout, _) = run_cmd(&state, &conn_id, check_script).await;
 
     let mut ufw_installed = false;
     let mut firewalld_installed = false;
@@ -212,6 +212,12 @@ pub async fn firewall_rules(
 
     if code == -1 && stdout.is_empty() {
         return Err("No active SSH connection.".into());
+    }
+
+    // If user lacks privileges to query firewall rules, gracefully return empty list so the rest of the application loads
+    if code != 0 && (stdout.contains("Permission Denied") || stdout.contains("need to be root") || stdout.contains("permission denied") || stdout.contains("You need to be root")) {
+        log::warn!("SSH Desktop: firewall_rules inaccessible for non-sudo user, returning empty rule list gracefully");
+        return Ok(vec![]);
     }
 
     let mut list = Vec::new();

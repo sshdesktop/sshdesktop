@@ -293,6 +293,18 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
 
     let username = &conn.config.username;
 
+    // ── 0th Condition: Fast check if user is already known to lack sudo ────
+    if let Some(priv_info) = crate::ssh::connection::get_cached_user_privilege(conn_id) {
+        if !priv_info.has_sudo && !priv_info.is_root {
+            let msg = format!(
+                "Permission Denied: User '{}' does not have administrator (sudo) privileges on this server.",
+                username
+            );
+            log::warn!("SSH Desktop: Fast-failing privileged command for non-sudo user: {}", msg);
+            return (msg, 126);
+        }
+    }
+
     // ── 1st Condition: Is the user root? ────────────────────────────────────
     // If username is "root", execute directly without sudo (never needs sudo, avoids "sudo: command not found")
     if username == "root" {
@@ -317,6 +329,11 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
         || lower_out.contains("is not allowed to execute")
         || lower_out.contains("not in sudoers")
     {
+        if let Some(mut p) = crate::ssh::connection::get_cached_user_privilege(conn_id) {
+            p.has_sudo = false;
+            p.sudo_type = "none".to_string();
+            crate::ssh::connection::set_cached_user_privilege(conn_id, p);
+        }
         let msg = format!(
             "Permission Denied: User '{}' does not have administrator (sudo) privileges on this server.\n{}",
             username,
@@ -578,6 +595,14 @@ pub async fn run_cmd_priv_with_stdin(
     };
 
     let username = &conn.config.username;
+
+    // Fast check if user is known to lack sudo
+    if let Some(priv_info) = crate::ssh::connection::get_cached_user_privilege(conn_id) {
+        if !priv_info.has_sudo && !priv_info.is_root {
+            return (format!("Permission Denied: User '{}' does not have administrator (sudo) privileges on this server.", username), 126);
+        }
+    }
+
     if username == "root" {
         return run_cmd_with_stdin(state, conn_id, raw_cmd, stdin_data).await;
     }
@@ -640,10 +665,18 @@ pub async fn ssh_exec(
         );
 
         if is_permission_denial {
-            log::info!("SSH Desktop: Detected permission denial for '{}', attempting auto-elevation", command);
-            let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &command).await;
-            if priv_code == 0 || !priv_out.is_empty() {
-                (priv_out, priv_code)
+            let can_elevate = crate::ssh::connection::get_cached_user_privilege(&conn_id)
+                .map(|p| p.has_sudo || p.is_root)
+                .unwrap_or(true);
+
+            if can_elevate {
+                log::info!("SSH Desktop: Detected permission denial for '{}', attempting auto-elevation", command);
+                let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &command).await;
+                if priv_code == 0 || !priv_out.is_empty() {
+                    (priv_out, priv_code)
+                } else {
+                    (direct_out, direct_code)
+                }
             } else {
                 (direct_out, direct_code)
             }

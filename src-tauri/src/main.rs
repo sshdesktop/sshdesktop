@@ -105,6 +105,7 @@ fn main() {
             ssh::connection::ssh_disconnect,
             ssh::connection::ssh_list_connections,
             ssh::connection::ssh_test_connection,
+            ssh::connection::ssh_get_user_privilege,
             ssh::terminal::terminal_create,
             ssh::terminal::terminal_write,
             ssh::terminal::terminal_resize,

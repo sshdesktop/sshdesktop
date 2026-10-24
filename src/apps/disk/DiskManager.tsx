@@ -11,6 +11,9 @@ import {
   BlockDeviceInfo, diskDeletePartition
 } from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
+import { useUserPrivilege } from '../../lib/permissions';
+import PermissionAlertBanner from '../../components/PermissionAlertBanner';
+import PermissionAlertModal from '../../components/PermissionAlertModal';
 
 // Subcomponents and Modals
 import DiskVisualizer from './components/DiskVisualizer';
@@ -95,6 +98,8 @@ export default function DiskManager() {
   const [loadingSmart, setLoadingSmart] = useState(false);
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
+  const { hasSudo, isRoot, username } = useUserPrivilege();
+  const [restrictedAction, setRestrictedAction] = useState<string | null>(null);
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setStatusToast({ message, type });
@@ -262,6 +267,10 @@ export default function DiskManager() {
 
   // Run 1-Click Space Cleanup Actions
   const handleRunCleanup = async (action: 'apt-clean' | 'docker-prune' | 'vacuum-logs') => {
+    if (!hasSudo && !isRoot) {
+      setRestrictedAction(`Run Storage Cleanup (${action})`);
+      return;
+    }
     setCleanupActionRunning(action);
     try {
       if (action === 'apt-clean') {
@@ -554,6 +563,9 @@ export default function DiskManager() {
             </div>
           )}
 
+          {/* Permission Alert Banner */}
+          <PermissionAlertBanner appName="Disk Utility" />
+
           {/* ========================================================= */}
           {/* TAB: PARTITIONS MANAGER (GParted Style)                    */}
           {/* ========================================================= */}
@@ -575,7 +587,13 @@ export default function DiskManager() {
                 <div className="flex flex-wrap items-center gap-2">
                   {/* Create Partition */}
                   <button
-                    onClick={() => setModalCreatePart(currentDisk)}
+                    onClick={() => {
+                      if (!hasSudo && !isRoot) {
+                        setRestrictedAction('Create Partition');
+                        return;
+                      }
+                      setModalCreatePart(currentDisk);
+                    }}
                     className="flex items-center space-x-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md active:scale-95 transition-all"
                   >
                     <Plus className="w-3.5 h-3.5" />
@@ -584,7 +602,13 @@ export default function DiskManager() {
 
                   {/* Init Table (GPT / MBR) */}
                   <button
-                    onClick={() => setModalInitTable(currentDisk)}
+                    onClick={() => {
+                      if (!hasSudo && !isRoot) {
+                        setRestrictedAction('Initialize Partition Table');
+                        return;
+                      }
+                      setModalInitTable(currentDisk);
+                    }}
                     className="flex items-center space-x-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 text-amber-300 border border-amber-500/30 rounded-xl text-xs font-semibold active:scale-95 transition-all"
                     title="Initialize GPT or MBR partition table"
                   >
@@ -598,7 +622,13 @@ export default function DiskManager() {
                       {/* Mount / Unmount */}
                       {!selectedPartition.mountpoint || selectedPartition.mountpoint === '—' ? (
                         <button
-                          onClick={() => setModalMount({ partition: selectedPartition })}
+                          onClick={() => {
+                            if (!hasSudo && !isRoot) {
+                              setRestrictedAction('Mount Partition');
+                              return;
+                            }
+                            setModalMount({ partition: selectedPartition });
+                          }}
                           className="flex items-center space-x-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-md active:scale-95 transition-all"
                         >
                           <ArrowUpRight className="w-3.5 h-3.5" />
@@ -606,7 +636,13 @@ export default function DiskManager() {
                         </button>
                       ) : (
                         <button
-                          onClick={() => setModalUnmount(selectedPartition)}
+                          onClick={() => {
+                            if (!hasSudo && !isRoot) {
+                              setRestrictedAction('Unmount Partition');
+                              return;
+                            }
+                            setModalUnmount(selectedPartition);
+                          }}
                           className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30"
                           title="Unmount partition"
                         >
@@ -617,7 +653,13 @@ export default function DiskManager() {
 
                       {/* Format */}
                       <button
-                        onClick={() => setModalFormat(selectedPartition)}
+                        onClick={() => {
+                          if (!hasSudo && !isRoot) {
+                            setRestrictedAction('Format Partition');
+                            return;
+                          }
+                          setModalFormat(selectedPartition);
+                        }}
                         className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all bg-white/5 hover:bg-white/10 text-indigo-300 border border-indigo-500/30"
                         title="Format filesystem"
                       >
@@ -628,6 +670,10 @@ export default function DiskManager() {
                       {/* Increase Partition */}
                       <button
                         onClick={() => {
+                          if (!hasSudo && !isRoot) {
+                            setRestrictedAction('Resize (Expand) Partition');
+                            return;
+                          }
                           setModalResizePart({ partition: selectedPartition, diskDev: currentDisk.path || `/dev/${currentDisk.name}`, initialMode: 'increase' });
                         }}
                         className="flex items-center space-x-1.5 px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/25 rounded-xl text-xs font-medium transition-colors"
@@ -640,6 +686,10 @@ export default function DiskManager() {
                       {/* Decrease Partition */}
                       <button
                         onClick={() => {
+                          if (!hasSudo && !isRoot) {
+                            setRestrictedAction('Resize (Shrink) Partition');
+                            return;
+                          }
                           setModalResizePart({ partition: selectedPartition, diskDev: currentDisk.path || `/dev/${currentDisk.name}`, initialMode: 'decrease' });
                         }}
                         className="flex items-center space-x-1.5 px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/25 rounded-xl text-xs font-medium transition-colors"
@@ -652,6 +702,10 @@ export default function DiskManager() {
                       {/* Resize Custom */}
                       <button
                         onClick={() => {
+                          if (!hasSudo && !isRoot) {
+                            setRestrictedAction('Resize Partition');
+                            return;
+                          }
                           setModalResizePart({ partition: selectedPartition, diskDev: currentDisk.path || `/dev/${currentDisk.name}`, initialMode: 'custom' });
                         }}
                         className="flex items-center space-x-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 text-gray-300 border border-white/10 rounded-xl text-xs font-medium transition-colors"
@@ -663,7 +717,13 @@ export default function DiskManager() {
 
                       {/* Check & Repair */}
                       <button
-                        onClick={() => setModalCheckFs(selectedPartition)}
+                        onClick={() => {
+                          if (!hasSudo && !isRoot) {
+                            setRestrictedAction('Check Filesystem (fsck)');
+                            return;
+                          }
+                          setModalCheckFs(selectedPartition);
+                        }}
                         className="flex items-center space-x-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 text-emerald-300 border border-emerald-500/20 rounded-xl text-xs font-medium transition-colors"
                       >
                         <Wrench className="w-3.5 h-3.5 text-emerald-400" />
@@ -672,7 +732,13 @@ export default function DiskManager() {
 
                       {/* Label & Flags */}
                       <button
-                        onClick={() => setModalFlags({ partition: selectedPartition, diskDev: currentDisk.path || `/dev/${currentDisk.name}` })}
+                        onClick={() => {
+                          if (!hasSudo && !isRoot) {
+                            setRestrictedAction('Modify Partition Flags / Label');
+                            return;
+                          }
+                          setModalFlags({ partition: selectedPartition, diskDev: currentDisk.path || `/dev/${currentDisk.name}` });
+                        }}
                         className="flex items-center space-x-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 text-yellow-300 border border-yellow-500/20 rounded-xl text-xs font-medium transition-colors"
                       >
                         <Flag className="w-3.5 h-3.5 text-yellow-400" />
@@ -682,6 +748,10 @@ export default function DiskManager() {
                       {/* Delete Partition */}
                       <button
                         onClick={() => {
+                          if (!hasSudo && !isRoot) {
+                            setRestrictedAction('Delete Partition');
+                            return;
+                          }
                           setModalDeleteConfirm({ partition: selectedPartition, diskDev: currentDisk.path || `/dev/${currentDisk.name}` });
                         }}
                         className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30"
@@ -1297,6 +1367,15 @@ export default function DiskManager() {
           </div>
         </div>
       )}
+
+      {/* Permission Denied Alert Modal */}
+      <PermissionAlertModal
+        isOpen={!!restrictedAction}
+        onClose={() => setRestrictedAction(null)}
+        actionName={restrictedAction || ''}
+        username={username}
+        appName="Disk Utility"
+      />
     </div>
   );
 }
