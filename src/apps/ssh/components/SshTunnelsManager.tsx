@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   ArrowRightLeft, Plus, Play, Square, Copy, Check, Trash2, 
   Settings, AlertCircle, ArrowRight, ShieldCheck, Globe, Database,
@@ -15,7 +15,10 @@ import {
   sshStartSocks5, 
   sshStopSocks5,
   openExternalUrl,
-  sshExec 
+  sshExec,
+  sftpReadTextFile,
+  sftpWriteTextFile,
+  sftpMkdir
 } from '../../../lib/tauri-bridge';
 
 const PRESETS: { name: string; type: TunnelType; localPort: number; remotePort: number; remoteHost: string; desc: string }[] = [
@@ -29,7 +32,7 @@ const PRESETS: { name: string; type: TunnelType; localPort: number; remotePort: 
 ];
 
 export default function SshTunnelsManager({ isLight = false }: { isLight?: boolean }) {
-  const { tunnels, addTunnel, removeTunnel, updateTunnel, setTunnelStatus, addAuditLog } = useSshStore();
+  const { tunnels, setTunnels, addTunnel, removeTunnel, updateTunnel, setTunnelStatus, addAuditLog } = useSshStore();
   const { activeConnectionId, connections } = useConnectionStore();
   const activeServer = connections.find(c => c.id === activeConnectionId);
 
@@ -41,6 +44,152 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [ruleToDelete, setRuleToDelete] = useState<SshTunnelRule | null>(null);
+
+  // User home directory calculation (~/.sshdesktop/tunnels.json)
+  const username = activeServer?.username || 'sharuk';
+  const [userHome, setUserHome] = useState<string>(() => {
+    return (!username || username === 'root') ? '/root' : `/home/${username}`;
+  });
+  const [isSyncingServer, setIsSyncingServer] = useState(false);
+  const [lastServerSync, setLastServerSync] = useState<string | null>(null);
+
+  // Discover actual remote $HOME when connected
+  useEffect(() => {
+    let isMounted = true;
+    if (activeConnectionId) {
+      sshExec(activeConnectionId, 'echo $HOME').then(res => {
+        if (isMounted && res.exit_code === 0 && res.stdout.trim().startsWith('/')) {
+          setUserHome(res.stdout.trim());
+        }
+      }).catch(() => {});
+    } else {
+      setUserHome((!username || username === 'root') ? '/root' : `/home/${username}`);
+    }
+    return () => { isMounted = false; };
+  }, [activeConnectionId, username]);
+
+  const tunnelsFilePath = `${userHome}/.sshdesktop/tunnels.json`;
+  const legacyTunnelsFilePath = `${userHome}/.clouddesk/tunnels.json`;
+
+  // Helper to persist tunnels list to remote server file ~/.sshdesktop/tunnels.json
+  const persistTunnelsToServer = useCallback(async (currentTunnels: SshTunnelRule[], showToast = false) => {
+    if (!activeConnectionId) return;
+    setIsSyncingServer(true);
+    try {
+      await sftpMkdir(activeConnectionId, `${userHome}/.sshdesktop`).catch(() => {});
+
+      const cleanRules = currentTunnels.map(t => ({
+        id: t.id,
+        name: t.name,
+        type: t.type,
+        localPort: Number(t.localPort),
+        remoteHost: t.remoteHost || '127.0.0.1',
+        remotePort: Number(t.remotePort),
+        bindAddress: t.bindAddress,
+        description: t.description || '',
+        autoStart: t.autoStart,
+        status: 'inactive' as const,
+        createdAt: t.createdAt || Date.now(),
+      }));
+
+      const jsonStr = JSON.stringify(cleanRules, null, 2);
+      let success = false;
+      try {
+        await sftpWriteTextFile(activeConnectionId, tunnelsFilePath, jsonStr);
+        success = true;
+      } catch (sftpErr) {
+        console.warn('[SSH Tunnels] SFTP write failed, trying sshExec fallback:', sftpErr);
+      }
+
+      if (!success) {
+        const b64 = btoa(unescape(encodeURIComponent(jsonStr)));
+        const res = await sshExec(
+          activeConnectionId,
+          `mkdir -p "${userHome}/.sshdesktop" && printf '%s' '${b64}' | base64 -d > "${tunnelsFilePath}"`
+        );
+        success = res.exit_code === 0;
+      }
+
+      if (success) {
+        const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        setLastServerSync(nowStr);
+        if (showToast) {
+          setSuccessMessage(`Tunnels saved to ${tunnelsFilePath}`);
+        }
+      }
+    } catch (err) {
+      console.warn('[SSH Tunnels] Failed to save tunnels to server:', err);
+    } finally {
+      setIsSyncingServer(false);
+    }
+  }, [activeConnectionId, tunnelsFilePath, userHome]);
+
+  // Hydrate tunnels from server ~/.sshdesktop/tunnels.json when connecting
+  useEffect(() => {
+    if (!activeConnectionId) return;
+    let isMounted = true;
+
+    const hydrateServerTunnels = async () => {
+      setIsSyncingServer(true);
+      try {
+        let fileContent = await sftpReadTextFile(activeConnectionId, tunnelsFilePath).catch(() => '');
+        if (!fileContent) {
+          fileContent = await sftpReadTextFile(activeConnectionId, legacyTunnelsFilePath).catch(() => '');
+        }
+        if (!fileContent) {
+          const res = await sshExec(
+            activeConnectionId,
+            `cat "${tunnelsFilePath}" 2>/dev/null || cat "${legacyTunnelsFilePath}" 2>/dev/null`
+          ).catch(() => null);
+          if (res && res.exit_code === 0 && res.stdout.trim()) {
+            fileContent = res.stdout;
+          }
+        }
+
+        if (fileContent && fileContent.trim().startsWith('[') && isMounted) {
+          try {
+            const parsed = JSON.parse(fileContent);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              const serverRules: SshTunnelRule[] = parsed.filter(item => item && item.id && item.name && item.type).map(item => ({
+                id: String(item.id),
+                name: String(item.name),
+                type: (item.type === 'remote' || item.type === 'dynamic' ? item.type : 'local') as TunnelType,
+                localPort: Number(item.localPort) || 8080,
+                remoteHost: String(item.remoteHost || '127.0.0.1'),
+                remotePort: Number(item.remotePort) || 80,
+                description: String(item.description || ''),
+                bindAddress: item.bindAddress ? String(item.bindAddress) : undefined,
+                autoStart: Boolean(item.autoStart),
+                status: 'inactive',
+                createdAt: Number(item.createdAt) || Date.now(),
+              }));
+
+              if (serverRules.length > 0) {
+                setTunnels(serverRules);
+                const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                setLastServerSync(nowStr);
+                return;
+              }
+            }
+          } catch (jsonErr) {
+            console.warn('[SSH Tunnels] Failed to parse tunnels JSON from server:', jsonErr);
+          }
+        }
+
+        // If file does not exist yet on server, write the existing default/local tunnels to ~/.sshdesktop/tunnels.json
+        if (isMounted && tunnels.length > 0) {
+          await persistTunnelsToServer(tunnels);
+        }
+      } catch (err) {
+        console.warn('[SSH Tunnels] Failed to hydrate tunnels from server:', err);
+      } finally {
+        if (isMounted) setIsSyncingServer(false);
+      }
+    };
+
+    hydrateServerTunnels();
+    return () => { isMounted = false; };
+  }, [activeConnectionId, tunnelsFilePath, userHome]);
 
   // Form State
   const [ruleName, setRuleName] = useState('');
@@ -293,8 +442,14 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
       createdAt: Date.now(),
     };
 
+    const nextTunnels = [newTunnel, ...tunnels.filter(t => t.id !== newTunnel.id)];
     addTunnel(newTunnel);
     setShowAddModal(false);
+
+    if (activeConnectionId) {
+      persistTunnelsToServer(nextTunnels);
+    }
+    setSuccessMessage(`Tunnel "${newTunnel.name}" configured and saved to ${tunnelsFilePath}.`);
 
     // Reset Form
     setRuleName('');
@@ -325,14 +480,46 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
           </p>
         </div>
 
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center space-x-2.5">
+          {/* Server Sync Location Pill */}
+          <div 
+            className="hidden sm:flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 text-xs text-gray-300"
+            title={`Tunnels stored on server in ${tunnelsFilePath}`}
+          >
+            <HardDrive className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+            <span className="text-gray-400">Server File:</span>
+            <span className="font-mono text-amber-300 font-semibold truncate max-w-[200px]">
+              {tunnelsFilePath}
+            </span>
+            {lastServerSync && (
+              <span className="text-emerald-400 text-[10px] ml-1 shrink-0">✓ Synced</span>
+            )}
+          </div>
+
+          {/* Sync Button */}
+          <button
+            onClick={() => {
+              if (activeConnectionId) {
+                persistTunnelsToServer(tunnels, true);
+              } else {
+                setErrorMessage('Connect to an SSH server to sync tunnels with ~/.sshdesktop/tunnels.json');
+              }
+            }}
+            disabled={isSyncingServer || !activeConnectionId}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 text-xs font-medium transition-all cursor-pointer disabled:opacity-40"
+            title={`Sync tunnels with ${tunnelsFilePath}`}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-blue-400 ${isSyncingServer ? 'animate-spin' : ''}`} />
+            <span>{isSyncingServer ? 'Saving...' : 'Sync Server'}</span>
+          </button>
+
           {/* Search box */}
           <input
             type="text"
             placeholder="Search rules or ports..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 text-xs text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500 w-48"
+            className="px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 text-xs text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500 w-40"
           />
 
           {/* New Rule Button */}
@@ -552,6 +739,12 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
               </button>
             </div>
 
+            {/* Server Storage Location Hint */}
+            <div className="flex items-center space-x-2 p-2.5 rounded-xl bg-blue-500/10 border border-blue-500/20 text-[11px] text-blue-300">
+              <HardDrive className="w-3.5 h-3.5 shrink-0 text-blue-400" />
+              <span>Will be saved to <strong className="font-mono text-amber-300">{tunnelsFilePath}</strong> on server</span>
+            </div>
+
             {/* Quick Presets */}
             <div>
               <label className="block text-xs font-medium text-gray-400 mb-1.5">Quick Presets</label>
@@ -730,6 +923,10 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
                     : `127.0.0.1:${ruleToDelete.localPort} ➔ ${ruleToDelete.remoteHost || '127.0.0.1'}:${ruleToDelete.remotePort}`}
                 </span>
               </div>
+              <div className="flex justify-between items-center text-[11px] pt-1 border-t border-white/5">
+                <span className="text-gray-400">Server File:</span>
+                <span className="font-mono text-amber-300 truncate max-w-[220px]">{tunnelsFilePath}</span>
+              </div>
               {ruleToDelete.status === 'active' && (
                 <div className="pt-2 text-amber-400 border-t border-white/10 flex items-center space-x-1.5 text-[11px]">
                   <AlertCircle className="w-4 h-4 shrink-0" />
@@ -754,8 +951,12 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
                   if (target.status === 'active') {
                     await handleToggleTunnel(target);
                   }
+                  const nextTunnels = tunnels.filter(t => t.id !== target.id);
                   removeTunnel(target.id);
-                  setSuccessMessage(`Tunnel rule "${target.name}" has been deleted.`);
+                  if (activeConnectionId) {
+                    persistTunnelsToServer(nextTunnels);
+                  }
+                  setSuccessMessage(`Tunnel rule "${target.name}" deleted and updated in ${tunnelsFilePath}.`);
                 }}
                 className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold shadow-lg shadow-rose-600/30 transition-all cursor-pointer flex items-center space-x-1.5"
               >
