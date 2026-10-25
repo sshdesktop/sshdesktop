@@ -2,11 +2,12 @@ import React from 'react';
 import { 
   Terminal, Folder, FileCode, Monitor, Container, Globe, Server, Database, 
   Package, Shield, Settings, Activity, Compass, Send, HardDrive, Flame, 
-  ScrollText, Variable, Clock, StickyNote, KeyRound, Users, ShieldCheck
+  ScrollText, Variable, Clock, StickyNote, KeyRound, Users, ShieldCheck, Workflow
 } from 'lucide-react';
 import { WindowState } from '../../lib/types';
 
 const APP_ICONS: Record<string, React.ElementType> = {
+  automation: Workflow,
   terminal: Terminal,
   files: Folder,
   editor: FileCode,

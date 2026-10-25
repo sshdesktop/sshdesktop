@@ -26,8 +26,10 @@ const SshApp = lazy(() => import('../apps/ssh/SshApp'));
 const BrowserApp = lazy(() => import('../apps/browser/BrowserApp'));
 const ApiApp = lazy(() => import('../apps/api/ApiApp'));
 const SslManager = lazy(() => import('../apps/ssl/SslManager'));
+const AutomationApp = lazy(() => import('../apps/automation/AutomationApp'));
 
 const APP_COMPONENTS: Record<string, React.LazyExoticComponent<React.FC>> = {
+  automation: AutomationApp,
   ssl: SslManager,
   api: ApiApp,
   ssh: SshApp,
