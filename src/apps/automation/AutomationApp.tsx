@@ -3,9 +3,11 @@ import {
   Workflow, Play, Square, RefreshCw, CheckCircle2, AlertCircle, Clock,
   Server, Shield, Terminal, Globe, Container, Trash2, Copy, Check,
   Download, Plus, Search, Filter, Layers, Zap, Eye, ChevronDown, ChevronRight,
-  Sliders, Calendar, ArrowRight, Activity, AlertTriangle, X, HelpCircle, HardDrive, Cpu, Package
+  Sliders, Calendar, ArrowRight, Activity, AlertTriangle, X, HelpCircle, HardDrive, Cpu, Package,
+  Cloud, CloudUpload, CloudDownload, FileJson
 } from 'lucide-react';
 import { useConnectionStore, useSettingsStore } from '../../lib/store';
+import { useUserPrivilege } from '../../lib/permissions';
 import { SavedConnection } from '../../lib/types';
 import {
   AutomationRecipe,
@@ -15,6 +17,7 @@ import {
   ScheduledAutomation,
   ExecutionMode,
   RecipeCategory,
+  AutomationServerData,
 } from './types';
 import {
   BUILT_IN_RECIPES,
@@ -31,12 +34,31 @@ import {
   saveSchedule,
   deleteSchedule,
   interpolateCommand,
+  getAutomationServerFilePath,
+  saveAutomationToServer,
+  loadAutomationFromServer,
+  checkAutomationServerFileStatus,
 } from './automation-service';
 
 export default function AutomationApp() {
   const connections = useConnectionStore(s => s.connections);
   const activeConnectionId = useConnectionStore(s => s.activeConnectionId);
   const { theme } = useSettingsStore();
+  const { username, homeDir } = useUserPrivilege();
+
+  const serverFilePath = getAutomationServerFilePath(homeDir);
+
+  // Server Sync States (~/.sshdesktop/automation.json)
+  const [isSyncingServer, setIsSyncingServer] = useState(false);
+  const [lastServerSyncTime, setLastServerSyncTime] = useState<string | null>(null);
+  const [serverFileStatus, setServerFileStatus] = useState<{
+    exists: boolean;
+    path: string;
+    size?: number;
+    modified?: string;
+    rawJson?: string;
+  } | null>(null);
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
 
   // Navigation Tabs
   const [activeTab, setActiveTab] = useState<'runner' | 'recipes' | 'fleet-matrix' | 'history' | 'schedules'>('runner');
@@ -105,6 +127,121 @@ export default function AutomationApp() {
     setHistory(loadStoredHistory());
     setSchedules(loadStoredSchedules());
   }, []);
+
+  // Save current automation data directly to /home/sharuk/.sshdesktop/automation.json on active server
+  const handleSaveToServer = useCallback(async (silent: boolean = false) => {
+    if (!activeConnectionId || !homeDir) {
+      if (!silent) {
+        setBannerNotice({ text: 'No active connected server to save automation data.', isError: true });
+      }
+      return;
+    }
+
+    setIsSyncingServer(true);
+    try {
+      const customOnly = recipes.filter(r => !r.isBuiltIn);
+      const res = await saveAutomationToServer(activeConnectionId, homeDir, {
+        username,
+        customRecipes: customOnly,
+        history,
+        schedules,
+        lastTargetServerIds: selectedServerIds,
+      });
+
+      if (res.success) {
+        setLastServerSyncTime(new Date().toLocaleTimeString());
+        setServerFileStatus(prev => ({
+          ...prev,
+          exists: true,
+          path: res.path,
+          modified: new Date().toLocaleString(),
+        }));
+        if (!silent) {
+          setBannerNotice({ text: `Automation data saved to server at ${res.path}!`, isError: false });
+        }
+      } else {
+        if (!silent) {
+          setBannerNotice({ text: `Server save error: ${res.error}`, isError: true });
+        }
+      }
+    } catch (err: any) {
+      if (!silent) {
+        setBannerNotice({ text: `Failed to save to server: ${err?.message || err}`, isError: true });
+      }
+    } finally {
+      setIsSyncingServer(false);
+    }
+  }, [activeConnectionId, homeDir, username, recipes, history, schedules, selectedServerIds]);
+
+  // Restore automation data from /home/sharuk/.sshdesktop/automation.json
+  const handleRestoreFromServer = useCallback(async () => {
+    if (!activeConnectionId || !homeDir) {
+      setBannerNotice({ text: 'No active connected server to restore from.', isError: true });
+      return;
+    }
+
+    setIsSyncingServer(true);
+    try {
+      const res = await loadAutomationFromServer(activeConnectionId, homeDir);
+      if (res.success && res.data) {
+        if (Array.isArray(res.data.custom_recipes)) {
+          const merged = [...BUILT_IN_RECIPES, ...res.data.custom_recipes];
+          setRecipes(merged);
+        }
+        if (Array.isArray(res.data.history)) {
+          setHistory(res.data.history);
+        }
+        if (Array.isArray(res.data.schedules)) {
+          setSchedules(res.data.schedules);
+        }
+        if (Array.isArray(res.data.last_target_server_ids) && res.data.last_target_server_ids.length > 0) {
+          setSelectedServerIds(res.data.last_target_server_ids);
+        }
+        setLastServerSyncTime(new Date().toLocaleTimeString());
+        setBannerNotice({ text: `Automation data restored from ${res.path}!`, isError: false });
+      } else {
+        setBannerNotice({ text: `Restore failed: ${res.error}`, isError: true });
+      }
+    } catch (err: any) {
+      setBannerNotice({ text: `Failed to restore from server: ${err?.message || err}`, isError: true });
+    } finally {
+      setIsSyncingServer(false);
+    }
+  }, [activeConnectionId, homeDir]);
+
+  // Auto-Hydrate from /home/sharuk/.sshdesktop/automation.json when connected
+  useEffect(() => {
+    if (!activeConnectionId || !homeDir) return;
+
+    let isMounted = true;
+    checkAutomationServerFileStatus(activeConnectionId, homeDir).then(status => {
+      if (!isMounted) return;
+      setServerFileStatus(status);
+      if (status.exists) {
+        // Hydrate from server
+        loadAutomationFromServer(activeConnectionId, homeDir).then(res => {
+          if (!isMounted || !res.success || !res.data) return;
+          if (Array.isArray(res.data.custom_recipes) && res.data.custom_recipes.length > 0) {
+            setRecipes([...BUILT_IN_RECIPES, ...res.data.custom_recipes]);
+          }
+          if (Array.isArray(res.data.history) && res.data.history.length > 0) {
+            setHistory(res.data.history);
+          }
+          if (Array.isArray(res.data.schedules) && res.data.schedules.length > 0) {
+            setSchedules(res.data.schedules);
+          }
+          if (Array.isArray(res.data.last_target_server_ids) && res.data.last_target_server_ids.length > 0) {
+            setSelectedServerIds(res.data.last_target_server_ids);
+          }
+          setLastServerSyncTime(new Date().toLocaleTimeString());
+        });
+      }
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [activeConnectionId, homeDir]);
 
   // Initialize selected servers default (select active server, or all if none active)
   useEffect(() => {
@@ -334,6 +471,17 @@ export default function AutomationApp() {
       const updatedHistory = saveHistoryEntry(historyEntry);
       setHistory(updatedHistory);
 
+      // Auto-save to remote server (~/.sshdesktop/automation.json)
+      if (activeConnectionId && homeDir) {
+        saveAutomationToServer(activeConnectionId, homeDir, {
+          username,
+          customRecipes: recipes.filter(r => !r.isBuiltIn),
+          history: updatedHistory,
+          schedules,
+          lastTargetServerIds: selectedServerIds,
+        }).catch(() => {});
+      }
+
       setBannerNotice({
         text: `Fleet Execution Finished: ${successCount} Succeeded, ${failureCount} Failed (${(totalDuration / 1000).toFixed(1)}s)`,
         isError: failureCount > 0,
@@ -383,6 +531,16 @@ export default function AutomationApp() {
     setIsRecipeModalOpen(false);
     setSelectedRecipeId(created.id);
     setBannerNotice({ text: `Custom recipe "${created.title}" saved successfully.` });
+
+    if (activeConnectionId && homeDir) {
+      saveAutomationToServer(activeConnectionId, homeDir, {
+        username,
+        customRecipes: updated.filter(r => !r.isBuiltIn),
+        history,
+        schedules,
+        lastTargetServerIds: selectedServerIds,
+      }).catch(() => {});
+    }
   };
 
   // Delete custom recipe
@@ -393,6 +551,16 @@ export default function AutomationApp() {
       setSelectedRecipeId(BUILT_IN_RECIPES[0].id);
     }
     setBannerNotice({ text: 'Custom recipe deleted.' });
+
+    if (activeConnectionId && homeDir) {
+      saveAutomationToServer(activeConnectionId, homeDir, {
+        username,
+        customRecipes: updated.filter(r => !r.isBuiltIn),
+        history,
+        schedules,
+        lastTargetServerIds: selectedServerIds,
+      }).catch(() => {});
+    }
   };
 
   // Execution Summary Metrics
@@ -495,8 +663,32 @@ export default function AutomationApp() {
           </button>
         </div>
 
-        {/* Global Action / Probing State */}
+        {/* Global Action / Probing State & Server Storage Sync */}
         <div className="flex items-center space-x-2">
+          {/* Server Sync Status Pill */}
+          <button
+            onClick={() => {
+              if (activeConnectionId && homeDir) {
+                checkAutomationServerFileStatus(activeConnectionId, homeDir).then(st => setServerFileStatus(st));
+              }
+              setIsSyncModalOpen(true);
+            }}
+            className="px-2.5 py-1.5 rounded-lg bg-black/40 hover:bg-black/60 text-xs font-mono border border-white/10 flex items-center space-x-2 transition-all cursor-pointer"
+            title={`Server Storage: ${serverFilePath} (Click to manage sync)`}
+          >
+            <span className="relative flex h-2 w-2 shrink-0">
+              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                isSyncingServer ? 'bg-blue-400' : serverFileStatus?.exists ? 'bg-emerald-400' : 'bg-amber-400'
+              }`} />
+              <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                isSyncingServer ? 'bg-blue-500' : serverFileStatus?.exists ? 'bg-emerald-500' : 'bg-amber-500'
+              }`} />
+            </span>
+            <span className="text-gray-300 truncate max-w-[210px] text-[11px]">
+              {homeDir ? `${homeDir}/.sshdesktop/automation.json` : '~/.sshdesktop/automation.json'}
+            </span>
+          </button>
+
           <button
             onClick={handleProbeFleet}
             disabled={isProbingFleet || isRunning}
@@ -1454,6 +1646,15 @@ export default function AutomationApp() {
                         onClick={() => {
                           const updated = deleteSchedule(sch.id);
                           setSchedules(updated);
+                          if (activeConnectionId && homeDir) {
+                            saveAutomationToServer(activeConnectionId, homeDir, {
+                              username,
+                              customRecipes: recipes.filter(r => !r.isBuiltIn),
+                              history,
+                              schedules: updated,
+                              lastTargetServerIds: selectedServerIds,
+                            }).catch(() => {});
+                          }
                         }}
                         className="p-2 rounded-lg text-gray-400 hover:text-red-400 hover:bg-white/5 transition-all"
                       >
@@ -1733,10 +1934,150 @@ export default function AutomationApp() {
                   setSchedules(updated);
                   setIsScheduleModalOpen(false);
                   setBannerNotice({ text: `Schedule "${item.title}" created.` });
+                  if (activeConnectionId && homeDir) {
+                    saveAutomationToServer(activeConnectionId, homeDir, {
+                      username,
+                      customRecipes: recipes.filter(r => !r.isBuiltIn),
+                      history,
+                      schedules: updated,
+                      lastTargetServerIds: selectedServerIds,
+                    }).catch(() => {});
+                  }
                 }}
                 className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-500/25"
               >
                 Save Schedule
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* 10. MODAL: REMOTE SERVER STORAGE (~/.sshdesktop/automation.json) */}
+      {/* ======================================================== */}
+      {isSyncModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-150">
+          <div className="w-full max-w-2xl bg-[#141726] border border-white/15 rounded-3xl shadow-2xl flex flex-col max-h-[85vh] overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-5 border-b border-white/10 flex items-center justify-between bg-[#181c2e]">
+              <div className="flex items-center space-x-3">
+                <div className="w-9 h-9 rounded-xl bg-blue-600/20 text-blue-400 flex items-center justify-center border border-blue-500/30">
+                  <Cloud className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Remote Server Automation Storage</h3>
+                  <p className="text-[11px] text-gray-400 font-mono">
+                    {serverFilePath}
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => setIsSyncModalOpen(false)} className="text-gray-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 overflow-y-auto space-y-5">
+              {/* Info banner */}
+              <div className="p-3.5 rounded-2xl bg-blue-500/10 border border-blue-500/20 text-blue-200 text-xs flex items-start space-x-3">
+                <HardDrive className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                <div className="leading-relaxed">
+                  All custom recipes, execution audit logs, and cron schedules are stored in your remote user profile at <code className="text-amber-300 font-mono text-[11px] bg-black/30 px-1.5 py-0.5 rounded">{serverFilePath}</code> for user <span className="font-semibold text-white">{username}</span>. When logging in from any desktop or browser, this data is restored.
+                </div>
+              </div>
+
+              {/* Status Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div className="p-3 rounded-xl bg-black/40 border border-white/10">
+                  <span className="text-[10px] text-gray-400 uppercase tracking-wider block">File Status</span>
+                  <span className={`font-bold text-xs mt-1 block ${serverFileStatus?.exists ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {serverFileStatus?.exists ? 'Saved on Server' : 'Not Created Yet'}
+                  </span>
+                </div>
+                <div className="p-3 rounded-xl bg-black/40 border border-white/10">
+                  <span className="text-[10px] text-gray-400 uppercase tracking-wider block">File Size</span>
+                  <span className="font-mono text-xs text-white mt-1 block">
+                    {serverFileStatus?.size !== undefined ? `${(serverFileStatus.size / 1024).toFixed(1)} KB` : '—'}
+                  </span>
+                </div>
+                <div className="p-3 rounded-xl bg-black/40 border border-white/10">
+                  <span className="text-[10px] text-gray-400 uppercase tracking-wider block">Login User</span>
+                  <span className="font-mono text-xs text-indigo-300 mt-1 block">
+                    {username}
+                  </span>
+                </div>
+                <div className="p-3 rounded-xl bg-black/40 border border-white/10">
+                  <span className="text-[10px] text-gray-400 uppercase tracking-wider block">Last Synced</span>
+                  <span className="font-mono text-[11px] text-gray-300 mt-1 block">
+                    {lastServerSyncTime || 'Just now'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex flex-wrap items-center gap-3 pt-2">
+                <button
+                  onClick={() => handleSaveToServer(false)}
+                  disabled={isSyncingServer}
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-500/25 flex items-center justify-center space-x-2 transition-all disabled:opacity-50 cursor-pointer"
+                >
+                  <CloudUpload className={`w-4 h-4 ${isSyncingServer ? 'animate-bounce' : ''}`} />
+                  <span>{isSyncingServer ? 'Saving to Server...' : 'Save Current State to Server'}</span>
+                </button>
+
+                <button
+                  onClick={() => handleRestoreFromServer()}
+                  disabled={isSyncingServer}
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center justify-center space-x-2 transition-all disabled:opacity-50 cursor-pointer"
+                >
+                  <CloudDownload className="w-4 h-4 text-emerald-400" />
+                  <span>Restore State from Server</span>
+                </button>
+              </div>
+
+              {/* Raw JSON Preview */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs font-semibold text-gray-300 flex items-center space-x-1.5">
+                    <FileJson className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Raw JSON on Server ({serverFilePath})</span>
+                  </span>
+                  <button
+                    onClick={() => handleCopy(serverFileStatus?.rawJson || '', 'raw-server-json')}
+                    disabled={!serverFileStatus?.rawJson}
+                    className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center space-x-1 disabled:opacity-40 cursor-pointer"
+                  >
+                    {copiedKey === 'raw-server-json' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                    <span>Copy JSON</span>
+                  </button>
+                </div>
+                <div className="h-44 p-3 rounded-xl bg-black/70 border border-white/10 font-mono text-[10px] text-emerald-300/90 overflow-y-auto select-text leading-relaxed">
+                  <pre>{serverFileStatus?.rawJson || JSON.stringify({
+                    user: username,
+                    custom_recipes: recipes.filter(r => !r.isBuiltIn),
+                    history_count: history.length,
+                    schedules_count: schedules.length,
+                    path: serverFilePath,
+                  }, null, 2)}</pre>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-white/10 bg-[#181c2e] flex items-center justify-between">
+              <button
+                onClick={() => handleCopy(serverFilePath, 'server-path')}
+                className="text-xs text-gray-400 hover:text-white flex items-center space-x-1 cursor-pointer"
+              >
+                {copiedKey === 'server-path' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                <span>Copy Path</span>
+              </button>
+              <button
+                onClick={() => setIsSyncModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold cursor-pointer"
+              >
+                Close
               </button>
             </div>
           </div>
