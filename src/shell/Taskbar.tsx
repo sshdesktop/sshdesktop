@@ -13,6 +13,7 @@ import { pickKeyFile } from '../lib/tauri-bridge';
 import { SshDesktopLogo } from '../components/SshDesktopLogo';
 
 const TASKBAR_ICONS: Record<string, React.ElementType> = {
+  ssl: ShieldCheck,
   terminal: Terminal,
   files: Folder,
   editor: FileCode,

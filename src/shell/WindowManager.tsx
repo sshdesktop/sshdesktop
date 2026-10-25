@@ -25,8 +25,10 @@ const EnvManager = lazy(() => import('../apps/env/EnvManager'));
 const SshApp = lazy(() => import('../apps/ssh/SshApp'));
 const BrowserApp = lazy(() => import('../apps/browser/BrowserApp'));
 const ApiApp = lazy(() => import('../apps/api/ApiApp'));
+const SslManager = lazy(() => import('../apps/ssl/SslManager'));
 
 const APP_COMPONENTS: Record<string, React.LazyExoticComponent<React.FC>> = {
+  ssl: SslManager,
   api: ApiApp,
   ssh: SshApp,
   browser: BrowserApp,
