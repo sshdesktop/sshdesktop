@@ -268,13 +268,26 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
     setTimeout(() => setCopiedId(null), 2000);
   };
 
+  // Helper with guaranteed timeout so tunnel operations never leave UI in infinite loading
+  const executeWithTimeout = async <T,>(promise: Promise<T>, ms = 10000, errorMsg = 'Operation timed out'): Promise<T> => {
+    let timer: any;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(errorMsg)), ms);
+    });
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   const handleToggleTunnel = async (t: SshTunnelRule) => {
     setErrorMessage(null);
     setSuccessMessage(null);
 
     // If starting and not connected to an SSH server
     if (t.status !== 'active' && !activeConnectionId) {
-      setErrorMessage(`No active SSH connection. Please connect to your server (${activeServer?.host || '13.233.150.163'}) in SSH Desktop before starting tunnels.`);
+      setErrorMessage(`No active SSH connection. Please connect to your server (${activeServer?.host || 'remote server'}) in SSH Desktop before starting tunnels.`);
       return;
     }
 
@@ -285,13 +298,15 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
         // STOP TUNNEL
         if (t.type === 'dynamic') {
           if (activeConnectionId) {
-            await sshStopSocks5(activeConnectionId);
+            await executeWithTimeout(sshStopSocks5(activeConnectionId), 4000, 'Stop SOCKS5 timeout').catch(() => {});
           }
-          await sshStopTunnel(`socks5:${activeConnectionId}`);
+          await executeWithTimeout(sshStopTunnel(`socks5:${activeConnectionId}`), 4000, 'Stop SOCKS5 tunnel timeout').catch(() => {});
         } else {
           const keyToStop = t.activeTunnelId || `${activeConnectionId || ''}:${t.remoteHost || '127.0.0.1'}:${t.remotePort}`;
-          await sshStopTunnel(keyToStop);
-          await sshStopTunnel(String(t.localPort));
+          await executeWithTimeout(sshStopTunnel(keyToStop), 4000, 'Stop tunnel timeout').catch(() => {});
+          if (t.localPort) {
+            await executeWithTimeout(sshStopTunnel(String(t.localPort)), 4000, 'Stop tunnel port timeout').catch(() => {});
+          }
         }
 
         updateTunnel(t.id, {
@@ -312,11 +327,17 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
       } else {
         // START TUNNEL
         if (t.type === 'dynamic') {
-          const boundPort = await sshStartSocks5(activeConnectionId!, t.localPort || 1080);
+          const targetPort = t.localPort || 1080;
+          const boundPort = await executeWithTimeout(
+            sshStartSocks5(activeConnectionId!, targetPort),
+            12000,
+            `Starting SOCKS5 proxy on port ${targetPort} timed out. Please check if port is already in use.`
+          );
+
           if (boundPort && boundPort > 0) {
             updateTunnel(t.id, {
               status: 'active',
-              localPort: t.localPort || boundPort,
+              localPort: boundPort,
               activeTunnelId: `socks5:${activeConnectionId}`,
               serverId: activeConnectionId || undefined,
               serverName: activeServer?.name || activeServer?.host || undefined,
@@ -333,7 +354,7 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
 
             setSuccessMessage(`Dynamic SOCKS5 Proxy active on port ${boundPort}!`);
           } else {
-            throw new Error(`Failed to bind SOCKS5 proxy on port ${t.localPort}`);
+            throw new Error(`Failed to bind SOCKS5 proxy on port ${t.localPort || 1080}`);
           }
         } else if (t.type === 'local') {
           // If destination is remote host or empty, map to 127.0.0.1 on the remote machine
@@ -341,19 +362,23 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
             ? '127.0.0.1' 
             : t.remoteHost;
 
-          const boundPort = await sshStartTunnel(
-            activeConnectionId!,
-            t.localPort || 0,
-            targetHost,
-            t.remotePort,
-            'local'
+          const boundPort = await executeWithTimeout(
+            sshStartTunnel(
+              activeConnectionId!,
+              t.localPort || 0,
+              targetHost,
+              t.remotePort,
+              'local'
+            ),
+            12000,
+            `Forwarding to ${targetHost}:${t.remotePort} timed out after 12s. Check network access.`
           );
 
           if (boundPort && boundPort > 0) {
             const tunnelKey = `${activeConnectionId}:${targetHost}:${t.remotePort}`;
             updateTunnel(t.id, {
               status: 'active',
-              localPort: t.localPort || boundPort,
+              localPort: boundPort,
               activeTunnelId: tunnelKey,
               serverId: activeConnectionId || undefined,
               serverName: activeServer?.name || activeServer?.host || undefined,
@@ -370,16 +395,20 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
 
             setSuccessMessage(`Tunnel "${t.name}" active! Local port ${boundPort} forwards to remote port ${t.remotePort}.`);
           } else {
-            throw new Error(`Failed to bind local tunnel port ${t.localPort} -> remote port ${t.remotePort}. Remote service might not be listening.`);
+            throw new Error(`Failed to bind local tunnel port ${t.localPort} -> remote port ${t.remotePort}.`);
           }
         } else {
           // REMOTE TUNNEL (-R)
-          const boundPort = await sshStartTunnel(
-            activeConnectionId!,
-            t.localPort || 0,
-            t.remoteHost || '127.0.0.1',
-            t.remotePort,
-            'remote'
+          const boundPort = await executeWithTimeout(
+            sshStartTunnel(
+              activeConnectionId!,
+              t.localPort || 0,
+              t.remoteHost || '127.0.0.1',
+              t.remotePort,
+              'remote'
+            ),
+            12000,
+            `Remote reverse tunnel on port ${t.remotePort} timed out after 12s.`
           );
 
           if (boundPort && boundPort > 0) {

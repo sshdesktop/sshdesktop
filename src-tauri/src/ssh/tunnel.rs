@@ -18,6 +18,83 @@ pub struct TunnelInfo {
 pub struct ActiveTunnel {
     pub info: TunnelInfo,
     pub child: Option<tokio::process::Child>,
+    pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+async fn handle_socks5_client(
+    stream: &mut tokio::net::TcpStream,
+    handle: &Arc<crate::ssh::session::ClientHandle>,
+    local_port: u16,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // 1. Negotiation
+    let mut header = [0u8; 2];
+    stream.read_exact(&mut header).await?;
+    if header[0] != 0x05 {
+        return Err("Not SOCKS5".into());
+    }
+    let nmethods = header[1] as usize;
+    let mut methods = vec![0u8; nmethods];
+    stream.read_exact(&mut methods).await?;
+    // Reply: Version 5, Method 0 (No authentication required)
+    stream.write_all(&[0x05, 0x00]).await?;
+
+    // 2. Request
+    let mut req = [0u8; 4];
+    stream.read_exact(&mut req).await?;
+    if req[0] != 0x05 || req[1] != 0x01 { // 0x01 = CONNECT
+        let _ = stream.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+        return Err("Only SOCKS5 CONNECT is supported".into());
+    }
+
+    let target_host = match req[3] {
+        1 => {
+            // IPv4: 4 bytes
+            let mut ip = [0u8; 4];
+            stream.read_exact(&mut ip).await?;
+            format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+        }
+        3 => {
+            // Domain: 1 byte len + domain string
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len).await?;
+            let mut domain = vec![0u8; len[0] as usize];
+            stream.read_exact(&mut domain).await?;
+            String::from_utf8_lossy(&domain).to_string()
+        }
+        4 => {
+            // IPv6: 16 bytes
+            let mut ip = [0u8; 16];
+            stream.read_exact(&mut ip).await?;
+            use std::net::Ipv6Addr;
+            Ipv6Addr::from(ip).to_string()
+        }
+        _ => {
+            let _ = stream.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+            return Err("Address type not supported".into());
+        }
+    };
+
+    let mut port_buf = [0u8; 2];
+    stream.read_exact(&mut port_buf).await?;
+    let target_port = u16::from_be_bytes(port_buf);
+
+    // 3. Connect via SSH channel_open_direct_tcpip
+    match handle.channel_open_direct_tcpip(&target_host, target_port as u32, "127.0.0.1", local_port as u32).await {
+        Ok(channel) => {
+            // SOCKS5 success reply: 0x05 (ver), 0x00 (success), 0x00 (rsv), 0x01 (IPv4), 127.0.0.1:0
+            stream.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0]).await?;
+            let mut ssh_stream = channel.into_stream();
+            let _ = tokio::io::copy_bidirectional(stream, &mut ssh_stream).await;
+            Ok(())
+        }
+        Err(e) => {
+            // 0x05 = Connection refused / host unreachable
+            let _ = stream.write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+            Err(e.into())
+        }
+    }
 }
 
 lazy_static! {
@@ -66,6 +143,7 @@ pub async fn ssh_start_tunnel(
 
     // 1. If an active tunnel for this server and remote port already exists, return its port
     let mut stale_child_to_kill = None;
+    let mut stale_shutdown_to_send = None;
     {
         let mut lock = ACTIVE_TUNNELS.lock();
         if let Some(active) = lock.get(&tunnel_key) {
@@ -78,9 +156,13 @@ pub async fn ssh_start_tunnel(
                 // Stale tunnel that is not listening, clean it up so we can recreate it
                 if let Some(mut stale) = lock.remove(&tunnel_key) {
                     stale_child_to_kill = stale.child.take();
+                    stale_shutdown_to_send = stale.shutdown_tx.take();
                 }
             }
         }
+    }
+    if let Some(tx) = stale_shutdown_to_send {
+        let _ = tx.send(());
     }
     if let Some(mut ch) = stale_child_to_kill {
         let _ = ch.kill().await;
@@ -95,6 +177,7 @@ pub async fn ssh_start_tunnel(
     } else if local_port > 0 {
         // If an existing tunnel is registered with this local_port, stop it first
         let mut dead_children = Vec::new();
+        let mut dead_shutdowns = Vec::new();
         {
             let mut lock = ACTIVE_TUNNELS.lock();
             let dead_keys: Vec<String> = lock.iter()
@@ -106,8 +189,14 @@ pub async fn ssh_start_tunnel(
                     if let Some(ch) = old.child.take() {
                         dead_children.push(ch);
                     }
+                    if let Some(tx) = old.shutdown_tx.take() {
+                        dead_shutdowns.push(tx);
+                    }
                 }
             }
+        }
+        for tx in dead_shutdowns {
+            let _ = tx.send(());
         }
         for mut ch in dead_children {
             let _ = ch.kill().await;
@@ -143,6 +232,106 @@ pub async fn ssh_start_tunnel(
         "SSH Desktop: Spawning SSH Tunnel [{}] (type: {}) via {}@{}:{}",
         tunnel_key, ftype, user, host, ssh_port
     );
+
+    // 3. Fast Path: Native in-memory SSH multiplexing path via russh
+    if !is_remote_forward {
+        let mut maybe_handle = {
+            let lock = state.sessions.lock().await;
+            lock.get(&conn_id).cloned()
+                .or_else(|| lock.get("default").cloned())
+                .or_else(|| lock.values().next().cloned())
+        };
+
+        if maybe_handle.is_none() {
+            let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+            if !is_ppk {
+                if let Ok(new_handle) = crate::ssh::session::connect_session(
+                    &conn.config.host,
+                    conn.config.port,
+                    &conn.config.username,
+                    conn.config.password.as_deref(),
+                    conn.config.private_key_path.as_deref(),
+                ).await {
+                    let arc_h = Arc::new(new_handle);
+                    {
+                        let mut lock = state.sessions.lock().await;
+                        lock.insert(conn.id.clone(), arc_h.clone());
+                        lock.insert("default".to_string(), arc_h.clone());
+                    }
+                    maybe_handle = Some(arc_h);
+                }
+            }
+        }
+
+        if let Some(handle) = maybe_handle {
+            let listener = match tokio::net::TcpListener::bind(("127.0.0.1", effective_local_port)).await {
+                Ok(l) => l,
+                Err(e) => {
+                    return Err(format!("Failed to bind local tunnel port {}: {}", effective_local_port, e));
+                }
+            };
+
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            let target_host = remote_target.clone();
+            let target_port = remote_port;
+            let local_p = effective_local_port;
+
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = &mut shutdown_rx => {
+                            log::info!("SSH direct-tcpip tunnel on port {} stopped", local_p);
+                            break;
+                        }
+                        res = listener.accept() => {
+                            match res {
+                                Ok((mut local_stream, _)) => {
+                                    let h = handle.clone();
+                                    let r_host = target_host.clone();
+                                    tokio::spawn(async move {
+                                        match h.channel_open_direct_tcpip(&r_host, target_port as u32, "127.0.0.1", local_p as u32).await {
+                                            Ok(channel) => {
+                                                let mut ssh_stream = channel.into_stream();
+                                                let _ = tokio::io::copy_bidirectional(&mut local_stream, &mut ssh_stream).await;
+                                            }
+                                            Err(e) => {
+                                                log::error!("Failed to open direct-tcpip channel to {}:{}: {}", r_host, target_port, e);
+                                            }
+                                        }
+                                    });
+                                }
+                                Err(e) => {
+                                    log::warn!("Listener error on tunnel port {}: {}", local_p, e);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            let tunnel_info = TunnelInfo {
+                tunnel_id: tunnel_key.clone(),
+                conn_id: conn_id.clone(),
+                local_port: effective_local_port,
+                remote_host: remote_target,
+                remote_port,
+                created_at: chrono::Utc::now().timestamp(),
+            };
+
+            {
+                let mut lock = ACTIVE_TUNNELS.lock();
+                lock.insert(tunnel_key, ActiveTunnel {
+                    info: tunnel_info,
+                    child: None,
+                    shutdown_tx: Some(shutdown_tx),
+                });
+            }
+
+            log::info!("SSH Desktop: Native SSH Tunnel active on 127.0.0.1:{}", effective_local_port);
+            return Ok(effective_local_port);
+        }
+    }
 
     let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
     let plink_bin = crate::ssh::connection::get_plink_path();
@@ -393,16 +582,20 @@ pub async fn ssh_start_tunnel(
 
     if !bound {
         if let Some(mut ch) = child_handle.take() {
+            let _ = ch.kill().await;
             let mut stderr_msg = String::new();
             if let Some(mut stderr) = ch.stderr.take() {
                 let mut buf = Vec::new();
-                let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf).await;
-                let text = String::from_utf8_lossy(&buf).trim().to_string();
-                if !text.is_empty() {
-                    stderr_msg = text;
+                if let Ok(Ok(_)) = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf)
+                ).await {
+                    let text = String::from_utf8_lossy(&buf).trim().to_string();
+                    if !text.is_empty() {
+                        stderr_msg = text;
+                    }
                 }
             }
-            let _ = ch.kill().await;
             if !stderr_msg.is_empty() {
                 return Err(format!("Tunnel on port {} failed: {}", effective_local_port, stderr_msg));
             }
@@ -424,6 +617,7 @@ pub async fn ssh_start_tunnel(
         lock.insert(tunnel_key, ActiveTunnel {
             info: tunnel_info,
             child: child_handle,
+            shutdown_tx: None,
         });
     }
 
@@ -434,10 +628,10 @@ pub async fn ssh_start_tunnel(
 /// Stop an active SSH port forwarding tunnel
 #[tauri::command]
 pub async fn ssh_stop_tunnel(tunnel_id: String) -> Result<(), String> {
-    let maybe_child = {
+    let (maybe_child, maybe_shutdown) = {
         let mut lock = ACTIVE_TUNNELS.lock();
         if let Some(mut active) = lock.remove(&tunnel_id) {
-            active.child.take()
+            (active.child.take(), active.shutdown_tx.take())
         } else {
             let matching_key = lock.iter().find(|(k, v)| {
                 *k == &tunnel_id 
@@ -447,23 +641,30 @@ pub async fn ssh_stop_tunnel(tunnel_id: String) -> Result<(), String> {
             }).map(|(k, _)| k.clone());
             
             if let Some(k) = matching_key {
-                lock.remove(&k).and_then(|mut active| active.child.take())
+                if let Some(mut active) = lock.remove(&k) {
+                    (active.child.take(), active.shutdown_tx.take())
+                } else {
+                    (None, None)
+                }
             } else {
-                None
+                (None, None)
             }
         }
     };
 
+    if let Some(tx) = maybe_shutdown {
+        let _ = tx.send(());
+        log::info!("SSH Desktop: Stopped native SSH Tunnel {}", tunnel_id);
+    }
     if let Some(mut child) = maybe_child {
         let _ = child.kill().await;
-        log::info!("SSH Desktop: Stopped SSH Tunnel {}", tunnel_id);
-        return Ok(());
+        log::info!("SSH Desktop: Stopped external SSH Tunnel {}", tunnel_id);
     }
 
-    let maybe_socks = {
+    let (maybe_socks_child, maybe_socks_shutdown) = {
         let mut lock = ACTIVE_SOCKS5.lock();
         if let Some(mut active) = lock.remove(&tunnel_id) {
-            active.child.take()
+            (active.child.take(), active.shutdown_tx.take())
         } else {
             let matching_key = lock.iter().find(|(k, v)| {
                 *k == &tunnel_id 
@@ -472,16 +673,24 @@ pub async fn ssh_stop_tunnel(tunnel_id: String) -> Result<(), String> {
                 || k.contains(&tunnel_id)
             }).map(|(k, _)| k.clone());
             if let Some(k) = matching_key {
-                lock.remove(&k).and_then(|mut active| active.child.take())
+                if let Some(mut active) = lock.remove(&k) {
+                    (active.child.take(), active.shutdown_tx.take())
+                } else {
+                    (None, None)
+                }
             } else {
-                None
+                (None, None)
             }
         }
     };
 
-    if let Some(mut child) = maybe_socks {
+    if let Some(tx) = maybe_socks_shutdown {
+        let _ = tx.send(());
+        log::info!("SSH Desktop: Stopped native SOCKS5 Tunnel {}", tunnel_id);
+    }
+    if let Some(mut child) = maybe_socks_child {
         let _ = child.kill().await;
-        log::info!("SSH Desktop: Stopped SOCKS5 Tunnel {}", tunnel_id);
+        log::info!("SSH Desktop: Stopped external SOCKS5 Tunnel {}", tunnel_id);
     }
     Ok(())
 }
@@ -510,6 +719,7 @@ pub async fn ssh_start_socks5(
 ) -> Result<u16, String> {
     // 1. If an active SOCKS5 proxy already exists and is responsive for this connection, return its port
     let mut stale_socks_child = None;
+    let mut stale_socks_shutdown = None;
     {
         let mut lock = ACTIVE_SOCKS5.lock();
         if let Some(active) = lock.get(&conn_id) {
@@ -519,9 +729,13 @@ pub async fn ssh_start_socks5(
             } else {
                 if let Some(mut stale) = lock.remove(&conn_id) {
                     stale_socks_child = stale.child.take();
+                    stale_socks_shutdown = stale.shutdown_tx.take();
                 }
             }
         }
+    }
+    if let Some(tx) = stale_socks_shutdown {
+        let _ = tx.send(());
     }
     if let Some(mut ch) = stale_socks_child {
         let _ = ch.kill().await;
@@ -541,6 +755,95 @@ pub async fn ssh_start_socks5(
         "SSH Desktop: Spawning SSH SOCKS5 Proxy -D 127.0.0.1:{} via {}@{}:{}",
         effective_local_port, user, host, ssh_port
     );
+
+    // Fast Path: Native SOCKS5 proxy server via in-memory russh session
+    let mut maybe_handle = {
+        let lock = state.sessions.lock().await;
+        lock.get(&conn_id).cloned()
+            .or_else(|| lock.get("default").cloned())
+            .or_else(|| lock.values().next().cloned())
+    };
+
+    if maybe_handle.is_none() {
+        let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+        if !is_ppk {
+            if let Ok(new_handle) = crate::ssh::session::connect_session(
+                &conn.config.host,
+                conn.config.port,
+                &conn.config.username,
+                conn.config.password.as_deref(),
+                conn.config.private_key_path.as_deref(),
+            ).await {
+                let arc_h = Arc::new(new_handle);
+                {
+                    let mut lock = state.sessions.lock().await;
+                    lock.insert(conn.id.clone(), arc_h.clone());
+                    lock.insert("default".to_string(), arc_h.clone());
+                }
+                maybe_handle = Some(arc_h);
+            }
+        }
+    }
+
+    if let Some(handle) = maybe_handle {
+        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", effective_local_port)).await {
+            Ok(l) => l,
+            Err(e) => {
+                return Err(format!("Failed to bind SOCKS5 proxy port {}: {}", effective_local_port, e));
+            }
+        };
+
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let local_p = effective_local_port;
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        log::info!("SSH SOCKS5 proxy on port {} stopped", local_p);
+                        break;
+                    }
+                    res = listener.accept() => {
+                        match res {
+                            Ok((mut stream, _)) => {
+                                let h = handle.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = handle_socks5_client(&mut stream, &h, local_p).await {
+                                        log::debug!("SOCKS5 client error: {}", e);
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                log::warn!("SOCKS5 listener error on port {}: {}", local_p, e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let tunnel_info = TunnelInfo {
+            tunnel_id: format!("socks5:{}", conn_id),
+            conn_id: conn_id.clone(),
+            local_port: effective_local_port,
+            remote_host: "0.0.0.0".to_string(),
+            remote_port: 0,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        {
+            let mut lock = ACTIVE_SOCKS5.lock();
+            lock.insert(conn_id.clone(), ActiveTunnel {
+                info: tunnel_info,
+                child: None,
+                shutdown_tx: Some(shutdown_tx),
+            });
+        }
+
+        log::info!("SSH Desktop: Native SSH SOCKS5 Proxy active on 127.0.0.1:{}", effective_local_port);
+        return Ok(effective_local_port);
+    }
 
     let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
     let plink_bin = crate::ssh::connection::get_plink_path();
@@ -749,6 +1052,7 @@ pub async fn ssh_start_socks5(
         lock.insert(conn_id.clone(), ActiveTunnel {
             info: tunnel_info,
             child: child_handle,
+            shutdown_tx: None,
         });
     }
 
@@ -759,14 +1063,22 @@ pub async fn ssh_start_socks5(
 /// Stop an active SSH SOCKS5 proxy
 #[tauri::command]
 pub async fn ssh_stop_socks5(conn_id: String) -> Result<(), String> {
-    let maybe_child = {
+    let (maybe_child, maybe_shutdown) = {
         let mut lock = ACTIVE_SOCKS5.lock();
-        lock.remove(&conn_id).and_then(|mut active| active.child.take())
+        if let Some(mut active) = lock.remove(&conn_id) {
+            (active.child.take(), active.shutdown_tx.take())
+        } else {
+            (None, None)
+        }
     };
 
+    if let Some(tx) = maybe_shutdown {
+        let _ = tx.send(());
+        log::info!("SSH Desktop: Stopped native SSH SOCKS5 Proxy for {}", conn_id);
+    }
     if let Some(mut child) = maybe_child {
         let _ = child.kill().await;
-        log::info!("SSH Desktop: Stopped SSH SOCKS5 Proxy for {}", conn_id);
+        log::info!("SSH Desktop: Stopped external SSH SOCKS5 Proxy for {}", conn_id);
     }
     Ok(())
 }
