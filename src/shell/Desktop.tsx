@@ -20,6 +20,7 @@ import DesktopActionModal, { DesktopActionType } from './desktop/DesktopActionMo
 import AppSwitcher from './desktop/AppSwitcher';
 import MissionControl from './desktop/MissionControl';
 import { ensureServerDirectories } from '../lib/server-init';
+import { loadSettingsFromServer, restoreSettingsToStore } from '../lib/server-settings';
 
 import { useWindowManager } from '../lib/hooks/useWindowManager';
 import { 
@@ -183,13 +184,31 @@ export default function Desktop() {
     }
   }, [activeConnectionId, userHome]);
 
-  // Initialize server directories on login: ~/.sshdesktop, ~/Desktop, ~/Downloads, ~/Documents
+  // Initialize server directories & auto-restore application settings on login: ~/.sshdesktop, ~/Desktop, ~/Downloads, ~/Documents
   useEffect(() => {
     if (!activeConnectionId || !userHome) return;
     setDesktopFolderItems([]);
     const initServer = async () => {
       try {
         await ensureServerDirectories(activeConnectionId, userHome);
+
+        // Auto-restore settings from ~/.sshdesktop/settings.json if present on server for login user
+        try {
+          const res = await loadSettingsFromServer(activeConnectionId, userHome);
+          if (res.success && res.data) {
+            const serverData = res.data;
+            restoreSettingsToStore(serverData);
+            if (serverData.icon_positions && Object.keys(serverData.icon_positions).length > 0) {
+              const savedPositions = serverData.icon_positions;
+              setIconPositions(prev => ({ ...savedPositions, ...prev }));
+            }
+            if (serverData.sticky_notes) {
+              setStickyNoteContent(serverData.sticky_notes);
+            }
+          }
+        } catch (settingsErr) {
+          console.warn('[Server Settings] Auto-restore notice:', settingsErr);
+        }
 
         // Hydrate icon positions if ~/.sshdesktop/icon_positions.json exists
         try {
@@ -218,6 +237,22 @@ export default function Desktop() {
     };
     initServer();
   }, [activeConnectionId, userHome, loadDesktopFolder]);
+
+  // Listen for external updates to stickies and icon positions from Settings restore
+  useEffect(() => {
+    const handleStickiesUpdate = (e: any) => {
+      if (typeof e.detail === 'string') setStickyNoteContent(e.detail);
+    };
+    const handleIconsUpdate = (e: any) => {
+      if (e.detail && typeof e.detail === 'object') setIconPositions(prev => ({ ...e.detail, ...prev }));
+    };
+    window.addEventListener('sshdesktop-stickies-updated', handleStickiesUpdate);
+    window.addEventListener('sshdesktop-icons-updated', handleIconsUpdate);
+    return () => {
+      window.removeEventListener('sshdesktop-stickies-updated', handleStickiesUpdate);
+      window.removeEventListener('sshdesktop-icons-updated', handleIconsUpdate);
+    };
+  }, []);
 
   useEffect(() => {
     loadDesktopFolder();
