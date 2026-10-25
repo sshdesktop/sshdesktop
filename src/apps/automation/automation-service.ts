@@ -1,4 +1,4 @@
-import { sshExec, sshConnect } from '../../lib/tauri-bridge';
+import { sshExec, sshConnect, sftpReadTextFile, sftpWriteTextFile, sftpMkdir } from '../../lib/tauri-bridge';
 import { SavedConnection } from '../../lib/types';
 import {
   AutomationRecipe,
@@ -7,6 +7,7 @@ import {
   AutomationExecutionRun,
   ScheduledAutomation,
   ExecutionMode,
+  AutomationServerData,
 } from './types';
 
 // ==========================================
@@ -678,3 +679,190 @@ export function deleteSchedule(id: string): ScheduledAutomation[] {
     return [];
   }
 }
+
+// ==========================================
+// REMOTE SERVER PERSISTENCE (~/.sshdesktop/automation.json)
+// ==========================================
+
+export function getAutomationServerFilePath(homeDir: string): string {
+  const cleanHome = homeDir?.replace(/\/+$/, '') || '/root';
+  return `${cleanHome}/.sshdesktop/automation.json`;
+}
+
+/**
+ * Saves all automation application data (custom recipes, history, and schedules)
+ * directly to the remote server at ~/.sshdesktop/automation.json for the login user (e.g. /home/sharuk/.sshdesktop/automation.json).
+ */
+export async function saveAutomationToServer(
+  connId: string,
+  homeDir: string,
+  data: {
+    username?: string;
+    customRecipes: AutomationRecipe[];
+    history: AutomationExecutionRun[];
+    schedules: ScheduledAutomation[];
+    lastTargetServerIds?: string[];
+  }
+): Promise<{ success: boolean; path: string; timestamp: string; error?: string }> {
+  const timestamp = new Date().toISOString();
+  if (!connId || !homeDir) {
+    return { success: false, path: '', error: 'No active connection or home directory provided', timestamp };
+  }
+
+  const filePath = getAutomationServerFilePath(homeDir);
+  const dirPath = `${homeDir.replace(/\/+$/, '')}/.sshdesktop`;
+
+  try {
+    // 1. Ensure remote ~/.sshdesktop directory exists
+    await sshExec(connId, `mkdir -p "${dirPath}"`).catch(() => {});
+    await sftpMkdir(connId, dirPath).catch(() => {});
+
+    // 2. Build complete server data payload
+    const payload: AutomationServerData = {
+      user: data.username || 'user',
+      version: '1.0',
+      updated_at: timestamp,
+      custom_recipes: data.customRecipes,
+      history: data.history.slice(0, 50), // keep latest 50
+      schedules: data.schedules,
+      last_target_server_ids: data.lastTargetServerIds || [],
+      client: 'SSH Desktop Multi-Server Automation Orchestrator',
+    };
+
+    const jsonStr = JSON.stringify(payload, null, 2);
+
+    // 3. Write file via SFTP with fallback to base64 sshExec
+    let wroteOk = false;
+    try {
+      await sftpWriteTextFile(connId, filePath, jsonStr);
+      wroteOk = true;
+    } catch (sftpErr) {
+      console.warn('[Automation Server Storage] SFTP write failed, attempting base64 sshExec fallback:', sftpErr);
+    }
+
+    if (!wroteOk) {
+      const b64 = btoa(unescape(encodeURIComponent(jsonStr)));
+      const res = await sshExec(
+        connId,
+        `mkdir -p "${dirPath}" && printf '%s' '${b64}' | base64 -d > "${filePath}" && chmod 600 "${filePath}"`
+      );
+      wroteOk = res.exit_code === 0;
+      if (!wroteOk) {
+        throw new Error(res.stderr || 'Failed to write automation.json to server');
+      }
+    }
+
+    // Ensure proper user-only read/write permissions
+    await sshExec(connId, `chmod 600 "${filePath}" 2>/dev/null || true`).catch(() => {});
+
+    // Also update local storage cache
+    localStorage.setItem(STORAGE_KEY_RECIPES, JSON.stringify(data.customRecipes));
+    localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(data.history.slice(0, 50)));
+    localStorage.setItem(STORAGE_KEY_SCHEDULES, JSON.stringify(data.schedules));
+
+    return { success: true, path: filePath, timestamp };
+  } catch (err: any) {
+    return { success: false, path: filePath, error: String(err?.message || err), timestamp };
+  }
+}
+
+/**
+ * Loads and parses automation data from ~/.sshdesktop/automation.json on the remote server.
+ */
+export async function loadAutomationFromServer(
+  connId: string,
+  homeDir: string
+): Promise<{
+  success: boolean;
+  data?: AutomationServerData;
+  path: string;
+  rawJson?: string;
+  error?: string;
+}> {
+  if (!connId || !homeDir) {
+    return { success: false, path: '', error: 'No active connection or home directory provided' };
+  }
+
+  const filePath = getAutomationServerFilePath(homeDir);
+
+  try {
+    let content = await sftpReadTextFile(connId, filePath).catch(() => '');
+
+    if (!content) {
+      const res = await sshExec(connId, `cat "${filePath}" 2>/dev/null`).catch(() => null);
+      if (res && res.exit_code === 0 && res.stdout.trim()) {
+        content = res.stdout;
+      }
+    }
+
+    if (!content || !content.trim().startsWith('{')) {
+      return { success: false, path: filePath, error: `No automation data file found at ${filePath}` };
+    }
+
+    const parsed = JSON.parse(content) as AutomationServerData;
+
+    // Cache into local storage
+    if (Array.isArray(parsed.custom_recipes)) {
+      localStorage.setItem(STORAGE_KEY_RECIPES, JSON.stringify(parsed.custom_recipes));
+    }
+    if (Array.isArray(parsed.history)) {
+      localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(parsed.history));
+    }
+    if (Array.isArray(parsed.schedules)) {
+      localStorage.setItem(STORAGE_KEY_SCHEDULES, JSON.stringify(parsed.schedules));
+    }
+
+    return { success: true, data: parsed, path: filePath, rawJson: content };
+  } catch (err: any) {
+    return { success: false, path: filePath, error: String(err?.message || err) };
+  }
+}
+
+/**
+ * Checks metadata of remote ~/.sshdesktop/automation.json (exists, file size, last modified)
+ */
+export async function checkAutomationServerFileStatus(
+  connId: string,
+  homeDir: string
+): Promise<{
+  exists: boolean;
+  path: string;
+  size?: number;
+  modified?: string;
+  rawJson?: string;
+}> {
+  const filePath = getAutomationServerFilePath(homeDir);
+  if (!connId || !homeDir) {
+    return { exists: false, path: filePath };
+  }
+
+  try {
+    const res = await sshExec(
+      connId,
+      `if [ -f "${filePath}" ]; then stat -c "%s %Y" "${filePath}" 2>/dev/null || stat -f "%z %m" "${filePath}" 2>/dev/null || wc -c < "${filePath}"; fi`
+    );
+
+    if (res.exit_code === 0 && res.stdout.trim()) {
+      const parts = res.stdout.trim().split(/\s+/);
+      const size = Number(parts[0]) || 0;
+      const modTimestamp = parts[1] ? Number(parts[1]) * 1000 : Date.now();
+      const modified = new Date(modTimestamp).toLocaleString();
+
+      const catRes = await sshExec(connId, `cat "${filePath}" 2>/dev/null`);
+      const rawJson = catRes.exit_code === 0 ? catRes.stdout : undefined;
+
+      return {
+        exists: true,
+        path: filePath,
+        size,
+        modified,
+        rawJson,
+      };
+    }
+
+    return { exists: false, path: filePath };
+  } catch {
+    return { exists: false, path: filePath };
+  }
+}
+

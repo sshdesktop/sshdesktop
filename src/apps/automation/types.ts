@@ -97,3 +97,22 @@ export interface ScheduledAutomation {
   lastRun?: number;
   nextRun?: string;
 }
+
+export interface AutomationServerData {
+  user: string;
+  version: string;
+  updated_at: string;
+  custom_recipes: AutomationRecipe[];
+  history: AutomationExecutionRun[];
+  schedules: ScheduledAutomation[];
+  last_target_server_ids?: string[];
+  client: string;
+}
+
+export interface AutomationSyncStatus {
+  synced: boolean;
+  syncing: boolean;
+  lastSyncedAt?: number;
+  serverPath: string;
+  error?: string;
+}
