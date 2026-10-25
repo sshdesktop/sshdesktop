@@ -2,7 +2,7 @@ import React, { useEffect } from 'react';
 import { 
   X, LayoutGrid, Terminal, Folder, FileCode, Monitor, Container, 
   Globe, Server, Database, Package, Shield, Settings, Activity,
-  Maximize2, Compass, Send, HardDrive, Flame, ScrollText, Variable, Clock, StickyNote, KeyRound, Users
+  Maximize2, Compass, Send, HardDrive, Flame, ScrollText, Variable, Clock, StickyNote, KeyRound, Users, ShieldCheck
 } from 'lucide-react';
 import { WindowState } from '../../lib/types';
 
@@ -29,6 +29,7 @@ const APP_ICONS: Record<string, React.ElementType> = {
   notes: StickyNote,
   ssh: KeyRound,
   users: Users,
+  ssl: ShieldCheck,
 };
 
 const APP_GRADIENTS: Record<string, string> = {
@@ -44,6 +45,7 @@ const APP_GRADIENTS: Record<string, string> = {
   settings: 'from-gray-900/60 to-slate-950/80',
   browser: 'from-sky-900/60 to-blue-950/80',
   disks: 'from-teal-900/60 to-slate-950/80',
+  ssl: 'from-emerald-900/60 to-teal-950/80',
 };
 
 interface MissionControlProps {

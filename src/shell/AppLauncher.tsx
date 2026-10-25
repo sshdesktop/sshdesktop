@@ -3,11 +3,12 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Terminal, Folder, FileCode, Monitor, Activity, Settings,
   Container, Server, ScrollText, Globe, Package, Users,
-  Clock, Database, Shield, HardDrive, Flame, StickyNote, Search, X, Variable, KeyRound, Compass, Send
+  Clock, Database, Shield, HardDrive, Flame, StickyNote, Search, X, Variable, KeyRound, Compass, Send, ShieldCheck
 } from 'lucide-react';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
 
 const ALL_APPS = [
+  { id: 'ssl', icon: ShieldCheck, label: 'SSL/TLS Manager (Certbot)', category: 'Security', gradient: 'from-[#10b981] to-[#047857]' },
   { id: 'api', icon: Send, label: 'API Studio (SSH Tunnel)', category: 'Core', gradient: 'from-[#6366f1] to-[#d946ef]' },
   { id: 'browser', icon: Compass, label: 'Private Web Browser', category: 'Core', gradient: 'from-[#06b6d4] to-[#1e40af]' },
   { id: 'ssh', icon: KeyRound, label: 'SSH Studio', category: 'Core', gradient: 'from-[#0ea5e9] to-[#1e40af]' },
