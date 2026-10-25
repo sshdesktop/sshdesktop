@@ -12,6 +12,14 @@ import { WALLPAPERS } from '../../shell/Desktop';
 import { sshExec } from '../../lib/tauri-bridge';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
 import { SshDesktopLogo } from '../../components/SshDesktopLogo';
+import { useUserPrivilege } from '../../lib/permissions';
+import { 
+  saveSettingsToServer, 
+  loadSettingsFromServer, 
+  restoreSettingsToStore, 
+  checkServerSettingsFile,
+  getServerSettingsFilePath
+} from '../../lib/server-settings';
 
 const ACCENT_COLORS = [
   { name: 'Sapphire Blue', value: '#89B4FA' },
@@ -46,18 +54,121 @@ export default function AppSettings() {
   const { openApp } = useWindowManager();
 
   const [activeTab, setActiveTab] = useState<
-    'appearance' | 'wallpaper' | 'datetime' | 'terminal' | 'editor' | 'dock' | 'ssh' | 'about'
+    'appearance' | 'wallpaper' | 'backup' | 'datetime' | 'terminal' | 'editor' | 'dock' | 'ssh' | 'about'
   >('appearance');
   const [navSearch, setNavSearch] = useState('');
   const [customUrl, setCustomUrl] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Active server info for Date & Time
+  // Active server info for Date & Time & Backup
   const activeConnectionId = useConnectionStore(s => s.activeConnectionId);
   const activeServer = useConnectionStore(s => {
     const id = s.activeConnectionId;
     return id ? s.connections.find(c => c.id === id) : null;
   });
+  const { username, homeDir: userHome } = useUserPrivilege();
+
+  // Server Backup & Restore States (~/.sshdesktop/settings.json)
+  const [isBackingUp, setIsBackingUp] = useState(false);
+  const [isRestoring, setIsRestoring] = useState(false);
+  const [backupMessage, setBackupMessage] = useState<{ text: string; isError: boolean } | null>(null);
+  const [copiedPath, setCopiedPath] = useState(false);
+  const [serverFileStatus, setServerFileStatus] = useState<{
+    exists: boolean;
+    size?: number;
+    modified?: string;
+    path: string;
+    data?: any;
+    rawJson?: string;
+  } | null>(null);
+  const [autoSyncServer, setAutoSyncServer] = useState<boolean>(() => {
+    return localStorage.getItem('sshdesktop_auto_sync_server') !== 'false';
+  });
+
+  const serverSettingsPath = getServerSettingsFilePath(userHome || '/root');
+
+  const refreshServerStatus = useCallback(async () => {
+    if (!activeConnectionId || !userHome) {
+      setServerFileStatus(null);
+      return;
+    }
+    const status = await checkServerSettingsFile(activeConnectionId, userHome);
+    setServerFileStatus(status);
+  }, [activeConnectionId, userHome]);
+
+  useEffect(() => {
+    if (activeTab === 'backup') {
+      refreshServerStatus();
+    }
+  }, [activeTab, refreshServerStatus]);
+
+  const handleBackupToServer = async () => {
+    if (!activeConnectionId || !userHome) {
+      setBackupMessage({ text: 'No active SSH connection to server.', isError: true });
+      return;
+    }
+    setIsBackingUp(true);
+    setBackupMessage(null);
+    try {
+      const res = await saveSettingsToServer(
+        activeConnectionId,
+        userHome,
+        useSettingsStore.getState(),
+        { username: username || activeServer?.username || 'user' }
+      );
+      if (res.success) {
+        setBackupMessage({ text: `Settings successfully backed up to ${res.path}!`, isError: false });
+        await refreshServerStatus();
+      } else {
+        throw new Error(res.error || 'Failed to save settings.json on server');
+      }
+    } catch (err: any) {
+      setBackupMessage({ text: `Backup failed: ${err?.message || err}`, isError: true });
+    } finally {
+      setIsBackingUp(false);
+    }
+  };
+
+  const handleRestoreFromServer = async () => {
+    if (!activeConnectionId || !userHome) {
+      setBackupMessage({ text: 'No active SSH connection to server.', isError: true });
+      return;
+    }
+    setIsRestoring(true);
+    setBackupMessage(null);
+    try {
+      const res = await loadSettingsFromServer(activeConnectionId, userHome);
+      if (res.success && res.data) {
+        restoreSettingsToStore(res.data);
+        setBackupMessage({ text: `Settings successfully restored from ${res.path}!`, isError: false });
+        await refreshServerStatus();
+      } else {
+        throw new Error(res.error || `No settings file found at ${serverSettingsPath}`);
+      }
+    } catch (err: any) {
+      setBackupMessage({ text: `Restore failed: ${err?.message || err}`, isError: true });
+    } finally {
+      setIsRestoring(false);
+    }
+  };
+
+  // Auto-sync debounced when settings change in AppSettings if autoSyncServer is enabled
+  const autoSyncTimerRef = useRef<any>(null);
+  useEffect(() => {
+    if (!autoSyncServer || !activeConnectionId || !userHome) return;
+    if (autoSyncTimerRef.current) clearTimeout(autoSyncTimerRef.current);
+    autoSyncTimerRef.current = setTimeout(() => {
+      saveSettingsToServer(
+        activeConnectionId,
+        userHome,
+        useSettingsStore.getState(),
+        { username: username || activeServer?.username || 'user' }
+      ).catch(() => {});
+    }, 1500);
+    return () => {
+      if (autoSyncTimerRef.current) clearTimeout(autoSyncTimerRef.current);
+    };
+  }, [theme, accentColor, wallpaper, dockPosition, autoHideDock, terminalFontSize, autoSyncServer, activeConnectionId, userHome, username, activeServer?.username]);
 
   // Server Date & Time States
   const [serverLocalTime, setServerLocalTime] = useState<string>('Loading...');
@@ -240,7 +351,8 @@ export default function AppSettings() {
   const navItems = [
     { id: 'appearance', label: 'Appearance', icon: Palette, color: 'text-pink-400' },
     { id: 'wallpaper', label: 'Wallpaper (4K)', icon: ImageIcon, color: 'text-blue-400' },
-    { id: 'datetime', label: 'Date & Time (Server)', icon: Clock, color: 'text-emerald-400' },
+    { id: 'backup', label: 'Server Backup & Restore', icon: HardDrive, color: 'text-emerald-400' },
+    { id: 'datetime', label: 'Date & Time (Server)', icon: Clock, color: 'text-teal-400' },
     { id: 'terminal', label: 'Terminal Emulator', icon: Terminal, color: 'text-sky-400' },
     { id: 'editor', label: 'Code Editor', icon: FileCode, color: 'text-purple-400' },
     { id: 'dock', label: 'Desktop & Dock', icon: Monitor, color: 'text-amber-400' },
@@ -473,6 +585,176 @@ export default function AppSettings() {
                     </div>
                   );
                 })}
+              </div>
+            </div>
+          )}
+
+          {/* TAB: SERVER BACKUP & RESTORE */}
+          {activeTab === 'backup' && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-lg font-bold text-white tracking-tight">Server Settings Backup & Restore</h2>
+                <p className="text-xs text-gray-400">
+                  Save, restore, and synchronize application preferences in your remote login user directory (<code className="text-amber-300 font-mono text-[11px]">{serverSettingsPath}</code>).
+                </p>
+              </div>
+
+              {/* Server File Location Card */}
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-blue-900/30 via-indigo-900/20 to-purple-900/30 border border-blue-500/20 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2 text-xs font-semibold text-blue-300">
+                    <HardDrive className="w-4 h-4 text-blue-400" />
+                    <span>Remote User Storage Location</span>
+                  </div>
+                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-medium flex items-center space-x-1 ${
+                    serverFileStatus?.exists 
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
+                      : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                  }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${serverFileStatus?.exists ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                    <span>{serverFileStatus?.exists ? 'Settings File Present' : 'Not Saved on Server Yet'}</span>
+                  </span>
+                </div>
+
+                <div className="text-xs font-mono text-gray-300 bg-[#101018]/90 p-2.5 rounded-xl border border-white/10 break-all select-all flex items-center justify-between">
+                  <span className="text-amber-300 font-semibold">{serverSettingsPath}</span>
+                  {copiedPath ? (
+                    <span className="text-[10px] text-emerald-400 flex items-center space-x-1 shrink-0 ml-2">
+                      <Check className="w-3 h-3" />
+                      <span>Copied</span>
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(serverSettingsPath);
+                        setCopiedPath(true);
+                        setTimeout(() => setCopiedPath(false), 2000);
+                      }}
+                      className="text-[10px] text-gray-400 hover:text-white transition-colors cursor-pointer shrink-0 ml-2 bg-white/5 hover:bg-white/10 px-2 py-0.5 rounded border border-white/10"
+                    >
+                      Copy Path
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 text-[11px] text-gray-400 pt-1">
+                  <div>
+                    <span className="text-gray-500">Login User:</span>{' '}
+                    <strong className="text-white font-mono">{username || activeServer?.username || 'root'}</strong>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">File Size:</span>{' '}
+                    <span className="text-gray-300 font-mono">{serverFileStatus?.size ? `${serverFileStatus.size} bytes` : '—'}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Last Modified:</span>{' '}
+                    <span className="text-gray-300 font-mono truncate block">{serverFileStatus?.modified || '—'}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Status/Error Notification Banner */}
+              {backupMessage && (
+                <div className={`p-3.5 rounded-2xl text-xs flex items-center space-x-2.5 border animate-in fade-in duration-200 ${
+                  backupMessage.isError 
+                    ? 'bg-rose-500/15 border-rose-500/30 text-rose-300' 
+                    : 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                }`}>
+                  {backupMessage.isError ? <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" /> : <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />}
+                  <span className="flex-1">{backupMessage.text}</span>
+                  <button onClick={() => setBackupMessage(null)} className="text-gray-400 hover:text-white cursor-pointer">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
+              {/* Primary Backup & Restore Actions */}
+              <div className="grid grid-cols-2 gap-4">
+                {/* Backup Card */}
+                <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3.5 shadow-xl backdrop-blur-md flex flex-col justify-between">
+                  <div>
+                    <div className="w-9 h-9 rounded-xl bg-blue-500/20 text-blue-400 flex items-center justify-center mb-2.5 border border-blue-500/30">
+                      <Upload className="w-4 h-4" />
+                    </div>
+                    <h3 className="text-xs font-bold text-white">Backup Settings to Server</h3>
+                    <p className="text-[11px] text-gray-400 mt-1 leading-relaxed">
+                      Upload current theme, wallpaper, dock position, font size, and desktop preferences directly to <code className="text-amber-300 text-[10px]">{serverSettingsPath}</code>.
+                    </p>
+                  </div>
+
+                  <button
+                    onClick={handleBackupToServer}
+                    disabled={isBackingUp || !activeConnectionId}
+                    className="w-full flex items-center justify-center space-x-2 py-2 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    {isBackingUp ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                    <span>{isBackingUp ? 'Backing Up...' : 'Backup to Server'}</span>
+                  </button>
+                </div>
+
+                {/* Restore Card */}
+                <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3.5 shadow-xl backdrop-blur-md flex flex-col justify-between">
+                  <div>
+                    <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center mb-2.5 border border-emerald-500/30">
+                      <RotateCcw className="w-4 h-4" />
+                    </div>
+                    <h3 className="text-xs font-bold text-white">Restore Settings from Server</h3>
+                    <p className="text-[11px] text-gray-400 mt-1 leading-relaxed">
+                      Download and apply configuration previously stored on this server for login user <strong className="text-white">{username || activeServer?.username}</strong>.
+                    </p>
+                  </div>
+
+                  <button
+                    onClick={handleRestoreFromServer}
+                    disabled={isRestoring || !activeConnectionId}
+                    className="w-full flex items-center justify-center space-x-2 py-2 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-600/30 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    {isRestoring ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                    <span>{isRestoring ? 'Restoring...' : 'Restore from Server'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Auto-Sync Configuration */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 shadow-xl backdrop-blur-md space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">Auto-Sync on Login & Preferences Change</span>
+                    <span className="text-[11px] text-gray-400">
+                      Automatically restore settings when connecting and auto-save updates to <span className="text-amber-300 font-mono text-[10px]">{serverSettingsPath}</span>
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const next = !autoSyncServer;
+                      setAutoSyncServer(next);
+                      localStorage.setItem('sshdesktop_auto_sync_server', String(next));
+                    }}
+                    className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${autoSyncServer ? 'bg-blue-600' : 'bg-white/10'}`}
+                  >
+                    <span className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${autoSyncServer ? 'left-5.5' : 'left-0.5'}`} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Remote File Content Preview */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 shadow-xl backdrop-blur-md space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-white flex items-center space-x-2">
+                    <FileCode className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Configuration JSON ({serverSettingsPath})</span>
+                  </span>
+                  <button
+                    onClick={() => refreshServerStatus()}
+                    className="text-[11px] text-gray-400 hover:text-white flex items-center space-x-1 cursor-pointer bg-white/5 hover:bg-white/10 px-2.5 py-1 rounded-lg border border-white/10 transition-colors"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Refresh</span>
+                  </button>
+                </div>
+                <div className="max-h-60 overflow-y-auto bg-[#101018] p-3 rounded-xl border border-white/5 font-mono text-[11px] text-gray-300 select-text">
+                  <pre>{serverFileStatus?.rawJson || '// No settings.json saved on server yet. Click "Backup to Server" to save current configuration.'}</pre>
+                </div>
               </div>
             </div>
           )}
