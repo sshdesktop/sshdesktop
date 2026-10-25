@@ -5,7 +5,7 @@ import {
   Palette, Sun, Moon, Minimize2, Eye, EyeOff, Server, ChevronDown, Check, Plus, X, Lock,
   Trash2, Search, Key, Upload, FileCode, ArrowRight, Shield, Globe, RefreshCw,
   Folder, Activity, Container, Database, HardDrive, Flame, ScrollText, Package,
-  Users, Clock, StickyNote, Variable, KeyRound, Compass, Send, LayoutGrid, Monitor
+  Users, Clock, StickyNote, Variable, KeyRound, Compass, Send, LayoutGrid, Monitor, Workflow
 } from 'lucide-react';
 import { useConnectionStore, useSettingsStore, useWindowStore, useTelemetryStore } from '../lib/store';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
@@ -13,6 +13,7 @@ import { pickKeyFile } from '../lib/tauri-bridge';
 import { SshDesktopLogo } from '../components/SshDesktopLogo';
 
 const TASKBAR_ICONS: Record<string, React.ElementType> = {
+  automation: Workflow,
   ssl: ShieldCheck,
   terminal: Terminal,
   files: Folder,

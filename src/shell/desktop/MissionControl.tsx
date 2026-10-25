@@ -2,11 +2,13 @@ import React, { useEffect } from 'react';
 import { 
   X, LayoutGrid, Terminal, Folder, FileCode, Monitor, Container, 
   Globe, Server, Database, Package, Shield, Settings, Activity,
-  Maximize2, Compass, Send, HardDrive, Flame, ScrollText, Variable, Clock, StickyNote, KeyRound, Users, ShieldCheck
+  Maximize2, Compass, Send, HardDrive, Flame, ScrollText, Variable, Clock, StickyNote, KeyRound, Users, ShieldCheck,
+  Workflow
 } from 'lucide-react';
 import { WindowState } from '../../lib/types';
 
 const APP_ICONS: Record<string, React.ElementType> = {
+  automation: Workflow,
   terminal: Terminal,
   files: Folder,
   editor: FileCode,
@@ -33,6 +35,7 @@ const APP_ICONS: Record<string, React.ElementType> = {
 };
 
 const APP_GRADIENTS: Record<string, string> = {
+  automation: 'from-indigo-900/60 to-cyan-950/80',
   terminal: 'from-slate-900 to-black',
   files: 'from-blue-900/60 to-indigo-950/80',
   editor: 'from-indigo-900/60 to-purple-950/80',

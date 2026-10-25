@@ -4,7 +4,7 @@ import {
   Terminal, Folder, FileCode, Monitor, Activity, Settings,
   Container, Server, ScrollText, Globe, Package, Users,
   Clock, Database, Shield, HardDrive, Flame, Variable,
-  Rocket, KeyRound, Compass, Send, ShieldCheck
+  Rocket, KeyRound, Compass, Send, ShieldCheck, Workflow
 } from 'lucide-react';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
 import { useSettingsStore, useWindowStore } from '../lib/store';
@@ -19,6 +19,7 @@ interface DockAppConfig {
 
 const DOCK_APPS: DockAppConfig[] = [
   { id: 'terminal', icon: Terminal, label: 'Terminal', tileBg: 'from-[#334155] via-[#1e293b] to-[#0f172a]', iconColor: '#4ade80' },
+  { id: 'automation', icon: Workflow, label: 'Fleet Automation', tileBg: 'from-[#4f46e5] via-[#3b82f6] to-[#06b6d4]', iconColor: '#ffffff' },
   { id: 'files', icon: Folder, label: 'File Manager', tileBg: 'from-[#38bdf8] via-[#0284c7] to-[#0369a1]', iconColor: '#ffffff' },
   { id: 'ssl', icon: ShieldCheck, label: 'SSL & Certbot', tileBg: 'from-[#059669] via-[#047857] to-[#064e3b]', iconColor: '#34d399' },
   { id: 'editor', icon: FileCode, label: 'Code Editor', tileBg: 'from-[#6366f1] via-[#4f46e5] to-[#3730a3]', iconColor: '#ffffff' },
