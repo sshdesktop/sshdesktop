@@ -6,7 +6,7 @@ import '@xterm/xterm/css/xterm.css';
 import { 
   Plus, X, Terminal as TerminalIcon, Trash2, ChevronDown, Server, 
   ExternalLink, ShieldAlert, Activity, RefreshCw, Copy, CornerDownLeft,
-  ZoomIn, ZoomOut, Clipboard, RotateCcw, Check
+  ZoomIn, ZoomOut, Clipboard, RotateCcw, Check, Sparkles, Palette
 } from 'lucide-react';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
@@ -14,6 +14,166 @@ import {
   terminalCreate, terminalWrite, terminalResize, terminalClose, sshLaunchPutty 
 } from '../../lib/tauri-bridge';
 import { listen } from '@tauri-apps/api/event';
+
+export interface TerminalThemeConfig {
+  id: string;
+  name: string;
+  dotColor: string;
+  background: string;
+  foreground: string;
+  cursor: string;
+  cursorAccent: string;
+  selectionBackground: string;
+  black: string;
+  red: string;
+  green: string;
+  yellow: string;
+  blue: string;
+  magenta: string;
+  cyan: string;
+  white: string;
+  brightBlack: string;
+  brightRed: string;
+  brightGreen: string;
+  brightYellow: string;
+  brightBlue: string;
+  brightMagenta: string;
+  brightCyan: string;
+  brightWhite: string;
+}
+
+export const TERMINAL_THEMES: TerminalThemeConfig[] = [
+  {
+    id: 'tokyo-night',
+    name: 'Tokyo Night Vivid',
+    dotColor: '#7aa2f7',
+    background: '#13141f',
+    foreground: '#d5dcfe',
+    cursor: '#7aa2f7',
+    cursorAccent: '#13141f',
+    selectionBackground: 'rgba(122, 162, 247, 0.35)',
+    black: '#1f2335',
+    red: '#f7768e',
+    green: '#41e998',
+    yellow: '#ffca5b',
+    blue: '#7aa2f7',
+    magenta: '#bb9af7',
+    cyan: '#2ac3de',
+    white: '#c0caf5',
+    brightBlack: '#565f89',
+    brightRed: '#ff7b72',
+    brightGreen: '#73fadc',
+    brightYellow: '#ffea79',
+    brightBlue: '#89ddff',
+    brightMagenta: '#d19eff',
+    brightCyan: '#7dcfff',
+    brightWhite: '#ffffff',
+  },
+  {
+    id: 'cyberpunk-neon',
+    name: 'Cyberpunk Neon',
+    dotColor: '#00f5ff',
+    background: '#0d0f18',
+    foreground: '#f8fafc',
+    cursor: '#00f5ff',
+    cursorAccent: '#0d0f18',
+    selectionBackground: 'rgba(0, 245, 255, 0.3)',
+    black: '#1e2030',
+    red: '#ff5370',
+    green: '#22c55e',
+    yellow: '#fbbf24',
+    blue: '#3b82f6',
+    magenta: '#d946ef',
+    cyan: '#06b6d4',
+    white: '#e2e8f0',
+    brightBlack: '#64748b',
+    brightRed: '#ff6e88',
+    brightGreen: '#4ade80',
+    brightYellow: '#fde047',
+    brightBlue: '#60a5fa',
+    brightMagenta: '#f472b6',
+    brightCyan: '#22d3ee',
+    brightWhite: '#ffffff',
+  },
+  {
+    id: 'catppuccin-mocha',
+    name: 'Catppuccin Mocha',
+    dotColor: '#a6e3a1',
+    background: '#181825',
+    foreground: '#cdd6f4',
+    cursor: '#f5e0dc',
+    cursorAccent: '#181825',
+    selectionBackground: 'rgba(137, 180, 250, 0.3)',
+    black: '#313244',
+    red: '#f38ba8',
+    green: '#a6e3a1',
+    yellow: '#f9e2af',
+    blue: '#89b4fa',
+    magenta: '#cba6f7',
+    cyan: '#94e2d5',
+    white: '#bac2de',
+    brightBlack: '#585b70',
+    brightRed: '#eba0ac',
+    brightGreen: '#b5e8b0',
+    brightYellow: '#fae3b0',
+    brightBlue: '#96cdfb',
+    brightMagenta: '#f5c2e7',
+    brightCyan: '#89dceb',
+    brightWhite: '#ffffff',
+  },
+  {
+    id: 'one-dark',
+    name: 'One Dark Vivid',
+    dotColor: '#61afef',
+    background: '#1e222a',
+    foreground: '#abb2bf',
+    cursor: '#528bff',
+    cursorAccent: '#1e222a',
+    selectionBackground: 'rgba(62, 68, 82, 0.8)',
+    black: '#282c34',
+    red: '#e06c75',
+    green: '#98c379',
+    yellow: '#e5c07b',
+    blue: '#61afef',
+    magenta: '#c678dd',
+    cyan: '#56b6c2',
+    white: '#abb2bf',
+    brightBlack: '#5c6370',
+    brightRed: '#be5046',
+    brightGreen: '#b1e08e',
+    brightYellow: '#ebcb8b',
+    brightBlue: '#73baff',
+    brightMagenta: '#d68ff6',
+    brightCyan: '#6cdad1',
+    brightWhite: '#ffffff',
+  },
+  {
+    id: 'monokai-pro',
+    name: 'Monokai Pro',
+    dotColor: '#ffd866',
+    background: '#19181a',
+    foreground: '#fcfcfa',
+    cursor: '#ffd866',
+    cursorAccent: '#19181a',
+    selectionBackground: 'rgba(255, 216, 102, 0.25)',
+    black: '#2d2a2e',
+    red: '#ff6188',
+    green: '#a9dc76',
+    yellow: '#ffd866',
+    blue: '#78dce8',
+    magenta: '#ab9df2',
+    cyan: '#78dce8',
+    white: '#fcfcfa',
+    brightBlack: '#727072',
+    brightRed: '#ff7b9b',
+    brightGreen: '#b9e68a',
+    brightYellow: '#ffe085',
+    brightBlue: '#90e4ee',
+    brightMagenta: '#beaff7',
+    brightCyan: '#90e4ee',
+    brightWhite: '#ffffff',
+  },
+];
 
 interface Tab {
   id: string;
@@ -54,6 +214,48 @@ export default function TerminalApp() {
   const [fontSize, setFontSize] = useState<number>(14);
   const fontSizeRef = useRef<number>(14);
   fontSizeRef.current = fontSize;
+
+  // Terminal Theme state & persistence
+  const [themeId, setThemeId] = useState<string>(() => {
+    return localStorage.getItem('sshdesktop_terminal_theme') || 'tokyo-night';
+  });
+  const [showThemeMenu, setShowThemeMenu] = useState(false);
+  const currentTheme = TERMINAL_THEMES.find(t => t.id === themeId) || TERMINAL_THEMES[0];
+  const themeRef = useRef<TerminalThemeConfig>(currentTheme);
+  themeRef.current = currentTheme;
+
+  // 4-Sided Margin / Padding state & persistence
+  const [padding, setPadding] = useState<number>(() => {
+    const saved = localStorage.getItem('sshdesktop_terminal_padding');
+    return saved ? parseInt(saved, 10) : 16; // default 16px for comfortable margin
+  });
+  const [showMarginMenu, setShowMarginMenu] = useState(false);
+
+  const updateTheme = useCallback((newThemeId: string) => {
+    setThemeId(newThemeId);
+    localStorage.setItem('sshdesktop_terminal_theme', newThemeId);
+    const targetTheme = TERMINAL_THEMES.find(t => t.id === newThemeId) || TERMINAL_THEMES[0];
+    themeRef.current = targetTheme;
+    tabInstances.current.forEach(inst => {
+      if (!inst.disposed) {
+        inst.term.options.theme = targetTheme;
+      }
+    });
+  }, []);
+
+  const updatePadding = useCallback((newPadding: number) => {
+    setPadding(newPadding);
+    localStorage.setItem('sshdesktop_terminal_padding', newPadding.toString());
+    setTimeout(() => {
+      tabInstances.current.forEach(inst => {
+        if (!inst.disposed) {
+          try {
+            inst.fitAddon.fit();
+          } catch {}
+        }
+      });
+    }, 40);
+  }, []);
 
   const updateZoom = useCallback((newSize: number) => {
     const clamped = Math.max(9, Math.min(32, newSize));
@@ -231,28 +433,7 @@ export default function TerminalApp() {
       cursorStyle: 'bar',
       fontSize: fontSizeRef.current,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
-      theme: {
-        background: '#14141e',
-        foreground: '#cdd6f4',
-        cursor: '#58a6ff',
-        selectionBackground: 'rgba(88, 166, 255, 0.35)',
-        black: '#303446',
-        red: '#e78284',
-        green: '#a6d189',
-        yellow: '#e5c890',
-        blue: '#8caaee',
-        magenta: '#f4b8e4',
-        cyan: '#81c8be',
-        white: '#c6d0f5',
-        brightBlack: '#626880',
-        brightRed: '#ea999c',
-        brightGreen: '#a6d189',
-        brightYellow: '#e5c890',
-        brightBlue: '#8caaee',
-        brightMagenta: '#f4b8e4',
-        brightCyan: '#81c8be',
-        brightWhite: '#b5bfe2',
-      },
+      theme: themeRef.current,
       allowTransparency: true,
       convertEol: true,
     });
@@ -282,8 +463,31 @@ export default function TerminalApp() {
     };
     el.addEventListener('wheel', handleWheel, { passive: false, capture: true });
 
-    // Keyboard Zoom Shortcuts (Ctrl+Plus, Ctrl+Minus, Ctrl+0)
+    // Keyboard Key Event Handler: Home / End command navigation & Ctrl Zoom shortcuts
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      // Home Key: Navigate to beginning/front of command line in bash/zsh/GNU Readline
+      if (e.key === 'Home' || (!e.getModifierState?.('NumLock') && e.code === 'Numpad7')) {
+        if (e.type === 'keydown') {
+          // Standard Linux / VT220 readline beginning-of-line escape sequence (\x1b[1~)
+          // For Ctrl+Home send \x1b[1;5H, Shift+Home send \x1b[1;2H
+          const seq = e.ctrlKey ? '\x1b[1;5H' : e.shiftKey ? '\x1b[1;2H' : '\x1b[1~';
+          terminalWrite(tabId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // End Key: Navigate to end of command line in bash/zsh/GNU Readline
+      if (e.key === 'End' || (!e.getModifierState?.('NumLock') && e.code === 'Numpad1')) {
+        if (e.type === 'keydown') {
+          // Standard Linux / VT220 readline end-of-line escape sequence (\x1b[4~)
+          // For Ctrl+End send \x1b[1;5F, Shift+End send \x1b[1;2F
+          const seq = e.ctrlKey ? '\x1b[1;5F' : e.shiftKey ? '\x1b[1;2F' : '\x1b[4~';
+          terminalWrite(tabId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // Keyboard Zoom Shortcuts (Ctrl+Plus, Ctrl+Minus, Ctrl+0)
       if (e.ctrlKey && (e.key === '=' || e.key === '+' || e.key === 'Add')) {
         if (e.type === 'keydown') {
           updateZoom(fontSizeRef.current + 1);
@@ -721,6 +925,15 @@ export default function TerminalApp() {
           </button>
 
           <button
+            onClick={() => sendQuickCommand("alias ls='ls --color=auto' grep='grep --color=auto' ll='ls -la --color=auto' 2>/dev/null; export TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1; echo -e '\\033[1;32m✓ Full 256-Color & TrueColor Activated!\\033[0m'")}
+            className="px-2.5 py-1 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/25 rounded-lg text-xs font-mono flex items-center space-x-1 transition-colors cursor-pointer"
+            title="Enable full 256-color, truecolor, and colorful ls/grep command outputs in remote shell"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Colorize</span>
+          </button>
+
+          <button
             onClick={handleLaunchPutty}
             className="px-2.5 py-1 bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 border border-blue-500/20 rounded-lg text-xs font-mono flex items-center space-x-1 transition-colors"
             title="Launch Standalone PuTTY Window with Auto-Login"
@@ -746,8 +959,14 @@ export default function TerminalApp() {
 
       {/* Terminal Viewports Container - Each tab keeps its DOM alive! */}
       <div 
-        className="flex-1 relative bg-[#14141e] overflow-hidden terminal-app"
+        className="flex-1 relative overflow-hidden terminal-app"
+        style={{ backgroundColor: currentTheme.background }}
         onContextMenu={handleContextMenu}
+        onClick={() => {
+          if (showThemeMenu) setShowThemeMenu(false);
+          if (showMarginMenu) setShowMarginMenu(false);
+          if (showServerMenu) setShowServerMenu(false);
+        }}
       >
         {tabs.map(tab => (
           <div
@@ -758,24 +977,124 @@ export default function TerminalApp() {
                 setupTabInstance(tab.id, el);
               }
             }}
-            className="absolute inset-0 p-2"
-            style={{ display: activeTab === tab.id ? 'block' : 'none' }}
+            className="absolute inset-0"
+            style={{ 
+              display: activeTab === tab.id ? 'block' : 'none',
+              padding: `${padding}px`,
+              backgroundColor: currentTheme.background
+            }}
           />
         ))}
       </div>
 
       {/* Terminal Status Bar */}
-      <div className="h-6 bg-[#0f0f18] border-t border-white/[0.08] px-3 flex items-center justify-between text-[11px] font-mono text-gray-400 shrink-0">
+      <div className="h-6 bg-[#0f0f18] border-t border-white/[0.08] px-3 flex items-center justify-between text-[11px] font-mono text-gray-400 shrink-0 relative select-none">
         <div className="flex items-center space-x-3">
           <span className="flex items-center space-x-1.5 text-emerald-400">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
             <span>PuTTY-Grade Raw PTY</span>
           </span>
-          <span>xterm.js 256color</span>
+          <span className="text-cyan-400 font-semibold flex items-center space-x-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+            <span>256color / TrueColor</span>
+          </span>
           <span>UTF-8</span>
           <span className="text-gray-500">Session: {activeTab}</span>
         </div>
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center space-x-2">
+          {/* Theme Selector Popover */}
+          <div className="relative">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowThemeMenu(!showThemeMenu);
+                setShowMarginMenu(false);
+              }}
+              className="flex items-center space-x-1.5 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] rounded px-2 py-0.5 text-gray-300 transition-colors cursor-pointer"
+              title="Change Terminal Color Theme"
+            >
+              <span className="w-2 h-2 rounded-full" style={{ backgroundColor: currentTheme.dotColor }} />
+              <span className="text-[10px]">{currentTheme.name}</span>
+              <ChevronDown className="w-2.5 h-2.5 text-gray-400" />
+            </button>
+
+            {showThemeMenu && (
+              <div 
+                className="absolute right-0 bottom-7 bg-[#1e1e2e] border border-white/15 rounded-xl shadow-2xl py-1 z-50 text-xs w-48 font-sans"
+                onClick={e => e.stopPropagation()}
+              >
+                <div className="px-3 py-1 text-[10px] uppercase font-bold text-gray-400 tracking-wider">
+                  Color Themes
+                </div>
+                {TERMINAL_THEMES.map(t => (
+                  <button
+                    key={t.id}
+                    onClick={() => {
+                      updateTheme(t.id);
+                      setShowThemeMenu(false);
+                    }}
+                    className={`w-full text-left px-3 py-1.5 hover:bg-blue-600/30 hover:text-white cursor-pointer flex items-center justify-between transition-colors ${
+                      themeId === t.id ? 'text-blue-400 font-semibold bg-white/[0.05]' : 'text-gray-300'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-2">
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: t.dotColor }} />
+                      <span className="text-xs">{t.name}</span>
+                    </div>
+                    {themeId === t.id && <Check className="w-3.5 h-3.5 text-blue-400" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Margin / Padding Selector Popover */}
+          <div className="relative">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowMarginMenu(!showMarginMenu);
+                setShowThemeMenu(false);
+              }}
+              className="flex items-center space-x-1 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] rounded px-2 py-0.5 text-gray-300 transition-colors cursor-pointer"
+              title="Terminal 4-Side Margins (Padding)"
+            >
+              <span className="text-[10px]">Margin: {padding}px</span>
+              <ChevronDown className="w-2.5 h-2.5 text-gray-400" />
+            </button>
+
+            {showMarginMenu && (
+              <div 
+                className="absolute right-0 bottom-7 bg-[#1e1e2e] border border-white/15 rounded-xl shadow-2xl py-1 z-50 text-xs w-44 font-sans"
+                onClick={e => e.stopPropagation()}
+              >
+                <div className="px-3 py-1 text-[10px] uppercase font-bold text-gray-400 tracking-wider">
+                  4-Side Margin
+                </div>
+                {[
+                  { label: 'Comfortable (16px)', val: 16 },
+                  { label: 'Spacious (20px)', val: 20 },
+                  { label: 'Balanced (12px)', val: 12 },
+                  { label: 'Compact (8px)', val: 8 },
+                ].map(opt => (
+                  <button
+                    key={opt.val}
+                    onClick={() => {
+                      updatePadding(opt.val);
+                      setShowMarginMenu(false);
+                    }}
+                    className={`w-full text-left px-3 py-1.5 hover:bg-blue-600/30 hover:text-white cursor-pointer flex items-center justify-between transition-colors ${
+                      padding === opt.val ? 'text-blue-400 font-semibold bg-white/[0.05]' : 'text-gray-300'
+                    }`}
+                  >
+                    <span>{opt.label}</span>
+                    {padding === opt.val && <Check className="w-3.5 h-3.5 text-blue-400" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
           {/* Font Zoom Indicator & Controls */}
           <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded px-1.5 py-0.5 space-x-1 text-gray-300">
             <button
