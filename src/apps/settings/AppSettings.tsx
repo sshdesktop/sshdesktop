@@ -6,7 +6,8 @@ import {
   RefreshCw, CheckCircle2, AlertCircle, Laptop, ArrowRight, 
   Monitor, Volume2, Bell, Cpu, HardDrive, Wifi, Lock, Moon, 
   Sun, Search, Sparkles, SlidersHorizontal, RotateCcw, ChevronRight, 
-  User, CheckCheck, X
+  User, CheckCheck, X, Archive, Download, FolderArchive, Trash2, Eye, FileArchive, Folder,
+  ChevronDown, ChevronUp, FileText
 } from 'lucide-react';
 import { WALLPAPERS } from '../../shell/Desktop';
 import { sshExec } from '../../lib/tauri-bridge';
@@ -20,6 +21,21 @@ import {
   checkServerSettingsFile,
   getServerSettingsFilePath
 } from '../../lib/server-settings';
+import {
+  listSshDesktopFiles,
+  createTarBackup,
+  listBackupArchives,
+  inspectTarArchive,
+  restoreTarBackup,
+  uploadAndRestoreTarBackup,
+  downloadTarBackup,
+  deleteBackupArchive,
+  getSshDesktopDirPath,
+  getSshDesktopBackupsDirPath,
+  SshDesktopFileEntry,
+  BackupArchiveEntry,
+  TarArchiveContentItem
+} from '../../lib/server-backup';
 
 const ACCENT_COLORS = [
   { name: 'Sapphire Blue', value: '#89B4FA' },
@@ -149,6 +165,213 @@ export default function AppSettings() {
       setBackupMessage({ text: `Restore failed: ${err?.message || err}`, isError: true });
     } finally {
       setIsRestoring(false);
+    }
+  };
+
+  // .sshdesktop Full Directory Tar Backup & Recovery States
+  const effectiveHome = userHome || (username ? `/home/${username}` : '/home/sharuk');
+  const sshDesktopPath = getSshDesktopDirPath(effectiveHome);
+  const sshDesktopBackupsPath = getSshDesktopBackupsDirPath(effectiveHome);
+
+  const [sshDesktopFiles, setSshDesktopFiles] = useState<SshDesktopFileEntry[]>([]);
+  const [sshDesktopTotalSize, setSshDesktopTotalSize] = useState<string>('—');
+  const [sshDesktopFileCount, setSshDesktopFileCount] = useState<number>(0);
+  const [backupArchives, setBackupArchives] = useState<BackupArchiveEntry[]>([]);
+  const [isTarLoading, setIsTarLoading] = useState(false);
+  const [isCreatingTar, setIsCreatingTar] = useState(false);
+  const [isRestoringTar, setIsRestoringTar] = useState(false);
+  const [tarBackupFormat, setTarBackupFormat] = useState<'tar.gz' | 'tar'>('tar.gz');
+  const [autoDownloadAfterBackup, setAutoDownloadAfterBackup] = useState<boolean>(true);
+  const [tarMessage, setTarMessage] = useState<{ text: string; isError: boolean } | null>(null);
+  const [showFilesList, setShowFilesList] = useState<boolean>(true);
+  const [showJsonSyncCard, setShowJsonSyncCard] = useState<boolean>(false);
+  const [copiedTargetDir, setCopiedTargetDir] = useState(false);
+
+  // Modals for Tar Inspect & Restore Confirmation
+  const [inspectModal, setInspectModal] = useState<{
+    open: boolean;
+    archiveName: string;
+    archivePath: string;
+    items: TarArchiveContentItem[];
+    rawOutput: string;
+    loading: boolean;
+  } | null>(null);
+  const [restoreConfirmModal, setRestoreConfirmModal] = useState<{
+    open: boolean;
+    archiveName: string;
+    archivePath: string;
+  } | null>(null);
+
+  const tarUploadInputRef = useRef<HTMLInputElement | null>(null);
+
+  const refreshTarBackupData = useCallback(async () => {
+    if (!activeConnectionId) {
+      setSshDesktopFiles([]);
+      setBackupArchives([]);
+      return;
+    }
+    setIsTarLoading(true);
+    try {
+      const [fileRes, archives] = await Promise.all([
+        listSshDesktopFiles(activeConnectionId, effectiveHome),
+        listBackupArchives(activeConnectionId, effectiveHome),
+      ]);
+      if (fileRes.success) {
+        setSshDesktopFiles(fileRes.files);
+        setSshDesktopTotalSize(fileRes.totalSize);
+        setSshDesktopFileCount(fileRes.totalFiles);
+      }
+      setBackupArchives(archives);
+    } catch (err: any) {
+      console.warn('Error refreshing tar backup data:', err);
+    } finally {
+      setIsTarLoading(false);
+    }
+  }, [activeConnectionId, effectiveHome]);
+
+  useEffect(() => {
+    if (activeTab === 'backup') {
+      refreshTarBackupData();
+    }
+  }, [activeTab, refreshTarBackupData]);
+
+  const handleCreateTarBackup = async () => {
+    if (!activeConnectionId) {
+      setTarMessage({ text: 'No active SSH connection to server.', isError: true });
+      return;
+    }
+    setIsCreatingTar(true);
+    setTarMessage(null);
+    try {
+      const res = await createTarBackup(activeConnectionId, effectiveHome, {
+        format: tarBackupFormat,
+      });
+      if (res.success) {
+        let dlNotice = '';
+        if (autoDownloadAfterBackup) {
+          try {
+            await downloadTarBackup(activeConnectionId, res.archivePath);
+            dlNotice = ' and downloaded to your local Downloads folder!';
+          } catch (dlErr: any) {
+            dlNotice = ` (saved on server; local download note: ${dlErr?.message || dlErr})`;
+          }
+        }
+        setTarMessage({
+          text: `Backup created successfully: ${res.archiveName} (${res.size}) in ${sshDesktopBackupsPath}${dlNotice}`,
+          isError: false,
+        });
+        await refreshTarBackupData();
+      } else {
+        throw new Error(res.error || 'Failed to create tar backup');
+      }
+    } catch (err: any) {
+      setTarMessage({ text: `Backup creation failed: ${err?.message || err}`, isError: true });
+    } finally {
+      setIsCreatingTar(false);
+    }
+  };
+
+  const handleConfirmRestoreTar = async () => {
+    if (!restoreConfirmModal || !activeConnectionId) return;
+    const { archivePath, archiveName } = restoreConfirmModal;
+    setIsRestoringTar(true);
+    setTarMessage(null);
+    try {
+      const res = await restoreTarBackup(activeConnectionId, effectiveHome, archivePath);
+      if (res.success) {
+        setTarMessage({
+          text: `Recovery successful: All files inside ${res.targetDir} restored from ${archiveName} (${res.restoredCount} files recovered)!`,
+          isError: false,
+        });
+        await Promise.all([refreshTarBackupData(), refreshServerStatus()]);
+      } else {
+        throw new Error(res.error || 'Failed to restore tar archive');
+      }
+    } catch (err: any) {
+      setTarMessage({ text: `Restore failed: ${err?.message || err}`, isError: true });
+    } finally {
+      setIsRestoringTar(false);
+      setRestoreConfirmModal(null);
+    }
+  };
+
+  const handleUploadAndRestoreTar = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !activeConnectionId) return;
+
+    if (!file.name.endsWith('.tar') && !file.name.endsWith('.tar.gz') && !file.name.endsWith('.tgz')) {
+      setTarMessage({ text: 'Invalid file format: Please select a valid .tar or .tar.gz archive.', isError: true });
+      if (tarUploadInputRef.current) tarUploadInputRef.current.value = '';
+      return;
+    }
+
+    setIsRestoringTar(true);
+    setTarMessage(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const res = await uploadAndRestoreTarBackup(activeConnectionId, effectiveHome, buf, file.name);
+      if (res.success) {
+        setTarMessage({
+          text: `Uploaded & recovered ${file.name} into ${res.targetDir} (${res.restoredCount} files restored)!`,
+          isError: false,
+        });
+        await Promise.all([refreshTarBackupData(), refreshServerStatus()]);
+      } else {
+        throw new Error(res.error || 'Upload and restore failed');
+      }
+    } catch (err: any) {
+      setTarMessage({ text: `Restore failed: ${err?.message || err}`, isError: true });
+    } finally {
+      setIsRestoringTar(false);
+      if (tarUploadInputRef.current) tarUploadInputRef.current.value = '';
+    }
+  };
+
+  const handleDownloadArchive = async (archivePath: string, archiveName: string) => {
+    if (!activeConnectionId) return;
+    try {
+      setTarMessage({ text: `Downloading ${archiveName} to your local PC...`, isError: false });
+      await downloadTarBackup(activeConnectionId, archivePath);
+      setTarMessage({ text: `Downloaded ${archiveName} to your local Downloads folder!`, isError: false });
+    } catch (err: any) {
+      setTarMessage({ text: `Download failed: ${err?.message || err}`, isError: true });
+    }
+  };
+
+  const handleDeleteArchive = async (archivePath: string, archiveName: string) => {
+    if (!activeConnectionId) return;
+    if (!confirm(`Delete backup archive "${archiveName}" from server?`)) return;
+    try {
+      await deleteBackupArchive(activeConnectionId, archivePath);
+      setTarMessage({ text: `Deleted archive ${archiveName}`, isError: false });
+      await refreshTarBackupData();
+    } catch (err: any) {
+      setTarMessage({ text: `Delete failed: ${err?.message || err}`, isError: true });
+    }
+  };
+
+  const handleInspectArchive = async (archivePath: string, archiveName: string) => {
+    if (!activeConnectionId) return;
+    setInspectModal({
+      open: true,
+      archiveName,
+      archivePath,
+      items: [],
+      rawOutput: '',
+      loading: true,
+    });
+    try {
+      const res = await inspectTarArchive(activeConnectionId, archivePath);
+      setInspectModal({
+        open: true,
+        archiveName,
+        archivePath,
+        items: res.items,
+        rawOutput: res.rawOutput,
+        loading: false,
+      });
+    } catch (err: any) {
+      setInspectModal(prev => prev ? { ...prev, loading: false, rawOutput: String(err) } : null);
     }
   };
 
@@ -351,7 +574,7 @@ export default function AppSettings() {
   const navItems = [
     { id: 'appearance', label: 'Appearance', icon: Palette, color: 'text-pink-400' },
     { id: 'wallpaper', label: 'Wallpaper (4K)', icon: ImageIcon, color: 'text-blue-400' },
-    { id: 'backup', label: 'Server Backup & Restore', icon: HardDrive, color: 'text-emerald-400' },
+    { id: 'backup', label: 'Backup & Recover (.tar)', icon: FolderArchive, color: 'text-emerald-400' },
     { id: 'datetime', label: 'Date & Time (Server)', icon: Clock, color: 'text-teal-400' },
     { id: 'terminal', label: 'Terminal Emulator', icon: Terminal, color: 'text-sky-400' },
     { id: 'editor', label: 'Code Editor', icon: FileCode, color: 'text-purple-400' },
@@ -589,71 +812,48 @@ export default function AppSettings() {
             </div>
           )}
 
-          {/* TAB: SERVER BACKUP & RESTORE */}
+          {/* TAB: SERVER BACKUP & RECOVER (.TAR) */}
           {activeTab === 'backup' && (
             <div className="space-y-6">
-              <div>
-                <h2 className="text-lg font-bold text-white tracking-tight">Server Settings Backup & Restore</h2>
-                <p className="text-xs text-gray-400">
-                  Save, restore, and synchronize application preferences in your remote login user directory (<code className="text-amber-300 font-mono text-[11px]">{serverSettingsPath}</code>).
-                </p>
-              </div>
-
-              {/* Server File Location Card */}
-              <div className="p-4 rounded-2xl bg-gradient-to-r from-blue-900/30 via-indigo-900/20 to-purple-900/30 border border-blue-500/20 space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2 text-xs font-semibold text-blue-300">
-                    <HardDrive className="w-4 h-4 text-blue-400" />
-                    <span>Remote User Storage Location</span>
-                  </div>
-                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-medium flex items-center space-x-1 ${
-                    serverFileStatus?.exists 
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
-                      : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                  }`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${serverFileStatus?.exists ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-                    <span>{serverFileStatus?.exists ? 'Settings File Present' : 'Not Saved on Server Yet'}</span>
-                  </span>
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-bold text-white tracking-tight flex items-center space-x-2">
+                    <FolderArchive className="w-5 h-5 text-emerald-400" />
+                    <span>Server Data Backup & Recover (.tar)</span>
+                  </h2>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    Backup and recover all files inside <code className="text-amber-300 font-mono text-[11px]">{sshDesktopPath}</code> into compressed <code className="text-emerald-300 font-mono text-[11px]">.tar.gz</code> or <code className="text-emerald-300 font-mono text-[11px]">.tar</code> archives.
+                  </p>
                 </div>
-
-                <div className="text-xs font-mono text-gray-300 bg-[#101018]/90 p-2.5 rounded-xl border border-white/10 break-all select-all flex items-center justify-between">
-                  <span className="text-amber-300 font-semibold">{serverSettingsPath}</span>
-                  {copiedPath ? (
-                    <span className="text-[10px] text-emerald-400 flex items-center space-x-1 shrink-0 ml-2">
-                      <Check className="w-3 h-3" />
-                      <span>Copied</span>
-                    </span>
-                  ) : (
-                    <button
-                      onClick={() => {
-                        navigator.clipboard.writeText(serverSettingsPath);
-                        setCopiedPath(true);
-                        setTimeout(() => setCopiedPath(false), 2000);
-                      }}
-                      className="text-[10px] text-gray-400 hover:text-white transition-colors cursor-pointer shrink-0 ml-2 bg-white/5 hover:bg-white/10 px-2 py-0.5 rounded border border-white/10"
-                    >
-                      Copy Path
-                    </button>
-                  )}
-                </div>
-
-                <div className="grid grid-cols-3 gap-2 text-[11px] text-gray-400 pt-1">
-                  <div>
-                    <span className="text-gray-500">Login User:</span>{' '}
-                    <strong className="text-white font-mono">{username || activeServer?.username || 'root'}</strong>
-                  </div>
-                  <div>
-                    <span className="text-gray-500">File Size:</span>{' '}
-                    <span className="text-gray-300 font-mono">{serverFileStatus?.size ? `${serverFileStatus.size} bytes` : '—'}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Last Modified:</span>{' '}
-                    <span className="text-gray-300 font-mono truncate block">{serverFileStatus?.modified || '—'}</span>
-                  </div>
-                </div>
+                <button
+                  onClick={() => {
+                    refreshTarBackupData();
+                    refreshServerStatus();
+                  }}
+                  disabled={isTarLoading}
+                  className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-medium flex items-center space-x-1.5 transition-all cursor-pointer active:scale-95 disabled:opacity-50"
+                  title="Refresh status from server"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isTarLoading ? 'animate-spin text-emerald-400' : ''}`} />
+                  <span>Refresh</span>
+                </button>
               </div>
 
               {/* Status/Error Notification Banner */}
+              {tarMessage && (
+                <div className={`p-3.5 rounded-2xl text-xs flex items-center space-x-2.5 border animate-in fade-in duration-200 ${
+                  tarMessage.isError 
+                    ? 'bg-rose-500/15 border-rose-500/30 text-rose-300' 
+                    : 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                }`}>
+                  {tarMessage.isError ? <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" /> : <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />}
+                  <span className="flex-1 font-mono">{tarMessage.text}</span>
+                  <button onClick={() => setTarMessage(null)} className="text-gray-400 hover:text-white cursor-pointer">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
               {backupMessage && (
                 <div className={`p-3.5 rounded-2xl text-xs flex items-center space-x-2.5 border animate-in fade-in duration-200 ${
                   backupMessage.isError 
@@ -668,94 +868,418 @@ export default function AppSettings() {
                 </div>
               )}
 
-              {/* Primary Backup & Restore Actions */}
+              {/* Server Target Directory Status Card */}
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-teal-950/30 to-blue-950/40 border border-emerald-500/30 space-y-3 shadow-xl">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2 text-xs font-semibold text-emerald-300">
+                    <FolderArchive className="w-4 h-4 text-emerald-400" />
+                    <span>Target Directory for Backup & Recovery</span>
+                  </div>
+                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-medium flex items-center space-x-1 ${
+                    activeConnectionId 
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
+                      : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                  }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${activeConnectionId ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                    <span>{activeConnectionId ? `Connected (${activeServer?.name || activeServer?.host})` : 'Offline (No Connection)'}</span>
+                  </span>
+                </div>
+
+                <div className="text-xs font-mono text-gray-300 bg-[#101018]/90 p-2.5 rounded-xl border border-white/10 break-all select-all flex items-center justify-between">
+                  <div className="flex items-center space-x-2 truncate">
+                    <Folder className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span className="text-amber-300 font-semibold">{sshDesktopPath}</span>
+                  </div>
+                  {copiedTargetDir ? (
+                    <span className="text-[10px] text-emerald-400 flex items-center space-x-1 shrink-0 ml-2">
+                      <Check className="w-3 h-3" />
+                      <span>Copied</span>
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(sshDesktopPath);
+                        setCopiedTargetDir(true);
+                        setTimeout(() => setCopiedTargetDir(false), 2000);
+                      }}
+                      className="text-[10px] text-gray-400 hover:text-white transition-colors cursor-pointer shrink-0 ml-2 bg-white/5 hover:bg-white/10 px-2 py-0.5 rounded border border-white/10"
+                    >
+                      Copy Path
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-4 gap-2 text-[11px] text-gray-400 pt-1">
+                  <div className="bg-white/5 p-2 rounded-lg border border-white/5">
+                    <span className="text-gray-500 block text-[10px]">Login User</span>
+                    <strong className="text-white font-mono text-xs">{username || activeServer?.username || 'sharuk'}</strong>
+                  </div>
+                  <div className="bg-white/5 p-2 rounded-lg border border-white/5">
+                    <span className="text-gray-500 block text-[10px]">Files Inside</span>
+                    <span className="text-emerald-300 font-mono text-xs font-bold">{sshDesktopFileCount} items</span>
+                  </div>
+                  <div className="bg-white/5 p-2 rounded-lg border border-white/5">
+                    <span className="text-gray-500 block text-[10px]">Total Size</span>
+                    <span className="text-cyan-300 font-mono text-xs font-bold">{sshDesktopTotalSize}</span>
+                  </div>
+                  <div className="bg-white/5 p-2 rounded-lg border border-white/5">
+                    <span className="text-gray-500 block text-[10px]">Backups Folder</span>
+                    <span className="text-gray-300 font-mono text-[10px] truncate block" title={sshDesktopBackupsPath}>{sshDesktopBackupsPath}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Primary Backup & Restore Hero Cards */}
               <div className="grid grid-cols-2 gap-4">
-                {/* Backup Card */}
-                <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3.5 shadow-xl backdrop-blur-md flex flex-col justify-between">
-                  <div>
-                    <div className="w-9 h-9 rounded-xl bg-blue-500/20 text-blue-400 flex items-center justify-center mb-2.5 border border-blue-500/30">
-                      <Upload className="w-4 h-4" />
+                {/* 1. CREATE TAR BACKUP CARD */}
+                <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-4 shadow-xl backdrop-blur-md flex flex-col justify-between">
+                  <div className="space-y-3">
+                    <div className="flex items-center space-x-2.5">
+                      <div className="w-9 h-9 rounded-xl bg-blue-500/20 text-blue-400 flex items-center justify-center border border-blue-500/30 shrink-0">
+                        <Archive className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h3 className="text-xs font-bold text-white">Create Tar Backup</h3>
+                        <span className="text-[10px] text-gray-400">All files in {sshDesktopPath}</span>
+                      </div>
                     </div>
-                    <h3 className="text-xs font-bold text-white">Backup Settings to Server</h3>
-                    <p className="text-[11px] text-gray-400 mt-1 leading-relaxed">
-                      Upload current theme, wallpaper, dock position, font size, and desktop preferences directly to <code className="text-amber-300 text-[10px]">{serverSettingsPath}</code>.
+
+                    <p className="text-[11px] text-gray-400 leading-relaxed">
+                      Packages all files inside <code className="text-amber-300 font-mono text-[10px]">{sshDesktopPath}</code> into an archive on the server with optional instant PC download.
                     </p>
+
+                    {/* Format Options */}
+                    <div className="space-y-2 pt-1">
+                      <label className="text-[10px] font-semibold text-gray-300 uppercase tracking-wider block">Archive Format</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setTarBackupFormat('tar.gz')}
+                          className={`px-2.5 py-1.5 rounded-lg text-xs font-mono font-medium flex items-center justify-center space-x-1.5 border transition-all cursor-pointer ${
+                            tarBackupFormat === 'tar.gz'
+                              ? 'bg-blue-600/20 border-blue-500 text-blue-300 font-bold'
+                              : 'bg-white/5 border-white/10 text-gray-400 hover:text-white'
+                          }`}
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+                          <span>.tar.gz (Gzip)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTarBackupFormat('tar')}
+                          className={`px-2.5 py-1.5 rounded-lg text-xs font-mono font-medium flex items-center justify-center space-x-1.5 border transition-all cursor-pointer ${
+                            tarBackupFormat === 'tar'
+                              ? 'bg-blue-600/20 border-blue-500 text-blue-300 font-bold'
+                              : 'bg-white/5 border-white/10 text-gray-400 hover:text-white'
+                          }`}
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                          <span>.tar (POSIX)</span>
+                        </button>
+                      </div>
+
+                      {/* Download Checkbox */}
+                      <label className="flex items-center space-x-2 text-[11px] text-gray-300 cursor-pointer pt-1">
+                        <input
+                          type="checkbox"
+                          checked={autoDownloadAfterBackup}
+                          onChange={(e) => setAutoDownloadAfterBackup(e.target.checked)}
+                          className="rounded border-white/20 bg-white/5 text-blue-600 focus:ring-0 cursor-pointer"
+                        />
+                        <span>Download tar archive to local PC Downloads folder</span>
+                      </label>
+                    </div>
                   </div>
 
                   <button
-                    onClick={handleBackupToServer}
-                    disabled={isBackingUp || !activeConnectionId}
-                    className="w-full flex items-center justify-center space-x-2 py-2 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30 transition-all cursor-pointer disabled:opacity-50"
+                    onClick={handleCreateTarBackup}
+                    disabled={isCreatingTar || !activeConnectionId}
+                    className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 active:scale-[0.98] text-white text-xs font-semibold shadow-lg shadow-blue-600/30 transition-all cursor-pointer disabled:opacity-50"
                   >
-                    {isBackingUp ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
-                    <span>{isBackingUp ? 'Backing Up...' : 'Backup to Server'}</span>
+                    {isCreatingTar ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Archive className="w-3.5 h-3.5" />
+                    )}
+                    <span>{isCreatingTar ? 'Creating Tar Archive...' : `Create Backup (${tarBackupFormat})`}</span>
                   </button>
                 </div>
 
-                {/* Restore Card */}
-                <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3.5 shadow-xl backdrop-blur-md flex flex-col justify-between">
-                  <div>
-                    <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center mb-2.5 border border-emerald-500/30">
-                      <RotateCcw className="w-4 h-4" />
+                {/* 2. RECOVER / RESTORE FROM TAR FILE CARD */}
+                <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-4 shadow-xl backdrop-blur-md flex flex-col justify-between">
+                  <div className="space-y-3">
+                    <div className="flex items-center space-x-2.5">
+                      <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/30 shrink-0">
+                        <RotateCcw className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h3 className="text-xs font-bold text-white">Restore / Recover Tar File</h3>
+                        <span className="text-[10px] text-gray-400">Restore into {sshDesktopPath}</span>
+                      </div>
                     </div>
-                    <h3 className="text-xs font-bold text-white">Restore Settings from Server</h3>
-                    <p className="text-[11px] text-gray-400 mt-1 leading-relaxed">
-                      Download and apply configuration previously stored on this server for login user <strong className="text-white">{username || activeServer?.username}</strong>.
+
+                    <p className="text-[11px] text-gray-400 leading-relaxed">
+                      Upload a <code className="text-emerald-300 font-mono text-[10px]">.tar</code> or <code className="text-emerald-300 font-mono text-[10px]">.tar.gz</code> archive from your computer to unpack and restore all files into <code className="text-amber-300 font-mono text-[10px]">{sshDesktopPath}</code>.
                     </p>
+
+                    {/* Hidden input for local tar upload */}
+                    <input
+                      type="file"
+                      ref={tarUploadInputRef}
+                      accept=".tar,.tar.gz,.tgz"
+                      onChange={handleUploadAndRestoreTar}
+                      className="hidden"
+                    />
+
+                    {/* Drag-and-Drop / Upload Box */}
+                    <div 
+                      onClick={() => !isRestoringTar && tarUploadInputRef.current?.click()}
+                      className="border border-dashed border-emerald-500/30 hover:border-emerald-500/60 bg-emerald-500/5 hover:bg-emerald-500/10 p-3.5 rounded-xl flex flex-col items-center justify-center text-center cursor-pointer transition-all group"
+                    >
+                      <Upload className="w-5 h-5 text-emerald-400 mb-1 group-hover:-translate-y-0.5 transition-transform" />
+                      <span className="text-xs font-semibold text-emerald-300">Click to Select Local Tar Archive</span>
+                      <span className="text-[10px] text-gray-400 mt-0.5">Supports .tar, .tar.gz, .tgz archives</span>
+                    </div>
                   </div>
 
                   <button
-                    onClick={handleRestoreFromServer}
-                    disabled={isRestoring || !activeConnectionId}
-                    className="w-full flex items-center justify-center space-x-2 py-2 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-600/30 transition-all cursor-pointer disabled:opacity-50"
+                    onClick={() => tarUploadInputRef.current?.click()}
+                    disabled={isRestoringTar || !activeConnectionId}
+                    className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white text-xs font-semibold shadow-lg shadow-emerald-600/30 transition-all cursor-pointer disabled:opacity-50"
                   >
-                    {isRestoring ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
-                    <span>{isRestoring ? 'Restoring...' : 'Restore from Server'}</span>
+                    {isRestoringTar ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    )}
+                    <span>{isRestoringTar ? 'Unpacking & Restoring...' : 'Upload & Recover from PC Tar'}</span>
                   </button>
                 </div>
               </div>
 
-              {/* Auto-Sync Configuration */}
+              {/* Server Backup Archives List */}
               <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 shadow-xl backdrop-blur-md space-y-3">
                 <div className="flex items-center justify-between">
-                  <div>
-                    <span className="text-xs font-semibold text-white block">Auto-Sync on Login & Preferences Change</span>
-                    <span className="text-[11px] text-gray-400">
-                      Automatically restore settings when connecting and auto-save updates to <span className="text-amber-300 font-mono text-[10px]">{serverSettingsPath}</span>
+                  <div className="flex items-center space-x-2">
+                    <Archive className="w-4 h-4 text-emerald-400" />
+                    <span className="text-xs font-bold text-white">Server Backup Archives</span>
+                    <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full font-mono">
+                      {backupArchives.length} archives
                     </span>
                   </div>
-                  <button
-                    onClick={() => {
-                      const next = !autoSyncServer;
-                      setAutoSyncServer(next);
-                      localStorage.setItem('sshdesktop_auto_sync_server', String(next));
-                    }}
-                    className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${autoSyncServer ? 'bg-blue-600' : 'bg-white/10'}`}
-                  >
-                    <span className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${autoSyncServer ? 'left-5.5' : 'left-0.5'}`} />
-                  </button>
+                  <span className="text-[10px] text-gray-400 font-mono">
+                    Stored in: <span className="text-amber-300">{sshDesktopBackupsPath}</span>
+                  </span>
                 </div>
+
+                {backupArchives.length === 0 ? (
+                  <div className="bg-[#101018] p-6 rounded-xl border border-white/5 text-center space-y-2">
+                    <FolderArchive className="w-8 h-8 text-gray-600 mx-auto" />
+                    <p className="text-xs text-gray-400">No backup archives created on server yet.</p>
+                    <p className="text-[11px] text-gray-500">Click <strong>Create Backup</strong> above to generate a .tar.gz archive of all files inside {sshDesktopPath}.</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto rounded-xl border border-white/10 bg-[#101018]">
+                    <table className="w-full text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-white/10 text-[10px] text-gray-400 uppercase tracking-wider bg-white/[0.02]">
+                          <th className="py-2.5 px-3">Archive File</th>
+                          <th className="py-2.5 px-3">Type</th>
+                          <th className="py-2.5 px-3">Size</th>
+                          <th className="py-2.5 px-3">Created Date</th>
+                          <th className="py-2.5 px-3 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5 font-mono text-[11px]">
+                        {backupArchives.map((arc) => (
+                          <tr key={arc.path} className="hover:bg-white/[0.03] transition-colors">
+                            <td className="py-2.5 px-3 text-white font-medium flex items-center space-x-2 truncate max-w-xs">
+                              <Archive className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                              <span className="truncate" title={arc.name}>{arc.name}</span>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                arc.isGzip 
+                                  ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30' 
+                                  : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                              }`}>
+                                {arc.isGzip ? 'TAR.GZ' : 'TAR'}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-cyan-300 font-semibold">{arc.size}</td>
+                            <td className="py-2.5 px-3 text-gray-400">{arc.modified}</td>
+                            <td className="py-2.5 px-3 text-right">
+                              <div className="flex items-center justify-end space-x-1.5">
+                                {/* Recover button */}
+                                <button
+                                  onClick={() => setRestoreConfirmModal({ open: true, archiveName: arc.name, archivePath: arc.path })}
+                                  disabled={isRestoringTar}
+                                  className="px-2 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white text-[10px] font-sans font-semibold border border-emerald-500/30 flex items-center space-x-1 transition-all cursor-pointer"
+                                  title="Restore / Recover all files into .sshdesktop"
+                                >
+                                  <RotateCcw className="w-3 h-3" />
+                                  <span>Recover</span>
+                                </button>
+
+                                {/* Download button */}
+                                <button
+                                  onClick={() => handleDownloadArchive(arc.path, arc.name)}
+                                  className="px-2 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white text-[10px] font-sans font-semibold border border-blue-500/30 flex items-center space-x-1 transition-all cursor-pointer"
+                                  title="Download tar archive to local PC"
+                                >
+                                  <Download className="w-3 h-3" />
+                                  <span>Download</span>
+                                </button>
+
+                                {/* Inspect button */}
+                                <button
+                                  onClick={() => handleInspectArchive(arc.path, arc.name)}
+                                  className="p-1 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 transition-colors cursor-pointer"
+                                  title="Inspect files inside tar archive"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                </button>
+
+                                {/* Delete button */}
+                                <button
+                                  onClick={() => handleDeleteArchive(arc.path, arc.name)}
+                                  className="p-1 rounded-lg bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/20 transition-colors cursor-pointer"
+                                  title="Delete backup archive from server"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
 
-              {/* Remote File Content Preview */}
-              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 shadow-xl backdrop-blur-md space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-white flex items-center space-x-2">
-                    <FileCode className="w-3.5 h-3.5 text-blue-400" />
-                    <span>Configuration JSON ({serverSettingsPath})</span>
-                  </span>
-                  <button
-                    onClick={() => refreshServerStatus()}
-                    className="text-[11px] text-gray-400 hover:text-white flex items-center space-x-1 cursor-pointer bg-white/5 hover:bg-white/10 px-2.5 py-1 rounded-lg border border-white/10 transition-colors"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    <span>Refresh</span>
+              {/* Collapsible Files Inside .sshdesktop */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 shadow-xl backdrop-blur-md space-y-3">
+                <div 
+                  onClick={() => setShowFilesList(!showFilesList)}
+                  className="flex items-center justify-between cursor-pointer select-none"
+                >
+                  <div className="flex items-center space-x-2">
+                    <FileText className="w-4 h-4 text-amber-400" />
+                    <span className="text-xs font-bold text-white">Files Inside {sshDesktopPath}</span>
+                    <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded-full font-mono">
+                      {sshDesktopFiles.length} files ({sshDesktopTotalSize})
+                    </span>
+                  </div>
+                  <button className="text-gray-400 hover:text-white text-xs flex items-center space-x-1">
+                    <span>{showFilesList ? 'Collapse' : 'Expand'}</span>
+                    {showFilesList ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                   </button>
                 </div>
-                <div className="max-h-60 overflow-y-auto bg-[#101018] p-3 rounded-xl border border-white/5 font-mono text-[11px] text-gray-300 select-text">
-                  <pre>{serverFileStatus?.rawJson || '// No settings.json saved on server yet. Click "Backup to Server" to save current configuration.'}</pre>
-                </div>
+
+                {showFilesList && (
+                  <div className="space-y-2 pt-1 animate-in fade-in duration-200">
+                    {sshDesktopFiles.length === 0 ? (
+                      <div className="text-xs text-gray-500 p-3 bg-[#101018] rounded-xl text-center">
+                        No files currently stored inside {sshDesktopPath}.
+                      </div>
+                    ) : (
+                      <div className="max-h-56 overflow-y-auto rounded-xl border border-white/10 bg-[#101018]">
+                        <table className="w-full text-left text-xs">
+                          <thead>
+                            <tr className="border-b border-white/10 text-[10px] text-gray-400 uppercase tracking-wider bg-white/[0.02]">
+                              <th className="py-2 px-3">File Name</th>
+                              <th className="py-2 px-3">Size</th>
+                              <th className="py-2 px-3">Last Modified</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/5 font-mono text-[11px]">
+                            {sshDesktopFiles.map((f) => (
+                              <tr key={f.path} className="hover:bg-white/[0.02]">
+                                <td className="py-1.5 px-3 text-white flex items-center space-x-2">
+                                  {f.isDir ? (
+                                    <Folder className="w-3.5 h-3.5 text-blue-400" />
+                                  ) : f.name.endsWith('.json') ? (
+                                    <FileCode className="w-3.5 h-3.5 text-amber-400" />
+                                  ) : (
+                                    <FileText className="w-3.5 h-3.5 text-gray-400" />
+                                  )}
+                                  <span className="font-semibold">{f.name}</span>
+                                </td>
+                                <td className="py-1.5 px-3 text-cyan-300">{f.size}</td>
+                                <td className="py-1.5 px-3 text-gray-400">{f.modified}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
+
+              {/* Collapsible Quick Settings Sync Card (Legacy settings.json sync) */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-4 shadow-xl backdrop-blur-md space-y-3">
+                <div 
+                  onClick={() => setShowJsonSyncCard(!showJsonSyncCard)}
+                  className="flex items-center justify-between cursor-pointer select-none"
+                >
+                  <div className="flex items-center space-x-2">
+                    <FileCode className="w-4 h-4 text-blue-400" />
+                    <span className="text-xs font-semibold text-white">Single Preferences Sync (settings.json only)</span>
+                  </div>
+                  <button className="text-gray-400 hover:text-white text-xs flex items-center space-x-1">
+                    <span>{showJsonSyncCard ? 'Collapse' : 'Expand Preferences Sync'}</span>
+                    {showJsonSyncCard ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+
+                {showJsonSyncCard && (
+                  <div className="space-y-4 pt-2 animate-in fade-in duration-200">
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        onClick={handleBackupToServer}
+                        disabled={isBackingUp || !activeConnectionId}
+                        className="flex items-center justify-center space-x-2 py-2 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        {isBackingUp ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                        <span>Save settings.json to Server</span>
+                      </button>
+
+                      <button
+                        onClick={handleRestoreFromServer}
+                        disabled={isRestoring || !activeConnectionId}
+                        className="flex items-center justify-center space-x-2 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        {isRestoring ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                        <span>Load settings.json from Server</span>
+                      </button>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-2 border-t border-white/5">
+                      <div>
+                        <span className="text-xs font-semibold text-white block">Auto-Sync Preferences</span>
+                        <span className="text-[10px] text-gray-400">Auto-save changes to settings.json</span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          const next = !autoSyncServer;
+                          setAutoSyncServer(next);
+                          localStorage.setItem('sshdesktop_auto_sync_server', String(next));
+                        }}
+                        className={`w-10 h-5.5 rounded-full transition-colors relative cursor-pointer ${autoSyncServer ? 'bg-blue-600' : 'bg-white/10'}`}
+                      >
+                        <span className={`w-4.5 h-4.5 rounded-full bg-white absolute top-0.5 transition-transform ${autoSyncServer ? 'left-5' : 'left-0.5'}`} />
+                      </button>
+                    </div>
+
+                    <div className="max-h-48 overflow-y-auto bg-[#101018] p-3 rounded-xl border border-white/5 font-mono text-[11px] text-gray-300 select-text">
+                      <pre>{serverFileStatus?.rawJson || '// No settings.json saved on server yet.'}</pre>
+                    </div>
+                  </div>
+                )}
+              </div>
+
             </div>
           )}
 
@@ -1171,6 +1695,141 @@ export default function AppSettings() {
 
         </div>
       </main>
+
+      {/* 1. Modal: Inspect Tar Archive Contents (tar -tvf) */}
+      {inspectModal?.open && (
+        <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/70 backdrop-blur-sm animate-in fade-in duration-200 p-4">
+          <div className="bg-[#181825] border border-white/20 rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between bg-white/[0.02]">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-8 h-8 rounded-xl bg-blue-500/20 text-blue-400 flex items-center justify-center border border-blue-500/30">
+                  <Archive className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white truncate max-w-md">{inspectModal.archiveName}</h3>
+                  <p className="text-[10px] text-gray-400 font-mono truncate">{inspectModal.archivePath}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setInspectModal(null)}
+                className="text-gray-400 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 flex-1 overflow-y-auto space-y-4">
+              {inspectModal.loading ? (
+                <div className="p-12 flex flex-col items-center justify-center space-y-2 text-gray-400">
+                  <RefreshCw className="w-6 h-6 animate-spin text-blue-400" />
+                  <span className="text-xs">Reading archive contents (tar -tvf)...</span>
+                </div>
+              ) : inspectModal.items.length === 0 ? (
+                <div className="bg-[#101018] p-4 rounded-xl font-mono text-xs text-gray-300 whitespace-pre-wrap">
+                  {inspectModal.rawOutput || 'Empty archive or unable to read contents.'}
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-xl border border-white/10 bg-[#101018]">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead>
+                      <tr className="border-b border-white/10 text-[10px] text-gray-400 uppercase tracking-wider bg-white/[0.02]">
+                        <th className="py-2 px-3">File / Path</th>
+                        <th className="py-2 px-3">Size</th>
+                        <th className="py-2 px-3">Date</th>
+                        <th className="py-2 px-3">Permissions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5 text-[11px]">
+                      {inspectModal.items.map((item, idx) => (
+                        <tr key={idx} className="hover:bg-white/[0.02]">
+                          <td className="py-1.5 px-3 text-white truncate max-w-xs">{item.name}</td>
+                          <td className="py-1.5 px-3 text-cyan-300">{item.size}</td>
+                          <td className="py-1.5 px-3 text-gray-400">{item.date}</td>
+                          <td className="py-1.5 px-3 text-gray-500">{item.permissions}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-5 py-3 border-t border-white/10 flex items-center justify-between bg-white/[0.02]">
+              <span className="text-xs text-gray-400">
+                Total {inspectModal.items.length} items in archive
+              </span>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setInspectModal(null)}
+                  className="px-3.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-medium transition-colors cursor-pointer"
+                >
+                  Close
+                </button>
+                <button
+                  onClick={() => {
+                    const arc = { archiveName: inspectModal.archiveName, archivePath: inspectModal.archivePath };
+                    setInspectModal(null);
+                    setRestoreConfirmModal({ open: true, ...arc });
+                  }}
+                  className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center space-x-1.5 transition-all cursor-pointer shadow-md shadow-emerald-600/30"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Recover This Archive</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 2. Modal: Confirm Restore & Recovery */}
+      {restoreConfirmModal?.open && (
+        <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/70 backdrop-blur-sm animate-in fade-in duration-200 p-4">
+          <div className="bg-[#181825] border border-amber-500/30 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-in zoom-in-95 duration-200">
+            <div className="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center border border-amber-500/30 mx-auto">
+              <RotateCcw className="w-6 h-6" />
+            </div>
+
+            <div className="text-center space-y-1.5">
+              <h3 className="text-sm font-bold text-white">Confirm Recovery / Restore</h3>
+              <p className="text-xs text-gray-300 leading-relaxed">
+                Are you sure you want to restore all files inside <code className="text-amber-300 font-mono text-[11px]">{sshDesktopPath}</code> from:
+              </p>
+              <div className="p-2 bg-[#101018] rounded-xl border border-white/10 font-mono text-xs text-emerald-300 break-all select-all">
+                {restoreConfirmModal.archiveName}
+              </div>
+              <p className="text-[11px] text-amber-300/80 pt-1">
+                Any existing configuration files will be restored and overwritten with the archive contents.
+              </p>
+            </div>
+
+            <div className="flex items-center space-x-2 pt-2">
+              <button
+                onClick={() => setRestoreConfirmModal(null)}
+                disabled={isRestoringTar}
+                className="flex-1 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmRestoreTar}
+                disabled={isRestoringTar}
+                className="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center justify-center space-x-1.5 transition-all cursor-pointer shadow-lg shadow-emerald-600/30 disabled:opacity-50"
+              >
+                {isRestoringTar ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Check className="w-3.5 h-3.5" />
+                )}
+                <span>{isRestoringTar ? 'Restoring...' : 'Confirm & Recover'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
