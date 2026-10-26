@@ -23,6 +23,13 @@ which caddy 2>/dev/null || true
 
 echo "===PLUGINS==="
 dpkg -l 2>/dev/null | grep -E "python3-certbot|certbot-nginx|certbot-apache" || rpm -qa 2>/dev/null | grep -E "certbot|certbot-nginx|certbot-apache" || true
+
+echo "===OS==="
+if [ -f /etc/os-release ]; then
+  grep -E "^(PRETTY_NAME|ID)=" /etc/os-release 2>/dev/null || true
+elif [ -f /etc/redhat-release ]; then
+  cat /etc/redhat-release 2>/dev/null || true
+fi
 `;
 
   try {
@@ -33,7 +40,8 @@ dpkg -l 2>/dev/null | grep -E "python3-certbot|certbot-nginx|certbot-apache" || 
     const versionSection = extractSection(out, '===VERSION===', '===SYSTEMD_TIMER===');
     const timerSection = extractSection(out, '===SYSTEMD_TIMER===', '===SERVERS===');
     const serversSection = extractSection(out, '===SERVERS===', '===PLUGINS===');
-    const pluginsSection = extractSection(out, '===PLUGINS===', null);
+    const pluginsSection = extractSection(out, '===PLUGINS===', '===OS===');
+    const osSection = extractSection(out, '===OS===', null);
 
     const isInstalled = !whichSection.includes('NOT_FOUND') && whichSection.trim().length > 0;
     const versionMatch = versionSection.match(/certbot\s+([\d\.]+)/i);
@@ -41,11 +49,51 @@ dpkg -l 2>/dev/null | grep -E "python3-certbot|certbot-nginx|certbot-apache" || 
 
     const isTimerActive = timerSection.includes('active');
 
+    // Parse OS Info
+    let osName = 'Linux Server';
+    let osId = 'unknown';
+    const prettyMatch = osSection.match(/PRETTY_NAME="?([^"\n]+)"?/i);
+    if (prettyMatch && prettyMatch[1]) {
+      osName = prettyMatch[1].trim();
+    }
+    const idMatch = osSection.match(/ID="?([^"\n]+)"?/i);
+    if (idMatch && idMatch[1]) {
+      osId = idMatch[1].trim().toLowerCase();
+    }
+
+    // Determine package manager and suggested command
+    let packageManager = 'apt / dnf / pacman';
+    let suggestedCommand = 'sudo apt update && sudo apt install -y certbot python3-certbot-nginx python3-certbot-apache';
+
+    if (['ubuntu', 'debian', 'kali', 'pop', 'linuxmint'].includes(osId)) {
+      packageManager = 'apt';
+      suggestedCommand = 'sudo apt-get update && sudo apt-get install -y certbot python3-certbot-nginx python3-certbot-apache';
+    } else if (['centos', 'rhel', 'rocky', 'almalinux'].includes(osId)) {
+      packageManager = 'dnf / yum';
+      suggestedCommand = 'sudo dnf install -y epel-release && sudo dnf install -y certbot python3-certbot-nginx python3-certbot-apache';
+    } else if (['fedora'].includes(osId)) {
+      packageManager = 'dnf';
+      suggestedCommand = 'sudo dnf install -y certbot python3-certbot-nginx python3-certbot-apache';
+    } else if (['arch', 'manjaro'].includes(osId)) {
+      packageManager = 'pacman';
+      suggestedCommand = 'sudo pacman -Sy --noconfirm certbot certbot-nginx certbot-apache';
+    } else if (['alpine'].includes(osId)) {
+      packageManager = 'apk';
+      suggestedCommand = 'sudo apk add --no-cache certbot certbot-nginx certbot-apache';
+    } else {
+      packageManager = 'snap / pip';
+      suggestedCommand = 'sudo snap install --classic certbot';
+    }
+
     return {
       installed: isInstalled,
       version,
       autoRenewActive: isTimerActive,
       timerStatusText: timerSection.trim() || 'inactive',
+      osName,
+      osId,
+      packageManager,
+      suggestedCommand,
       webServers: {
         nginx: serversSection.includes('nginx'),
         apache: serversSection.includes('apache2') || serversSection.includes('httpd'),
@@ -72,6 +120,13 @@ dpkg -l 2>/dev/null | grep -E "python3-certbot|certbot-nginx|certbot-apache" || 
  */
 export async function installCertbot(connId: string, webserver?: 'nginx' | 'apache' | 'standalone'): Promise<{ success: boolean; output: string }> {
   const installCmd = `
+# Determine if running as root or need sudo
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  SUDO=""
+fi
+
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   OS_ID=$ID
@@ -79,33 +134,43 @@ else
   OS_ID="unknown"
 fi
 
-echo "Detected OS: $OS_ID"
+echo "Detected OS: $OS_ID (Privilege: \${SUDO:-root})"
+echo "Beginning automated Certbot installation..."
+
 if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ]; then
   export DEBIAN_FRONTEND=noninteractive
-  sudo apt-get update -y && sudo apt-get install -y certbot python3-certbot-nginx python3-certbot-apache
+  $SUDO apt-get update -y && $SUDO apt-get install -y certbot python3-certbot-nginx python3-certbot-apache
 elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ]; then
-  sudo dnf install -y epel-release || sudo yum install -y epel-release
-  sudo dnf install -y certbot python3-certbot-nginx python3-certbot-apache || sudo yum install -y certbot python3-certbot-nginx python3-certbot-apache
+  $SUDO dnf install -y epel-release || $SUDO yum install -y epel-release || true
+  $SUDO dnf install -y certbot python3-certbot-nginx python3-certbot-apache || $SUDO yum install -y certbot python3-certbot-nginx python3-certbot-apache
 elif [ "$OS_ID" = "fedora" ]; then
-  sudo dnf install -y certbot python3-certbot-nginx python3-certbot-apache
+  $SUDO dnf install -y certbot python3-certbot-nginx python3-certbot-apache
 elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ]; then
-  sudo pacman -Sy --noconfirm certbot certbot-nginx certbot-apache
+  $SUDO pacman -Sy --noconfirm certbot certbot-nginx certbot-apache
 elif [ "$OS_ID" = "alpine" ]; then
-  sudo apk add --no-cache certbot certbot-nginx certbot-apache
+  $SUDO apk add --no-cache certbot certbot-nginx certbot-apache
 else
   # Generic fallback via snap or pip
   if command -v snap >/dev/null 2>&1; then
-    sudo snap install --classic certbot && sudo ln -sf /snap/bin/certbot /usr/bin/certbot
+    $SUDO snap install --classic certbot && $SUDO ln -sf /snap/bin/certbot /usr/bin/certbot
   else
-    sudo python3 -m pip install certbot certbot-nginx certbot-apache 2>/dev/null || sudo pip3 install certbot
+    $SUDO python3 -m pip install certbot certbot-nginx certbot-apache 2>/dev/null || $SUDO pip3 install certbot
   fi
 fi
+
+# Verify installation outcome
+echo "===INSTALL_VERIFY==="
+which certbot || which /snap/bin/certbot || echo "CERTBOT_STILL_MISSING"
+certbot --version 2>&1 || /snap/bin/certbot --version 2>&1 || true
 `;
 
   const res = await sshExec(connId, installCmd);
+  const out = (res.stdout || '') + (res.stderr ? '\n' + res.stderr : '');
+  const isOk = res.exit_code === 0 || out.includes('certbot ') || out.includes('/bin/certbot');
+
   return {
-    success: res.exit_code === 0,
-    output: (res.stdout || '') + (res.stderr ? '\n' + res.stderr : ''),
+    success: isOk,
+    output: out,
   };
 }
 

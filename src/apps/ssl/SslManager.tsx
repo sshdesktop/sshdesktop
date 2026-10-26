@@ -93,9 +93,11 @@ export default function SslManager() {
   const [isTestingDiag, setIsTestingDiag] = useState(false);
   const [diagResult, setDiagResult] = useState<SslDiagnosticResult | null>(null);
 
-  // Certbot One-Click Installer
+  // Certbot One-Click Installer & Alert Modal
   const [isInstallingCertbot, setIsInstallingCertbot] = useState(false);
   const [installOutput, setInstallOutput] = useState<string | null>(null);
+  const [showInstallAlertModal, setShowInstallAlertModal] = useState(false);
+  const [copiedInstallCmd, setCopiedInstallCmd] = useState(false);
 
   // Load everything on mount or server switch
   const refreshAll = useCallback(async () => {
@@ -109,6 +111,11 @@ export default function SslManager() {
       ]);
       setCertbotStatus(status);
       setCertificates(certs);
+
+      // In case server does not have certbot installed, automatically show alert to install certbot
+      if (!status.installed) {
+        setShowInstallAlertModal(true);
+      }
 
       // Auto-populate webserver plugin if detected
       if (status.webServers.nginx) {
@@ -349,7 +356,8 @@ export default function SslManager() {
   const handleInstallCertbot = async () => {
     if (!activeConnectionId) return;
     setIsInstallingCertbot(true);
-    setInstallOutput('Detecting distribution and installing certbot + webserver plugins...');
+    setShowInstallAlertModal(true);
+    setInstallOutput('Detecting host distribution and running automated package manager install...');
     try {
       const res = await installCertbot(activeConnectionId);
       setInstallOutput(res.output);
@@ -357,7 +365,7 @@ export default function SslManager() {
         setMessage({ text: 'Certbot and plugins successfully installed on server!', isError: false });
         await refreshAll();
       } else {
-        setMessage({ text: 'Installation returned non-zero code. Check log below.', isError: true });
+        setMessage({ text: 'Installation returned non-zero code. Check output log in the alert modal.', isError: true });
       }
     } catch (err: any) {
       setInstallOutput(`Error: ${err?.message || err}`);
@@ -389,8 +397,18 @@ export default function SslManager() {
               <span>{activeServer?.username || 'root'}@{activeServer?.host || 'localhost'}</span>
               <span>·</span>
               <span className="flex items-center space-x-1">
-                <span className={`w-1.5 h-1.5 rounded-full ${certbotStatus?.installed ? 'bg-emerald-400' : 'bg-rose-400'}`} />
-                <span>{certbotStatus?.installed ? `Certbot v${certbotStatus.version || ''}` : 'Certbot Not Installed'}</span>
+                <span className={`w-1.5 h-1.5 rounded-full ${certbotStatus?.installed ? 'bg-emerald-400' : 'bg-rose-400 animate-pulse'}`} />
+                {certbotStatus?.installed ? (
+                  <span>Certbot v{certbotStatus.version || ''}</span>
+                ) : (
+                  <button
+                    onClick={() => setShowInstallAlertModal(true)}
+                    className="text-rose-400 hover:text-rose-300 font-medium underline flex items-center space-x-1 cursor-pointer transition-colors"
+                    title="Certbot is not installed. Click to view alert and install."
+                  >
+                    <span>Certbot Not Installed (Click to Install)</span>
+                  </button>
+                )}
               </span>
               {certbotStatus?.autoRenewActive && (
                 <>
@@ -448,23 +466,29 @@ export default function SslManager() {
 
       {/* Missing Certbot Warning Banner */}
       {!isLoading && certbotStatus && !certbotStatus.installed && (
-        <div className="mx-5 mt-4 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-200 flex items-center justify-between">
+        <div className="mx-5 mt-4 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex items-center justify-between shadow-lg">
           <div className="flex items-center space-x-3">
             <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
             <div>
-              <div className="text-xs font-bold text-white">Certbot is not installed on this server</div>
+              <div className="text-xs font-bold text-white flex items-center space-x-2">
+                <span>Certbot is not installed on this server</span>
+                {certbotStatus.osName && (
+                  <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-mono border border-amber-500/30">
+                    {certbotStatus.osName}
+                  </span>
+                )}
+              </div>
               <div className="text-[11px] text-amber-300/80">
                 Install Certbot and web server plugins to automatically issue, configure, and renew Let's Encrypt SSL certificates.
               </div>
             </div>
           </div>
           <button
-            onClick={handleInstallCertbot}
-            disabled={isInstallingCertbot || (!hasSudo && !isRoot)}
-            className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-md shadow-amber-900/30 transition-all cursor-pointer flex items-center space-x-1.5 disabled:opacity-50"
+            onClick={() => setShowInstallAlertModal(true)}
+            className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 active:scale-95 text-white text-xs font-semibold shadow-md shadow-amber-900/30 transition-all cursor-pointer flex items-center space-x-1.5"
           >
-            {isInstallingCertbot ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-            <span>{isInstallingCertbot ? 'Installing Certbot...' : 'Install Certbot & Plugins'}</span>
+            <Download className="w-3.5 h-3.5" />
+            <span>Install Certbot & Plugins</span>
           </button>
         </div>
       )}
@@ -784,6 +808,28 @@ export default function SslManager() {
               </p>
             </div>
 
+            {!certbotStatus?.installed && (
+              <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex items-center justify-between shadow-xl">
+                <div className="flex items-center space-x-3">
+                  <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
+                  <div>
+                    <h4 className="text-xs font-bold text-white">Certbot Application Required for Let's Encrypt</h4>
+                    <p className="text-[11px] text-amber-300/80">
+                      Certbot is not installed on this server. Automated domain challenge validation and HTTPS issuance require Certbot.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowInstallAlertModal(true)}
+                  className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-md cursor-pointer flex items-center space-x-1.5 shrink-0"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Install Certbot</span>
+                </button>
+              </div>
+            )}
+
             <form onSubmit={handleIssueSubmit} className="space-y-4">
               
               {/* Domain Names */}
@@ -960,6 +1006,28 @@ export default function SslManager() {
                 Let's Encrypt certificates are valid for 90 days. Certbot automatically renews certificates when they have less than 30 days remaining.
               </p>
             </div>
+
+            {!certbotStatus?.installed && (
+              <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex items-center justify-between shadow-xl">
+                <div className="flex items-center space-x-3">
+                  <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
+                  <div>
+                    <h4 className="text-xs font-bold text-white">Certbot Application Required for Auto-Renewal</h4>
+                    <p className="text-[11px] text-amber-300/80">
+                      Certbot systemd timers and auto-renewal checks require Certbot installed on this server.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowInstallAlertModal(true)}
+                  className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-md cursor-pointer flex items-center space-x-1.5 shrink-0"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Install Certbot</span>
+                </button>
+              </div>
+            )}
 
             {/* Timer Card */}
             <div className="bg-[#181825]/90 border border-white/10 rounded-2xl p-5 shadow-xl backdrop-blur-md space-y-4">
@@ -1362,6 +1430,144 @@ export default function SslManager() {
               >
                 {isDeleting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                 <span>{isDeleting ? 'Processing...' : deleteAction === 'revoke' ? 'Revoke & Delete' : 'Delete Certificate'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 8. MODAL: Certbot Not Installed Alert & Automated Installer */}
+      {showInstallAlertModal && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200"
+          onClick={() => !isInstallingCertbot && setShowInstallAlertModal(false)}
+        >
+          <div 
+            className="bg-[#181825] border border-amber-500/30 rounded-3xl w-full max-w-xl p-6 shadow-2xl space-y-4 max-h-[90vh] flex flex-col animate-in zoom-in-95 duration-200"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-start justify-between border-b border-white/10 pb-4">
+              <div className="flex items-center space-x-3">
+                <div className="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center border border-amber-500/30 shrink-0 shadow-lg shadow-amber-500/10">
+                  <ShieldAlert className="w-6 h-6 animate-pulse" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center space-x-2">
+                    <span>Certbot Is Not Installed on Server</span>
+                  </h3>
+                  <div className="text-xs text-amber-300/90 font-mono mt-0.5">
+                    {activeServer?.username || 'root'}@{activeServer?.host || 'remote'} · {certbotStatus?.osName || 'Linux Host'}
+                  </div>
+                </div>
+              </div>
+              {!isInstallingCertbot && (
+                <button
+                  onClick={() => setShowInstallAlertModal(false)}
+                  className="text-gray-400 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+
+            {/* Modal Description & OS Info */}
+            <div className="space-y-3 flex-1 overflow-y-auto pr-1">
+              <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200 leading-relaxed">
+                <p>
+                  <strong>Alert:</strong> The <strong>Certbot ACME Client</strong> application was not detected on this remote server. Certbot is required to request, verify domain ownership, automatically install, and renew free <strong>Let's Encrypt SSL/TLS certificates</strong>.
+                </p>
+              </div>
+
+              {/* Detected Environment Info */}
+              <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                <div className="bg-[#101018] p-2.5 rounded-xl border border-white/5 space-y-0.5">
+                  <span className="text-gray-500 text-[10px] uppercase font-bold block">Operating System</span>
+                  <span className="text-white font-medium truncate block">{certbotStatus?.osName || 'Linux Host'}</span>
+                </div>
+                <div className="bg-[#101018] p-2.5 rounded-xl border border-white/5 space-y-0.5">
+                  <span className="text-gray-500 text-[10px] uppercase font-bold block">Package Manager</span>
+                  <span className="text-emerald-400 font-medium truncate block">{certbotStatus?.packageManager || 'apt / dnf'}</span>
+                </div>
+              </div>
+
+              {/* Suggested Manual Command Box */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] text-gray-400">
+                  <span>Host Installation Command</span>
+                  {copiedInstallCmd ? (
+                    <span className="text-emerald-400 flex items-center space-x-1">
+                      <Check className="w-3 h-3" />
+                      <span>Copied to clipboard</span>
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        const cmd = certbotStatus?.suggestedCommand || 'sudo apt update && sudo apt install -y certbot python3-certbot-nginx';
+                        navigator.clipboard.writeText(cmd);
+                        setCopiedInstallCmd(true);
+                        setTimeout(() => setCopiedInstallCmd(false), 2000);
+                      }}
+                      className="text-gray-400 hover:text-white flex items-center space-x-1 cursor-pointer transition-colors"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copy command</span>
+                    </button>
+                  )}
+                </div>
+                <div className="bg-[#0c0c14] p-2.5 rounded-xl border border-white/10 font-mono text-[11px] text-emerald-300 break-all select-all flex items-center justify-between">
+                  <code>{certbotStatus?.suggestedCommand || 'sudo apt update && sudo apt install -y certbot python3-certbot-nginx'}</code>
+                </div>
+              </div>
+
+              {/* Live Terminal Install Console (when installing or output present) */}
+              {(isInstallingCertbot || installOutput) && (
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-white flex items-center space-x-2">
+                      <Terminal className="w-3.5 h-3.5 text-blue-400" />
+                      <span>Installation Console Output</span>
+                    </span>
+                    {isInstallingCertbot && (
+                      <span className="text-xs text-amber-400 flex items-center space-x-1.5">
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                        <span>Running package installation on host...</span>
+                      </span>
+                    )}
+                  </div>
+                  <div className="max-h-48 overflow-y-auto bg-[#0a0a10] p-3 rounded-xl border border-white/10 font-mono text-[10px] text-gray-300 select-text leading-relaxed whitespace-pre-wrap">
+                    {installOutput}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer Buttons */}
+            <div className="flex items-center justify-between pt-3 border-t border-white/10">
+              <button
+                onClick={() => setShowInstallAlertModal(false)}
+                disabled={isInstallingCertbot}
+                className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-gray-300 hover:text-white text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {certbotStatus?.installed ? 'Done' : 'Dismiss / Remind Later'}
+              </button>
+
+              <button
+                onClick={handleInstallCertbot}
+                disabled={isInstallingCertbot || (!hasSudo && !isRoot)}
+                className="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white text-xs font-semibold shadow-lg shadow-emerald-900/40 transition-all cursor-pointer disabled:opacity-50"
+              >
+                {isInstallingCertbot ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Installing Certbot...</span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Install Certbot on Server</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
