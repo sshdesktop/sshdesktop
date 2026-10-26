@@ -4,15 +4,16 @@ import {
   ExternalLink, Trash2, AlertTriangle, AlertCircle, CheckCircle2,
   Calendar, Clock, Server, Terminal, Globe, Download, Eye, FileText,
   KeyRound, Flame, ArrowRight, Play, Sparkles, Filter, Search, X,
-  Layers, HardDrive, Info, Activity, Radio
+  Layers, HardDrive, Info, Activity, Radio, Cpu, Wrench
 } from 'lucide-react';
 import { useConnectionStore } from '../../lib/store';
 import { useUserPrivilege } from '../../lib/permissions';
-import PermissionAlertBanner from '../../components/PermissionAlertBanner';
 import { SslCertificate, CertbotStatus, IssueCertForm, SelfSignedForm, SslDiagnosticResult } from './types';
 import {
   detectCertbotStatus,
   installCertbot,
+  installCertbotPlugin,
+  installWebServer,
   listCertificates,
   issueCertificate,
   renewCertificates,
@@ -72,6 +73,14 @@ export default function SslManager() {
   const [isIssuing, setIsIssuing] = useState(false);
   const [issueOutput, setIssueOutput] = useState<string | null>(null);
 
+  // Web Server / Plugin Dependency Missing Modal (only asked when user selects that webserver)
+  const [missingDepModal, setMissingDepModal] = useState<{
+    type: 'missing_webserver' | 'missing_plugin';
+    webserver: 'nginx' | 'apache';
+    title: string;
+    description: string;
+  } | null>(null);
+
   // Renewal Actions
   const [isRenewing, setIsRenewing] = useState(false);
   const [renewingCertId, setRenewingCertId] = useState<string | null>(null);
@@ -93,11 +102,14 @@ export default function SslManager() {
   const [isTestingDiag, setIsTestingDiag] = useState(false);
   const [diagResult, setDiagResult] = useState<SslDiagnosticResult | null>(null);
 
-  // Certbot One-Click Installer & Alert Modal
+  // Certbot One-Click Installer State & Modal
   const [isInstallingCertbot, setIsInstallingCertbot] = useState(false);
   const [installOutput, setInstallOutput] = useState<string | null>(null);
   const [showInstallAlertModal, setShowInstallAlertModal] = useState(false);
   const [copiedInstallCmd, setCopiedInstallCmd] = useState(false);
+
+  // Generic Component Installing State
+  const [installingComponent, setInstallingComponent] = useState<string | null>(null);
 
   // Load everything on mount or server switch
   const refreshAll = useCallback(async () => {
@@ -112,16 +124,13 @@ export default function SslManager() {
       setCertbotStatus(status);
       setCertificates(certs);
 
-      // In case server does not have certbot installed, automatically show alert to install certbot
-      if (!status.installed) {
-        setShowInstallAlertModal(true);
-      }
-
-      // Auto-populate webserver plugin if detected
+      // Auto-populate webserver plugin if detected and not already customized
       if (status.webServers.nginx) {
         setIssueForm(prev => ({ ...prev, plugin: 'nginx' }));
       } else if (status.webServers.apache) {
         setIssueForm(prev => ({ ...prev, plugin: 'apache' }));
+      } else {
+        setIssueForm(prev => ({ ...prev, plugin: 'standalone' }));
       }
     } catch (err: any) {
       setMessage({ text: `Failed to load certificate data: ${err?.message || err}`, isError: true });
@@ -160,7 +169,7 @@ export default function SslManager() {
     });
   }, [certificates, searchQuery, statusFilter]);
 
-  // Handle Certificate Inspection
+  // Inspect Certificate
   const handleInspect = async (cert: SslCertificate) => {
     setSelectedCertForInspect(cert);
     setIsInspecting(true);
@@ -175,7 +184,7 @@ export default function SslManager() {
     }
   };
 
-  // Handle View PEM Content
+  // View PEM Content
   const handleViewPem = async (cert: SslCertificate) => {
     setSelectedCertForPem(cert);
     setIsReadingPem(true);
@@ -190,7 +199,7 @@ export default function SslManager() {
     }
   };
 
-  // Handle Single Cert Renewal
+  // Single Cert Renewal
   const handleRenewSingle = async (cert: SslCertificate) => {
     if (!activeConnectionId) return;
     setRenewingCertId(cert.id);
@@ -210,22 +219,161 @@ export default function SslManager() {
     }
   };
 
-  // Handle Issue Certificate
+  // Plugin Selection Handler: Checks dependency ONLY when user selects that webserver
+  const handleSelectPlugin = (plugin: 'nginx' | 'apache' | 'standalone' | 'webroot' | 'dns') => {
+    setIssueForm(prev => ({ ...prev, plugin }));
+
+    if (plugin === 'nginx' && certbotStatus) {
+      if (!certbotStatus.webServers.nginx) {
+        setMissingDepModal({
+          type: 'missing_webserver',
+          webserver: 'nginx',
+          title: 'Nginx Web Server Is Not Installed',
+          description: 'Nginx is not detected on this server. The Nginx Certbot plugin requires Nginx to be installed to configure vhosts and HTTPS redirects.',
+        });
+      } else if (!certbotStatus.plugins.nginx) {
+        setMissingDepModal({
+          type: 'missing_plugin',
+          webserver: 'nginx',
+          title: 'Certbot Nginx Plugin Is Not Installed',
+          description: 'Nginx is installed, but the Certbot Nginx plugin (python3-certbot-nginx) is missing. Install it to allow Certbot to automatically configure Nginx SSL.',
+        });
+      }
+    } else if (plugin === 'apache' && certbotStatus) {
+      if (!certbotStatus.webServers.apache) {
+        setMissingDepModal({
+          type: 'missing_webserver',
+          webserver: 'apache',
+          title: 'Apache Web Server Is Not Installed',
+          description: 'Apache (apache2/httpd) is not detected on this server. The Apache Certbot plugin requires Apache to be installed.',
+        });
+      } else if (!certbotStatus.plugins.apache) {
+        setMissingDepModal({
+          type: 'missing_plugin',
+          webserver: 'apache',
+          title: 'Certbot Apache Plugin Is Not Installed',
+          description: 'Apache is installed, but the Certbot Apache plugin (python3-certbot-apache) is missing. Install it to allow Certbot to automatically configure Apache SSL.',
+        });
+      }
+    }
+  };
+
+  // One-click install for missing webserver or plugin triggered from plugin selection
+  const handleInstallMissingDep = async () => {
+    if (!activeConnectionId || !missingDepModal) return;
+    const { type, webserver } = missingDepModal;
+    setInstallingComponent(type === 'missing_webserver' ? webserver : `${webserver}-plugin`);
+
+    try {
+      if (type === 'missing_webserver') {
+        const res = await installWebServer(activeConnectionId, webserver);
+        if (res.success) {
+          setMessage({ text: `${webserver.toUpperCase()} web server successfully installed!`, isError: false });
+          // Check if plugin is also needed
+          const newStatus = await detectCertbotStatus(activeConnectionId);
+          setCertbotStatus(newStatus);
+          if (!newStatus.plugins[webserver]) {
+            setMissingDepModal({
+              type: 'missing_plugin',
+              webserver,
+              title: `Install Certbot ${webserver === 'nginx' ? 'Nginx' : 'Apache'} Plugin`,
+              description: `${webserver.toUpperCase()} is installed. Now install python3-certbot-${webserver} to complete ACME automated integration.`,
+            });
+            return;
+          }
+        } else {
+          setMessage({ text: `Failed to install ${webserver}: ${res.output.slice(0, 160)}`, isError: true });
+        }
+      } else {
+        const res = await installCertbotPlugin(activeConnectionId, webserver);
+        if (res.success) {
+          setMessage({ text: `Certbot ${webserver} plugin installed successfully!`, isError: false });
+          const newStatus = await detectCertbotStatus(activeConnectionId);
+          setCertbotStatus(newStatus);
+        } else {
+          setMessage({ text: `Failed to install plugin: ${res.output.slice(0, 160)}`, isError: true });
+        }
+      }
+      setMissingDepModal(null);
+    } catch (err: any) {
+      setMessage({ text: `Installation error: ${err?.message || err}`, isError: true });
+    } finally {
+      setInstallingComponent(null);
+    }
+  };
+
+  // Issue Let's Encrypt Certificate
   const handleIssueSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeConnectionId) return;
+
+    if (!certbotStatus?.installed) {
+      setShowInstallAlertModal(true);
+      return;
+    }
+
+    // Guard: Check if selected plugin has missing webserver or plugin dependencies
+    if (issueForm.plugin === 'nginx') {
+      if (!certbotStatus.webServers.nginx) {
+        setMissingDepModal({
+          type: 'missing_webserver',
+          webserver: 'nginx',
+          title: 'Nginx Web Server Is Not Installed',
+          description: 'Cannot issue certificate using Nginx plugin because Nginx is not installed on this server.',
+        });
+        return;
+      }
+      if (!certbotStatus.plugins.nginx) {
+        setMissingDepModal({
+          type: 'missing_plugin',
+          webserver: 'nginx',
+          title: 'Certbot Nginx Plugin Is Not Installed',
+          description: 'Cannot issue certificate using Nginx plugin because python3-certbot-nginx is not installed.',
+        });
+        return;
+      }
+    } else if (issueForm.plugin === 'apache') {
+      if (!certbotStatus.webServers.apache) {
+        setMissingDepModal({
+          type: 'missing_webserver',
+          webserver: 'apache',
+          title: 'Apache Web Server Is Not Installed',
+          description: 'Cannot issue certificate using Apache plugin because Apache is not installed on this server.',
+        });
+        return;
+      }
+      if (!certbotStatus.plugins.apache) {
+        setMissingDepModal({
+          type: 'missing_plugin',
+          webserver: 'apache',
+          title: 'Certbot Apache Plugin Is Not Installed',
+          description: 'Cannot issue certificate using Apache plugin because python3-certbot-apache is not installed.',
+        });
+        return;
+      }
+    }
+
     setIsIssuing(true);
-    setIssueOutput('Contacting Let\'s Encrypt ACME server and verifying domain challenge...');
+    setIssueOutput('Contacting Let\'s Encrypt ACME server and verifying domain challenge...\n(This usually takes 10 to 30 seconds)');
     setMessage(null);
 
     try {
-      const res = await issueCertificate(activeConnectionId, issueForm);
+      // 90-second timeout guard to prevent infinite hanging
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Operation timed out after 90 seconds. Please check DNS resolution, firewall port 80/443, and server connectivity.')), 90000)
+      );
+
+      const res = await Promise.race([
+        issueCertificate(activeConnectionId, issueForm),
+        timeoutPromise,
+      ]) as { success: boolean; output: string; certName?: string };
+
       setIssueOutput(res.output);
       if (res.success) {
         setMessage({ text: `SSL Certificate for "${issueForm.domains}" issued successfully!`, isError: false });
         await refreshAll();
       } else {
-        setMessage({ text: 'Certificate issuance encountered an error. Check the log below.', isError: true });
+        setMessage({ text: 'Certificate issuance encountered an issue. Review the diagnostic log below.', isError: true });
       }
     } catch (err: any) {
       setIssueOutput(`Error: ${err?.message || err}`);
@@ -278,7 +426,7 @@ export default function SslManager() {
     }
   };
 
-  // Handle Self-Signed Generation
+  // Handle Self-Signed Generation (Fixed: -batch flag prevents infinite hanging)
   const handleGenerateSelfSigned = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeConnectionId) return;
@@ -286,7 +434,15 @@ export default function SslManager() {
     setMessage(null);
 
     try {
-      const res = await generateSelfSignedCertificate(activeConnectionId, selfSignedForm);
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('OpenSSL certificate generation timed out after 30 seconds.')), 30000)
+      );
+
+      const res = await Promise.race([
+        generateSelfSignedCertificate(activeConnectionId, selfSignedForm),
+        timeoutPromise,
+      ]) as { success: boolean; certPath: string; keyPath: string; output: string };
+
       if (res.success) {
         setMessage({ text: `Self-signed certificate generated at ${res.certPath}!`, isError: false });
         await refreshAll();
@@ -352,20 +508,20 @@ export default function SslManager() {
     }
   };
 
-  // Handle Install Certbot
+  // Handle Install Certbot (Installs ONLY certbot per requirements)
   const handleInstallCertbot = async () => {
     if (!activeConnectionId) return;
     setIsInstallingCertbot(true);
     setShowInstallAlertModal(true);
-    setInstallOutput('Detecting host distribution and running automated package manager install...');
+    setInstallOutput('Detecting host distribution and running automated package manager install for Certbot core...');
     try {
       const res = await installCertbot(activeConnectionId);
       setInstallOutput(res.output);
       if (res.success) {
-        setMessage({ text: 'Certbot and plugins successfully installed on server!', isError: false });
+        setMessage({ text: 'Certbot successfully installed on server!', isError: false });
         await refreshAll();
       } else {
-        setMessage({ text: 'Installation returned non-zero code. Check output log in the alert modal.', isError: true });
+        setMessage({ text: 'Installation returned non-zero code. Check output log in the modal.', isError: true });
       }
     } catch (err: any) {
       setInstallOutput(`Error: ${err?.message || err}`);
@@ -378,10 +534,10 @@ export default function SslManager() {
   return (
     <div className="flex flex-col h-full bg-[#14141e] text-[#cdd6f4] select-none font-sans overflow-hidden">
       
-      {/* 1. macOS Sonoma Top Navigation Header */}
+      {/* 1. Header Bar */}
       <header className="h-14 border-b border-white/[0.08] bg-[#181825]/90 backdrop-blur-2xl px-5 flex items-center justify-between shrink-0">
         
-        {/* Left: App Title & Status Indicators */}
+        {/* Left: App Title & Real-time Certbot Status */}
         <div className="flex items-center space-x-3">
           <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-700 flex items-center justify-center text-white shadow-md shadow-emerald-900/30 border border-white/20">
             <ShieldCheck className="w-4 h-4" />
@@ -399,12 +555,12 @@ export default function SslManager() {
               <span className="flex items-center space-x-1">
                 <span className={`w-1.5 h-1.5 rounded-full ${certbotStatus?.installed ? 'bg-emerald-400' : 'bg-rose-400 animate-pulse'}`} />
                 {certbotStatus?.installed ? (
-                  <span>Certbot v{certbotStatus.version || ''}</span>
+                  <span className="text-emerald-300 font-mono">Certbot v{certbotStatus.version || 'installed'}</span>
                 ) : (
                   <button
                     onClick={() => setShowInstallAlertModal(true)}
                     className="text-rose-400 hover:text-rose-300 font-medium underline flex items-center space-x-1 cursor-pointer transition-colors"
-                    title="Certbot is not installed. Click to view alert and install."
+                    title="Certbot is not installed. Click to view installer."
                   >
                     <span>Certbot Not Installed (Click to Install)</span>
                   </button>
@@ -415,7 +571,7 @@ export default function SslManager() {
                   <span>·</span>
                   <span className="text-teal-300 flex items-center space-x-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-teal-400 animate-pulse" />
-                    <span>Auto-Renew Timer Active</span>
+                    <span>Auto-Renew Active</span>
                   </span>
                 </>
               )}
@@ -425,6 +581,16 @@ export default function SslManager() {
 
         {/* Right: Primary Quick Action Buttons */}
         <div className="flex items-center space-x-2">
+          {!certbotStatus?.installed && (
+            <button
+              onClick={() => setShowInstallAlertModal(true)}
+              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Install Certbot</span>
+            </button>
+          )}
+
           <button
             onClick={() => setActiveTab('issue')}
             className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-900/30 transition-all cursor-pointer active:scale-95"
@@ -449,53 +615,14 @@ export default function SslManager() {
             className="p-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 transition-colors cursor-pointer"
             title="Refresh certificates and Certbot status"
           >
-            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin text-blue-400' : ''}`} />
+            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin text-emerald-400' : ''}`} />
           </button>
         </div>
       </header>
 
-      {/* Permission Warning for non-root users */}
-      {!hasSudo && !isRoot && (
-        <div className="px-5 pt-3">
-          <PermissionAlertBanner 
-            appName="SSL/TLS Certificate Manager"
-            customMessage="Certbot and Let's Encrypt require root or sudo privileges to manage certificates in /etc/letsencrypt and reload web servers."
-          />
-        </div>
-      )}
-
-      {/* Missing Certbot Warning Banner */}
-      {!isLoading && certbotStatus && !certbotStatus.installed && (
-        <div className="mx-5 mt-4 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex items-center justify-between shadow-lg">
-          <div className="flex items-center space-x-3">
-            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
-            <div>
-              <div className="text-xs font-bold text-white flex items-center space-x-2">
-                <span>Certbot is not installed on this server</span>
-                {certbotStatus.osName && (
-                  <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-mono border border-amber-500/30">
-                    {certbotStatus.osName}
-                  </span>
-                )}
-              </div>
-              <div className="text-[11px] text-amber-300/80">
-                Install Certbot and web server plugins to automatically issue, configure, and renew Let's Encrypt SSL certificates.
-              </div>
-            </div>
-          </div>
-          <button
-            onClick={() => setShowInstallAlertModal(true)}
-            className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 active:scale-95 text-white text-xs font-semibold shadow-md shadow-amber-900/30 transition-all cursor-pointer flex items-center space-x-1.5"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Install Certbot & Plugins</span>
-          </button>
-        </div>
-      )}
-
-      {/* Status Notification Message */}
+      {/* Global Notice Banner */}
       {message && (
-        <div className={`mx-5 mt-3 p-3 rounded-2xl text-xs flex items-center space-x-2.5 border animate-in fade-in duration-200 ${
+        <div className={`px-5 py-2.5 text-xs flex items-center space-x-2 border-b shrink-0 ${
           message.isError 
             ? 'bg-rose-500/15 border-rose-500/30 text-rose-300' 
             : 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
@@ -508,9 +635,8 @@ export default function SslManager() {
         </div>
       )}
 
-      {/* 2. Top Metric Cards */}
+      {/* Top Metric Cards */}
       <div className="grid grid-cols-5 gap-3 p-5 shrink-0">
-        {/* Card 1: Total */}
         <div className="bg-[#181825]/90 border border-white/10 rounded-2xl p-3.5 shadow-md flex items-center justify-between">
           <div>
             <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Installed Certs</div>
@@ -521,7 +647,6 @@ export default function SslManager() {
           </div>
         </div>
 
-        {/* Card 2: Valid */}
         <div className="bg-[#181825]/90 border border-white/10 rounded-2xl p-3.5 shadow-md flex items-center justify-between">
           <div>
             <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Valid & Active</div>
@@ -532,7 +657,6 @@ export default function SslManager() {
           </div>
         </div>
 
-        {/* Card 3: Expiring Soon */}
         <div className="bg-[#181825]/90 border border-white/10 rounded-2xl p-3.5 shadow-md flex items-center justify-between">
           <div>
             <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Expiring (&lt; 30d)</div>
@@ -545,7 +669,6 @@ export default function SslManager() {
           </div>
         </div>
 
-        {/* Card 4: Expired */}
         <div className="bg-[#181825]/90 border border-white/10 rounded-2xl p-3.5 shadow-md flex items-center justify-between">
           <div>
             <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Expired</div>
@@ -558,7 +681,6 @@ export default function SslManager() {
           </div>
         </div>
 
-        {/* Card 5: Auto-Renewal */}
         <div className="bg-[#181825]/90 border border-white/10 rounded-2xl p-3.5 shadow-md flex items-center justify-between">
           <div>
             <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Auto-Renewal</div>
@@ -578,7 +700,7 @@ export default function SslManager() {
         </div>
       </div>
 
-      {/* 3. Navigation Tabs */}
+      {/* Navigation Tabs */}
       <div className="px-5 border-b border-white/[0.08] flex items-center space-x-1 shrink-0 bg-[#14141e]">
         {[
           { id: 'certificates', label: `Certificates (${certificates.length})`, icon: ShieldCheck },
@@ -606,7 +728,7 @@ export default function SslManager() {
         })}
       </div>
 
-      {/* 4. Tab Content Area */}
+      {/* Tab Content Area */}
       <div className="flex-1 overflow-y-auto p-5">
         
         {/* TAB 1: CERTIFICATES LIST */}
@@ -680,7 +802,6 @@ export default function SslManager() {
                       key={cert.id}
                       className="bg-[#181825]/90 border border-white/10 hover:border-white/20 rounded-2xl p-4 shadow-xl transition-all backdrop-blur-md flex items-center justify-between"
                     >
-                      {/* Left: Domain & Status */}
                       <div className="space-y-1.5 min-w-0 flex-1 pr-4">
                         <div className="flex items-center space-x-2.5">
                           <span className={`w-2 h-2 rounded-full ${
@@ -688,7 +809,6 @@ export default function SslManager() {
                           }`} />
                           <h3 className="text-sm font-bold text-white font-mono truncate">{cert.name}</h3>
 
-                          {/* Status Badge */}
                           <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold flex items-center space-x-1 ${
                             isExpired
                               ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
@@ -714,7 +834,6 @@ export default function SslManager() {
                           )}
                         </div>
 
-                        {/* Covered Domains */}
                         <div className="flex flex-wrap items-center gap-1.5 text-xs text-gray-300 font-mono">
                           {cert.domains.map((dom, idx) => (
                             <a
@@ -731,7 +850,6 @@ export default function SslManager() {
                           ))}
                         </div>
 
-                        {/* Details Footer */}
                         <div className="flex items-center space-x-4 text-[11px] text-gray-400 pt-1">
                           <span>Expiry: <strong className="text-gray-300">{cert.expiryDate || '—'}</strong></span>
                           <span>·</span>
@@ -741,9 +859,7 @@ export default function SslManager() {
                         </div>
                       </div>
 
-                      {/* Right: Actions */}
                       <div className="flex items-center space-x-2 shrink-0">
-                        {/* Renew Single Button */}
                         {cert.isCertbot && (
                           <button
                             onClick={() => handleRenewSingle(cert)}
@@ -756,7 +872,6 @@ export default function SslManager() {
                           </button>
                         )}
 
-                        {/* Inspect Details Button */}
                         <button
                           onClick={() => handleInspect(cert)}
                           className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 text-xs transition-colors cursor-pointer"
@@ -766,7 +881,6 @@ export default function SslManager() {
                           <span>Inspect</span>
                         </button>
 
-                        {/* View PEM Button */}
                         <button
                           onClick={() => handleViewPem(cert)}
                           className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 text-xs transition-colors cursor-pointer"
@@ -776,7 +890,6 @@ export default function SslManager() {
                           <span>PEM</span>
                         </button>
 
-                        {/* Delete / Revoke Button */}
                         {cert.isCertbot && (
                           <button
                             onClick={() => {
@@ -813,9 +926,9 @@ export default function SslManager() {
                 <div className="flex items-center space-x-3">
                   <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
                   <div>
-                    <h4 className="text-xs font-bold text-white">Certbot Application Required for Let's Encrypt</h4>
+                    <h4 className="text-xs font-bold text-white">Certbot Application Required</h4>
                     <p className="text-[11px] text-amber-300/80">
-                      Certbot is not installed on this server. Automated domain challenge validation and HTTPS issuance require Certbot.
+                      Certbot is not installed on this server. Click &quot;Install Certbot&quot; below to install Certbot core.
                     </p>
                   </div>
                 </div>
@@ -864,10 +977,10 @@ export default function SslManager() {
                 />
               </div>
 
-              {/* Web Server / Challenge Method */}
+              {/* Web Server / Challenge Method Selection */}
               <div className="bg-[#181825]/90 border border-white/10 rounded-2xl p-4 space-y-3 shadow-xl backdrop-blur-md">
                 <label className="block text-xs font-semibold text-white">
-                  Web Server & Challenge Method
+                  Web Server &amp; Challenge Method
                 </label>
                 <div className="grid grid-cols-3 gap-2.5">
                   {[
@@ -880,18 +993,137 @@ export default function SslManager() {
                     <button
                       key={m.id}
                       type="button"
-                      onClick={() => setIssueForm({ ...issueForm, plugin: m.id as any })}
+                      onClick={() => handleSelectPlugin(m.id as any)}
                       className={`p-3 rounded-xl border text-left cursor-pointer transition-all ${
                         issueForm.plugin === m.id
                           ? 'bg-emerald-600/20 border-emerald-500 text-white shadow-sm'
                           : 'bg-white/5 border-white/10 text-gray-400 hover:text-white hover:bg-white/10'
                       }`}
                     >
-                      <div className="text-xs font-bold">{m.label}</div>
+                      <div className="text-xs font-bold flex items-center justify-between">
+                        <span>{m.label}</span>
+                        {m.id === 'nginx' && certbotStatus?.webServers.nginx && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="Nginx detected on host" />
+                        )}
+                        {m.id === 'apache' && certbotStatus?.webServers.apache && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="Apache detected on host" />
+                        )}
+                      </div>
                       <div className="text-[10px] text-gray-400 mt-0.5 leading-snug">{m.desc}</div>
                     </button>
                   ))}
                 </div>
+
+                {/* Inline Dependency Alert for Nginx / Apache */}
+                {issueForm.plugin === 'nginx' && certbotStatus && (
+                  !certbotStatus.webServers.nginx ? (
+                    <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-between text-xs text-amber-200">
+                      <div className="flex items-center space-x-2">
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                        <span>Nginx is not installed on this server.</span>
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <button
+                          type="button"
+                          onClick={() => setIssueForm(prev => ({ ...prev, plugin: 'standalone' }))}
+                          className="px-2 py-1 rounded bg-white/10 hover:bg-white/15 text-[11px] text-gray-300 cursor-pointer"
+                        >
+                          Use Standalone
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMissingDepModal({
+                              type: 'missing_webserver',
+                              webserver: 'nginx',
+                              title: 'Install Nginx Web Server',
+                              description: 'Install Nginx on this server to enable automatic Nginx SSL configuration.',
+                            });
+                          }}
+                          className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-[11px] text-white font-semibold cursor-pointer"
+                        >
+                          Install Nginx
+                        </button>
+                      </div>
+                    </div>
+                  ) : !certbotStatus.plugins.nginx ? (
+                    <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/25 flex items-center justify-between text-xs text-blue-200">
+                      <div className="flex items-center space-x-2">
+                        <Info className="w-4 h-4 text-blue-400 shrink-0" />
+                        <span>Nginx is installed, but the Certbot Nginx plugin (python3-certbot-nginx) is not installed.</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMissingDepModal({
+                            type: 'missing_plugin',
+                            webserver: 'nginx',
+                            title: 'Install Certbot Nginx Plugin',
+                            description: 'Install python3-certbot-nginx so Certbot can configure Nginx virtual hosts.',
+                          });
+                        }}
+                        className="px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-500 text-[11px] text-white font-semibold cursor-pointer shrink-0"
+                      >
+                        Install Nginx Plugin
+                      </button>
+                    </div>
+                  ) : null
+                )}
+
+                {issueForm.plugin === 'apache' && certbotStatus && (
+                  !certbotStatus.webServers.apache ? (
+                    <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-between text-xs text-amber-200">
+                      <div className="flex items-center space-x-2">
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                        <span>Apache is not installed on this server.</span>
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <button
+                          type="button"
+                          onClick={() => setIssueForm(prev => ({ ...prev, plugin: 'standalone' }))}
+                          className="px-2 py-1 rounded bg-white/10 hover:bg-white/15 text-[11px] text-gray-300 cursor-pointer"
+                        >
+                          Use Standalone
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMissingDepModal({
+                              type: 'missing_webserver',
+                              webserver: 'apache',
+                              title: 'Install Apache Web Server',
+                              description: 'Install Apache on this server to enable automatic Apache SSL configuration.',
+                            });
+                          }}
+                          className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-[11px] text-white font-semibold cursor-pointer"
+                        >
+                          Install Apache
+                        </button>
+                      </div>
+                    </div>
+                  ) : !certbotStatus.plugins.apache ? (
+                    <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/25 flex items-center justify-between text-xs text-blue-200">
+                      <div className="flex items-center space-x-2">
+                        <Info className="w-4 h-4 text-blue-400 shrink-0" />
+                        <span>Apache is installed, but the Certbot Apache plugin (python3-certbot-apache) is not installed.</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMissingDepModal({
+                            type: 'missing_plugin',
+                            webserver: 'apache',
+                            title: 'Install Certbot Apache Plugin',
+                            description: 'Install python3-certbot-apache so Certbot can configure Apache virtual hosts.',
+                          });
+                        }}
+                        className="px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-500 text-[11px] text-white font-semibold cursor-pointer shrink-0"
+                      >
+                        Install Apache Plugin
+                      </button>
+                    </div>
+                  ) : null
+                )}
 
                 {issueForm.plugin === 'webroot' && (
                   <div className="pt-2">
@@ -909,10 +1141,9 @@ export default function SslManager() {
 
               {/* Advanced Options */}
               <div className="bg-[#181825]/90 border border-white/10 rounded-2xl p-4 space-y-3 shadow-xl backdrop-blur-md">
-                <span className="text-xs font-semibold text-white block">Certificate Security & Options</span>
+                <span className="text-xs font-semibold text-white block">Certificate Security &amp; Options</span>
 
                 <div className="grid grid-cols-2 gap-4">
-                  {/* Key Algorithm */}
                   <div>
                     <label className="block text-[11px] text-gray-400 mb-1">Key Algorithm</label>
                     <select
@@ -940,7 +1171,6 @@ export default function SslManager() {
                   )}
                 </div>
 
-                {/* Checkboxes */}
                 <div className="pt-1 space-y-2">
                   <label className="flex items-center space-x-2 text-xs text-gray-300 cursor-pointer">
                     <input
@@ -987,7 +1217,7 @@ export default function SslManager() {
                     <Terminal className="w-3.5 h-3.5 text-emerald-400" />
                     <span>Certbot ACME Output Log</span>
                   </div>
-                  {isIssuing && <span className="text-emerald-400 animate-pulse">Running...</span>}
+                  {isIssuing && <span className="text-emerald-400 animate-pulse">Running ACME challenge...</span>}
                 </div>
                 <pre className="text-[11px] font-mono text-gray-300 whitespace-pre-wrap max-h-60 overflow-y-auto select-text leading-relaxed">
                   {issueOutput}
@@ -1001,7 +1231,7 @@ export default function SslManager() {
         {activeTab === 'renewal' && (
           <div className="max-w-2xl mx-auto space-y-5">
             <div>
-              <h2 className="text-base font-bold text-white tracking-tight">Certbot Auto-Renewal & Systemd Timers</h2>
+              <h2 className="text-base font-bold text-white tracking-tight">Certbot Auto-Renewal &amp; Systemd Timers</h2>
               <p className="text-xs text-gray-400">
                 Let's Encrypt certificates are valid for 90 days. Certbot automatically renews certificates when they have less than 30 days remaining.
               </p>
@@ -1012,7 +1242,7 @@ export default function SslManager() {
                 <div className="flex items-center space-x-3">
                   <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
                   <div>
-                    <h4 className="text-xs font-bold text-white">Certbot Application Required for Auto-Renewal</h4>
+                    <h4 className="text-xs font-bold text-white">Certbot Application Required</h4>
                     <p className="text-[11px] text-amber-300/80">
                       Certbot systemd timers and auto-renewal checks require Certbot installed on this server.
                     </p>
@@ -1029,7 +1259,6 @@ export default function SslManager() {
               </div>
             )}
 
-            {/* Timer Card */}
             <div className="bg-[#181825]/90 border border-white/10 rounded-2xl p-5 shadow-xl backdrop-blur-md space-y-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-3">
@@ -1060,7 +1289,7 @@ export default function SslManager() {
                   disabled={!activeConnectionId}
                   className="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer"
                 >
-                  Enable & Start certbot.timer
+                  Enable &amp; Start certbot.timer
                 </button>
 
                 <button
@@ -1081,7 +1310,6 @@ export default function SslManager() {
               </div>
             </div>
 
-            {/* Renewal Log Preview */}
             {renewalOutput && (
               <div className="bg-[#101018] border border-white/10 rounded-2xl p-4 space-y-2 shadow-2xl">
                 <div className="flex items-center justify-between text-xs font-mono text-gray-400 border-b border-white/5 pb-2">
@@ -1096,20 +1324,20 @@ export default function SslManager() {
           </div>
         )}
 
-        {/* TAB 4: SELF-SIGNED GENERATOR */}
+        {/* TAB 4: SELF-SIGNED GENERATOR (FIXED: -batch flag prevents loading hang) */}
         {activeTab === 'self-signed' && (
           <div className="max-w-2xl mx-auto space-y-6">
             <div>
               <h2 className="text-base font-bold text-white tracking-tight">Generate Self-Signed SSL/TLS Certificate</h2>
               <p className="text-xs text-gray-400">
-                Quickly create OpenSSL private keys and self-signed certificates for local development, test APIs, or staging servers.
+                Quickly create OpenSSL private keys and self-signed certificates for local development, test APIs, or staging servers without ACME.
               </p>
             </div>
 
             <form onSubmit={handleGenerateSelfSigned} className="bg-[#181825]/90 border border-white/10 rounded-2xl p-5 space-y-4 shadow-xl backdrop-blur-md">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-white mb-1">Common Name / Domain</label>
+                  <label className="block text-xs font-semibold text-white mb-1">Common Name / Domain *</label>
                   <input
                     type="text"
                     required
@@ -1189,7 +1417,7 @@ export default function SslManager() {
         {activeTab === 'diagnostics' && (
           <div className="max-w-3xl mx-auto space-y-6">
             <div>
-              <h2 className="text-base font-bold text-white tracking-tight">TLS Handshake & SSL Health Diagnostics</h2>
+              <h2 className="text-base font-bold text-white tracking-tight">TLS Handshake &amp; SSL Health Diagnostics</h2>
               <p className="text-xs text-gray-400">
                 Perform an active TLS probe via OpenSSL against any domain or localhost port 443 to inspect negotiated protocols, cipher suites, and certificate chains.
               </p>
@@ -1279,7 +1507,7 @@ export default function SslManager() {
         )}
       </div>
 
-      {/* 5. MODAL: Inspect Certificate (X.509) */}
+      {/* MODAL 1: Inspect Certificate (X.509) */}
       {selectedCertForInspect && (
         <div 
           className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in"
@@ -1320,7 +1548,7 @@ export default function SslManager() {
         </div>
       )}
 
-      {/* 6. MODAL: View Public PEM Content */}
+      {/* MODAL 2: View Public PEM Content */}
       {selectedCertForPem && (
         <div 
           className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in"
@@ -1371,7 +1599,7 @@ export default function SslManager() {
         </div>
       )}
 
-      {/* 7. MODAL: Delete / Revoke Confirmation */}
+      {/* MODAL 3: Delete / Revoke Confirmation */}
       {certToDelete && (
         <div 
           className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in"
@@ -1436,7 +1664,94 @@ export default function SslManager() {
         </div>
       )}
 
-      {/* 8. MODAL: Certbot Not Installed Alert & Automated Installer */}
+      {/* MODAL 4: Target Web Server / Plugin Missing Modal (Only asked when user selects that webserver) */}
+      {missingDepModal && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200"
+          onClick={() => !installingComponent && setMissingDepModal(null)}
+        >
+          <div 
+            className="bg-[#181825] border border-amber-500/30 rounded-3xl w-full max-w-lg p-6 shadow-2xl space-y-4 animate-in zoom-in-95 duration-200"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center border border-amber-500/30 shrink-0">
+                  <Wrench className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">{missingDepModal.title}</h3>
+                  <div className="text-[11px] text-amber-300 font-mono mt-0.5">
+                    Target: {missingDepModal.webserver.toUpperCase()} · Mode: {missingDepModal.type === 'missing_webserver' ? 'Package Missing' : 'Plugin Missing'}
+                  </div>
+                </div>
+              </div>
+              {!installingComponent && (
+                <button
+                  onClick={() => setMissingDepModal(null)}
+                  className="text-gray-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+
+            <p className="text-xs text-gray-300 leading-relaxed">
+              {missingDepModal.description}
+            </p>
+
+            <div className="p-3 bg-[#101018] rounded-xl border border-white/5 text-[11px] text-gray-400 font-mono space-y-1">
+              <div>Detected OS: <span className="text-white">{certbotStatus?.osName || 'Linux'}</span></div>
+              <div>
+                Package to install: <span className="text-emerald-400 font-bold">
+                  {missingDepModal.type === 'missing_webserver' 
+                    ? missingDepModal.webserver === 'nginx' ? 'nginx' : 'apache2 / httpd' 
+                    : `python3-certbot-${missingDepModal.webserver}`}
+                </span>
+              </div>
+            </div>
+
+            {installingComponent && (
+              <div className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-xl flex items-center space-x-2 text-xs text-blue-300 font-mono animate-pulse">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                <span>Installing {installingComponent} on remote host...</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between pt-2 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => {
+                  setIssueForm(prev => ({ ...prev, plugin: 'standalone' }));
+                  setMissingDepModal(null);
+                }}
+                disabled={!!installingComponent}
+                className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 text-gray-300 text-xs font-medium cursor-pointer"
+              >
+                Switch to Standalone Mode
+              </button>
+
+              <button
+                type="button"
+                onClick={handleInstallMissingDep}
+                disabled={!!installingComponent || (!hasSudo && !isRoot)}
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md shadow-emerald-900/30 flex items-center space-x-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {installingComponent ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                <span>
+                  {installingComponent 
+                    ? 'Installing...' 
+                    : missingDepModal.type === 'missing_webserver' 
+                    ? `Install ${missingDepModal.webserver.toUpperCase()}` 
+                    : `Install ${missingDepModal.webserver.toUpperCase()} Plugin`}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 5: Certbot Core Installer Modal */}
       {showInstallAlertModal && (
         <div 
           className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200"
@@ -1446,7 +1761,6 @@ export default function SslManager() {
             className="bg-[#181825] border border-amber-500/30 rounded-3xl w-full max-w-xl p-6 shadow-2xl space-y-4 max-h-[90vh] flex flex-col animate-in zoom-in-95 duration-200"
             onClick={e => e.stopPropagation()}
           >
-            {/* Modal Header */}
             <div className="flex items-start justify-between border-b border-white/10 pb-4">
               <div className="flex items-center space-x-3">
                 <div className="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center border border-amber-500/30 shrink-0 shadow-lg shadow-amber-500/10">
@@ -1454,7 +1768,7 @@ export default function SslManager() {
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-white flex items-center space-x-2">
-                    <span>Certbot Is Not Installed on Server</span>
+                    <span>Certbot ACME Client Installation</span>
                   </h3>
                   <div className="text-xs text-amber-300/90 font-mono mt-0.5">
                     {activeServer?.username || 'root'}@{activeServer?.host || 'remote'} · {certbotStatus?.osName || 'Linux Host'}
@@ -1471,15 +1785,13 @@ export default function SslManager() {
               )}
             </div>
 
-            {/* Modal Description & OS Info */}
             <div className="space-y-3 flex-1 overflow-y-auto pr-1">
               <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200 leading-relaxed">
                 <p>
-                  <strong>Alert:</strong> The <strong>Certbot ACME Client</strong> application was not detected on this remote server. Certbot is required to request, verify domain ownership, automatically install, and renew free <strong>Let's Encrypt SSL/TLS certificates</strong>.
+                  <strong>Notice:</strong> This automated installer will install <strong>Certbot core</strong> on your remote server. Web server plugins (such as Nginx or Apache) are only installed when you select those specific modes in the wizard.
                 </p>
               </div>
 
-              {/* Detected Environment Info */}
               <div className="grid grid-cols-2 gap-2 text-xs font-mono">
                 <div className="bg-[#101018] p-2.5 rounded-xl border border-white/5 space-y-0.5">
                   <span className="text-gray-500 text-[10px] uppercase font-bold block">Operating System</span>
@@ -1491,10 +1803,9 @@ export default function SslManager() {
                 </div>
               </div>
 
-              {/* Suggested Manual Command Box */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-[11px] text-gray-400">
-                  <span>Host Installation Command</span>
+                  <span>Installation Command (Certbot only)</span>
                   {copiedInstallCmd ? (
                     <span className="text-emerald-400 flex items-center space-x-1">
                       <Check className="w-3 h-3" />
@@ -1503,7 +1814,7 @@ export default function SslManager() {
                   ) : (
                     <button
                       onClick={() => {
-                        const cmd = certbotStatus?.suggestedCommand || 'sudo apt update && sudo apt install -y certbot python3-certbot-nginx';
+                        const cmd = certbotStatus?.suggestedCommand || 'sudo apt update && sudo apt install -y certbot';
                         navigator.clipboard.writeText(cmd);
                         setCopiedInstallCmd(true);
                         setTimeout(() => setCopiedInstallCmd(false), 2000);
@@ -1516,11 +1827,10 @@ export default function SslManager() {
                   )}
                 </div>
                 <div className="bg-[#0c0c14] p-2.5 rounded-xl border border-white/10 font-mono text-[11px] text-emerald-300 break-all select-all flex items-center justify-between">
-                  <code>{certbotStatus?.suggestedCommand || 'sudo apt update && sudo apt install -y certbot python3-certbot-nginx'}</code>
+                  <code>{certbotStatus?.suggestedCommand || 'sudo apt update && sudo apt install -y certbot'}</code>
                 </div>
               </div>
 
-              {/* Live Terminal Install Console (when installing or output present) */}
               {(isInstallingCertbot || installOutput) && (
                 <div className="space-y-1.5 pt-1">
                   <div className="flex items-center justify-between text-xs">
@@ -1542,14 +1852,13 @@ export default function SslManager() {
               )}
             </div>
 
-            {/* Modal Footer Buttons */}
             <div className="flex items-center justify-between pt-3 border-t border-white/10">
               <button
                 onClick={() => setShowInstallAlertModal(false)}
                 disabled={isInstallingCertbot}
                 className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-gray-300 hover:text-white text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50"
               >
-                {certbotStatus?.installed ? 'Done' : 'Dismiss / Remind Later'}
+                {certbotStatus?.installed ? 'Done' : 'Close'}
               </button>
 
               <button
@@ -1565,7 +1874,7 @@ export default function SslManager() {
                 ) : (
                   <>
                     <Download className="w-3.5 h-3.5" />
-                    <span>Install Certbot on Server</span>
+                    <span>Install Certbot Only</span>
                   </>
                 )}
               </button>
