@@ -23,6 +23,10 @@ export interface CertbotStatus {
   version?: string;
   autoRenewActive: boolean;
   timerStatusText?: string;
+  osName?: string;
+  osId?: string;
+  packageManager?: string;
+  suggestedCommand?: string;
   webServers: {
     nginx: boolean;
     apache: boolean;
