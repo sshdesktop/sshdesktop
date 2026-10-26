@@ -7,16 +7,17 @@ import SshTunnelsManager from './components/SshTunnelsManager';
 import SshKeyVault from './components/SshKeyVault';
 import SshSecurityAuditor from './components/SshSecurityAuditor';
 import SshConfigEditor from './components/SshConfigEditor';
+import SshSnippetsManager from './components/SshSnippetsManager';
 import { useConnectionStore } from '../../lib/store';
 import { useSshStore } from './sshStore';
 
 export default function SshApp() {
   const { activeConnectionId, connections } = useConnectionStore();
   const activeServer = connections.find(c => c.id === activeConnectionId);
-  const { tunnels, keys } = useSshStore();
+  const { tunnels, keys, snippets } = useSshStore();
 
   // Active main tab: defaults to config
-  const [activeMainTab, setActiveMainTab] = useState<'config' | 'tunnels' | 'keys' | 'security'>('config');
+  const [activeMainTab, setActiveMainTab] = useState<'config' | 'tunnels' | 'keys' | 'security' | 'snippets'>('config');
 
   const navTabs = [
     { 
@@ -41,6 +42,12 @@ export default function SshApp() {
       id: 'security' as const, 
       label: 'Security & Auditor', 
       icon: ShieldCheck 
+    },
+    { 
+      id: 'snippets' as const, 
+      label: 'DevOps Snippets', 
+      icon: Terminal, 
+      count: snippets.length 
     },
   ];
 
@@ -129,6 +136,9 @@ export default function SshApp() {
 
         {/* VIEW 4: SECURITY AUDITOR */}
         {activeMainTab === 'security' && <SshSecurityAuditor />}
+
+        {/* VIEW 5: DEVOPS SNIPPETS */}
+        {activeMainTab === 'snippets' && <SshSnippetsManager />}
       </div>
     </div>
   );

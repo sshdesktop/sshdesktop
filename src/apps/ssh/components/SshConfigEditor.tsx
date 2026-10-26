@@ -1,9 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import Editor from '@monaco-editor/react';
 import { 
   FileCode, Plus, Save, RefreshCw, Trash2, Check, 
   ExternalLink, Server, Key, Eye, AlertCircle, Copy,
   ShieldCheck, ShieldAlert, Sliders, CheckCircle2, RotateCcw,
-  Terminal, Lock, ArrowRight, Play, Wrench, Shield, X
+  Terminal, Lock, ArrowRight, Play, Wrench, Shield, X,
+  ZoomIn, ZoomOut, WrapText, Layers
 } from 'lucide-react';
 import { SshConfigEntry } from '../types';
 import { useConnectionStore } from '../../../lib/store';
@@ -219,6 +221,72 @@ export default function SshConfigEditor() {
   const [isValidating, setIsValidating] = useState(false);
   const [isReloadingService, setIsReloadingService] = useState(false);
   const [reloadSuccess, setReloadSuccess] = useState(false);
+
+  // Monaco Editor State
+  const [editorFontSize, setEditorFontSize] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('sshdesktop_config_fontsize');
+      return saved ? parseInt(saved, 10) : 13;
+    } catch {
+      return 13;
+    }
+  });
+  const [isWordWrap, setIsWordWrap] = useState<boolean>(true);
+  const [showMinimap, setShowMinimap] = useState<boolean>(false);
+  const editorRef = useRef<any>(null);
+
+  const handleUpdateFontSize = (newSize: number) => {
+    const clamped = Math.max(9, Math.min(32, newSize));
+    setEditorFontSize(clamped);
+    try {
+      localStorage.setItem('sshdesktop_config_fontsize', String(clamped));
+    } catch {}
+  };
+
+  const handleEditorDidMount = (editor: any, monaco: any) => {
+    editorRef.current = editor;
+    try {
+      monaco.editor.defineTheme('sshdesktop-dark', {
+        base: 'vs-dark',
+        inherit: true,
+        rules: [
+          { token: 'keyword', foreground: '7aa2f7', fontStyle: 'bold' },
+          { token: 'comment', foreground: '565f89', fontStyle: 'italic' },
+          { token: 'string', foreground: '9ece6a' },
+          { token: 'number', foreground: 'ff9e64' },
+          { token: 'identifier', foreground: 'cdd6f4' },
+        ],
+        colors: {
+          'editor.background': '#0f111a',
+          'editor.foreground': '#cdd6f4',
+          'editorLineNumber.foreground': '#45475a',
+          'editorLineNumber.activeForeground': '#89b4fa',
+          'editor.selectionBackground': '#31324480',
+          'editor.lineHighlightBackground': '#18182560',
+        }
+      });
+      monaco.editor.setTheme('sshdesktop-dark');
+    } catch {}
+  };
+
+  // Keyboard Shortcuts for Monaco Raw Editor (Ctrl++, Ctrl+-, Alt+Z)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (mode !== 'raw') return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
+        e.preventDefault();
+        handleUpdateFontSize(editorFontSize + 1);
+      } else if ((e.ctrlKey || e.metaKey) && e.key === '-') {
+        e.preventDefault();
+        handleUpdateFontSize(editorFontSize - 1);
+      } else if (e.altKey && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        setIsWordWrap(prev => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [mode, editorFontSize]);
 
   // Sudo password prompt modal (if needed when server user lacks passwordless sudo)
   const [showSudoPrompt, setShowSudoPrompt] = useState(false);
@@ -766,18 +834,135 @@ Host *
       {/* Main Content Area */}
       <div className="flex-1 overflow-y-auto p-6">
         {mode === 'raw' ? (
-          /* RAW TEXT EDITOR */
-          <div className="h-full flex flex-col space-y-2">
-            <div className="flex items-center justify-between text-xs text-gray-400 px-1 font-mono">
-              <span>File: {targetFile} {targetFile.startsWith('/etc') ? '(Requires Sudo)' : ''}</span>
-              <span>Lines: {rawText.split('\n').length} | Chars: {rawText.length}</span>
+          /* RAW MONACO VS CODE EDITOR */
+          <div className="h-full flex flex-col border border-white/10 rounded-2xl overflow-hidden bg-[#0f111a] shadow-2xl">
+            {/* Monaco Toolbar */}
+            <div className="px-4 py-2 bg-[#131522] border-b border-white/10 flex flex-wrap items-center justify-between gap-2 text-xs select-none">
+              <div className="flex items-center space-x-2 font-mono">
+                <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                  {targetFile}
+                </span>
+                {targetFile.startsWith('/etc') && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                    Sudo Required
+                  </span>
+                )}
+                <span className="text-gray-500 text-[11px] hidden sm:inline">
+                  {rawText.split('\n').length} lines, {rawText.length.toLocaleString()} chars
+                </span>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                {/* Word Wrap */}
+                <button
+                  type="button"
+                  onClick={() => setIsWordWrap(!isWordWrap)}
+                  className={`px-2 py-1 rounded-lg text-xs flex items-center space-x-1 transition-all cursor-pointer ${
+                    isWordWrap ? 'bg-indigo-600/30 text-indigo-300 border border-indigo-500/40' : 'bg-white/5 text-gray-400 hover:text-white'
+                  }`}
+                  title="Toggle Word Wrap (Alt + Z)"
+                >
+                  <WrapText className="w-3 h-3" />
+                  <span className="text-[11px]">Wrap</span>
+                </button>
+
+                {/* Minimap */}
+                <button
+                  type="button"
+                  onClick={() => setShowMinimap(!showMinimap)}
+                  className={`px-2 py-1 rounded-lg text-xs flex items-center space-x-1 transition-all cursor-pointer ${
+                    showMinimap ? 'bg-indigo-600/30 text-indigo-300 border border-indigo-500/40' : 'bg-white/5 text-gray-400 hover:text-white'
+                  }`}
+                  title="Toggle Minimap"
+                >
+                  <Layers className="w-3 h-3" />
+                  <span className="text-[11px]">Map</span>
+                </button>
+
+                {/* Zoom Controls */}
+                <div className="flex items-center bg-white/5 rounded-lg border border-white/10 px-1 py-0.5 space-x-1 text-gray-300">
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateFontSize(editorFontSize - 1)}
+                    className="hover:text-white text-gray-400 p-0.5 cursor-pointer"
+                    title="Zoom Out (Ctrl + -)"
+                  >
+                    <ZoomOut className="w-3 h-3" />
+                  </button>
+                  <span className="text-[10px] font-mono px-1">{editorFontSize}px</span>
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateFontSize(editorFontSize + 1)}
+                    className="hover:text-white text-indigo-400 p-0.5 cursor-pointer"
+                    title="Zoom In (Ctrl + +)"
+                  >
+                    <ZoomIn className="w-3 h-3" />
+                  </button>
+                </div>
+
+                {/* Copy Raw Content */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(rawText);
+                    setSavedSuccess(true);
+                    setTimeout(() => setSavedSuccess(false), 1500);
+                  }}
+                  className="p-1 hover:text-white text-gray-400 transition-colors cursor-pointer"
+                  title="Copy Full Configuration"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                </button>
+
+                {/* Revert Changes */}
+                {rawText !== originalText && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm('Revert all unsaved changes to original file content?')) {
+                        setRawText(originalText);
+                      }
+                    }}
+                    className="px-2 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/20 text-xs flex items-center space-x-1 cursor-pointer transition-colors"
+                    title="Discard changes and restore original"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span className="text-[11px]">Revert</span>
+                  </button>
+                )}
+              </div>
             </div>
-            <textarea
-              value={rawText}
-              onChange={(e) => setRawText(e.target.value)}
-              className="flex-1 w-full p-4 rounded-2xl bg-[#11111b] border border-white/10 font-mono text-xs text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none leading-relaxed"
-              placeholder="# OpenSSH Configuration..."
-            />
+
+            {/* Monaco Editor Canvas */}
+            <div className="flex-1 min-h-[400px] relative overflow-hidden bg-[#0f111a]">
+              <Editor
+                height="100%"
+                language="shell"
+                theme="sshdesktop-dark"
+                value={rawText}
+                onChange={(val) => setRawText(val || '')}
+                onMount={handleEditorDidMount}
+                options={{
+                  fontSize: editorFontSize,
+                  wordWrap: isWordWrap ? 'on' : 'off',
+                  minimap: { enabled: showMinimap },
+                  scrollBeyondLastLine: false,
+                  automaticLayout: true,
+                  fontFamily: "'JetBrains Mono', 'Fira Code', 'Menlo', 'Monaco', 'Consolas', monospace",
+                  lineNumbers: 'on',
+                  renderWhitespace: 'selection',
+                  cursorBlinking: 'smooth',
+                  tabSize: 2,
+                  bracketPairColorization: { enabled: true },
+                  padding: { top: 10, bottom: 10 },
+                }}
+                loading={
+                  <div className="h-full flex items-center justify-center text-xs text-gray-500 font-mono">
+                    Loading SSH Configuration Editor...
+                  </div>
+                }
+              />
+            </div>
           </div>
         ) : (
           /* VISUAL DIRECTIVES EDITOR */

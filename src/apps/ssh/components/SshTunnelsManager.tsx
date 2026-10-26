@@ -673,6 +673,24 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
                     </span>
                   </div>
 
+                  {/* Colorful CLI Command Snippet */}
+                  <div className="flex items-center space-x-2 text-[11px] font-mono mt-1">
+                    <span className="text-gray-500 text-[10px]">CLI:</span>
+                    <div className="px-2 py-0.5 rounded-lg bg-black/40 border border-white/10 select-all overflow-x-auto truncate text-[11px]">
+                      <span className="text-emerald-400 font-bold">ssh -N </span>
+                      <span className="text-amber-400 font-bold">-{t.type[0].toUpperCase()} </span>
+                      <span className="text-cyan-300">
+                        {t.type === 'dynamic' 
+                          ? String(t.localPort) 
+                          : t.type === 'local' 
+                          ? `${t.localPort}:${t.remoteHost || '127.0.0.1'}:${t.remotePort}`
+                          : `${t.remotePort}:${t.remoteHost || '127.0.0.1'}:${t.localPort}`
+                        }
+                      </span>
+                      <span className="text-purple-300"> {activeServer?.username || 'user'}@{activeServer?.host || 'server'}</span>
+                    </div>
+                  </div>
+
                   {t.description && (
                     <p className="text-xs text-gray-400 line-clamp-1">{t.description}</p>
                   )}
