@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
+import Editor from '@monaco-editor/react';
 import { 
   Terminal, Play, Copy, Check, Plus, Trash2, Edit2, 
   Sparkles, Layers, Radio, Globe, Container, Shield, Database,
@@ -15,6 +16,81 @@ const CATEGORY_ICONS: Record<string, React.ElementType> = {
   security: Shield,
   database: Database,
 };
+
+function HighlightedCommand({ code }: { code: string }) {
+  // Tokenize bash command line into colorful tokens
+  const tokens = useMemo(() => {
+    const regex = /("[^"]*"|'[^']*'|\$[{]?[A-Za-z0-9_]+[}]?|--?[a-zA-Z0-9_-]+|\|{1,2}|&&|>>|>|;|sudo|doas|\b[a-zA-Z0-9_\-\./:]+\b|\s+)/g;
+    const parts = code.match(regex) || [code];
+    let isStartOfCmd = true;
+
+    return parts.map((part, i) => {
+      if (/^\s+$/.test(part)) return <span key={i}>{part}</span>;
+
+      // Sudo / Doas in bold rose
+      if (part === 'sudo' || part === 'doas') {
+        isStartOfCmd = true;
+        return <span key={i} className="text-rose-400 font-bold">{part}</span>;
+      }
+
+      // Operators: |, &&, ||, ;, >, >> in purple
+      if (/^(\|{1,2}|&&|>>|>|;)$/.test(part)) {
+        isStartOfCmd = true;
+        return <span key={i} className="text-purple-400 font-bold mx-0.5">{part}</span>;
+      }
+
+      // Strings in soft amber
+      if (/^("[^"]*"|'[^']*')$/.test(part)) {
+        return <span key={i} className="text-amber-200">{part}</span>;
+      }
+
+      // Variables in bright cyan
+      if (/^\$[{]?[A-Za-z0-9_]+[}]?$/.test(part)) {
+        return <span key={i} className="text-cyan-300 font-bold">{part}</span>;
+      }
+
+      // Flags in amber/gold
+      if (/^--?[a-zA-Z0-9_-]+$/.test(part)) {
+        return <span key={i} className="text-amber-400 font-semibold">{part}</span>;
+      }
+
+      // Main commands in bright neon emerald
+      const KNOWN_CMDS = new Set([
+        'systemctl', 'docker', 'curl', 'apt', 'apt-get', 'yum', 'git', 'ssh', 'scp',
+        'rsync', 'find', 'grep', 'awk', 'sed', 'chmod', 'chown', 'kill', 'pkill',
+        'nginx', 'certbot', 'ufw', 'iptables', 'journalctl', 'htop', 'df', 'free',
+        'ip', 'netstat', 'ss', 'tar', 'gzip', 'cat', 'ls', 'mkdir', 'rm', 'echo',
+        'ps', 'uname', 'uptime', 'head', 'tail', 'less', 'nano', 'vim', 'which', 'su'
+      ]);
+
+      if (isStartOfCmd || KNOWN_CMDS.has(part.toLowerCase())) {
+        isStartOfCmd = false;
+        return <span key={i} className="text-emerald-400 font-bold">{part}</span>;
+      }
+
+      // Subcommands in vivid sky blue
+      const SUB_CMDS = new Set([
+        'restart', 'status', 'start', 'stop', 'enable', 'disable', 'reload',
+        'compose', 'build', 'run', 'up', 'down', 'exec', 'logs', 'ps', 'images',
+        'install', 'update', 'upgrade', 'clone', 'pull', 'push', 'checkout', 'commit',
+        'prune', 'clean', 'system'
+      ]);
+
+      if (SUB_CMDS.has(part.toLowerCase())) {
+        return <span key={i} className="text-sky-300 font-semibold">{part}</span>;
+      }
+
+      // Paths in indigo
+      if (part.includes('/') || part.includes('.')) {
+        return <span key={i} className="text-indigo-300">{part}</span>;
+      }
+
+      return <span key={i} className="text-gray-200">{part}</span>;
+    });
+  }, [code]);
+
+  return <code className="leading-relaxed whitespace-pre-wrap select-all font-mono text-xs">{tokens}</code>;
+}
 
 interface SshSnippetsManagerProps {
   onExecuteInActive?: (cmd: string) => void;
@@ -197,8 +273,8 @@ export default function SshSnippetsManager({
                     <p className="text-xs text-gray-400 mt-1 line-clamp-2">{s.description}</p>
                   )}
 
-                  <div className="mt-2.5 p-2.5 rounded-xl bg-black/40 border border-white/10 font-mono text-xs text-cyan-300 select-all overflow-x-auto whitespace-pre-wrap">
-                    {s.command}
+                  <div className="mt-2.5 p-3 rounded-xl bg-[#0d0e17] border border-white/10 shadow-inner overflow-x-auto">
+                    <HighlightedCommand code={s.command} />
                   </div>
                 </div>
 
@@ -290,15 +366,30 @@ export default function SshSnippetsManager({
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-gray-300 mb-1">Command String</label>
-                <textarea
-                  rows={3}
-                  required
-                  placeholder="sudo systemctl restart docker..."
-                  value={editingSnippet.command}
-                  onChange={e => setEditingSnippet({ ...editingSnippet, command: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-white/5 border border-white/10 text-white font-mono text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                />
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-medium text-gray-300">Command String</label>
+                  <span className="text-[10px] text-emerald-400 font-mono">Bash / Shell Syntax</span>
+                </div>
+                <div className="h-28 rounded-xl border border-white/10 overflow-hidden bg-[#0d0e17] shadow-inner">
+                  <Editor
+                    height="100%"
+                    language="shell"
+                    theme="vs-dark"
+                    value={editingSnippet.command}
+                    onChange={val => setEditingSnippet({ ...editingSnippet, command: val || '' })}
+                    options={{
+                      fontSize: 12,
+                      wordWrap: 'on',
+                      minimap: { enabled: false },
+                      scrollBeyondLastLine: false,
+                      automaticLayout: true,
+                      fontFamily: "'JetBrains Mono', 'Fira Code', 'Menlo', 'Monaco', 'Consolas', monospace",
+                      lineNumbers: 'off',
+                      renderWhitespace: 'selection',
+                      padding: { top: 8, bottom: 8 },
+                    }}
+                  />
+                </div>
               </div>
 
               <div>

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import Editor from '@monaco-editor/react';
 import { 
   Key, Plus, Copy, Check, Download, Upload, Trash2, 
   ShieldCheck, Eye, EyeOff, Server, Terminal, AlertCircle,
@@ -593,36 +594,73 @@ export default function SshKeyVault({ isLight = false }: { isLight?: boolean }) 
               <button onClick={() => setViewingKey(null)} className="text-gray-400 hover:text-white cursor-pointer">✕</button>
             </div>
 
-            <div className="space-y-3">
+            <div className="space-y-4">
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-medium text-gray-300">OpenSSH Public Key (.pub)</span>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs font-semibold text-gray-300">OpenSSH Public Key (.pub)</span>
                   <button
                     onClick={() => handleCopyPublicKey(viewingKey)}
                     className="text-xs text-blue-400 hover:text-blue-300 cursor-pointer flex items-center space-x-1"
                   >
                     <Copy className="w-3 h-3" />
-                    <span>Copy</span>
+                    <span>Copy Key</span>
                   </button>
                 </div>
-                <div className="p-3 bg-black/40 border border-white/10 rounded-xl text-xs font-mono text-cyan-300 break-all select-all">
-                  {viewingKey.publicKey}
-                </div>
+                {(() => {
+                  const parts = (viewingKey.publicKey || '').trim().split(/\s+/);
+                  const algo = parts[0] || 'ssh-key';
+                  const payload = parts[1] || '';
+                  const comment = parts.slice(2).join(' ');
+                  return (
+                    <div className="p-3 bg-[#0d0e17] border border-white/10 rounded-xl text-xs font-mono select-all leading-relaxed space-y-1.5 shadow-inner">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                          {algo}
+                        </span>
+                        {comment && (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">
+                            {comment}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-cyan-300 break-all text-[11px]">
+                        {payload || viewingKey.publicKey}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-medium text-gray-300">Private Key (.pem)</span>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs font-semibold text-gray-300">Private Key (.pem / OpenSSH Format)</span>
                   <button
                     onClick={() => handleDownloadPrivateKey(viewingKey)}
                     className="text-xs text-amber-400 hover:text-amber-300 cursor-pointer flex items-center space-x-1"
                   >
                     <Download className="w-3 h-3" />
-                    <span>Download</span>
+                    <span>Download .pem</span>
                   </button>
                 </div>
-                <div className="p-3 bg-black/40 border border-white/10 rounded-xl text-[11px] font-mono text-gray-400 whitespace-pre overflow-x-auto max-h-48 select-all">
-                  {viewingKey.privateKey}
+                <div className="h-44 rounded-xl border border-white/10 overflow-hidden bg-[#0d0e17] shadow-inner">
+                  <Editor
+                    height="100%"
+                    language="plaintext"
+                    theme="vs-dark"
+                    value={viewingKey.privateKey || 'No private key stored'}
+                    options={{
+                      readOnly: true,
+                      domReadOnly: true,
+                      fontSize: 11,
+                      wordWrap: 'on',
+                      minimap: { enabled: false },
+                      scrollBeyondLastLine: false,
+                      automaticLayout: true,
+                      fontFamily: "'JetBrains Mono', 'Fira Code', 'Menlo', 'Monaco', 'Consolas', monospace",
+                      lineNumbers: 'on',
+                      padding: { top: 8, bottom: 8 },
+                    }}
+                  />
                 </div>
               </div>
             </div>
