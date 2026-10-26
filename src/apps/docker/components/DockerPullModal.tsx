@@ -1,5 +1,6 @@
 import React from 'react';
-import { Download, X, RefreshCw, ArrowDownToLine } from 'lucide-react';
+import { Download, X, RefreshCw, ArrowDownToLine, Sparkles } from 'lucide-react';
+import { DockerCommandSnippet } from './DockerCodeViewer';
 
 interface DockerPullModalProps {
   isOpen: boolean;
@@ -23,6 +24,8 @@ export const DockerPullModal: React.FC<DockerPullModalProps> = ({
   onClose,
 }) => {
   if (!isOpen) return null;
+
+  const pullCommand = `docker pull ${pullImageInput.trim() || 'nginx:latest'}`;
 
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-200">
@@ -65,6 +68,15 @@ export const DockerPullModal: React.FC<DockerPullModalProps> = ({
             </button>
           </div>
 
+          {/* Live Colorful CLI Snippet */}
+          <div className="space-y-1">
+            <div className="flex items-center space-x-1.5 text-[11px] text-purple-400 font-medium">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Equivalent Docker CLI:</span>
+            </div>
+            <DockerCommandSnippet command={pullCommand} label="Pull Command" />
+          </div>
+
           {/* Popular Curated Images */}
           <div>
             <span className="text-[11px] text-gray-400 block mb-2 font-medium">Popular Docker Images:</span>
@@ -91,10 +103,37 @@ export const DockerPullModal: React.FC<DockerPullModalProps> = ({
             </div>
           </div>
 
-          {/* Pull Logs Preview */}
+          {/* Pull Logs Preview with Colorful Tokens */}
           {pullLogs && (
-            <div className="bg-[#11111a] border border-white/10 rounded-xl p-3 max-h-40 overflow-y-auto font-mono text-[11px] text-gray-300 whitespace-pre-wrap select-text">
-              {pullLogs}
+            <div className="bg-[#0c0d14] border border-white/10 rounded-2xl p-3.5 max-h-48 overflow-y-auto font-mono text-[11px] space-y-1 shadow-inner leading-relaxed">
+              {pullLogs.split('\n').filter(Boolean).map((line, idx) => {
+                let badge = null;
+                let textColor = 'text-gray-300';
+
+                if (line.includes('Pull complete') || line.includes('Already exists')) {
+                  badge = <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] font-bold mr-1.5">DONE</span>;
+                  textColor = 'text-emerald-300';
+                } else if (line.includes('Downloading') || line.includes('Extracting')) {
+                  badge = <span className="px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[9px] font-bold mr-1.5">PROGRESS</span>;
+                  textColor = 'text-amber-200';
+                } else if (line.includes('Pulling fs layer')) {
+                  badge = <span className="px-1.5 py-0.2 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30 text-[9px] font-bold mr-1.5">LAYER</span>;
+                  textColor = 'text-sky-300';
+                } else if (line.startsWith('Digest:')) {
+                  badge = <span className="px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[9px] font-bold mr-1.5">SHA</span>;
+                  textColor = 'text-purple-300';
+                } else if (line.startsWith('Status:')) {
+                  badge = <span className="px-1.5 py-0.2 rounded bg-emerald-500/25 text-emerald-300 border border-emerald-500/40 text-[9px] font-bold mr-1.5">SUCCESS</span>;
+                  textColor = 'text-emerald-300 font-bold';
+                }
+
+                return (
+                  <div key={idx} className="flex items-start">
+                    {badge}
+                    <span className={`break-all ${textColor}`}>{line}</span>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

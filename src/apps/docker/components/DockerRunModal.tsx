@@ -1,5 +1,6 @@
-import React from 'react';
-import { Play, X, AlertCircle, RefreshCw } from 'lucide-react';
+import React, { useMemo } from 'react';
+import { Play, X, AlertCircle, RefreshCw, Sparkles } from 'lucide-react';
+import { DockerCommandSnippet } from './DockerCodeViewer';
 
 interface DockerRunModalProps {
   isOpen: boolean;
@@ -42,11 +43,39 @@ export const DockerRunModal: React.FC<DockerRunModalProps> = ({
 }) => {
   if (!isOpen) return null;
 
+  // Build the live CLI command string
+  const generatedDockerCommand = useMemo(() => {
+    const parts = ['docker run -d'];
+    if (name.trim()) parts.push(`--name ${name.trim()}`);
+    if (restart && restart !== 'no') parts.push(`--restart ${restart}`);
+    
+    if (ports.trim()) {
+      ports.split(',').map(p => p.trim()).filter(Boolean).forEach(p => {
+        parts.push(`-p ${p}`);
+      });
+    }
+
+    if (volumes.trim()) {
+      volumes.split(',').map(v => v.trim()).filter(Boolean).forEach(v => {
+        parts.push(`-v ${v}`);
+      });
+    }
+
+    if (env.trim()) {
+      env.split(',').map(e => e.trim()).filter(Boolean).forEach(e => {
+        parts.push(`-e ${e}`);
+      });
+    }
+
+    parts.push(image.trim() || 'nginx:alpine');
+    return parts.join(' ');
+  }, [image, name, ports, restart, volumes, env]);
+
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-200">
-      <div className="bg-[#1c1d2e] border border-white/20 rounded-3xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col">
+      <div className="bg-[#1c1d2e] border border-white/20 rounded-3xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Modal Header */}
-        <div className="px-6 py-4 bg-[#141422] border-b border-white/10 flex items-center justify-between">
+        <div className="px-6 py-4 bg-[#141422] border-b border-white/10 flex items-center justify-between shrink-0">
           <div className="flex items-center space-x-3">
             <div className="w-8 h-8 rounded-xl bg-blue-600/30 border border-blue-400/30 flex items-center justify-center">
               <Play className="w-4 h-4 text-blue-400 fill-current" />
@@ -65,11 +94,26 @@ export const DockerRunModal: React.FC<DockerRunModalProps> = ({
         </div>
 
         {/* Modal Form */}
-        <form onSubmit={onSubmit} className="p-6 space-y-4 overflow-y-auto max-h-[75vh]">
+        <form onSubmit={onSubmit} className="p-6 space-y-4 overflow-y-auto flex-1">
           <div>
-            <label className="block text-xs font-medium text-gray-300 mb-1">
-              Docker Image <span className="text-rose-400">*</span>
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-xs font-medium text-gray-300">
+                Docker Image <span className="text-rose-400">*</span>
+              </label>
+              <div className="flex items-center space-x-1.5 text-[10px]">
+                <span className="text-gray-500">Quick:</span>
+                {['nginx:alpine', 'redis:alpine', 'postgres:16'].map(preset => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => onImageChange(preset)}
+                    className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-cyan-300 font-mono cursor-pointer"
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+            </div>
             <input
               type="text"
               placeholder="e.g. nginx:alpine, redis:latest, postgres:16"
@@ -140,6 +184,15 @@ export const DockerRunModal: React.FC<DockerRunModalProps> = ({
               onChange={e => onEnvChange(e.target.value)}
               className="w-full bg-[#13131c] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono"
             />
+          </div>
+
+          {/* Live Colorful Command Preview */}
+          <div className="space-y-1.5 pt-1">
+            <div className="flex items-center space-x-1.5 text-[11px] text-emerald-400 font-medium">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Generated Docker CLI Command (Live Preview):</span>
+            </div>
+            <DockerCommandSnippet command={generatedDockerCommand} label="Run Command" />
           </div>
 
           {error && (

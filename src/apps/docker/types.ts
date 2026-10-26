@@ -47,6 +47,7 @@ export interface ContainerInspectData {
   env: string[];
   ports: { hostPort: string; containerPort: string; protocol: string }[];
   mounts: { source: string; destination: string; mode: string; type: string }[];
+  rawJson?: string;
 }
 
 export interface DockerAuthInfo {
