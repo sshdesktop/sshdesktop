@@ -5,9 +5,12 @@ import {
   ServerExecutionResult,
   TargetHealth,
   AutomationExecutionRun,
-  ScheduledAutomation,
   ExecutionMode,
   AutomationServerData,
+  FleetMatrixData,
+  ReplicaSet,
+  FleetOrganization,
+  FleetGroup,
 } from './types';
 
 // ==========================================
@@ -353,7 +356,7 @@ export async function executeOnServer(
     }
 
     const durationMs = Date.now() - startedAt;
-    const isSuccess = res.exit_code === 0;
+    const isSuccess = res.exit_code === 0 && !res.stderr.includes('No active SSH connection') && !res.stderr.includes('Network is unreachable') && !res.stderr.includes('Connection refused');
 
     return {
       serverId: server.id,
@@ -363,8 +366,8 @@ export async function executeOnServer(
       username: server.username,
       status: isSuccess ? 'success' : 'failed',
       stdout: res.stdout || '',
-      stderr: res.stderr || '',
-      exitCode: res.exit_code,
+      stderr: res.stderr || (isSuccess ? '' : `Failed to execute on ${server.name || server.host} (${server.host}:${server.port}). Node is inactive or unreachable.`),
+      exitCode: isSuccess ? 0 : (res.exit_code === 0 ? 1 : res.exit_code),
       durationMs,
       startedAt,
       finishedAt: Date.now(),
@@ -641,42 +644,87 @@ export function clearHistory(): void {
   }
 }
 
-export function loadStoredSchedules(): ScheduledAutomation[] {
+// ==========================================
+// ENTERPRISE FLEET MATRIX & REPLICA STORAGE
+// ==========================================
+const STORAGE_KEY_FLEET_MATRIX = 'sshdesktop_automation_fleet_matrix';
+const STORAGE_KEY_REPLICAS = 'sshdesktop_automation_replicas';
+
+export function getDefaultFleetMatrix(connections: SavedConnection[] = []): FleetMatrixData {
+  const defaultOrgId = 'org-default';
+  const defaultGroupId = 'grp-default';
+
+  const mappings: Record<string, { organizationId: string; groupId: string }> = {};
+  connections.forEach(c => {
+    mappings[c.id] = { organizationId: defaultOrgId, groupId: defaultGroupId };
+  });
+
+  return {
+    organizations: [
+      {
+        id: defaultOrgId,
+        name: 'Primary Enterprise Fleet',
+        description: 'Default infrastructure organization for managed servers',
+        color: '#6366f1',
+        createdAt: Date.now(),
+      },
+    ],
+    groups: [
+      {
+        id: defaultGroupId,
+        organizationId: defaultOrgId,
+        name: 'Core Nodes',
+        description: 'Primary production and utility compute instances',
+        color: '#3b82f6',
+        createdAt: Date.now(),
+      },
+    ],
+    mappings,
+  };
+}
+
+export function loadStoredFleetMatrix(connections: SavedConnection[] = []): FleetMatrixData {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_SCHEDULES);
+    const raw = localStorage.getItem(STORAGE_KEY_FLEET_MATRIX);
+    if (!raw) return getDefaultFleetMatrix(connections);
+    const parsed = JSON.parse(raw) as FleetMatrixData;
+    if (!parsed.organizations || parsed.organizations.length === 0) {
+      return getDefaultFleetMatrix(connections);
+    }
+    return parsed;
+  } catch (err) {
+    console.error('Failed to parse fleet matrix:', err);
+    return getDefaultFleetMatrix(connections);
+  }
+}
+
+export function saveStoredFleetMatrix(data: FleetMatrixData): FleetMatrixData {
+  try {
+    localStorage.setItem(STORAGE_KEY_FLEET_MATRIX, JSON.stringify(data));
+    return data;
+  } catch (err) {
+    console.error('Failed to save fleet matrix:', err);
+    return data;
+  }
+}
+
+export function loadStoredReplicaSets(): ReplicaSet[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_REPLICAS);
     return raw ? JSON.parse(raw) : [];
   } catch (err) {
-    console.error('Failed to load scheduled automations:', err);
+    console.error('Failed to load replica sets:', err);
     return [];
   }
 }
 
-export function saveSchedule(schedule: ScheduledAutomation): ScheduledAutomation[] {
+export function saveStoredReplicaSets(data: ReplicaSet[]): ReplicaSet[] {
   try {
-    const current = loadStoredSchedules();
-    const index = current.findIndex(s => s.id === schedule.id);
-    if (index >= 0) {
-      current[index] = schedule;
-    } else {
-      current.push(schedule);
-    }
-    localStorage.setItem(STORAGE_KEY_SCHEDULES, JSON.stringify(current));
-    return current;
+    localStorage.setItem(STORAGE_KEY_REPLICAS, JSON.stringify(data));
+    return data;
   } catch (err) {
-    console.error('Failed to save schedule:', err);
-    return [];
-  }
-}
-
-export function deleteSchedule(id: string): ScheduledAutomation[] {
-  try {
-    const current = loadStoredSchedules();
-    const filtered = current.filter(s => s.id !== id);
-    localStorage.setItem(STORAGE_KEY_SCHEDULES, JSON.stringify(filtered));
-    return filtered;
-  } catch (err) {
-    console.error('Failed to delete schedule:', err);
-    return [];
+    console.error('Failed to save replica sets:', err);
+    return data;
   }
 }
 
@@ -690,7 +738,7 @@ export function getAutomationServerFilePath(homeDir: string): string {
 }
 
 /**
- * Saves all automation application data (custom recipes, history, and schedules)
+ * Saves all automation application data (custom recipes, history, fleet matrix, and replica sets)
  * directly to the remote server at ~/.sshdesktop/automation.json for the login user (e.g. /home/sharuk/.sshdesktop/automation.json).
  */
 export async function saveAutomationToServer(
@@ -700,7 +748,8 @@ export async function saveAutomationToServer(
     username?: string;
     customRecipes: AutomationRecipe[];
     history: AutomationExecutionRun[];
-    schedules: ScheduledAutomation[];
+    fleetMatrix?: FleetMatrixData;
+    replicaSets?: ReplicaSet[];
     lastTargetServerIds?: string[];
   }
 ): Promise<{ success: boolean; path: string; timestamp: string; error?: string }> {
@@ -720,13 +769,14 @@ export async function saveAutomationToServer(
     // 2. Build complete server data payload
     const payload: AutomationServerData = {
       user: data.username || 'user',
-      version: '1.0',
+      version: '2.0',
       updated_at: timestamp,
       custom_recipes: data.customRecipes,
       history: data.history.slice(0, 50), // keep latest 50
-      schedules: data.schedules,
+      fleet_matrix: data.fleetMatrix,
+      replica_sets: data.replicaSets,
       last_target_server_ids: data.lastTargetServerIds || [],
-      client: 'SSH Desktop Multi-Server Automation Orchestrator',
+      client: 'SSH Desktop Multi-Server Enterprise Orchestrator',
     };
 
     const jsonStr = JSON.stringify(payload, null, 2);
@@ -758,7 +808,12 @@ export async function saveAutomationToServer(
     // Also update local storage cache
     localStorage.setItem(STORAGE_KEY_RECIPES, JSON.stringify(data.customRecipes));
     localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(data.history.slice(0, 50)));
-    localStorage.setItem(STORAGE_KEY_SCHEDULES, JSON.stringify(data.schedules));
+    if (data.fleetMatrix) {
+      localStorage.setItem(STORAGE_KEY_FLEET_MATRIX, JSON.stringify(data.fleetMatrix));
+    }
+    if (data.replicaSets) {
+      localStorage.setItem(STORAGE_KEY_REPLICAS, JSON.stringify(data.replicaSets));
+    }
 
     return { success: true, path: filePath, timestamp };
   } catch (err: any) {
@@ -808,8 +863,11 @@ export async function loadAutomationFromServer(
     if (Array.isArray(parsed.history)) {
       localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(parsed.history));
     }
-    if (Array.isArray(parsed.schedules)) {
-      localStorage.setItem(STORAGE_KEY_SCHEDULES, JSON.stringify(parsed.schedules));
+    if (parsed.fleet_matrix) {
+      localStorage.setItem(STORAGE_KEY_FLEET_MATRIX, JSON.stringify(parsed.fleet_matrix));
+    }
+    if (Array.isArray(parsed.replica_sets)) {
+      localStorage.setItem(STORAGE_KEY_REPLICAS, JSON.stringify(parsed.replica_sets));
     }
 
     return { success: true, data: parsed, path: filePath, rawJson: content };

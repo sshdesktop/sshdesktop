@@ -506,15 +506,19 @@ pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnecti
         };
         let mut lock = state.connections.lock();
         lock.insert(restored.id.clone(), restored.clone());
-        lock.insert("default".to_string(), restored.clone());
+        if conn_id == "default" || lock.get("default").is_none() {
+            lock.insert("default".to_string(), restored.clone());
+        }
         log::info!("SSH Desktop: Auto-restored SSH connection '{}' from disk storage into memory", conn_id);
         return Some(restored);
     }
 
-    // 3. Fallback to any connection in memory
-    {
+    // 3. Fallback ONLY if conn_id is explicitly "default" or empty
+    if conn_id == "default" || conn_id.is_empty() {
         let lock = state.connections.lock();
         lock.values().next().cloned()
+    } else {
+        None
     }
 }
 

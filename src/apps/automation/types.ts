@@ -82,20 +82,55 @@ export interface AutomationExecutionRun {
   results: Record<string, ServerExecutionResult>;
 }
 
-export interface ScheduledAutomation {
+// Enterprise Organization Hierarchy
+export interface FleetOrganization {
   id: string;
-  title: string;
-  cronExpr: string;
-  targetType: 'all' | 'group' | 'custom';
-  targetGroup?: string;
-  targetServerIds: string[];
-  recipeId?: string;
-  command: string;
-  isSudo: boolean;
-  enabled: boolean;
+  name: string;
+  description?: string;
+  color?: string;
   createdAt: number;
-  lastRun?: number;
-  nextRun?: string;
+}
+
+export interface FleetGroup {
+  id: string;
+  organizationId: string;
+  name: string;
+  description?: string;
+  tags?: string[];
+  color?: string;
+  createdAt: number;
+}
+
+export interface FleetMatrixData {
+  organizations: FleetOrganization[];
+  groups: FleetGroup[];
+  // Mapping of serverId to { organizationId, groupId }
+  mappings: Record<string, { organizationId: string; groupId: string }>;
+}
+
+// Replica Sets Cluster Management
+export type ReplicationType = 'database' | 'rsync' | 'config' | 'service';
+
+export interface ReplicaNodeStatus {
+  role: 'primary' | 'replica';
+  status: 'healthy' | 'lagging' | 'offline' | 'unknown';
+  lastChecked?: number;
+  details?: string;
+}
+
+export interface ReplicaSet {
+  id: string;
+  name: string;
+  description?: string;
+  primaryServerId: string;
+  replicaServerIds: string[];
+  replicationType: ReplicationType;
+  syncCommand?: string;
+  healthCheckCommand?: string;
+  autoFailover?: boolean;
+  healthStatus?: Record<string, ReplicaNodeStatus>;
+  createdAt: number;
+  updatedAt?: number;
 }
 
 export interface AutomationServerData {
@@ -104,7 +139,8 @@ export interface AutomationServerData {
   updated_at: string;
   custom_recipes: AutomationRecipe[];
   history: AutomationExecutionRun[];
-  schedules: ScheduledAutomation[];
+  fleet_matrix?: FleetMatrixData;
+  replica_sets?: ReplicaSet[];
   last_target_server_ids?: string[];
   client: string;
 }
