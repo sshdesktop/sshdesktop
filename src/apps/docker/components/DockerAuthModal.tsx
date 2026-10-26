@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { User, X, Lock, AlertTriangle, Eye, EyeOff, LogIn, LogOut, Loader2, Trash2 } from 'lucide-react';
 import { DockerAuthInfo, SavedDockerCredential } from '../types';
+import { DockerCommandSnippet } from './DockerCodeViewer';
 
 interface DockerAuthModalProps {
   isOpen: boolean;
@@ -213,6 +214,14 @@ export const DockerAuthModal: React.FC<DockerAuthModalProps> = ({
               <label htmlFor="saveDockerCreds" className="text-xs text-gray-300 cursor-pointer">
                 Save credential profile in SSH Desktop
               </label>
+            </div>
+
+            {/* Live Docker Login CLI */}
+            <div className="space-y-1 pt-1">
+              <DockerCommandSnippet 
+                command={`docker login -u ${username.trim() || 'username'} ${registry !== 'docker.io' ? registry : ''}`}
+                label="Login CLI"
+              />
             </div>
 
             <div className="pt-3 flex items-center justify-end space-x-3">

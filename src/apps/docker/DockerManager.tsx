@@ -40,6 +40,7 @@ import { DockerPullModal } from './components/DockerPullModal';
 import { DockerLogsModal } from './components/DockerLogsModal';
 import { DockerRunModal } from './components/DockerRunModal';
 import { DockerAuthModal } from './components/DockerAuthModal';
+import { DockerCommandSnippet, DockerBuildOutputLine } from './components/DockerCodeViewer';
 
 export default function DockerManager() {
   const [activeTab, setActiveTab] = useState<'containers' | 'images' | 'volumes' | 'networks' | 'editor' | 'system'>('containers');
@@ -117,6 +118,8 @@ export default function DockerManager() {
   // Monaco Editor Zoom & Word Wrap State (VS Code shortcuts)
   const [editorFontSize, setEditorFontSize] = useState<number>(13);
   const [editorWordWrap, setEditorWordWrap] = useState<'on' | 'off'>('on');
+  const [consoleFontSize, setConsoleFontSize] = useState<number>(12);
+  const [consoleWordWrap, setConsoleWordWrap] = useState<boolean>(true);
 
   // Tag Image Modal State
   const [showTagModal, setShowTagModal] = useState(false);
@@ -960,6 +963,28 @@ export default function DockerManager() {
   const handleEditorDidMount = (editor: any, monaco: any) => {
     // Bind VS Code shortcuts directly in Monaco editor instance
     try {
+      monaco.editor.defineTheme('docker-dark', {
+        base: 'vs-dark',
+        inherit: true,
+        rules: [
+          { token: 'keyword', foreground: '7aa2f7', fontStyle: 'bold' },
+          { token: 'comment', foreground: '565f89', fontStyle: 'italic' },
+          { token: 'string', foreground: '9ece6a' },
+          { token: 'number', foreground: 'ff9e64' },
+          { token: 'type', foreground: '2ac3de' },
+          { token: 'identifier', foreground: 'cdd6f4' },
+        ],
+        colors: {
+          'editor.background': '#13141f',
+          'editor.foreground': '#cdd6f4',
+          'editorLineNumber.foreground': '#45475a',
+          'editorLineNumber.activeForeground': '#89b4fa',
+          'editor.selectionBackground': '#31324480',
+          'editor.lineHighlightBackground': '#1a1b2a60',
+        }
+      });
+      monaco.editor.setTheme('docker-dark');
+      
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Equal, () => {
         setEditorFontSize((prev: number) => Math.min(32, prev + 1));
       });
@@ -1430,7 +1455,8 @@ export default function DockerManager() {
           restartPolicy: data.HostConfig?.RestartPolicy?.Name || 'no',
           env: envList,
           ports: parsedPorts,
-          mounts: parsedMounts
+          mounts: parsedMounts,
+          rawJson: JSON.stringify(rawArr, null, 2)
         });
       }
     } catch (err: any) {
@@ -2512,16 +2538,28 @@ export default function DockerManager() {
 
                         {/* Image */}
                         <td className="py-3 px-4">
-                          <span className="font-mono text-xs text-gray-300 bg-white/5 px-2 py-0.5 rounded border border-white/5">
-                            {c.image}
-                          </span>
+                          {c.image.includes(':') ? (
+                            <span className="font-mono text-xs bg-[#13141f] px-2 py-0.5 rounded border border-white/10 inline-flex items-center space-x-0.5">
+                              <span className="text-purple-300 font-semibold">{c.image.split(':')[0]}</span>
+                              <span className="text-gray-500">:</span>
+                              <span className="text-emerald-300 font-bold">{c.image.split(':')[1]}</span>
+                            </span>
+                          ) : (
+                            <span className="font-mono text-xs text-purple-300 bg-[#13141f] px-2 py-0.5 rounded border border-white/10 font-semibold">
+                              {c.image}
+                            </span>
+                          )}
                         </td>
 
                         {/* Ports */}
                         <td className="py-3 px-4">
-                          <span className="font-mono text-[11px] text-gray-400">
-                            {c.ports || '—'}
-                          </span>
+                          {c.ports ? (
+                            <span className="font-mono text-[11px] text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded">
+                              {c.ports}
+                            </span>
+                          ) : (
+                            <span className="font-mono text-[11px] text-gray-500">—</span>
+                          )}
                         </td>
 
                         {/* Created / Uptime */}
@@ -2699,7 +2737,7 @@ export default function DockerManager() {
                         >
                           <td className="py-3 px-4 font-medium text-white flex items-center space-x-2">
                             <Layers className="w-4 h-4 text-purple-400 shrink-0" />
-                            <span className="font-mono">{img.repository}</span>
+                            <span className="font-mono text-purple-300 font-semibold">{img.repository}</span>
                             {isUsed && (
                               <span 
                                 className="inline-flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-500/15 border border-amber-500/30 text-amber-300 font-normal shrink-0" 
@@ -2711,12 +2749,12 @@ export default function DockerManager() {
                             )}
                           </td>
                           <td className="py-3 px-4">
-                            <span className="font-mono text-[11px] bg-white/10 text-gray-300 px-2 py-0.5 rounded border border-white/10">
+                            <span className="font-mono text-[11px] bg-emerald-500/15 text-emerald-300 px-2 py-0.5 rounded border border-emerald-500/30 font-bold">
                               {img.tag}
                             </span>
                           </td>
-                          <td className="py-3 px-4 font-mono text-gray-400">{img.id}</td>
-                          <td className="py-3 px-4 font-mono text-gray-300">{img.size}</td>
+                          <td className="py-3 px-4 font-mono text-cyan-300 text-[11px]">{img.id}</td>
+                          <td className="py-3 px-4 font-mono text-amber-300 text-xs font-semibold">{img.size}</td>
                           <td className="py-3 px-4 text-gray-400">{img.created}</td>
                           <td className="py-3 px-4 text-right pr-6">
                             <div className="flex items-center justify-end space-x-1.5">
@@ -2850,10 +2888,10 @@ export default function DockerManager() {
                       >
                         <td className="py-3 px-4 font-mono font-medium text-white flex items-center space-x-2">
                           <HardDrive className="w-4 h-4 text-amber-400 shrink-0" />
-                          <span className="truncate max-w-md">{vol.name}</span>
+                          <span className="truncate max-w-md text-amber-300 font-semibold">{vol.name}</span>
                         </td>
-                        <td className="py-3 px-4 font-mono text-gray-400">{vol.driver}</td>
-                        <td className="py-3 px-4 font-mono text-gray-400">{vol.scope}</td>
+                        <td className="py-3 px-4 font-mono text-emerald-300 text-[11px]">{vol.driver}</td>
+                        <td className="py-3 px-4 font-mono text-cyan-300 text-[11px]">{vol.scope}</td>
                         <td className="py-3 px-4 text-right pr-6">
                           <button
                             onClick={() => handleDeleteVolume(vol.name)}
@@ -2915,13 +2953,13 @@ export default function DockerManager() {
                       >
                         <td className="py-3 px-4 font-mono font-medium text-white flex items-center space-x-2">
                           <Network className="w-4 h-4 text-cyan-400 shrink-0" />
-                          <span>{net.name}</span>
+                          <span className="text-cyan-300 font-semibold">{net.name}</span>
                         </td>
-                        <td className="py-3 px-4 font-mono text-gray-400">{net.id}</td>
+                        <td className="py-3 px-4 font-mono text-purple-300 text-[11px]">{net.id}</td>
                         <td className="py-3 px-4 font-mono text-gray-300">
-                          <span className="px-2 py-0.5 rounded bg-white/5 border border-white/5">{net.driver}</span>
+                          <span className="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 font-bold text-[11px]">{net.driver}</span>
                         </td>
-                        <td className="py-3 px-4 font-mono text-gray-400">{net.scope}</td>
+                        <td className="py-3 px-4 font-mono text-gray-300 text-[11px]">{net.scope}</td>
                         <td className="py-3 px-4 text-right pr-6">
                           {['bridge', 'host', 'none'].includes(net.name) ? (
                             <span className="text-[10px] text-gray-500 uppercase tracking-wider">System</span>
@@ -3191,7 +3229,7 @@ export default function DockerManager() {
                     value={editorContent}
                     onChange={(val) => setEditorContent(val || '')}
                     onMount={handleEditorDidMount}
-                    theme="vs-dark"
+                    theme="docker-dark"
                     options={{
                       fontSize: editorFontSize,
                       fontFamily: "'JetBrains Mono', 'Fira Code', Menlo, monospace",
@@ -3241,10 +3279,43 @@ export default function DockerManager() {
                     )}
                   </div>
                   <div className="flex items-center space-x-2">
+                    {/* Console Zoom Controls */}
+                    <div className="flex items-center bg-white/5 rounded-lg border border-white/10 px-1 py-0.5 space-x-1 text-gray-300">
+                      <button
+                        type="button"
+                        onClick={() => setConsoleFontSize(prev => Math.max(9, prev - 1))}
+                        className="hover:text-white text-gray-400 p-0.5 cursor-pointer"
+                        title="Zoom Out Console"
+                      >
+                        <ZoomOut className="w-3 h-3" />
+                      </button>
+                      <span className="text-[10px] font-mono px-0.5">{consoleFontSize}px</span>
+                      <button
+                        type="button"
+                        onClick={() => setConsoleFontSize(prev => Math.min(22, prev + 1))}
+                        className="hover:text-white text-blue-400 p-0.5 cursor-pointer"
+                        title="Zoom In Console"
+                      >
+                        <ZoomIn className="w-3 h-3" />
+                      </button>
+                    </div>
+
+                    {/* Word Wrap Toggle */}
+                    <button
+                      type="button"
+                      onClick={() => setConsoleWordWrap(!consoleWordWrap)}
+                      className={`p-1 rounded-lg border transition-all cursor-pointer ${
+                        consoleWordWrap ? 'bg-blue-600/30 text-blue-300 border-blue-500/40' : 'bg-white/5 text-gray-400 border-white/10 hover:text-white'
+                      }`}
+                      title="Toggle Word Wrap"
+                    >
+                      <WrapText className="w-3 h-3" />
+                    </button>
+
                     {isEditorRunning && (
                       <button
                         onClick={handleCancelBuild}
-                        className="px-2 py-1 rounded bg-rose-600/30 hover:bg-rose-600/50 text-rose-300 border border-rose-500/30 text-[11px] flex items-center space-x-1 transition-colors"
+                        className="px-2 py-1 rounded bg-rose-600/30 hover:bg-rose-600/50 text-rose-300 border border-rose-500/30 text-[11px] flex items-center space-x-1 transition-colors cursor-pointer"
                         title="Cancel running operation"
                       >
                         <Square className="w-3 h-3 fill-current" />
@@ -3257,7 +3328,7 @@ export default function DockerManager() {
                           navigator.clipboard.writeText(editorOutput);
                           showNotification('Copied output to clipboard');
                         }}
-                        className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-[11px] text-gray-300 flex items-center space-x-1 transition-colors"
+                        className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-[11px] text-gray-300 flex items-center space-x-1 transition-colors cursor-pointer"
                       >
                         <Copy className="w-3 h-3" />
                         <span>Copy</span>
@@ -3268,15 +3339,40 @@ export default function DockerManager() {
                         setEditorOutput('');
                         setEditorExitCode(null);
                       }}
-                      className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-[11px] text-gray-400 hover:text-white transition-colors"
+                      className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-[11px] text-gray-400 hover:text-white transition-colors cursor-pointer"
                     >
                       Clear
                     </button>
                   </div>
                 </div>
-                <div className="flex-1 p-3 overflow-y-auto font-mono text-xs text-gray-300 whitespace-pre-wrap leading-relaxed select-text">
-                  {editorOutput || (
-                    <span className="text-gray-600 italic">No command output yet. Click "Build Image" or "Compose Up" to see live stdout/stderr here.</span>
+
+                {/* Live CLI Snippet Bar */}
+                <div className="px-3 py-1.5 bg-[#0a0a12] border-b border-white/5">
+                  <DockerCommandSnippet 
+                    command={
+                      editorMode === 'dockerfile'
+                        ? `docker build -t ${editorImageTag} ${editorPath}`
+                        : `docker compose -f ${editorPath}/docker-compose.yml up -d`
+                    }
+                    label={editorMode === 'dockerfile' ? 'Build CLI' : 'Compose CLI'}
+                  />
+                </div>
+
+                <div 
+                  style={{ fontSize: `${consoleFontSize}px` }}
+                  className={`flex-1 p-3 overflow-y-auto font-mono text-gray-300 leading-relaxed select-text ${
+                    consoleWordWrap ? 'whitespace-pre-wrap' : 'whitespace-pre overflow-x-auto'
+                  }`}
+                >
+                  {editorOutput ? (
+                    editorOutput.split('\n').map((line, idx) => (
+                      <DockerBuildOutputLine key={idx} line={line} index={idx} />
+                    ))
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center text-gray-600 italic text-xs py-10 space-y-2">
+                      <FileCode className="w-8 h-8 text-gray-700" />
+                      <span>No command output yet. Click "Build Image" or "Compose Up" to see live stdout/stderr here.</span>
+                    </div>
                   )}
                   <div ref={consoleOutputEndRef} />
                 </div>
@@ -3474,27 +3570,76 @@ export default function DockerManager() {
             </div>
 
             <form onSubmit={handleExecSubmit} className="p-6 space-y-4">
-              <div className="flex space-x-2">
-                <input
-                  type="text"
-                  placeholder="e.g. ls -la /app, env, ps aux, cat /etc/os-release"
-                  value={execCmd}
-                  onChange={e => setExecCmd(e.target.value)}
-                  className="flex-1 bg-[#13131c] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white placeholder-gray-500 font-mono focus:outline-none focus:border-blue-500"
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="text-gray-400 font-medium">Command:</span>
+                  <div className="flex items-center space-x-1">
+                    <span className="text-gray-500">Quick:</span>
+                    {['uptime', 'env', 'ps aux', 'df -h', 'ls -la'].map(cmd => (
+                      <button
+                        key={cmd}
+                        type="button"
+                        onClick={() => setExecCmd(cmd)}
+                        className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-emerald-300 font-mono text-[10px] cursor-pointer"
+                      >
+                        {cmd}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex space-x-2">
+                  <input
+                    type="text"
+                    placeholder="e.g. ls -la /app, env, ps aux, cat /etc/os-release"
+                    value={execCmd}
+                    onChange={e => setExecCmd(e.target.value)}
+                    className="flex-1 bg-[#13131c] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white placeholder-gray-500 font-mono focus:outline-none focus:border-blue-500"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isExecRunning || !execCmd.trim()}
+                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-md active:scale-95 cursor-pointer disabled:opacity-50"
+                  >
+                    {isExecRunning && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                    <span>Run</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Live Exec Command Preview */}
+              <div className="space-y-1">
+                <DockerCommandSnippet 
+                  command={`docker exec -it ${execTarget.name || execTarget.id} ${execCmd.trim() || 'sh'}`}
+                  label="Exec CLI"
                 />
-                <button
-                  type="submit"
-                  disabled={isExecRunning || !execCmd.trim()}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-md active:scale-95"
-                >
-                  {isExecRunning && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                  <span>Run</span>
-                </button>
               </div>
 
               {execOutput && (
-                <div className="bg-[#0d0e15] border border-white/10 rounded-xl p-3.5 max-h-60 overflow-y-auto font-mono text-[11px] text-gray-300 whitespace-pre-wrap select-text leading-relaxed">
-                  {execOutput}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[11px] text-gray-400">
+                    <span className="font-mono">Output:</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(execOutput);
+                        showNotification('Copied output to clipboard');
+                      }}
+                      className="text-xs text-blue-400 hover:text-blue-300 cursor-pointer flex items-center space-x-1"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
+                    </button>
+                  </div>
+                  <div className="bg-[#0b0c14] border border-white/10 rounded-2xl p-3.5 max-h-64 overflow-y-auto font-mono text-xs text-gray-300 whitespace-pre-wrap select-text leading-relaxed shadow-inner">
+                    {execOutput.split('\n').map((line, idx) => (
+                      <div key={idx} className="hover:bg-white/[0.03] px-1 py-0.2 rounded flex items-start">
+                        <span className="text-[10px] text-gray-600 w-7 text-right pr-2 select-none shrink-0 font-mono pt-0.5">
+                          {idx + 1}
+                        </span>
+                        <span className="flex-1 text-gray-200">{line}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </form>

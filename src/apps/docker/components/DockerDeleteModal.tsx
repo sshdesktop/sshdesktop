@@ -4,6 +4,7 @@ import {
   HardDrive, Network, X, Loader2, ShieldAlert, CheckSquare, Square
 } from 'lucide-react';
 import { ResourceDeleteTarget } from '../types';
+import { DockerCommandSnippet } from './DockerCodeViewer';
 
 interface DockerDeleteModalProps {
   target: ResourceDeleteTarget | null;
@@ -135,6 +136,27 @@ export const DockerDeleteModal: React.FC<DockerDeleteModalProps> = ({
               <span className="text-gray-300 break-all text-right">{target.subText}</span>
             </div>
           )}
+        </div>
+
+        {/* Live CLI Command Snippet */}
+        <div className="space-y-1">
+          <DockerCommandSnippet 
+            command={(() => {
+              if (target.type === 'container') {
+                return `docker rm ${isRunningContainer || forceConfirmed ? '-f ' : ''}${target.id || target.name}`;
+              } else if (target.type === 'bulk-containers') {
+                return `docker rm -f ${(target.bulkIds || []).join(' ')}`;
+              } else if (target.type === 'image') {
+                return `docker rmi ${forceConfirmed ? '-f ' : ''}${target.id || target.name}`;
+              } else if (target.type === 'volume') {
+                return `docker volume rm ${target.name}`;
+              } else if (target.type === 'network') {
+                return `docker network rm ${target.id || target.name}`;
+              }
+              return `docker rm ${target.id || target.name}`;
+            })()}
+            label="Delete CLI"
+          />
         </div>
 
         {/* In-Use Alert: Running Container */}

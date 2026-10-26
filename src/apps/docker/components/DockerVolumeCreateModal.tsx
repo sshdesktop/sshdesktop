@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { HardDrive, X, Plus, Loader2 } from 'lucide-react';
+import { HardDrive, X, Plus, Loader2, Sparkles } from 'lucide-react';
+import { DockerCommandSnippet } from './DockerCodeViewer';
 
 interface DockerVolumeCreateModalProps {
   isOpen: boolean;
@@ -91,6 +92,18 @@ export const DockerVolumeCreateModal: React.FC<DockerVolumeCreateModalProps> = (
               onChange={(e) => setVolLabels(e.target.value)}
               className="w-full px-3 py-2 rounded-xl bg-black/30 border border-white/10 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
               placeholder="env=prod,team=backend"
+            />
+          </div>
+
+          {/* Live CLI Snippet */}
+          <div className="space-y-1 pt-1">
+            <div className="flex items-center space-x-1.5 text-[11px] text-amber-400 font-medium">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Generated Volume Command:</span>
+            </div>
+            <DockerCommandSnippet 
+              command={`docker volume create --driver ${volDriver} ${volOpts ? `--opt ${volOpts} ` : ''}${volLabels ? `--label ${volLabels} ` : ''}${volName.trim() || 'my-volume'}`}
+              label="Volume CLI"
             />
           </div>
 

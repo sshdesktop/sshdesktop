@@ -1,5 +1,6 @@
 import React from 'react';
 import { Trash2, AlertCircle, RefreshCw, X } from 'lucide-react';
+import { DockerCommandSnippet } from './DockerCodeViewer';
 
 interface DockerPruneModalProps {
   isOpen: boolean;
@@ -40,8 +41,29 @@ export const DockerPruneModal: React.FC<DockerPruneModalProps> = ({
         </div>
 
         <div className="p-6 space-y-4">
-          <div className="bg-[#13131c] p-3 rounded-xl border border-white/10 font-mono text-[11px] text-gray-300 whitespace-pre-wrap max-h-48 overflow-y-auto">
-            {systemDfText || 'Calculating disk usage...'}
+          <div className="space-y-1">
+            <DockerCommandSnippet command="docker system df" label="Disk Usage CLI" />
+          </div>
+
+          <div className="bg-[#0c0d14] p-3.5 rounded-2xl border border-white/10 font-mono text-[11px] max-h-48 overflow-y-auto shadow-inner leading-relaxed select-text">
+            {systemDfText ? (
+              systemDfText.split('\n').map((line, idx) => {
+                if (idx === 0) {
+                  return <div key={idx} className="text-gray-500 font-bold uppercase tracking-wider pb-1">{line}</div>;
+                }
+                return (
+                  <div key={idx} className="text-gray-200 hover:bg-white/[0.03] px-1 py-0.2 rounded flex items-center justify-between">
+                    <span>{line}</span>
+                  </div>
+                );
+              })
+            ) : (
+              <span className="text-gray-500 italic">Calculating disk usage...</span>
+            )}
+          </div>
+
+          <div className="space-y-1">
+            <DockerCommandSnippet command="docker system prune -f" label="Prune CLI" />
           </div>
 
           <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-xs text-amber-200 flex items-start space-x-2.5">

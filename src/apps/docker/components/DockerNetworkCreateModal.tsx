@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Network, X, Plus, Loader2 } from 'lucide-react';
+import { Network, X, Plus, Loader2, Sparkles } from 'lucide-react';
+import { DockerCommandSnippet } from './DockerCodeViewer';
 
 interface DockerNetworkCreateModalProps {
   isOpen: boolean;
@@ -161,6 +162,18 @@ export const DockerNetworkCreateModal: React.FC<DockerNetworkCreateModalProps> =
               />
               <span>IPv6</span>
             </label>
+          </div>
+
+          {/* Live CLI Snippet */}
+          <div className="space-y-1 pt-1">
+            <div className="flex items-center space-x-1.5 text-[11px] text-cyan-400 font-medium">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Generated Docker Network Command:</span>
+            </div>
+            <DockerCommandSnippet 
+              command={`docker network create --driver ${driver} ${subnet ? `--subnet ${subnet} ` : ''}${gateway ? `--gateway ${gateway} ` : ''}${internal ? '--internal ' : ''}${attachable ? '--attachable ' : ''}${ipv6 ? '--ipv6 ' : ''}${name.trim() || 'my-network'}`}
+              label="Network CLI"
+            />
           </div>
 
           <div className="pt-3 flex items-center justify-end space-x-3">

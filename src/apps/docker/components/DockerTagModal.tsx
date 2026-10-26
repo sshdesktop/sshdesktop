@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Tag, X, Loader2 } from 'lucide-react';
 import { ImageItem } from '../types';
+import { DockerCommandSnippet } from './DockerCodeViewer';
 
 interface DockerTagModalProps {
   image: ImageItem | null;
@@ -90,8 +91,11 @@ export const DockerTagModal: React.FC<DockerTagModalProps> = ({
             />
           </div>
 
-          <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/20 text-[11px] font-mono text-cyan-200">
-            Command: docker tag {imageDisplayName} {newRepo || '<repo>'}:{newTag || 'latest'}
+          <div className="space-y-1">
+            <DockerCommandSnippet 
+              command={`docker tag ${imageDisplayName} ${newRepo.trim() || '<repo>'}:${newTag.trim() || 'latest'}`} 
+              label="Tag Command" 
+            />
           </div>
 
           <div className="pt-2 flex items-center justify-end space-x-3">

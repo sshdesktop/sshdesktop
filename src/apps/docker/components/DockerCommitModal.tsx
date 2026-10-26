@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
-import { GitCommit, X, Loader2 } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { GitCommit, X, Loader2, Sparkles } from 'lucide-react';
 import { ContainerItem } from '../types';
+import { DockerCommandSnippet } from './DockerCodeViewer';
 
 interface DockerCommitModalProps {
   container: ContainerItem | null;
@@ -127,6 +128,18 @@ export const DockerCommitModal: React.FC<DockerCommitModalProps> = ({
             <label htmlFor="commitPauseCheck" className="text-xs text-gray-300 cursor-pointer">
               Pause container during commit (recommended for data consistency)
             </label>
+          </div>
+
+          {/* Live CLI Snippet */}
+          <div className="space-y-1 pt-1">
+            <div className="flex items-center space-x-1.5 text-[11px] text-indigo-400 font-medium">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Equivalent Docker CLI Command:</span>
+            </div>
+            <DockerCommandSnippet 
+              command={`docker commit ${message ? `-m "${message}" ` : ''}${author ? `-a "${author}" ` : ''}${pause ? '' : '--pause=false '}${container.id.substring(0, 12)} ${repo.trim() || 'my-image'}:${tag.trim() || 'latest'}`}
+              label="Commit Command"
+            />
           </div>
 
           <div className="pt-2 flex items-center justify-end space-x-3">
