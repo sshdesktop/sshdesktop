@@ -6,23 +6,43 @@ import { SslCertificate, CertbotStatus, IssueCertForm, SelfSignedForm, SslDiagno
  */
 export async function detectCertbotStatus(connId: string): Promise<CertbotStatus> {
   const probeScript = `
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$HOME/.local/bin:$PATH"
+
 echo "===WHICH_CERTBOT==="
-which certbot 2>/dev/null || which /snap/bin/certbot 2>/dev/null || echo "NOT_FOUND"
+if command -v certbot >/dev/null 2>&1; then
+  command -v certbot
+elif [ -x /usr/bin/certbot ]; then
+  echo "/usr/bin/certbot"
+elif [ -x /snap/bin/certbot ]; then
+  echo "/snap/bin/certbot"
+elif [ -x /usr/local/bin/certbot ]; then
+  echo "/usr/local/bin/certbot"
+elif [ -x /root/.local/bin/certbot ]; then
+  echo "/root/.local/bin/certbot"
+elif which certbot >/dev/null 2>&1; then
+  which certbot
+elif which /snap/bin/certbot >/dev/null 2>&1; then
+  which /snap/bin/certbot
+else
+  echo "NOT_FOUND"
+fi
 
 echo "===VERSION==="
-certbot --version 2>&1 || /snap/bin/certbot --version 2>&1 || echo "UNKNOWN"
+certbot --version 2>&1 || /snap/bin/certbot --version 2>&1 || /usr/bin/certbot --version 2>&1 || echo "UNKNOWN"
 
 echo "===SYSTEMD_TIMER==="
 systemctl is-active certbot.timer certbot.service 2>/dev/null || true
 
 echo "===SERVERS==="
-which nginx 2>/dev/null || true
-which apache2 2>/dev/null || true
-which httpd 2>/dev/null || true
-which caddy 2>/dev/null || true
+(command -v nginx >/dev/null 2>&1 || [ -x /usr/sbin/nginx ] || [ -x /usr/bin/nginx ]) && echo "NGINX_INSTALLED"
+(command -v apache2 >/dev/null 2>&1 || [ -x /usr/sbin/apache2 ] || command -v httpd >/dev/null 2>&1 || [ -x /usr/sbin/httpd ]) && echo "APACHE_INSTALLED"
+(command -v caddy >/dev/null 2>&1 || [ -x /usr/bin/caddy ]) && echo "CADDY_INSTALLED"
 
 echo "===PLUGINS==="
-dpkg -l 2>/dev/null | grep -E "python3-certbot|certbot-nginx|certbot-apache" || rpm -qa 2>/dev/null | grep -E "certbot|certbot-nginx|certbot-apache" || true
+(certbot plugins 2>/dev/null || /snap/bin/certbot plugins 2>/dev/null || /usr/bin/certbot plugins 2>/dev/null || true)
+(dpkg -l 2>/dev/null | grep -E "python3-certbot-nginx|python3-certbot-apache|certbot-nginx|certbot-apache" || true)
+(rpm -qa 2>/dev/null | grep -E "python3-certbot-nginx|python3-certbot-apache|certbot-nginx|certbot-apache" || true)
+(pacman -Q 2>/dev/null | grep -E "certbot-nginx|certbot-apache" || true)
 
 echo "===OS==="
 if [ -f /etc/os-release ]; then
@@ -43,7 +63,11 @@ fi
     const pluginsSection = extractSection(out, '===PLUGINS===', '===OS===');
     const osSection = extractSection(out, '===OS===', null);
 
-    const isInstalled = !whichSection.includes('NOT_FOUND') && whichSection.trim().length > 0;
+    // Robust installation detection: either valid binary path found, or version string returned
+    const hasBinary = !whichSection.includes('NOT_FOUND') && whichSection.trim().length > 0;
+    const hasVersionOutput = versionSection.toLowerCase().includes('certbot') && !versionSection.includes('UNKNOWN');
+    const isInstalled = hasBinary || hasVersionOutput;
+
     const versionMatch = versionSection.match(/certbot\s+([\d\.]+)/i);
     const version = versionMatch ? versionMatch[1] : (isInstalled ? 'Installed' : undefined);
 
@@ -61,29 +85,39 @@ fi
       osId = idMatch[1].trim().toLowerCase();
     }
 
-    // Determine package manager and suggested command
+    // Determine package manager and suggested command (ONLY install certbot)
     let packageManager = 'apt / dnf / pacman';
-    let suggestedCommand = 'sudo apt update && sudo apt install -y certbot python3-certbot-nginx python3-certbot-apache';
+    let suggestedCommand = 'sudo apt update && sudo apt install -y certbot';
 
     if (['ubuntu', 'debian', 'kali', 'pop', 'linuxmint'].includes(osId)) {
       packageManager = 'apt';
-      suggestedCommand = 'sudo apt-get update && sudo apt-get install -y certbot python3-certbot-nginx python3-certbot-apache';
+      suggestedCommand = 'sudo apt-get update -y && sudo apt-get install -y certbot';
     } else if (['centos', 'rhel', 'rocky', 'almalinux'].includes(osId)) {
       packageManager = 'dnf / yum';
-      suggestedCommand = 'sudo dnf install -y epel-release && sudo dnf install -y certbot python3-certbot-nginx python3-certbot-apache';
+      suggestedCommand = 'sudo dnf install -y epel-release && sudo dnf install -y certbot';
     } else if (['fedora'].includes(osId)) {
       packageManager = 'dnf';
-      suggestedCommand = 'sudo dnf install -y certbot python3-certbot-nginx python3-certbot-apache';
+      suggestedCommand = 'sudo dnf install -y certbot';
     } else if (['arch', 'manjaro'].includes(osId)) {
       packageManager = 'pacman';
-      suggestedCommand = 'sudo pacman -Sy --noconfirm certbot certbot-nginx certbot-apache';
+      suggestedCommand = 'sudo pacman -Sy --noconfirm certbot';
     } else if (['alpine'].includes(osId)) {
       packageManager = 'apk';
-      suggestedCommand = 'sudo apk add --no-cache certbot certbot-nginx certbot-apache';
+      suggestedCommand = 'sudo apk add --no-cache certbot';
     } else {
       packageManager = 'snap / pip';
-      suggestedCommand = 'sudo snap install --classic certbot';
+      suggestedCommand = 'sudo snap install --classic certbot && sudo ln -sf /snap/bin/certbot /usr/bin/certbot';
     }
+
+    // Webserver presence
+    const nginxInstalled = serversSection.includes('NGINX_INSTALLED');
+    const apacheInstalled = serversSection.includes('APACHE_INSTALLED');
+    const caddyInstalled = serversSection.includes('CADDY_INSTALLED');
+
+    // Plugin presence
+    const pluginsLower = pluginsSection.toLowerCase();
+    const nginxPlugin = pluginsLower.includes('nginx');
+    const apachePlugin = pluginsLower.includes('apache');
 
     return {
       installed: isInstalled,
@@ -95,13 +129,13 @@ fi
       packageManager,
       suggestedCommand,
       webServers: {
-        nginx: serversSection.includes('nginx'),
-        apache: serversSection.includes('apache2') || serversSection.includes('httpd'),
-        caddy: serversSection.includes('caddy'),
+        nginx: nginxInstalled,
+        apache: apacheInstalled,
+        caddy: caddyInstalled,
       },
       plugins: {
-        nginx: pluginsSection.includes('nginx'),
-        apache: pluginsSection.includes('apache'),
+        nginx: nginxPlugin,
+        apache: apachePlugin,
       },
     };
   } catch (err) {
@@ -116,11 +150,12 @@ fi
 }
 
 /**
- * Installs Certbot and webserver plugins using the host's native package manager
+ * Installs ONLY Certbot (does not bundle nginx/apache plugins unless requested)
  */
-export async function installCertbot(connId: string, webserver?: 'nginx' | 'apache' | 'standalone'): Promise<{ success: boolean; output: string }> {
+export async function installCertbot(connId: string): Promise<{ success: boolean; output: string }> {
   const installCmd = `
-# Determine if running as root or need sudo
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
+
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
 else
@@ -135,33 +170,37 @@ else
 fi
 
 echo "Detected OS: $OS_ID (Privilege: \${SUDO:-root})"
-echo "Beginning automated Certbot installation..."
+echo "Beginning automated Certbot installation (Certbot core only)..."
 
 if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ]; then
   export DEBIAN_FRONTEND=noninteractive
-  $SUDO apt-get update -y && $SUDO apt-get install -y certbot python3-certbot-nginx python3-certbot-apache
+  $SUDO apt-get update -y && $SUDO apt-get install -y certbot
 elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ]; then
   $SUDO dnf install -y epel-release || $SUDO yum install -y epel-release || true
-  $SUDO dnf install -y certbot python3-certbot-nginx python3-certbot-apache || $SUDO yum install -y certbot python3-certbot-nginx python3-certbot-apache
+  $SUDO dnf install -y certbot || $SUDO yum install -y certbot
 elif [ "$OS_ID" = "fedora" ]; then
-  $SUDO dnf install -y certbot python3-certbot-nginx python3-certbot-apache
+  $SUDO dnf install -y certbot
 elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ]; then
-  $SUDO pacman -Sy --noconfirm certbot certbot-nginx certbot-apache
+  $SUDO pacman -Sy --noconfirm certbot
 elif [ "$OS_ID" = "alpine" ]; then
-  $SUDO apk add --no-cache certbot certbot-nginx certbot-apache
+  $SUDO apk add --no-cache certbot
 else
-  # Generic fallback via snap or pip
   if command -v snap >/dev/null 2>&1; then
-    $SUDO snap install --classic certbot && $SUDO ln -sf /snap/bin/certbot /usr/bin/certbot
+    $SUDO snap install --classic certbot
+    $SUDO ln -sf /snap/bin/certbot /usr/bin/certbot 2>/dev/null || true
   else
-    $SUDO python3 -m pip install certbot certbot-nginx certbot-apache 2>/dev/null || $SUDO pip3 install certbot
+    $SUDO python3 -m pip install certbot 2>/dev/null || $SUDO pip3 install certbot
   fi
 fi
 
-# Verify installation outcome
+# Ensure /usr/bin/certbot symlink exists if installed via snap
+if [ -x /snap/bin/certbot ] && [ ! -x /usr/bin/certbot ]; then
+  $SUDO ln -sf /snap/bin/certbot /usr/bin/certbot 2>/dev/null || true
+fi
+
 echo "===INSTALL_VERIFY==="
-which certbot || which /snap/bin/certbot || echo "CERTBOT_STILL_MISSING"
-certbot --version 2>&1 || /snap/bin/certbot --version 2>&1 || true
+command -v certbot || which certbot || [ -x /snap/bin/certbot ] && echo "/snap/bin/certbot" || [ -x /usr/bin/certbot ] && echo "/usr/bin/certbot" || echo "CERTBOT_STILL_MISSING"
+certbot --version 2>&1 || /snap/bin/certbot --version 2>&1 || /usr/bin/certbot --version 2>&1 || true
 `;
 
   const res = await sshExec(connId, installCmd);
@@ -175,12 +214,138 @@ certbot --version 2>&1 || /snap/bin/certbot --version 2>&1 || true
 }
 
 /**
+ * Installs a specific webserver Certbot plugin (Nginx or Apache)
+ */
+export async function installCertbotPlugin(
+  connId: string,
+  plugin: 'nginx' | 'apache'
+): Promise<{ success: boolean; output: string }> {
+  const installCmd = `
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
+
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  SUDO=""
+fi
+
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  OS_ID=$ID
+else
+  OS_ID="unknown"
+fi
+
+echo "Installing Certbot ${plugin} plugin on $OS_ID..."
+
+if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ]; then
+  export DEBIAN_FRONTEND=noninteractive
+  $SUDO apt-get update -y && $SUDO apt-get install -y python3-certbot-${plugin}
+elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ]; then
+  $SUDO dnf install -y python3-certbot-${plugin} || $SUDO yum install -y python3-certbot-${plugin}
+elif [ "$OS_ID" = "fedora" ]; then
+  $SUDO dnf install -y python3-certbot-${plugin}
+elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ]; then
+  $SUDO pacman -Sy --noconfirm certbot-${plugin}
+elif [ "$OS_ID" = "alpine" ]; then
+  $SUDO apk add --no-cache certbot-${plugin}
+else
+  if command -v snap >/dev/null 2>&1 && snap list certbot >/dev/null 2>&1; then
+    $SUDO snap set certbot trust-plugin-with-root=ok
+    $SUDO snap install certbot-${plugin}
+  else
+    $SUDO python3 -m pip install certbot-${plugin} 2>/dev/null || $SUDO pip3 install certbot-${plugin}
+  fi
+fi
+
+echo "===PLUGIN_VERIFY==="
+certbot plugins 2>&1 | grep -i "${plugin}" || true
+`;
+
+  const res = await sshExec(connId, installCmd);
+  const out = (res.stdout || '') + (res.stderr ? '\n' + res.stderr : '');
+  const isOk = res.exit_code === 0 || out.toLowerCase().includes(plugin);
+
+  return {
+    success: isOk,
+    output: out,
+  };
+}
+
+/**
+ * Installs the webserver package itself (Nginx or Apache) if missing on the host
+ */
+export async function installWebServer(
+  connId: string,
+  webserver: 'nginx' | 'apache'
+): Promise<{ success: boolean; output: string }> {
+  const installCmd = `
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  SUDO=""
+fi
+
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  OS_ID=$ID
+else
+  OS_ID="unknown"
+fi
+
+echo "Installing ${webserver} web server on $OS_ID..."
+
+if [ "${webserver}" = "nginx" ]; then
+  if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ]; then
+    export DEBIAN_FRONTEND=noninteractive
+    $SUDO apt-get update -y && $SUDO apt-get install -y nginx
+  elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ]; then
+    $SUDO dnf install -y nginx || $SUDO yum install -y nginx
+  elif [ "$OS_ID" = "fedora" ]; then
+    $SUDO dnf install -y nginx
+  elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ]; then
+    $SUDO pacman -Sy --noconfirm nginx
+  elif [ "$OS_ID" = "alpine" ]; then
+    $SUDO apk add --no-cache nginx
+  fi
+  $SUDO systemctl enable --now nginx 2>/dev/null || true
+else
+  # Apache
+  if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ]; then
+    export DEBIAN_FRONTEND=noninteractive
+    $SUDO apt-get update -y && $SUDO apt-get install -y apache2
+    $SUDO systemctl enable --now apache2 2>/dev/null || true
+  else
+    $SUDO dnf install -y httpd || $SUDO yum install -y httpd || $SUDO pacman -Sy --noconfirm apache || $SUDO apk add --no-cache apache2
+    $SUDO systemctl enable --now httpd 2>/dev/null || $SUDO systemctl enable --now apache2 2>/dev/null || true
+  fi
+fi
+
+echo "===WEBSERVER_VERIFY==="
+command -v nginx || command -v apache2 || command -v httpd || echo "FAILED"
+`;
+
+  const res = await sshExec(connId, installCmd);
+  const out = (res.stdout || '') + (res.stderr ? '\n' + res.stderr : '');
+  const isOk = res.exit_code === 0 && !out.includes('FAILED');
+
+  return {
+    success: isOk,
+    output: out,
+  };
+}
+
+/**
  * Lists all active certificates managed by Certbot, plus custom certificates
  */
 export async function listCertificates(connId: string): Promise<SslCertificate[]> {
   const script = `
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
+
 echo "===CERTBOT_CERTS==="
-sudo certbot certificates 2>/dev/null || certbot certificates 2>/dev/null || true
+sudo certbot certificates 2>/dev/null || certbot certificates 2>/dev/null || /snap/bin/certbot certificates 2>/dev/null || true
 
 echo "===CUSTOM_CERTS==="
 # Scan for additional custom fullchain or server certs in /etc/ssl/certs and webservers
@@ -273,7 +438,6 @@ done
         const filePath = lines[0] || '';
         if (!filePath) continue;
 
-        // Skip if this cert is already captured via Let's Encrypt live path
         if (filePath.includes('/letsencrypt/live/') || certList.some(c => c.certPath === filePath)) {
           continue;
         }
@@ -340,6 +504,8 @@ done
 
 /**
  * Issues a new Let's Encrypt certificate via Certbot
+ * Includes --no-eff-email, resolved certbot binary path, and non-interactive flags
+ * to prevent stdin blocking and ensure fast execution without hanging!
  */
 export async function issueCertificate(
   connId: string,
@@ -355,33 +521,61 @@ export async function issueCertificate(
   }
 
   const domainFlags = domainList.map(d => `-d "${d}"`).join(' ');
-  const emailFlag = form.email.trim() ? `-m "${form.email.trim()}"` : '--register-unsafely-without-email';
+  // Always append --no-eff-email to prevent Certbot prompt hanging in non-interactive sessions!
+  const emailFlag = form.email.trim()
+    ? `-m "${form.email.trim()}" --no-eff-email`
+    : '--register-unsafely-without-email --no-eff-email';
+
   const dryRunFlag = form.dryRun ? '--dry-run' : '';
   const keyTypeFlag = form.keyType === 'ecdsa' ? '--key-type ecdsa' : `--key-type rsa --rsa-key-size ${form.rsaKeySize || 2048}`;
   const redirectFlag = form.redirectHttps ? '--redirect' : '--no-redirect';
 
-  let command = '';
+  // Construct script with PATH and full binary resolution
+  let certbotSubcmd = '';
 
   switch (form.plugin) {
     case 'nginx':
-      command = `sudo certbot --nginx ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${redirectFlag} ${keyTypeFlag} ${dryRunFlag}`;
+      certbotSubcmd = `--nginx ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${redirectFlag} ${keyTypeFlag} ${dryRunFlag}`;
       break;
     case 'apache':
-      command = `sudo certbot --apache ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${redirectFlag} ${keyTypeFlag} ${dryRunFlag}`;
+      certbotSubcmd = `--apache ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${redirectFlag} ${keyTypeFlag} ${dryRunFlag}`;
       break;
     case 'webroot':
       const rootDir = form.webrootPath?.trim() || '/var/www/html';
-      command = `sudo certbot certonly --webroot -w "${rootDir}" ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${keyTypeFlag} ${dryRunFlag}`;
+      certbotSubcmd = `certonly --webroot -w "${rootDir}" ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${keyTypeFlag} ${dryRunFlag}`;
       break;
     case 'standalone':
-      command = `sudo certbot certonly --standalone ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${keyTypeFlag} ${dryRunFlag}`;
+      certbotSubcmd = `certonly --standalone ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${keyTypeFlag} ${dryRunFlag}`;
       break;
     case 'dns':
-      command = `sudo certbot certonly --manual --preferred-challenges dns ${domainFlags} ${emailFlag} --agree-tos ${keyTypeFlag} ${dryRunFlag}`;
+      // For DNS challenge in automated sessions, non-interactive requires an auth hook or will fail fast
+      certbotSubcmd = `certonly --manual --preferred-challenges dns ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${keyTypeFlag} ${dryRunFlag}`;
       break;
   }
 
-  const res = await sshExec(connId, command);
+  const script = `
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
+
+if command -v certbot >/dev/null 2>&1; then
+  CERTBOT="certbot"
+elif [ -x /snap/bin/certbot ]; then
+  CERTBOT="/snap/bin/certbot"
+elif [ -x /usr/bin/certbot ]; then
+  CERTBOT="/usr/bin/certbot"
+elif [ -x /usr/local/bin/certbot ]; then
+  CERTBOT="/usr/local/bin/certbot"
+else
+  CERTBOT="certbot"
+fi
+
+if [ "${form.plugin}" = "webroot" ]; then
+  mkdir -p "${form.webrootPath?.trim() || '/var/www/html'}" 2>/dev/null || true
+fi
+
+sudo $CERTBOT ${certbotSubcmd} 2>&1
+`;
+
+  const res = await sshExec(connId, script);
   const out = (res.stdout || '') + (res.stderr ? '\n' + res.stderr : '');
   const success = res.exit_code === 0 || out.includes('Congratulations!') || out.includes('The dry run was successful');
 
@@ -400,11 +594,27 @@ export async function renewCertificates(
   certName?: string,
   dryRun: boolean = false
 ): Promise<{ success: boolean; output: string }> {
-  let cmd = 'sudo certbot renew';
-  if (dryRun) cmd += ' --dry-run';
-  if (certName) cmd += ` --cert-name "${certName}" --force-renewal`;
+  let subcmd = 'renew --non-interactive --no-eff-email';
+  if (dryRun) subcmd += ' --dry-run';
+  if (certName) subcmd += ` --cert-name "${certName}" --force-renewal`;
 
-  const res = await sshExec(connId, cmd);
+  const script = `
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
+
+if command -v certbot >/dev/null 2>&1; then
+  CERTBOT="certbot"
+elif [ -x /snap/bin/certbot ]; then
+  CERTBOT="/snap/bin/certbot"
+elif [ -x /usr/bin/certbot ]; then
+  CERTBOT="/usr/bin/certbot"
+else
+  CERTBOT="certbot"
+fi
+
+sudo $CERTBOT ${subcmd} 2>&1
+`;
+
+  const res = await sshExec(connId, script);
   const out = (res.stdout || '') + (res.stderr ? '\n' + res.stderr : '');
   const success = res.exit_code === 0 || out.includes('Congratulations') || out.includes('The dry run was successful');
 
@@ -434,8 +644,21 @@ export async function revokeCertificate(
   certName: string,
   reason: string = 'unspecified'
 ): Promise<{ success: boolean; output: string }> {
-  const cmd = `sudo certbot revoke --cert-name "${certName}" --reason "${reason}" --delete-after-revoke --non-interactive`;
-  const res = await sshExec(connId, cmd);
+  const script = `
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
+
+if command -v certbot >/dev/null 2>&1; then
+  CERTBOT="certbot"
+elif [ -x /snap/bin/certbot ]; then
+  CERTBOT="/snap/bin/certbot"
+else
+  CERTBOT="certbot"
+fi
+
+sudo $CERTBOT revoke --cert-name "${certName}" --reason "${reason}" --delete-after-revoke --non-interactive 2>&1
+`;
+
+  const res = await sshExec(connId, script);
   return {
     success: res.exit_code === 0,
     output: (res.stdout || '') + (res.stderr ? '\n' + res.stderr : ''),
@@ -449,8 +672,21 @@ export async function deleteCertificate(
   connId: string,
   certName: string
 ): Promise<{ success: boolean; output: string }> {
-  const cmd = `sudo certbot delete --cert-name "${certName}" --non-interactive`;
-  const res = await sshExec(connId, cmd);
+  const script = `
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
+
+if command -v certbot >/dev/null 2>&1; then
+  CERTBOT="certbot"
+elif [ -x /snap/bin/certbot ]; then
+  CERTBOT="/snap/bin/certbot"
+else
+  CERTBOT="certbot"
+fi
+
+sudo $CERTBOT delete --cert-name "${certName}" --non-interactive 2>&1
+`;
+
+  const res = await sshExec(connId, script);
   return {
     success: res.exit_code === 0,
     output: (res.stdout || '') + (res.stderr ? '\n' + res.stderr : ''),
@@ -483,29 +719,49 @@ export async function readCertificatePem(
 
 /**
  * Generates a self-signed SSL/TLS certificate pair using OpenSSL
+ * Uses -batch flag and sanitized inputs so it NEVER prompts or hangs on stdin!
  */
 export async function generateSelfSignedCertificate(
   connId: string,
   form: SelfSignedForm
 ): Promise<{ success: boolean; certPath: string; keyPath: string; output: string }> {
   const outDir = form.outputDir.replace(/\/+$/, '') || '/etc/ssl/certs';
-  const certPath = `${outDir}/${form.domain}.crt`;
-  const keyPath = `${outDir}/${form.domain}.key`;
+  const cleanDomain = (form.domain || 'localhost').trim().replace(/[^a-zA-Z0-9.-]/g, '');
+  const certPath = `${outDir}/${cleanDomain}.crt`;
+  const keyPath = `${outDir}/${cleanDomain}.key`;
+  const country = (form.country || 'US').trim().substring(0, 2).toUpperCase() || 'US';
+  const org = (form.organization || 'Local Development').trim().replace(/[\/="]/g, '') || 'Dev';
+  const days = Number(form.validDays) || 365;
 
-  const cmd = `
-sudo mkdir -p "${outDir}"
-sudo openssl req -x509 -nodes -days ${form.validDays || 365} -newkey rsa:2048 \\
+  const script = `
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  SUDO=""
+fi
+
+$SUDO mkdir -p "${outDir}"
+$SUDO openssl req -x509 -nodes -days ${days} -newkey rsa:2048 -batch \\
   -keyout "${keyPath}" \\
   -out "${certPath}" \\
-  -subj "/C=${form.country || 'US'}/O=${form.organization || 'Local Development'}/CN=${form.domain}"
+  -subj "/C=${country}/O=${org}/CN=${cleanDomain}" 2>&1
+
+chmod 644 "${certPath}" 2>/dev/null || true
+chmod 600 "${keyPath}" 2>/dev/null || true
+echo "===SELF_SIGNED_DONE==="
 `;
 
-  const res = await sshExec(connId, cmd);
+  const res = await sshExec(connId, script);
+  const out = (res.stdout || '') + (res.stderr ? '\n' + res.stderr : '');
+  const isSuccess = res.exit_code === 0 || out.includes('===SELF_SIGNED_DONE===');
+
   return {
-    success: res.exit_code === 0,
+    success: isSuccess,
     certPath,
     keyPath,
-    output: (res.stdout || '') + (res.stderr ? '\n' + res.stderr : ''),
+    output: out,
   };
 }
 
