@@ -65,7 +65,7 @@ export default function Dock({
     const handleMouseMove = (e: MouseEvent) => {
       if (e.clientY >= window.innerHeight - 10) {
         setIsHovered(true);
-      } else if (isHovered && e.clientY < window.innerHeight - 85) {
+      } else if (isHovered && e.clientY < window.innerHeight - 120) {
         setIsHovered(false);
       }
     };
@@ -111,7 +111,7 @@ export default function Dock({
         onMouseLeave={() => {
           if (autoHideDock) setIsHovered(false);
         }}
-        className="fixed bottom-2 z-[999998] pointer-events-auto transition-transform duration-300 ease-out"
+        className="fixed bottom-2 z-[999998] pointer-events-auto transition-transform duration-300 ease-out overflow-visible"
         style={{
           left: '50%',
           transform: `translateX(-50%) translateY(${isDockVisible ? '0' : 'calc(100% + 24px)'})`,
@@ -121,7 +121,7 @@ export default function Dock({
           initial={{ y: 80, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
           transition={{ type: 'spring', damping: 22, stiffness: 280 }}
-          className={`dock-bar backdrop-blur-3xl rounded-[20px] px-2 py-1.5 flex items-end space-x-1 border shadow-2xl transition-all max-w-[calc(100vw-24px)] flex-nowrap overflow-x-auto no-scrollbar ${
+          className={`dock-bar backdrop-blur-3xl rounded-[20px] px-2 py-1.5 flex items-end space-x-1 border shadow-2xl transition-all max-w-[calc(100vw-24px)] flex-nowrap overflow-visible ${
             isLight
               ? 'bg-white/75 border-black/10 text-slate-800 shadow-[0_20px_50px_rgba(0,0,0,0.15)] ring-1 ring-black/5'
               : 'bg-black/40 border-white/20 text-white shadow-[0_25px_50px_rgba(0,0,0,0.6),inset_0_1px_1px_rgba(255,255,255,0.3)] ring-1 ring-black/10'
@@ -203,55 +203,57 @@ function DockSquircleItem({
   isLight?: boolean;
 }) {
   return (
-    <motion.button
-      whileHover={{ scale: 1.25, y: -8 }}
-      whileTap={{ scale: 0.92 }}
-      transition={{ type: 'spring', stiffness: 450, damping: 18 }}
-      onClick={onClick}
-      className={`relative p-0.5 rounded-xl group flex flex-col items-center justify-center cursor-pointer select-none shrink-0 ${
-        isLaunching ? 'animate-dock-bounce' : ''
-      }`}
-      title={label}
-    >
-      {/* Authentic macOS Squircle Tile - Sleek Compact Proportions */}
-      <div 
-        className={`w-10 h-10 rounded-[12px] bg-gradient-to-b ${tileBg} flex items-center justify-center shadow-md border border-white/20 relative overflow-hidden transition-all group-hover:shadow-2xl`}
+    <div className="relative group flex flex-col items-center justify-end shrink-0 hover:z-30 z-10 origin-bottom">
+      <motion.button
+        whileHover={{ scale: 1.28, y: -10 }}
+        whileTap={{ scale: 0.92 }}
+        transition={{ type: 'spring', stiffness: 450, damping: 20 }}
+        onClick={onClick}
+        aria-label={label}
+        className={`relative p-0.5 rounded-xl flex flex-col items-center justify-center cursor-pointer select-none origin-bottom focus:outline-none ${
+          isLaunching ? 'animate-dock-bounce' : ''
+        }`}
       >
-        {/* Subtle glass reflection sheen on top half */}
-        <div className="absolute top-0 left-0 right-0 h-1/2 bg-gradient-to-b from-white/30 to-transparent pointer-events-none" />
-        
-        <Icon className="w-4.5 h-4.5 drop-shadow-md relative z-10" style={{ color: iconColor }} />
-      </div>
-      
-      {/* Active focused indicator dot */}
-      {isActive && (
-        <motion.span
-          initial={{ scale: 0 }}
-          animate={{ scale: 1 }}
-          className={`absolute -bottom-1.5 w-1 h-1 rounded-full ${
-            isLight ? 'bg-blue-600 shadow-[0_0_6px_rgba(37,99,235,0.8)]' : 'bg-white shadow-[0_0_6px_rgba(255,255,255,0.9)]'
-          }`}
-        />
-      )}
-      
-      {/* Open but unfocused indicator */}
-      {isOpen && !isActive && !hasMinimized && (
-        <span className={`absolute -bottom-1.5 w-1 h-1 rounded-full ${isLight ? 'bg-slate-400' : 'bg-white/50'}`} />
-      )}
+        {/* Authentic macOS Squircle Tile - Sleek Compact Proportions */}
+        <div 
+          className={`w-10 h-10 rounded-[12px] bg-gradient-to-b ${tileBg} flex items-center justify-center shadow-md border border-white/20 relative overflow-hidden transition-all group-hover:shadow-[0_12px_24px_rgba(0,0,0,0.5)]`}
+        >
+          {/* Subtle glass reflection sheen on top half */}
+          <div className="absolute top-0 left-0 right-0 h-1/2 bg-gradient-to-b from-white/30 to-transparent pointer-events-none" />
+          
+          <Icon className="w-4.5 h-4.5 drop-shadow-md relative z-10" style={{ color: iconColor }} />
+        </div>
 
-      {/* Minimized indicator */}
-      {hasMinimized && !isActive && (
-        <span className={`absolute -bottom-1.5 w-1 h-1 rounded-full ${isLight ? 'bg-amber-500' : 'bg-amber-300'}`} />
-      )}
-      
-      {/* Tooltip */}
-      <span className={`absolute -top-9 backdrop-blur-xl text-xs font-medium px-2.5 py-1 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap pointer-events-none transition-opacity shadow-2xl font-sans ${
-        isLight 
-          ? 'bg-white text-slate-900 border border-black/10 shadow-lg' 
-          : 'bg-[#1e1e2e]/95 text-white border border-white/15'
-      }`}>
-        {label}
-      </span>
-    </motion.button>
+        {/* Tooltip */}
+        <span className={`absolute -top-10 backdrop-blur-xl text-xs font-medium px-2.5 py-1 rounded-lg opacity-0 group-hover:opacity-100 whitespace-nowrap pointer-events-none transition-opacity duration-150 shadow-2xl font-sans z-50 ${
+          isLight 
+            ? 'bg-white/95 text-slate-900 border border-black/10 shadow-lg' 
+            : 'bg-[#1e1e2e]/95 text-white border border-white/15'
+        }`}>
+          {label}
+        </span>
+      </motion.button>
+
+      {/* Indicator Dot Tray (Fixed at dock bottom shelf, doesn't jump on hover) */}
+      <div className="h-1.5 flex items-center justify-center mt-0.5 pointer-events-none">
+        {isActive && (
+          <motion.span
+            initial={{ scale: 0 }}
+            animate={{ scale: 1 }}
+            className={`w-1 h-1 rounded-full ${
+              isLight ? 'bg-blue-600 shadow-[0_0_6px_rgba(37,99,235,0.8)]' : 'bg-white shadow-[0_0_6px_rgba(255,255,255,0.9)]'
+            }`}
+          />
+        )}
+        
+        {isOpen && !isActive && !hasMinimized && (
+          <span className={`w-1 h-1 rounded-full ${isLight ? 'bg-slate-400' : 'bg-white/50'}`} />
+        )}
+
+        {hasMinimized && !isActive && (
+          <span className={`w-1 h-1 rounded-full ${isLight ? 'bg-amber-500' : 'bg-amber-300'}`} />
+        )}
+      </div>
+    </div>
   );
 }
