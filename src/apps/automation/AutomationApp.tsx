@@ -4,9 +4,9 @@ import {
   Workflow, Play, Square, RefreshCw, CheckCircle2, AlertCircle, Clock,
   Server, Shield, Terminal, Globe, Container, Trash2, Copy, Check,
   Download, Plus, Search, Filter, Layers, Zap, Eye, ChevronDown, ChevronRight,
-  Sliders, Calendar, ArrowRight, Activity, AlertTriangle, X, HelpCircle, HardDrive, Cpu, Package,
-  Cloud, CloudUpload, CloudDownload, FileJson, Edit3, MoveRight, Network, GitBranch,
-  ZoomIn, ZoomOut, WrapText, CheckSquare, Square as SquareIcon, FileText
+  Sliders, ArrowRight, Activity, AlertTriangle, X, HardDrive, Cpu, Package,
+  Cloud, CloudUpload, CloudDownload, FileJson, Edit3, MoveRight, Network,
+  ZoomIn, ZoomOut, WrapText, CheckSquare, Square as SquareIcon, FileText, KeyRound, Tag
 } from 'lucide-react';
 import { useConnectionStore, useSettingsStore } from '../../lib/store';
 import { useUserPrivilege } from '../../lib/permissions';
@@ -22,8 +22,8 @@ import {
   FleetMatrixData,
   FleetOrganization,
   FleetGroup,
-  ReplicaSet,
-  ReplicationType,
+  FleetServer,
+  TargetServer,
 } from './types';
 import {
   BUILT_IN_RECIPES,
@@ -43,8 +43,6 @@ import {
   checkAutomationServerFileStatus,
   loadStoredFleetMatrix,
   saveStoredFleetMatrix,
-  loadStoredReplicaSets,
-  saveStoredReplicaSets,
   getDefaultFleetMatrix,
 } from './automation-service';
 
@@ -69,23 +67,23 @@ export default function AutomationApp() {
 
   const serverFilePath = getAutomationServerFilePath(homeDir);
 
-  // Navigation Tabs (Schedules tab removed per requirements)
-  const [activeTab, setActiveTab] = useState<'runner' | 'recipes' | 'fleet-matrix' | 'replicas' | 'history'>('runner');
+  // Navigation Tabs: Runner, Recipes, Fleet Matrix, History (Replicas and Schedules removed)
+  const [activeTab, setActiveTab] = useState<'runner' | 'recipes' | 'fleet-matrix' | 'history'>('runner');
 
-  // Recipes, History, Fleet Matrix & Replicas State
+  // Recipes, History, Fleet Matrix State
   const [recipes, setRecipes] = useState<AutomationRecipe[]>([]);
   const [history, setHistory] = useState<AutomationExecutionRun[]>([]);
   const [fleetMatrix, setFleetMatrix] = useState<FleetMatrixData>(() => getDefaultFleetMatrix([]));
-  const [replicaSets, setReplicaSets] = useState<ReplicaSet[]>([]);
   const [fleetHealth, setFleetHealth] = useState<Record<string, TargetHealth>>({});
   const [isProbingFleet, setIsProbingFleet] = useState(false);
 
   // Runner Configuration State
   const [selectedServerIds, setSelectedServerIds] = useState<string[]>([]);
   const [serverSearchQuery, setServerSearchQuery] = useState('');
-  const [selectedGroupFilter, setSelectedGroupFilter] = useState<string>('all');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'offline'>('all');
-  
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [collapsedOrgs, setCollapsedOrgs] = useState<Record<string, boolean>>({});
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+
   const [selectedRecipeId, setSelectedRecipeId] = useState<string>('fleet-telemetry');
   const [customCommand, setCustomCommand] = useState<string>('');
   const [isSudo, setIsSudo] = useState<boolean>(false);
@@ -94,7 +92,7 @@ export default function AutomationApp() {
   const [stopOnError, setStopOnError] = useState<boolean>(true);
   const [variableValues, setVariableValues] = useState<Record<string, string>>({});
 
-  // Monaco Editor State
+  // Monaco Editor State for Runner
   const [editorFontSize, setEditorFontSize] = useState<number>(13);
   const [isWordWrap, setIsWordWrap] = useState<boolean>(true);
   const [showMinimap, setShowMinimap] = useState<boolean>(false);
@@ -125,63 +123,87 @@ export default function AutomationApp() {
   } | null>(null);
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
 
-  // Fleet Matrix Modals State
+  // Fleet Matrix Modals: Organization CRUD
   const [isOrgModalOpen, setIsOrgModalOpen] = useState(false);
   const [editingOrg, setEditingOrg] = useState<FleetOrganization | null>(null);
   const [orgForm, setOrgForm] = useState({ name: '', description: '', color: '#6366f1' });
 
+  // Fleet Matrix Modals: Group CRUD
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [editingGroup, setEditingGroup] = useState<FleetGroup | null>(null);
   const [groupForm, setGroupForm] = useState({ organizationId: '', name: '', description: '', color: '#3b82f6' });
 
-  const [isAssignModalOpen, setIsAssignModalOpen] = useState(false);
-  const [assignServerId, setAssignServerId] = useState<string>('');
-  const [assignOrgId, setAssignOrgId] = useState<string>('');
-  const [assignGroupId, setAssignGroupId] = useState<string>('');
-
-  // Replica Modal State
-  const [isReplicaModalOpen, setIsReplicaModalOpen] = useState(false);
-  const [editingReplica, setEditingReplica] = useState<ReplicaSet | null>(null);
-  const [replicaForm, setReplicaForm] = useState<{
+  // Fleet Matrix Modals: Server CRUD (Native Fleet Server Add/Edit/Delete)
+  const [isServerModalOpen, setIsServerModalOpen] = useState(false);
+  const [editingServer, setEditingServer] = useState<FleetServer | null>(null);
+  const [serverForm, setServerForm] = useState<{
     name: string;
-    description: string;
-    primaryServerId: string;
-    replicaServerIds: string[];
-    replicationType: ReplicationType;
-    syncCommand: string;
-    healthCheckCommand: string;
-    autoFailover: boolean;
+    organizationId: string;
+    groupId: string;
+    host: string;
+    port: number;
+    username: string;
+    password?: string;
+    privateKey?: string;
+    authType: 'password' | 'privateKey' | 'agent';
+    status: 'active' | 'inactive';
+    tags: string;
+    osType: string;
+    notes: string;
   }>({
     name: '',
-    description: '',
-    primaryServerId: '',
-    replicaServerIds: [],
-    replicationType: 'database',
-    syncCommand: '',
-    healthCheckCommand: '',
-    autoFailover: false,
+    organizationId: '',
+    groupId: '',
+    host: '',
+    port: 22,
+    username: 'root',
+    password: '',
+    privateKey: '',
+    authType: 'password',
+    status: 'active',
+    tags: '',
+    osType: 'Linux',
+    notes: '',
   });
 
-  // New Recipe Modal State
+  // Import Saved Logins Modal
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [importOrgId, setImportOrgId] = useState('');
+  const [importGroupId, setImportGroupId] = useState('');
+
+  // Recipes Tab: Add / Edit Recipe Modal with Monaco Editor
   const [isRecipeModalOpen, setIsRecipeModalOpen] = useState(false);
-  const [newRecipe, setNewRecipe] = useState<Partial<AutomationRecipe>>({
+  const [editingRecipe, setEditingRecipe] = useState<AutomationRecipe | null>(null);
+  const [recipeForm, setRecipeForm] = useState<{
+    title: string;
+    category: RecipeCategory;
+    description: string;
+    command: string;
+    isSudo: boolean;
+    stopOnError: boolean;
+    timeoutSeconds: number;
+  }>({
     title: '',
-    description: '',
     category: 'custom',
+    description: '',
     command: '',
     isSudo: false,
-    icon: 'Workflow',
+    stopOnError: false,
+    timeoutSeconds: 60,
   });
+  const [recipeEditorFontSize, setRecipeEditorFontSize] = useState<number>(13);
+  const [recipeWordWrap, setRecipeWordWrap] = useState<boolean>(true);
+  const [recipeSearchQuery, setRecipeSearchQuery] = useState('');
+  const [selectedRecipeCategory, setSelectedRecipeCategory] = useState<string>('all');
 
   // Status Notification
   const [bannerNotice, setBannerNotice] = useState<{ text: string; isError?: boolean } | null>(null);
 
-  // Load recipes, history, matrix, and replicas on mount
+  // Load recipes, history, and fleet matrix on mount
   useEffect(() => {
     setRecipes(loadStoredRecipes());
     setHistory(loadStoredHistory());
     setFleetMatrix(loadStoredFleetMatrix(connections));
-    setReplicaSets(loadStoredReplicaSets());
   }, [connections]);
 
   // Save current automation data directly to /home/sharuk/.sshdesktop/automation.json on active server
@@ -201,7 +223,6 @@ export default function AutomationApp() {
         customRecipes: customOnly,
         history,
         fleetMatrix,
-        replicaSets,
         lastTargetServerIds: selectedServerIds,
       });
 
@@ -228,7 +249,7 @@ export default function AutomationApp() {
     } finally {
       setIsSyncingServer(false);
     }
-  }, [activeConnectionId, homeDir, username, recipes, history, fleetMatrix, replicaSets, selectedServerIds]);
+  }, [activeConnectionId, homeDir, username, recipes, history, fleetMatrix, selectedServerIds]);
 
   // Restore automation data from /home/sharuk/.sshdesktop/automation.json
   const handleRestoreFromServer = useCallback(async () => {
@@ -250,9 +271,6 @@ export default function AutomationApp() {
         }
         if (res.data.fleet_matrix) {
           setFleetMatrix(res.data.fleet_matrix);
-        }
-        if (Array.isArray(res.data.replica_sets)) {
-          setReplicaSets(res.data.replica_sets);
         }
         if (Array.isArray(res.data.last_target_server_ids) && res.data.last_target_server_ids.length > 0) {
           setSelectedServerIds(res.data.last_target_server_ids);
@@ -278,7 +296,6 @@ export default function AutomationApp() {
       if (!isMounted) return;
       setServerFileStatus(status);
       if (status.exists) {
-        // Hydrate from server
         loadAutomationFromServer(activeConnectionId, homeDir).then(res => {
           if (!isMounted || !res.success || !res.data) return;
           if (Array.isArray(res.data.custom_recipes) && res.data.custom_recipes.length > 0) {
@@ -289,9 +306,6 @@ export default function AutomationApp() {
           }
           if (res.data.fleet_matrix) {
             setFleetMatrix(res.data.fleet_matrix);
-          }
-          if (Array.isArray(res.data.replica_sets)) {
-            setReplicaSets(res.data.replica_sets);
           }
           if (Array.isArray(res.data.last_target_server_ids) && res.data.last_target_server_ids.length > 0) {
             setSelectedServerIds(res.data.last_target_server_ids);
@@ -306,25 +320,27 @@ export default function AutomationApp() {
     };
   }, [activeConnectionId, homeDir]);
 
-  // Initialize selected servers default
-  useEffect(() => {
-    if (connections.length > 0 && selectedServerIds.length === 0) {
-      if (activeConnectionId && connections.some(c => c.id === activeConnectionId)) {
-        setSelectedServerIds([activeConnectionId]);
-      } else {
-        setSelectedServerIds(connections.map(c => c.id));
-      }
-    }
-  }, [connections, activeConnectionId]);
+  // All managed servers in Fleet Matrix
+  const allFleetServers: FleetServer[] = useMemo(() => {
+    return fleetMatrix.servers || [];
+  }, [fleetMatrix.servers]);
 
-  // Initial Probe on Mount to establish Active/Inactive colors
+  // Auto-select active servers initially if none selected
   useEffect(() => {
-    if (connections.length > 0 && Object.keys(fleetHealth).length === 0) {
-      probeFleetTelemetry(connections, (health) => {
+    if (allFleetServers.length > 0 && selectedServerIds.length === 0) {
+      const activeIds = allFleetServers.filter(s => s.status === 'active').map(s => s.id);
+      setSelectedServerIds(activeIds.length > 0 ? activeIds : allFleetServers.map(s => s.id));
+    }
+  }, [allFleetServers]);
+
+  // Initial Probe on Mount to establish health/telemetry
+  useEffect(() => {
+    if (allFleetServers.length > 0 && Object.keys(fleetHealth).length === 0) {
+      probeFleetTelemetry(allFleetServers, (health) => {
         setFleetHealth(prev => ({ ...prev, [health.serverId]: health }));
       });
     }
-  }, [connections]);
+  }, [allFleetServers]);
 
   // Update recipe settings when selected recipe changes
   useEffect(() => {
@@ -354,56 +370,52 @@ export default function AutomationApp() {
     return () => clearInterval(timer);
   }, [isRunning, executionStartTime]);
 
-  // Keyboard Shortcuts for Monaco Editor: Zoom In (Ctrl++), Zoom Out (Ctrl+-), Word Wrap (Alt+Z)
+  // Keyboard shortcut listener for Monaco Zoom In / Out and Word Wrap
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Zoom In: Ctrl + = or Ctrl + +
-      if ((e.ctrlKey || e.metaKey) && (e.key === '=' || e.key === '+')) {
+      // Zoom in: Ctrl + + or Ctrl + =
+      if (e.ctrlKey && (e.key === '+' || e.key === '=')) {
         e.preventDefault();
-        setEditorFontSize(prev => Math.min(prev + 1, 32));
+        setEditorFontSize(f => Math.min(f + 1, 32));
       }
-      // Zoom Out: Ctrl + -
-      else if ((e.ctrlKey || e.metaKey) && e.key === '-') {
+      // Zoom out: Ctrl + -
+      else if (e.ctrlKey && e.key === '-') {
         e.preventDefault();
-        setEditorFontSize(prev => Math.max(prev - 1, 9));
+        setEditorFontSize(f => Math.max(f - 1, 9));
       }
-      // Word Wrap: Alt + Z
+      // Word wrap toggle: Alt + Z
       else if (e.altKey && (e.key === 'z' || e.key === 'Z')) {
         e.preventDefault();
-        setIsWordWrap(prev => !prev);
+        setIsWordWrap(w => !w);
       }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Filtered Servers for selection list with Online / Offline support
+  // Filtered servers by search query and active/inactive status filter
   const filteredServers = useMemo(() => {
-    return connections.filter(c => {
-      const matchesSearch = 
-        (c.name || '').toLowerCase().includes(serverSearchQuery.toLowerCase()) ||
-        c.host.toLowerCase().includes(serverSearchQuery.toLowerCase()) ||
-        c.username.toLowerCase().includes(serverSearchQuery.toLowerCase());
-      const matchesGroup = 
-        selectedGroupFilter === 'all' || 
-        c.group === selectedGroupFilter;
-      
-      const health = fleetHealth[c.id];
-      const isOnline = health ? health.reachable : false;
-      const matchesStatus = 
-        statusFilter === 'all' || 
-        (statusFilter === 'online' && isOnline) ||
-        (statusFilter === 'offline' && !isOnline);
+    return allFleetServers.filter(s => {
+      const q = serverSearchQuery.toLowerCase();
+      const matchesSearch = !q ||
+        s.name.toLowerCase().includes(q) ||
+        s.host.toLowerCase().includes(q) ||
+        s.username.toLowerCase().includes(q) ||
+        (s.tags && s.tags.some(t => t.toLowerCase().includes(q)));
 
-      return matchesSearch && matchesGroup && matchesStatus;
+      const matchesStatus =
+        statusFilter === 'all' ||
+        (statusFilter === 'active' && s.status === 'active') ||
+        (statusFilter === 'inactive' && s.status === 'inactive');
+
+      return matchesSearch && matchesStatus;
     });
-  }, [connections, serverSearchQuery, selectedGroupFilter, statusFilter, fleetHealth]);
+  }, [allFleetServers, serverSearchQuery, statusFilter]);
 
-  // Selected Target Servers
-  const targetServers = useMemo(() => {
-    return connections.filter(c => selectedServerIds.includes(c.id));
-  }, [connections, selectedServerIds]);
+  // Selected Target Servers for Execution (TargetServer[])
+  const targetServers: FleetServer[] = useMemo(() => {
+    return allFleetServers.filter(s => selectedServerIds.includes(s.id));
+  }, [allFleetServers, selectedServerIds]);
 
   // Copy helper
   const handleCopy = (text: string, key: string) => {
@@ -412,40 +424,65 @@ export default function AutomationApp() {
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  // Toggle server selection
+  // Toggle selection of a single server
   const toggleServer = (id: string) => {
     setSelectedServerIds(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+      prev.includes(id) ? prev.filter(sId => sId !== id) : [...prev, id]
     );
   };
 
-  const selectAllFiltered = () => {
-    const ids = new Set([...selectedServerIds, ...filteredServers.map(s => s.id)]);
-    setSelectedServerIds(Array.from(ids));
+  // Toggle selection of all servers in a group
+  const toggleGroupServers = (groupId: string) => {
+    const groupServers = allFleetServers.filter(s => s.groupId === groupId);
+    const groupServerIds = groupServers.map(s => s.id);
+    const allSelected = groupServerIds.every(id => selectedServerIds.includes(id));
+
+    if (allSelected) {
+      setSelectedServerIds(prev => prev.filter(id => !groupServerIds.includes(id)));
+    } else {
+      setSelectedServerIds(prev => Array.from(new Set([...prev, ...groupServerIds])));
+    }
   };
 
-  const deselectAllFiltered = () => {
-    const removeSet = new Set(filteredServers.map(s => s.id));
-    setSelectedServerIds(prev => prev.filter(id => !removeSet.has(id)));
+  // Toggle selection of all servers in an organization
+  const toggleOrgServers = (orgId: string) => {
+    const orgServers = allFleetServers.filter(s => s.organizationId === orgId);
+    const orgServerIds = orgServers.map(s => s.id);
+    const allSelected = orgServerIds.length > 0 && orgServerIds.every(id => selectedServerIds.includes(id));
+
+    if (allSelected) {
+      setSelectedServerIds(prev => prev.filter(id => !orgServerIds.includes(id)));
+    } else {
+      setSelectedServerIds(prev => Array.from(new Set([...prev, ...orgServerIds])));
+    }
   };
 
-  // Run Fleet Telemetry Probe
+  // Quick selection helpers
+  const selectAllTargets = () => {
+    setSelectedServerIds(filteredServers.map(s => s.id));
+  };
+
+  const selectActiveTargets = () => {
+    setSelectedServerIds(filteredServers.filter(s => s.status === 'active').map(s => s.id));
+  };
+
+  const deselectAllTargets = () => {
+    setSelectedServerIds([]);
+  };
+
+  // Manual Trigger to Refresh / Probe Fleet Health Matrix
   const handleProbeFleet = async () => {
-    if (connections.length === 0) {
-      setBannerNotice({ text: 'No servers configured in SSH Desktop.', isError: true });
+    if (allFleetServers.length === 0) {
+      setBannerNotice({ text: 'No servers available in Fleet Matrix to probe.', isError: true });
       return;
     }
     setIsProbingFleet(true);
-    setBannerNotice({ text: `Probing active connection and telemetry on ${connections.length} servers...` });
+    setBannerNotice({ text: `Probing active status and metrics across ${allFleetServers.length} fleet servers...` });
     try {
-      const results = await probeFleetTelemetry(connections, (health) => {
+      await probeFleetTelemetry(allFleetServers, (health) => {
         setFleetHealth(prev => ({ ...prev, [health.serverId]: health }));
       });
-      const onlineCount = results.filter(r => r.reachable).length;
-      setBannerNotice({
-        text: `Fleet probe complete: ${onlineCount}/${results.length} servers online (active).`,
-        isError: onlineCount === 0,
-      });
+      setBannerNotice({ text: 'Fleet health probe complete. Active statuses updated.', isError: false });
     } catch (err: any) {
       setBannerNotice({ text: `Fleet probe failed: ${err.message}`, isError: true });
     } finally {
@@ -459,7 +496,7 @@ export default function AutomationApp() {
     setBannerNotice({ text: 'Cancellation requested. Awaiting thread cleanup...', isError: true });
   };
 
-  // Execute Automation Run
+  // Execute Automation Run across Selected Fleet
   const handleRunAutomation = async () => {
     if (targetServers.length === 0) {
       setBannerNotice({ text: 'Please select at least one target server.', isError: true });
@@ -477,18 +514,24 @@ export default function AutomationApp() {
     setExecutionStartTime(start);
     setExecutionElapsedMs(0);
 
+    // Initial clean map for all target servers
+    // Inactive servers are immediately marked as skipped/failed with explicit explanation,
+    // ensuring no stale output from any previous server can ever appear!
     const initialMap: Record<string, ServerExecutionResult> = {};
     targetServers.forEach(s => {
+      const isDeactivated = s.status === 'inactive';
       initialMap[s.id] = {
         serverId: s.id,
         serverName: s.name || s.host,
         host: s.host,
         port: s.port,
         username: s.username,
-        status: 'pending',
+        status: isDeactivated ? 'failed' : 'pending',
         stdout: '',
-        stderr: '',
-        exitCode: 0,
+        stderr: isDeactivated
+          ? `[DEACTIVATED] Server "${s.name || s.host}" (${s.host}:${s.port}) is marked Inactive in Fleet Matrix. Execution skipped.`
+          : '',
+        exitCode: isDeactivated ? 1 : 0,
         durationMs: 0,
       };
     });
@@ -538,6 +581,9 @@ export default function AutomationApp() {
         );
       }
 
+      // Merge with initial map to ensure all servers are represented
+      finalResults = { ...initialMap, ...finalResults };
+
       const totalDuration = Date.now() - start;
       const resArray = Object.values(finalResults);
       const successCount = resArray.filter(r => r.status === 'success').length;
@@ -570,7 +616,6 @@ export default function AutomationApp() {
           customRecipes: recipes.filter(r => !r.isBuiltIn),
           history: updatedHistory,
           fleetMatrix,
-          replicaSets,
           lastTargetServerIds: selectedServerIds,
         }).catch(() => {});
       }
@@ -597,7 +642,7 @@ export default function AutomationApp() {
     setExecutionMode(run.mode);
     setConcurrency(run.concurrency);
     const targetIds = Object.keys(run.results);
-    setSelectedServerIds(targetIds.filter(id => connections.some(c => c.id === id)));
+    setSelectedServerIds(targetIds.filter(id => allFleetServers.some(s => s.id === id)));
     setActiveTab('runner');
     setBannerNotice({ text: `Loaded previous run: "${run.recipeTitle}" on ${targetIds.length} target servers.` });
   };
@@ -667,43 +712,93 @@ ${serversReport}
     downloadTextFile(filename, fullDoc, 'text/markdown;charset=utf-8');
   };
 
-  // Save new custom recipe
+  // Recipe CRUD: Save (Add or Edit)
   const handleSaveRecipe = () => {
-    if (!newRecipe.title || !newRecipe.command) {
+    if (!recipeForm.title.trim() || !recipeForm.command.trim()) {
       setBannerNotice({ text: 'Recipe title and bash command are required.', isError: true });
       return;
     }
-    const created: AutomationRecipe = {
-      id: `recipe-custom-${Date.now()}`,
-      title: newRecipe.title,
-      description: newRecipe.description || 'Custom fleet automation recipe',
-      category: newRecipe.category as RecipeCategory || 'custom',
-      icon: 'Workflow',
-      command: newRecipe.command,
-      isSudo: !!newRecipe.isSudo,
-      isBuiltIn: false,
-      createdAt: Date.now(),
-    };
-    const updated = saveCustomRecipe(created);
-    setRecipes(updated);
-    setIsRecipeModalOpen(false);
-    setSelectedRecipeId(created.id);
-    setBannerNotice({ text: `Custom recipe "${created.title}" saved successfully.` });
 
-    if (activeConnectionId && homeDir) {
-      saveAutomationToServer(activeConnectionId, homeDir, {
-        username,
-        customRecipes: updated.filter(r => !r.isBuiltIn),
-        history,
-        fleetMatrix,
-        replicaSets,
-        lastTargetServerIds: selectedServerIds,
-      }).catch(() => {});
+    if (editingRecipe) {
+      // Update existing custom recipe
+      const updated: AutomationRecipe = {
+        ...editingRecipe,
+        title: recipeForm.title.trim(),
+        category: recipeForm.category,
+        description: recipeForm.description.trim() || 'Custom fleet automation recipe',
+        command: recipeForm.command,
+        isSudo: !!recipeForm.isSudo,
+        stopOnError: !!recipeForm.stopOnError,
+        timeoutSeconds: Number(recipeForm.timeoutSeconds) || 60,
+      };
+      const updatedList = saveCustomRecipe(updated);
+      setRecipes(updatedList);
+      setIsRecipeModalOpen(false);
+      setEditingRecipe(null);
+      setBannerNotice({ text: `Custom recipe "${updated.title}" updated successfully.` });
+
+      if (activeConnectionId && homeDir) {
+        saveAutomationToServer(activeConnectionId, homeDir, {
+          username,
+          customRecipes: updatedList.filter(r => !r.isBuiltIn),
+          history,
+          fleetMatrix,
+          lastTargetServerIds: selectedServerIds,
+        }).catch(() => {});
+      }
+    } else {
+      // Create new recipe
+      const created: AutomationRecipe = {
+        id: `recipe-custom-${Date.now()}`,
+        title: recipeForm.title.trim(),
+        description: recipeForm.description.trim() || 'Custom fleet automation recipe',
+        category: recipeForm.category,
+        icon: 'Workflow',
+        command: recipeForm.command,
+        isSudo: !!recipeForm.isSudo,
+        stopOnError: !!recipeForm.stopOnError,
+        timeoutSeconds: Number(recipeForm.timeoutSeconds) || 60,
+        isBuiltIn: false,
+        createdAt: Date.now(),
+      };
+      const updatedList = saveCustomRecipe(created);
+      setRecipes(updatedList);
+      setIsRecipeModalOpen(false);
+      setSelectedRecipeId(created.id);
+      setBannerNotice({ text: `Custom recipe "${created.title}" saved successfully.` });
+
+      if (activeConnectionId && homeDir) {
+        saveAutomationToServer(activeConnectionId, homeDir, {
+          username,
+          customRecipes: updatedList.filter(r => !r.isBuiltIn),
+          history,
+          fleetMatrix,
+          lastTargetServerIds: selectedServerIds,
+        }).catch(() => {});
+      }
     }
   };
 
-  // Delete custom recipe
+  // Recipe CRUD: Open Edit Modal
+  const handleOpenEditRecipe = (recipe: AutomationRecipe) => {
+    setEditingRecipe(recipe);
+    setRecipeForm({
+      title: recipe.title,
+      category: recipe.category,
+      description: recipe.description || '',
+      command: recipe.command,
+      isSudo: !!recipe.isSudo,
+      stopOnError: !!recipe.stopOnError,
+      timeoutSeconds: recipe.timeoutSeconds || 60,
+    });
+    setIsRecipeModalOpen(true);
+  };
+
+  // Recipe CRUD: Delete Recipe
   const handleDeleteRecipe = (id: string) => {
+    const target = recipes.find(r => r.id === id);
+    if (!confirm(`Are you sure you want to delete recipe "${target?.title || id}"?`)) return;
+
     const updated = deleteCustomRecipe(id);
     setRecipes(updated);
     if (selectedRecipeId === id) {
@@ -717,7 +812,6 @@ ${serversReport}
         customRecipes: updated.filter(r => !r.isBuiltIn),
         history,
         fleetMatrix,
-        replicaSets,
         lastTargetServerIds: selectedServerIds,
       }).catch(() => {});
     }
@@ -750,22 +844,19 @@ ${serversReport}
         customRecipes: recipes.filter(r => !r.isBuiltIn),
         history,
         fleetMatrix: updatedMatrix,
-        replicaSets,
         lastTargetServerIds: selectedServerIds,
       }).catch(() => {});
     }
   };
 
   const handleDeleteOrg = (orgId: string) => {
+    const org = fleetMatrix.organizations.find(o => o.id === orgId);
+    if (!confirm(`Are you sure you want to delete Organization "${org?.name || orgId}" and its hierarchy?`)) return;
+
     const nextOrgs = fleetMatrix.organizations.filter(o => o.id !== orgId);
     const nextGroups = fleetMatrix.groups.filter(g => g.organizationId !== orgId);
-    const nextMappings = { ...fleetMatrix.mappings };
-    Object.keys(nextMappings).forEach(sid => {
-      if (nextMappings[sid]?.organizationId === orgId) {
-        delete nextMappings[sid];
-      }
-    });
-    const updatedMatrix = { organizations: nextOrgs, groups: nextGroups, mappings: nextMappings };
+    const nextServers = (fleetMatrix.servers || []).filter(s => s.organizationId !== orgId);
+    const updatedMatrix = { ...fleetMatrix, organizations: nextOrgs, groups: nextGroups, servers: nextServers };
     setFleetMatrix(updatedMatrix);
     saveStoredFleetMatrix(updatedMatrix);
     if (activeConnectionId && homeDir) {
@@ -774,7 +865,6 @@ ${serversReport}
         customRecipes: recipes.filter(r => !r.isBuiltIn),
         history,
         fleetMatrix: updatedMatrix,
-        replicaSets,
         lastTargetServerIds: selectedServerIds,
       }).catch(() => {});
     }
@@ -814,123 +904,244 @@ ${serversReport}
         customRecipes: recipes.filter(r => !r.isBuiltIn),
         history,
         fleetMatrix: updatedMatrix,
-        replicaSets,
         lastTargetServerIds: selectedServerIds,
       }).catch(() => {});
     }
   };
 
   const handleDeleteGroup = (groupId: string) => {
+    const grp = fleetMatrix.groups.find(g => g.id === groupId);
+    if (!confirm(`Are you sure you want to delete Group "${grp?.name || groupId}" and its servers?`)) return;
+
     const nextGroups = fleetMatrix.groups.filter(g => g.id !== groupId);
-    const nextMappings = { ...fleetMatrix.mappings };
-    Object.keys(nextMappings).forEach(sid => {
-      if (nextMappings[sid]?.groupId === groupId) {
-        delete nextMappings[sid];
-      }
+    const nextServers = (fleetMatrix.servers || []).filter(s => s.groupId !== groupId);
+    const updatedMatrix = { ...fleetMatrix, groups: nextGroups, servers: nextServers };
+    setFleetMatrix(updatedMatrix);
+    saveStoredFleetMatrix(updatedMatrix);
+    if (activeConnectionId && homeDir) {
+      saveAutomationToServer(activeConnectionId, homeDir, {
+        username,
+        customRecipes: recipes.filter(r => !r.isBuiltIn),
+        history,
+        fleetMatrix: updatedMatrix,
+        lastTargetServerIds: selectedServerIds,
+      }).catch(() => {});
+    }
+  };
+
+  // Fleet Matrix: Native Server CRUD (Add / Edit / Delete)
+  const handleOpenAddServer = (defaultOrgId?: string, defaultGroupId?: string) => {
+    setEditingServer(null);
+    setServerForm({
+      name: '',
+      organizationId: defaultOrgId || fleetMatrix.organizations[0]?.id || '',
+      groupId: defaultGroupId || fleetMatrix.groups[0]?.id || '',
+      host: '',
+      port: 22,
+      username: 'root',
+      password: '',
+      privateKey: '',
+      authType: 'password',
+      status: 'active',
+      tags: '',
+      osType: 'Linux',
+      notes: '',
     });
-    const updatedMatrix = { ...fleetMatrix, groups: nextGroups, mappings: nextMappings };
-    setFleetMatrix(updatedMatrix);
-    saveStoredFleetMatrix(updatedMatrix);
-    if (activeConnectionId && homeDir) {
-      saveAutomationToServer(activeConnectionId, homeDir, {
-        username,
-        customRecipes: recipes.filter(r => !r.isBuiltIn),
-        history,
-        fleetMatrix: updatedMatrix,
-        replicaSets,
-        lastTargetServerIds: selectedServerIds,
-      }).catch(() => {});
-    }
+    setIsServerModalOpen(true);
   };
 
-  // Fleet Matrix: Server Assignment
-  const handleAssignServer = () => {
-    if (!assignServerId || !assignOrgId || !assignGroupId) return;
-    const nextMappings = {
-      ...fleetMatrix.mappings,
-      [assignServerId]: { organizationId: assignOrgId, groupId: assignGroupId },
-    };
-    const updatedMatrix = { ...fleetMatrix, mappings: nextMappings };
-    setFleetMatrix(updatedMatrix);
-    saveStoredFleetMatrix(updatedMatrix);
-    setIsAssignModalOpen(false);
-    setBannerNotice({ text: 'Server assignment updated.' });
-    if (activeConnectionId && homeDir) {
-      saveAutomationToServer(activeConnectionId, homeDir, {
-        username,
-        customRecipes: recipes.filter(r => !r.isBuiltIn),
-        history,
-        fleetMatrix: updatedMatrix,
-        replicaSets,
-        lastTargetServerIds: selectedServerIds,
-      }).catch(() => {});
-    }
+  const handleOpenEditServer = (server: FleetServer) => {
+    setEditingServer(server);
+    setServerForm({
+      name: server.name,
+      organizationId: server.organizationId,
+      groupId: server.groupId,
+      host: server.host,
+      port: server.port || 22,
+      username: server.username,
+      password: server.password || '',
+      privateKey: server.privateKey || '',
+      authType: server.authType || 'password',
+      status: server.status || 'active',
+      tags: (server.tags || []).join(', '),
+      osType: server.osType || 'Linux',
+      notes: server.notes || '',
+    });
+    setIsServerModalOpen(true);
   };
 
-  // Replica Sets: CRUD
-  const handleSaveReplica = () => {
-    if (!replicaForm.name.trim() || !replicaForm.primaryServerId) {
-      setBannerNotice({ text: 'Replica name and primary node are required.', isError: true });
+  const handleSaveServer = () => {
+    if (!serverForm.host.trim() || !serverForm.username.trim()) {
+      setBannerNotice({ text: 'Host and Username are required.', isError: true });
       return;
     }
-    let nextReplicas = [...replicaSets];
-    if (editingReplica) {
-      nextReplicas = nextReplicas.map(r => r.id === editingReplica.id ? {
-        ...r,
-        name: replicaForm.name,
-        description: replicaForm.description,
-        primaryServerId: replicaForm.primaryServerId,
-        replicaServerIds: replicaForm.replicaServerIds,
-        replicationType: replicaForm.replicationType,
-        syncCommand: replicaForm.syncCommand,
-        healthCheckCommand: replicaForm.healthCheckCommand,
-        autoFailover: replicaForm.autoFailover,
-        updatedAt: Date.now(),
-      } : r);
+    if (!serverForm.organizationId || !serverForm.groupId) {
+      setBannerNotice({ text: 'Please select an Organization and Group for this server.', isError: true });
+      return;
+    }
+
+    const tagsArray = serverForm.tags.split(',').map(t => t.trim()).filter(Boolean);
+
+    let nextServers = [...(fleetMatrix.servers || [])];
+    if (editingServer) {
+      nextServers = nextServers.map(s => {
+        if (s.id === editingServer.id) {
+          return {
+            ...s,
+            name: serverForm.name.trim() || `${serverForm.username}@${serverForm.host}`,
+            organizationId: serverForm.organizationId,
+            groupId: serverForm.groupId,
+            host: serverForm.host.trim(),
+            port: Number(serverForm.port) || 22,
+            username: serverForm.username.trim(),
+            password: serverForm.password || undefined,
+            privateKey: serverForm.privateKey || undefined,
+            authType: serverForm.authType,
+            status: serverForm.status,
+            tags: tagsArray,
+            osType: serverForm.osType,
+            notes: serverForm.notes,
+            updatedAt: Date.now(),
+          };
+        }
+        return s;
+      });
+      setBannerNotice({ text: `Server "${serverForm.name || serverForm.host}" updated.` });
     } else {
-      const created: ReplicaSet = {
-        id: `replica-${Date.now()}`,
-        name: replicaForm.name,
-        description: replicaForm.description,
-        primaryServerId: replicaForm.primaryServerId,
-        replicaServerIds: replicaForm.replicaServerIds,
-        replicationType: replicaForm.replicationType,
-        syncCommand: replicaForm.syncCommand,
-        healthCheckCommand: replicaForm.healthCheckCommand,
-        autoFailover: replicaForm.autoFailover,
+      const newServer: FleetServer = {
+        id: `srv-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        name: serverForm.name.trim() || `${serverForm.username}@${serverForm.host}`,
+        organizationId: serverForm.organizationId,
+        groupId: serverForm.groupId,
+        host: serverForm.host.trim(),
+        port: Number(serverForm.port) || 22,
+        username: serverForm.username.trim(),
+        password: serverForm.password || undefined,
+        privateKey: serverForm.privateKey || undefined,
+        authType: serverForm.authType,
+        status: serverForm.status,
+        tags: tagsArray,
+        osType: serverForm.osType,
+        notes: serverForm.notes,
         createdAt: Date.now(),
       };
-      nextReplicas.push(created);
+      nextServers.push(newServer);
+      setBannerNotice({ text: `Server "${newServer.name}" added to Fleet Matrix.` });
     }
-    setReplicaSets(nextReplicas);
-    saveStoredReplicaSets(nextReplicas);
-    setIsReplicaModalOpen(false);
-    setEditingReplica(null);
-    setBannerNotice({ text: `Replica cluster set saved successfully.` });
+
+    const updatedMatrix = { ...fleetMatrix, servers: nextServers };
+    setFleetMatrix(updatedMatrix);
+    saveStoredFleetMatrix(updatedMatrix);
+    setIsServerModalOpen(false);
+    setEditingServer(null);
+
     if (activeConnectionId && homeDir) {
       saveAutomationToServer(activeConnectionId, homeDir, {
         username,
         customRecipes: recipes.filter(r => !r.isBuiltIn),
         history,
-        fleetMatrix,
-        replicaSets: nextReplicas,
+        fleetMatrix: updatedMatrix,
         lastTargetServerIds: selectedServerIds,
       }).catch(() => {});
     }
   };
 
-  const handleDeleteReplica = (id: string) => {
-    const updated = replicaSets.filter(r => r.id !== id);
-    setReplicaSets(updated);
-    saveStoredReplicaSets(updated);
-    setBannerNotice({ text: 'Replica cluster removed.' });
+  const handleDeleteServer = (serverId: string) => {
+    const srv = (fleetMatrix.servers || []).find(s => s.id === serverId);
+    if (!confirm(`Are you sure you want to delete server "${srv?.name || serverId}" from Fleet Matrix?`)) return;
+
+    const nextServers = (fleetMatrix.servers || []).filter(s => s.id !== serverId);
+    const updatedMatrix = { ...fleetMatrix, servers: nextServers };
+    setFleetMatrix(updatedMatrix);
+    saveStoredFleetMatrix(updatedMatrix);
+    setSelectedServerIds(prev => prev.filter(id => id !== serverId));
+    setBannerNotice({ text: `Server deleted from Fleet Matrix.` });
+
     if (activeConnectionId && homeDir) {
       saveAutomationToServer(activeConnectionId, homeDir, {
         username,
         customRecipes: recipes.filter(r => !r.isBuiltIn),
         history,
-        fleetMatrix,
-        replicaSets: updated,
+        fleetMatrix: updatedMatrix,
+        lastTargetServerIds: selectedServerIds,
+      }).catch(() => {});
+    }
+  };
+
+  const handleToggleServerStatus = (serverId: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    const nextServers = (fleetMatrix.servers || []).map(s => {
+      if (s.id === serverId) {
+        const nextStatus: 'active' | 'inactive' = s.status === 'active' ? 'inactive' : 'active';
+        return { ...s, status: nextStatus, updatedAt: Date.now() };
+      }
+      return s;
+    });
+    const updatedMatrix = { ...fleetMatrix, servers: nextServers };
+    setFleetMatrix(updatedMatrix);
+    saveStoredFleetMatrix(updatedMatrix);
+
+    if (activeConnectionId && homeDir) {
+      saveAutomationToServer(activeConnectionId, homeDir, {
+        username,
+        customRecipes: recipes.filter(r => !r.isBuiltIn),
+        history,
+        fleetMatrix: updatedMatrix,
+        lastTargetServerIds: selectedServerIds,
+      }).catch(() => {});
+    }
+  };
+
+  // Import Saved Connections from Login Screen into Fleet Matrix
+  const handleImportSavedConnections = () => {
+    if (!importOrgId || !importGroupId) {
+      setBannerNotice({ text: 'Please select an Organization and Group for imported servers.', isError: true });
+      return;
+    }
+
+    const existingKeys = new Set((fleetMatrix.servers || []).map(s => `${s.username}@${s.host}:${s.port}`));
+    const toImport: FleetServer[] = [];
+
+    connections.forEach(c => {
+      const port = Number(c.port) || 22;
+      const key = `${c.username}@${c.host}:${port}`;
+      if (!existingKeys.has(key)) {
+        toImport.push({
+          id: c.id,
+          organizationId: importOrgId,
+          groupId: importGroupId,
+          name: c.name || `${c.username}@${c.host}`,
+          host: c.host,
+          port,
+          username: c.username,
+          password: c.password,
+          authType: (c as any).authMethod === 'key' ? 'privateKey' : 'password',
+          tags: c.tags || [],
+          status: 'active',
+          createdAt: Date.now(),
+        });
+      }
+    });
+
+    if (toImport.length === 0) {
+      setBannerNotice({ text: 'All saved login connections have already been imported into Fleet Matrix.', isError: false });
+      setIsImportModalOpen(false);
+      return;
+    }
+
+    const updatedServers = [...(fleetMatrix.servers || []), ...toImport];
+    const updatedMatrix = { ...fleetMatrix, servers: updatedServers };
+    setFleetMatrix(updatedMatrix);
+    saveStoredFleetMatrix(updatedMatrix);
+    setIsImportModalOpen(false);
+    setBannerNotice({ text: `Successfully imported ${toImport.length} saved servers into Fleet Matrix!`, isError: false });
+
+    if (activeConnectionId && homeDir) {
+      saveAutomationToServer(activeConnectionId, homeDir, {
+        username,
+        customRecipes: recipes.filter(r => !r.isBuiltIn),
+        history,
+        fleetMatrix: updatedMatrix,
         lastTargetServerIds: selectedServerIds,
       }).catch(() => {});
     }
@@ -967,12 +1178,12 @@ ${serversReport}
               </span>
             </div>
             <p className="text-[10px] text-gray-400">
-              Orchestrator for {connections.length} nodes • Monaco VS Code Integration • Hierarchy & Replicas
+              Orchestrator for {allFleetServers.length} nodes • Monaco VS Code Integration • Hierarchy &amp; Playbooks
             </p>
           </div>
         </div>
 
-        {/* Tab Switcher Pills (Schedules removed) */}
+        {/* Tab Switcher Pills */}
         <div className="flex items-center bg-black/40 p-1 rounded-xl border border-white/5 space-x-1">
           <button
             onClick={() => setActiveTab('runner')}
@@ -1005,18 +1216,7 @@ ${serversReport}
             }`}
           >
             <Network className="w-3.5 h-3.5" />
-            <span>Fleet Matrix</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('replicas')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center space-x-1.5 ${
-              activeTab === 'replicas'
-                ? 'bg-blue-600 text-white shadow-md'
-                : 'text-gray-400 hover:text-white hover:bg-white/5'
-            }`}
-          >
-            <GitBranch className="w-3.5 h-3.5" />
-            <span>Replicas ({replicaSets.length})</span>
+            <span>Fleet Matrix ({allFleetServers.length})</span>
           </button>
           <button
             onClick={() => setActiveTab('history')}
@@ -1090,21 +1290,21 @@ ${serversReport}
       )}
 
       {/* ======================================================== */}
-      {/* 2. TAB 1: RUNNER (PRIMARY WORKSPACE)                     */}
+      {/* 2. TAB 1: RUNNER (PRIMARY ORCHESTRATION WORKSPACE)        */}
       {/* ======================================================== */}
       {activeTab === 'runner' && (
         <div className="flex-1 flex overflow-hidden">
-          {/* LEFT COLUMN: FLEET TARGET SELECTOR WITH ACTIVE GREEN & INACTIVE RED STATUS */}
-          <aside className="w-72 border-r border-white/10 bg-[#111320] flex flex-col shrink-0">
-            {/* Target Header with Dedicated Refresh Button */}
+          {/* LEFT COLUMN: HIERARCHY TARGET SELECTOR (ORGANIZATION > GROUP > SERVER) */}
+          <aside className="w-80 border-r border-white/10 bg-[#111320] flex flex-col shrink-0">
+            {/* Target Header with Dedicated Refresh & Quick Select */}
             <div className="p-3 border-b border-white/10 flex items-center justify-between">
               <div>
                 <span className="text-xs font-bold text-white tracking-wide uppercase">Target Fleet</span>
                 <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-blue-500/20 text-blue-300 font-mono">
-                  {selectedServerIds.length}/{connections.length}
+                  {selectedServerIds.length}/{allFleetServers.length}
                 </span>
               </div>
-              <div className="flex items-center space-x-1.5">
+              <div className="flex items-center space-x-1">
                 <button
                   onClick={handleProbeFleet}
                   disabled={isProbingFleet}
@@ -1114,21 +1314,30 @@ ${serversReport}
                   <RefreshCw className={`w-3.5 h-3.5 ${isProbingFleet ? 'animate-spin text-blue-400' : ''}`} />
                 </button>
                 <button
-                  onClick={selectAllFiltered}
+                  onClick={selectAllTargets}
                   className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white text-[11px] cursor-pointer"
+                  title="Select All Servers"
                 >
                   All
                 </button>
                 <button
-                  onClick={deselectAllFiltered}
+                  onClick={selectActiveTargets}
+                  className="px-1.5 py-0.5 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 text-[11px] cursor-pointer"
+                  title="Select Only Active Servers"
+                >
+                  Active
+                </button>
+                <button
+                  onClick={deselectAllTargets}
                   className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white text-[11px] cursor-pointer"
+                  title="Deselect All"
                 >
                   None
                 </button>
               </div>
             </div>
 
-            {/* Target Status Filters (All / Online / Offline) */}
+            {/* Target Status Filter Pills */}
             <div className="px-3 pt-2 pb-1 flex items-center space-x-1">
               <button
                 onClick={() => setStatusFilter('all')}
@@ -1136,25 +1345,25 @@ ${serversReport}
                   statusFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-white/5 text-gray-400 hover:text-white'
                 }`}
               >
-                All ({connections.length})
+                All ({allFleetServers.length})
               </button>
               <button
-                onClick={() => setStatusFilter('online')}
+                onClick={() => setStatusFilter('active')}
                 className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all flex items-center space-x-1 ${
-                  statusFilter === 'online' ? 'bg-emerald-600 text-white' : 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
+                  statusFilter === 'active' ? 'bg-emerald-600 text-white' : 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
                 }`}
               >
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                <span>Active ({connections.filter(c => fleetHealth[c.id]?.reachable).length})</span>
+                <span>Active ({allFleetServers.filter(s => s.status === 'active').length})</span>
               </button>
               <button
-                onClick={() => setStatusFilter('offline')}
+                onClick={() => setStatusFilter('inactive')}
                 className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all flex items-center space-x-1 ${
-                  statusFilter === 'offline' ? 'bg-red-600 text-white' : 'bg-red-500/10 text-red-400 hover:bg-red-500/20'
+                  statusFilter === 'inactive' ? 'bg-red-600 text-white' : 'bg-red-500/10 text-red-400 hover:bg-red-500/20'
                 }`}
               >
                 <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
-                <span>Inactive ({connections.filter(c => fleetHealth[c.id] && !fleetHealth[c.id]?.reachable).length})</span>
+                <span>Inactive ({allFleetServers.filter(s => s.status === 'inactive').length})</span>
               </button>
             </div>
 
@@ -1164,7 +1373,7 @@ ${serversReport}
                 <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input
                   type="text"
-                  placeholder="Filter targets..."
+                  placeholder="Filter targets by name, host, tags..."
                   value={serverSearchQuery}
                   onChange={e => setServerSearchQuery(e.target.value)}
                   className="w-full pl-8 pr-2.5 py-1.5 rounded-lg bg-black/40 border border-white/10 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
@@ -1172,88 +1381,208 @@ ${serversReport}
               </div>
             </div>
 
-            {/* Servers Checkbox List with Bright Green / Red Status Badges */}
-            <div className="flex-1 overflow-y-auto px-2 space-y-1">
-              {filteredServers.length === 0 ? (
-                <div className="py-8 text-center text-xs text-gray-500">
-                  No matching servers found.
+            {/* HIERARCHICAL TREE VIEW: ORGANIZATION > GROUP > SERVER */}
+            <div className="flex-1 overflow-y-auto px-2 space-y-2">
+              {allFleetServers.length === 0 ? (
+                <div className="py-8 px-4 text-center space-y-3">
+                  <div className="text-xs text-gray-400">No servers defined in Fleet Matrix yet.</div>
+                  <div className="flex flex-col gap-2">
+                    <button
+                      onClick={() => handleOpenAddServer()}
+                      className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center justify-center space-x-1 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Add Server</span>
+                    </button>
+                    {connections.length > 0 && (
+                      <button
+                        onClick={() => {
+                          setImportOrgId(fleetMatrix.organizations[0]?.id || '');
+                          setImportGroupId(fleetMatrix.groups[0]?.id || '');
+                          setIsImportModalOpen(true);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-gray-200 text-xs font-semibold flex items-center justify-center space-x-1 cursor-pointer"
+                      >
+                        <MoveRight className="w-3.5 h-3.5" />
+                        <span>Import from Saved Logins ({connections.length})</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               ) : (
-                filteredServers.map(server => {
-                  const isSelected = selectedServerIds.includes(server.id);
-                  const health = fleetHealth[server.id];
-                  const execRes = executionResults[server.id];
-                  const isOnline = health ? health.reachable : false;
+                fleetMatrix.organizations.map(org => {
+                  const orgServers = filteredServers.filter(s => s.organizationId === org.id);
+                  if (serverSearchQuery && orgServers.length === 0) return null;
+
+                  const isOrgCollapsed = !!collapsedOrgs[org.id];
+                  const allOrgServers = allFleetServers.filter(s => s.organizationId === org.id);
+                  const isAllOrgSelected = allOrgServers.length > 0 && allOrgServers.every(s => selectedServerIds.includes(s.id));
+                  const isSomeOrgSelected = allOrgServers.some(s => selectedServerIds.includes(s.id)) && !isAllOrgSelected;
+                  const orgGroups = fleetMatrix.groups.filter(g => g.organizationId === org.id);
 
                   return (
-                    <div
-                      key={server.id}
-                      onClick={() => toggleServer(server.id)}
-                      className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
-                        isSelected
-                          ? isOnline
-                            ? 'bg-emerald-950/20 border-emerald-500/40 text-white'
-                            : 'bg-red-950/20 border-red-500/40 text-white'
-                          : 'bg-white/[0.02] border-white/5 text-gray-400 hover:bg-white/[0.05]'
-                      }`}
-                    >
-                      <div className="flex items-center space-x-2.5 min-w-0">
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => {}}
-                          className="w-3.5 h-3.5 rounded border-gray-600 text-blue-600 focus:ring-0 cursor-pointer pointer-events-none"
-                        />
-                        <div className="min-w-0">
-                          <div className="flex items-center space-x-1.5">
-                            <span className="text-xs font-semibold truncate text-gray-200">
-                              {server.name || server.host}
-                            </span>
-                            {/* Organization or Group badge */}
-                            {server.group && (
-                              <span className="px-1 py-0.2 rounded text-[9px] bg-white/10 text-gray-300">
-                                {server.group}
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-[10px] text-gray-500 truncate font-mono">
-                            {server.username}@{server.host}:{server.port}
-                          </div>
+                    <div key={org.id} className="rounded-xl border border-white/5 bg-black/20 overflow-hidden">
+                      {/* Organization Row */}
+                      <div className="p-2 flex items-center justify-between bg-white/[0.03] hover:bg-white/[0.06] transition-colors">
+                        <div className="flex items-center space-x-2 min-w-0">
+                          <button
+                            onClick={() => setCollapsedOrgs(prev => ({ ...prev, [org.id]: !prev[org.id] }))}
+                            className="text-gray-400 hover:text-white p-0.5 cursor-pointer"
+                          >
+                            {isOrgCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                          </button>
+                          <input
+                            type="checkbox"
+                            checked={isAllOrgSelected}
+                            ref={el => { if (el) el.indeterminate = isSomeOrgSelected; }}
+                            onChange={() => toggleOrgServers(org.id)}
+                            className="w-3.5 h-3.5 rounded text-blue-600 cursor-pointer"
+                            title="Toggle all servers in this organization"
+                          />
+                          <span
+                            className="w-2.5 h-2.5 rounded-full shrink-0"
+                            style={{ backgroundColor: org.color || '#6366f1' }}
+                          />
+                          <span className="text-xs font-bold text-white truncate">{org.name}</span>
                         </div>
+                        <span className="text-[10px] text-gray-400 font-mono shrink-0">
+                          {allOrgServers.filter(s => s.status === 'active').length}/{allOrgServers.length} Active
+                        </span>
                       </div>
 
-                      {/* Explicit Active Green / Inactive Red Status Indicator */}
-                      <div className="shrink-0 flex items-center space-x-1.5">
-                        {execRes && execRes.status === 'running' ? (
-                          <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-400" />
-                        ) : isOnline ? (
-                          <span
-                            className="flex items-center space-x-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_8px_rgba(52,211,153,0.3)]"
-                            title={`Active / Online (${health?.latencyMs || 0}ms)`}
-                          >
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                            <span>Active</span>
-                          </span>
-                        ) : (
-                          <span
-                            className="flex items-center space-x-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-red-500/20 text-red-300 border border-red-500/40 shadow-[0_0_8px_rgba(239,68,68,0.3)]"
-                            title={health?.error || 'Server is offline or unreachable'}
-                          >
-                            <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
-                            <span>Inactive</span>
-                          </span>
-                        )}
-                      </div>
+                      {/* Nested Groups inside Org */}
+                      {!isOrgCollapsed && (
+                        <div className="p-1 space-y-1">
+                          {orgGroups.map(grp => {
+                            const groupServers = filteredServers.filter(s => s.groupId === grp.id);
+                            if (serverSearchQuery && groupServers.length === 0) return null;
+
+                            const isGroupCollapsed = !!collapsedGroups[grp.id];
+                            const allGroupServers = allFleetServers.filter(s => s.groupId === grp.id);
+                            const isAllGroupSelected = allGroupServers.length > 0 && allGroupServers.every(s => selectedServerIds.includes(s.id));
+                            const isSomeGroupSelected = allGroupServers.some(s => selectedServerIds.includes(s.id)) && !isAllGroupSelected;
+
+                            return (
+                              <div key={grp.id} className="ml-2 pl-2 border-l border-white/10 rounded-lg">
+                                {/* Group Row */}
+                                <div className="p-1.5 flex items-center justify-between rounded hover:bg-white/[0.04] transition-colors">
+                                  <div className="flex items-center space-x-2 min-w-0">
+                                    <button
+                                      onClick={() => setCollapsedGroups(prev => ({ ...prev, [grp.id]: !prev[grp.id] }))}
+                                      className="text-gray-400 hover:text-white p-0.5 cursor-pointer"
+                                    >
+                                      {isGroupCollapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                                    </button>
+                                    <input
+                                      type="checkbox"
+                                      checked={isAllGroupSelected}
+                                      ref={el => { if (el) el.indeterminate = isSomeGroupSelected; }}
+                                      onChange={() => toggleGroupServers(grp.id)}
+                                      className="w-3.5 h-3.5 rounded text-blue-600 cursor-pointer"
+                                      title="Toggle all servers in this group"
+                                    />
+                                    <span
+                                      className="w-2 h-2 rounded-full shrink-0"
+                                      style={{ backgroundColor: grp.color || '#3b82f6' }}
+                                    />
+                                    <span className="text-xs font-semibold text-gray-300 truncate">{grp.name}</span>
+                                  </div>
+                                  <span className="text-[10px] text-gray-500 font-mono shrink-0">
+                                    ({allGroupServers.length})
+                                  </span>
+                                </div>
+
+                                {/* Nested Servers inside Group */}
+                                {!isGroupCollapsed && (
+                                  <div className="ml-3 pl-2 border-l border-white/5 space-y-1 mt-1 pb-1">
+                                    {groupServers.length === 0 ? (
+                                      <div className="text-[10px] text-gray-500 italic py-1">No matching servers</div>
+                                    ) : (
+                                      groupServers.map(server => {
+                                        const isSelected = selectedServerIds.includes(server.id);
+                                        const health = fleetHealth[server.id];
+                                        const execRes = executionResults[server.id];
+                                        const isActive = server.status === 'active';
+
+                                        return (
+                                          <div
+                                            key={server.id}
+                                            onClick={() => toggleServer(server.id)}
+                                            className={`p-2 rounded-lg border transition-all cursor-pointer flex items-center justify-between ${
+                                              isSelected
+                                                ? isActive
+                                                  ? 'bg-emerald-950/25 border-emerald-500/40 text-white'
+                                                  : 'bg-red-950/25 border-red-500/40 text-white'
+                                                : 'bg-white/[0.02] border-white/5 text-gray-400 hover:bg-white/[0.05]'
+                                            }`}
+                                          >
+                                            <div className="flex items-center space-x-2 min-w-0">
+                                              <input
+                                                type="checkbox"
+                                                checked={isSelected}
+                                                onChange={() => {}}
+                                                className="w-3.5 h-3.5 rounded text-blue-600 pointer-events-none"
+                                              />
+                                              <div className="min-w-0">
+                                                <div className="flex items-center space-x-1.5">
+                                                  <span className="text-xs font-semibold truncate text-gray-200">
+                                                    {server.name}
+                                                  </span>
+                                                </div>
+                                                <div className="text-[10px] text-gray-500 truncate font-mono">
+                                                  {server.username}@{server.host}:{server.port}
+                                                </div>
+                                              </div>
+                                            </div>
+
+                                            {/* Bright Green Active / Bright Red Inactive status badge */}
+                                            <div className="shrink-0 flex items-center space-x-1.5">
+                                              {execRes && execRes.status === 'running' ? (
+                                                <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-400" />
+                                              ) : isActive ? (
+                                                <span
+                                                  className="flex items-center space-x-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_8px_rgba(52,211,153,0.3)]"
+                                                  title={`Active node${health?.latencyMs ? ` (${health.latencyMs}ms)` : ''}`}
+                                                >
+                                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                                  <span>Active</span>
+                                                </span>
+                                              ) : (
+                                                <span
+                                                  className="flex items-center space-x-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-red-500/20 text-red-300 border border-red-500/40 shadow-[0_0_8px_rgba(239,68,68,0.3)]"
+                                                  title="Deactivated in Fleet Matrix. Execution will be skipped."
+                                                >
+                                                  <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                                                  <span>Inactive</span>
+                                                </span>
+                                              )}
+                                            </div>
+                                          </div>
+                                        );
+                                      })
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   );
                 })
               )}
             </div>
 
-            {/* Quick Fleet Target Stats Footer */}
-            <div className="p-3 border-t border-white/10 bg-black/20 text-[11px] text-gray-400 flex items-center justify-between">
+            {/* Target Fleet Stats Footer */}
+            <div className="p-3 border-t border-white/10 bg-black/30 text-[11px] text-gray-400 flex items-center justify-between">
               <span>Selected for Execution:</span>
-              <span className="font-bold text-white font-mono">{selectedServerIds.length} Nodes</span>
+              <div className="flex items-center space-x-1.5 font-mono">
+                <span className="font-bold text-white">{selectedServerIds.length} Nodes</span>
+                <span className="text-[10px] text-emerald-400">
+                  ({targetServers.filter(s => s.status === 'active').length} active)
+                </span>
+              </div>
             </div>
           </aside>
 
@@ -1262,7 +1591,7 @@ ${serversReport}
             {/* Task Configuration Toolbar */}
             <div className="p-4 border-b border-white/10 bg-[#141624] space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                {/* Recipe Picker */}
+                {/* Playbook Picker */}
                 <div className="flex items-center space-x-2">
                   <span className="text-xs font-semibold text-gray-400">Playbook:</span>
                   <select
@@ -1314,89 +1643,77 @@ ${serversReport}
                   </div>
 
                   {executionMode === 'parallel' ? (
-                    <div className="flex items-center space-x-1.5 border-l border-white/10 pl-3">
-                      <span className="text-[11px] text-gray-400">Workers:</span>
-                      <select
+                    <div className="flex items-center space-x-1.5 text-xs text-gray-300 pl-2 border-l border-white/10">
+                      <span>Pool:</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={30}
                         value={concurrency}
-                        onChange={e => setConcurrency(Number(e.target.value))}
-                        className="px-2 py-0.5 rounded bg-black/60 border border-white/10 text-xs text-white focus:outline-none"
-                      >
-                        <option value={1}>1 (Sequential)</option>
-                        <option value={2}>2 Concurrent</option>
-                        <option value={5}>5 Concurrent</option>
-                        <option value={10}>10 Concurrent</option>
-                        <option value={50}>All Concurrent</option>
-                      </select>
+                        onChange={e => setConcurrency(Math.max(1, Math.min(30, Number(e.target.value) || 1)))}
+                        className="w-12 px-1.5 py-0.5 rounded bg-black/60 border border-white/20 text-center font-mono text-white text-xs focus:outline-none"
+                      />
                     </div>
                   ) : (
-                    <label className="flex items-center space-x-1.5 border-l border-white/10 pl-3 text-[11px] text-gray-300 cursor-pointer">
+                    <label className="flex items-center space-x-1.5 text-xs text-gray-300 pl-2 border-l border-white/10 cursor-pointer">
                       <input
                         type="checkbox"
                         checked={stopOnError}
                         onChange={e => setStopOnError(e.target.checked)}
-                        className="w-3.5 h-3.5 rounded text-blue-600 border-gray-600"
+                        className="w-3.5 h-3.5 rounded text-blue-600"
                       />
-                      <span>Stop on Failure</span>
+                      <span>Stop on Error</span>
                     </label>
                   )}
 
-                  {/* Sudo Toggle */}
-                  <label className="flex items-center space-x-1.5 border-l border-white/10 pl-3 text-[11px] text-gray-300 cursor-pointer">
+                  <label className="flex items-center space-x-1.5 text-xs text-red-300 pl-2 border-l border-white/10 cursor-pointer">
                     <input
                       type="checkbox"
                       checked={isSudo}
                       onChange={e => setIsSudo(e.target.checked)}
-                      className="w-3.5 h-3.5 rounded text-indigo-600 border-gray-600"
+                      className="w-3.5 h-3.5 rounded text-red-600"
                     />
-                    <Shield className="w-3 h-3 text-indigo-400" />
-                    <span>Run as Sudo</span>
+                    <Shield className="w-3.5 h-3.5 text-red-400" />
+                    <span>Sudo</span>
                   </label>
                 </div>
 
-                {/* Primary Execution CTA */}
+                {/* Primary Action Button */}
                 <div className="flex items-center space-x-2">
                   {isRunning ? (
                     <button
                       onClick={handleCancelExecution}
-                      className="px-4 py-2 rounded-xl bg-red-600/80 hover:bg-red-600 text-white text-xs font-semibold shadow-lg shadow-red-600/30 flex items-center space-x-2 transition-all cursor-pointer"
+                      className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold shadow-lg shadow-red-500/25 flex items-center space-x-2 cursor-pointer"
                     >
-                      <Square className="w-3.5 h-3.5 fill-current" />
-                      <span>Abort Run</span>
+                      <Square className="w-4 h-4 fill-current" />
+                      <span>Cancel Fleet Run</span>
                     </button>
                   ) : (
                     <button
                       onClick={handleRunAutomation}
-                      disabled={selectedServerIds.length === 0}
-                      className="px-5 py-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-cyan-500 hover:opacity-95 text-white text-xs font-bold shadow-lg shadow-blue-500/25 flex items-center space-x-2 disabled:opacity-50 transition-all cursor-pointer"
+                      disabled={selectedServerIds.length === 0 || !customCommand.trim()}
+                      className="px-5 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold shadow-lg shadow-blue-500/30 flex items-center space-x-2 disabled:opacity-50 transition-all cursor-pointer"
                     >
-                      <Play className="w-3.5 h-3.5 fill-current" />
-                      <span>Execute on Fleet ({selectedServerIds.length})</span>
+                      <Play className="w-4 h-4 fill-current" />
+                      <span>Execute on Fleet ({targetServers.length} Servers)</span>
                     </button>
                   )}
                 </div>
               </div>
 
-              {/* Dynamic Variables Inputs */}
-              {recipes.find(r => r.id === selectedRecipeId)?.variables && (
-                <div className="pt-2 border-t border-white/5 flex flex-wrap gap-3">
-                  {recipes.find(r => r.id === selectedRecipeId)?.variables?.map(v => (
-                    <div key={v.name} className="flex items-center space-x-2 text-xs">
-                      <span className="text-gray-400">{v.label}:</span>
-                      <input
-                        type="text"
-                        placeholder={v.placeholder || v.name}
-                        value={variableValues[v.name] || ''}
-                        onChange={e => setVariableValues(prev => ({ ...prev, [v.name]: e.target.value }))}
-                        className="px-2.5 py-1 rounded bg-black/60 border border-white/15 text-white text-xs min-w-[220px] focus:outline-none focus:border-blue-500"
-                      />
-                    </div>
-                  ))}
+              {/* Inactive servers warning pill if any inactive servers are in selection */}
+              {targetServers.some(s => s.status === 'inactive') && (
+                <div className="p-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-300 text-[11px] flex items-center space-x-2">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    Note: {targetServers.filter(s => s.status === 'inactive').length} selected server(s) are deactivated in Fleet Matrix and will be cleanly marked skipped without executing commands.
+                  </span>
                 </div>
               )}
             </div>
 
-            {/* MONACO VS CODE EDITOR TOOLBAR */}
-            <div className="px-4 py-2 border-b border-white/10 bg-[#0d101d] flex flex-wrap items-center justify-between gap-2 text-xs">
+            {/* MONACO VS CODE SCRIPT EDITOR TOOLBAR */}
+            <div className="px-4 py-2 border-b border-white/10 bg-[#0f111d] flex items-center justify-between text-xs">
               <div className="flex items-center space-x-3">
                 <span className="flex items-center space-x-1.5 font-semibold text-blue-400">
                   <Terminal className="w-3.5 h-3.5" />
@@ -1566,7 +1883,7 @@ ${serversReport}
                   <Server className="w-12 h-12 text-gray-600 mb-3" />
                   <h3 className="text-sm font-semibold text-gray-300">No Target Servers Selected</h3>
                   <p className="text-xs text-gray-500 max-w-sm mt-1">
-                    Select target servers from the left panel to execute commands across your fleet.
+                    Select target servers from the left hierarchy panel to execute commands across your fleet.
                   </p>
                 </div>
               ) : Object.keys(executionResults).length === 0 ? (
@@ -1587,6 +1904,7 @@ ${serversReport}
                     const isSuccess = res.status === 'success';
                     const isFailed = res.status === 'failed';
                     const isRunningCard = res.status === 'running';
+                    const isDeactive = server.status === 'inactive';
 
                     return (
                       <div
@@ -1598,154 +1916,126 @@ ${serversReport}
                             ? 'bg-[#111624] border-emerald-500/30'
                             : isFailed
                             ? 'bg-[#1a1218] border-red-500/30'
-                            : 'bg-white/[0.02] border-white/10 opacity-70'
+                            : 'bg-[#131522] border-white/10'
                         }`}
                       >
-                        {/* Server Card Header */}
-                        <div className="flex items-center justify-between pb-2 border-b border-white/5">
-                          <div className="flex items-center space-x-2 min-w-0">
-                            {isRunningCard ? (
-                              <RefreshCw className="w-4 h-4 text-blue-400 animate-spin shrink-0" />
-                            ) : isSuccess ? (
-                              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                            ) : isFailed ? (
-                              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
-                            ) : (
-                              <Clock className="w-4 h-4 text-gray-500 shrink-0" />
-                            )}
-                            <div className="min-w-0">
-                              <h4 className="text-xs font-bold text-white truncate">
-                                {server.name || server.host}
-                              </h4>
-                              <p className="text-[10px] text-gray-400 font-mono truncate">
-                                {server.host}:{server.port}
-                              </p>
+                        <div>
+                          <div className="flex items-center justify-between pb-2 border-b border-white/5">
+                            <div className="flex items-center space-x-2 min-w-0">
+                              <span
+                                className={`w-2 h-2 rounded-full shrink-0 ${
+                                  isRunningCard
+                                    ? 'bg-blue-400 animate-pulse'
+                                    : isSuccess
+                                    ? 'bg-emerald-400'
+                                    : isFailed
+                                    ? 'bg-red-400'
+                                    : 'bg-gray-500'
+                                }`}
+                              />
+                              <div className="min-w-0">
+                                <span className="font-bold text-xs text-white truncate block">
+                                  {server.name}
+                                </span>
+                                <span className="text-[10px] text-gray-500 font-mono truncate block">
+                                  {server.username}@{server.host}:{server.port}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center space-x-1.5 shrink-0">
+                              {isDeactive && (
+                                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-red-500/20 text-red-300 border border-red-500/30">
+                                  DEACTIVATED
+                                </span>
+                              )}
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${
+                                  isRunningCard
+                                    ? 'bg-blue-500/20 text-blue-300'
+                                    : isSuccess
+                                    ? 'bg-emerald-500/20 text-emerald-300'
+                                    : isFailed
+                                    ? 'bg-red-500/20 text-red-300'
+                                    : 'bg-white/10 text-gray-400'
+                                }`}
+                              >
+                                {res.status}
+                              </span>
                             </div>
                           </div>
 
-                          <div className="flex items-center space-x-1.5 shrink-0">
-                            {res.durationMs > 0 && (
-                              <span className="text-[10px] text-gray-400 font-mono">
-                                {(res.durationMs / 1000).toFixed(2)}s
-                              </span>
-                            )}
-                            <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${
-                              isSuccess
-                                ? 'bg-emerald-500/20 text-emerald-300'
-                                : isFailed
-                                ? 'bg-red-500/20 text-red-300'
-                                : isRunningCard
-                                ? 'bg-blue-500/20 text-blue-300'
-                                : 'bg-gray-500/20 text-gray-400'
-                            }`}>
-                              {res.status.toUpperCase()}
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Terminal Output Snippet */}
-                        <div
-                          onClick={() => setInspectResult(res)}
-                          className="mt-2 h-24 p-2 rounded-lg bg-black/60 border border-white/5 font-mono text-[10px] text-gray-300 overflow-hidden cursor-pointer hover:border-white/20 transition-all select-text flex flex-col justify-between"
-                          title="Click to expand terminal logs"
-                        >
-                          <div className="overflow-hidden leading-relaxed line-clamp-4">
+                          {/* Output preview terminal */}
+                          <div className="mt-2.5 p-2 rounded-xl bg-black/60 border border-white/5 font-mono text-[10px] text-gray-300 h-24 overflow-y-auto select-text leading-relaxed">
                             {isRunningCard ? (
-                              <div className="text-blue-400 flex items-center space-x-1.5">
+                              <div className="flex items-center space-x-2 text-blue-400">
                                 <RefreshCw className="w-3 h-3 animate-spin" />
-                                <span>Executing script on remote node...</span>
+                                <span>Executing script on node...</span>
                               </div>
-                            ) : res.stdout ? (
-                              <span className="text-gray-300 whitespace-pre-wrap">{res.stdout}</span>
-                            ) : res.stderr ? (
-                              <span className="text-red-400 whitespace-pre-wrap">{res.stderr}</span>
+                            ) : res.stdout || res.stderr ? (
+                              <>
+                                {res.stdout && <div className="text-emerald-400/90 whitespace-pre-wrap">{res.stdout}</div>}
+                                {res.stderr && <div className="text-red-400 whitespace-pre-wrap mt-1">{res.stderr}</div>}
+                              </>
                             ) : (
-                              <span className="text-gray-600 italic">No output returned.</span>
+                              <span className="text-gray-600 italic">No output recorded.</span>
                             )}
-                          </div>
-                          <div className="pt-1 flex items-center justify-between text-[9px] text-gray-500 border-t border-white/5">
-                            <span>Exit Code: {res.exitCode}</span>
-                            <span className="text-blue-400 flex items-center space-x-0.5">
-                              <Eye className="w-3 h-3" />
-                              <span>Inspect Log</span>
-                            </span>
                           </div>
                         </div>
 
-                        {/* Card Actions */}
-                        <div className="mt-2.5 pt-2 flex items-center justify-between text-xs">
-                          <button
-                            onClick={() => handleDownloadSingleLog(res, selectedRecipeId)}
-                            className="px-2 py-1 rounded bg-white/5 hover:bg-white/10 text-gray-300 text-[10px] flex items-center space-x-1 transition-all cursor-pointer"
-                            title="Download this server's output log"
-                          >
-                            <Download className="w-3 h-3 text-cyan-400" />
-                            <span>Download Log</span>
-                          </button>
+                        {/* Footer with runtime, single download, and view drawer button */}
+                        <div className="mt-3 pt-2 border-t border-white/5 flex items-center justify-between text-[11px] text-gray-400">
+                          <span className="font-mono">
+                            {(res.durationMs / 1000).toFixed(2)}s
+                            {res.exitCode !== undefined && ` • exit ${res.exitCode}`}
+                          </span>
 
-                          <button
-                            onClick={() => setInspectResult(res)}
-                            className="text-xs text-blue-400 hover:text-blue-300 font-medium cursor-pointer"
-                          >
-                            Full Output &rarr;
-                          </button>
+                          <div className="flex items-center space-x-1">
+                            <button
+                              onClick={() => handleDownloadSingleLog(res, selectedRecipeId)}
+                              className="p-1 rounded bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white transition-all cursor-pointer"
+                              title="Download execution log for this server"
+                            >
+                              <Download className="w-3 h-3" />
+                            </button>
+                            <button
+                              onClick={() => setInspectResult(res)}
+                              className="p-1 rounded bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white transition-all cursor-pointer"
+                              title="Inspect full output in drawer"
+                            >
+                              <Eye className="w-3 h-3" />
+                            </button>
+                          </div>
                         </div>
                       </div>
                     );
                   })}
                 </div>
               ) : (
-                /* UNIFIED LOG CONSOLE VIEW */
-                <div className="rounded-2xl border border-white/10 bg-black/80 font-mono text-xs overflow-hidden flex flex-col h-full shadow-2xl">
-                  <div className="px-4 py-2.5 bg-[#141724] border-b border-white/10 flex items-center justify-between text-gray-400">
-                    <span className="text-xs font-bold text-white">Fleet Unified Terminal Stream</span>
-                    <button
-                      onClick={() => {
-                        const fullLog = targetServers
-                          .map(s => {
-                            const res = executionResults[s.id];
-                            return `=== [${s.name || s.host}] (Status: ${res?.status}, Code: ${res?.exitCode}) ===\n${res?.stdout || ''}\n${res?.stderr || ''}\n`;
-                          })
-                          .join('\n');
-                        handleCopy(fullLog, 'unified-full');
-                      }}
-                      className="px-2.5 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px] flex items-center space-x-1 cursor-pointer"
-                    >
-                      {copiedKey === 'unified-full' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-                      <span>Copy Unified Log</span>
-                    </button>
-                  </div>
+                /* UNIFIED LOG STREAM VIEW */
+                <div className="rounded-2xl border border-white/10 bg-[#090b14] p-4 font-mono text-xs overflow-y-auto space-y-4">
+                  {targetServers.map(server => {
+                    const res = executionResults[server.id];
+                    if (!res) return null;
 
-                  <div className="flex-1 p-4 overflow-y-auto space-y-4 select-text">
-                    {targetServers.map(s => {
-                      const res = executionResults[s.id];
-                      if (!res) return null;
-
-                      return (
-                        <div key={s.id} className="border-b border-white/5 pb-3">
-                          <div className="flex items-center space-x-2 text-blue-400 font-semibold mb-1">
-                            <span>[{s.name || s.host}]</span>
-                            <span className="text-gray-500 text-[10px]">({s.host})</span>
-                            <span className={`text-[10px] px-1.5 py-0.2 rounded ${
-                              res.status === 'success' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'
-                            }`}>
-                              exit {res.exitCode} ({res.durationMs}ms)
-                            </span>
-                          </div>
-                          {res.stdout && (
-                            <pre className="text-emerald-300/90 whitespace-pre-wrap pl-2 font-mono text-[11px] leading-relaxed">
-                              {res.stdout}
-                            </pre>
-                          )}
-                          {res.stderr && (
-                            <pre className="text-red-400 whitespace-pre-wrap pl-2 font-mono text-[11px] leading-relaxed">
-                              {res.stderr}
-                            </pre>
-                          )}
+                    return (
+                      <div key={server.id} className="space-y-1">
+                        <div className="text-blue-400 font-bold border-b border-white/10 pb-1 flex items-center justify-between">
+                          <span>
+                            &gt;&gt;&gt; NODE: {server.name} ({server.username}@{server.host}:{server.port}) — STATUS: {res.status.toUpperCase()}
+                          </span>
+                          <span className="text-gray-500 font-normal text-[10px]">
+                            exit code: {res.exitCode} • {(res.durationMs / 1000).toFixed(2)}s
+                          </span>
                         </div>
-                      );
-                    })}
-                  </div>
+                        {res.stdout && <pre className="text-emerald-400 whitespace-pre-wrap pl-3">{res.stdout}</pre>}
+                        {res.stderr && <pre className="text-red-400 whitespace-pre-wrap pl-3">{res.stderr}</pre>}
+                        {!res.stdout && !res.stderr && (
+                          <div className="text-gray-600 pl-3 italic">(No standard output or error stream)</div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1754,21 +2044,33 @@ ${serversReport}
       )}
 
       {/* ======================================================== */}
-      {/* 3. TAB 2: RECIPE PLAYBOOKS                               */}
+      {/* 3. TAB 2: RECIPE PLAYBOOKS (WITH ADD / EDIT / DELETE)    */}
       {/* ======================================================== */}
       {activeTab === 'recipes' && (
         <div className="flex-1 overflow-y-auto p-6 bg-[#0e101a]">
           <div className="max-w-6xl mx-auto space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-bold text-white tracking-tight">Automation Recipes & Playbooks</h2>
+                <h2 className="text-lg font-bold text-white tracking-tight">Automation Recipes &amp; Playbooks</h2>
                 <p className="text-xs text-gray-400">
-                  Curated operational workflows and customizable multi-server scripts
+                  Curated operational workflows and customizable multi-server scripts with full VS Code Monaco editor
                 </p>
               </div>
 
               <button
-                onClick={() => setIsRecipeModalOpen(true)}
+                onClick={() => {
+                  setEditingRecipe(null);
+                  setRecipeForm({
+                    title: '',
+                    category: 'custom',
+                    description: '',
+                    command: '#!/usr/bin/env bash\n# Enter bash commands to run across your fleet...\n',
+                    isSudo: false,
+                    stopOnError: false,
+                    timeoutSeconds: 60,
+                  });
+                  setIsRecipeModalOpen(true);
+                }}
                 className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-lg shadow-blue-500/25 flex items-center space-x-2 cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
@@ -1776,73 +2078,128 @@ ${serversReport}
               </button>
             </div>
 
+            {/* Filter and Search Bar */}
+            <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl bg-[#141726] border border-white/10">
+              <div className="flex items-center space-x-1 overflow-x-auto">
+                {['all', 'system', 'maintenance', 'security', 'docker', 'web', 'cleanup', 'custom'].map(cat => (
+                  <button
+                    key={cat}
+                    onClick={() => setSelectedRecipeCategory(cat)}
+                    className={`px-3 py-1 rounded-lg text-xs font-medium capitalize transition-all cursor-pointer ${
+                      selectedRecipeCategory === cat
+                        ? 'bg-blue-600 text-white'
+                        : 'text-gray-400 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+
+              <div className="relative w-64">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  placeholder="Search recipes..."
+                  value={recipeSearchQuery}
+                  onChange={e => setRecipeSearchQuery(e.target.value)}
+                  className="w-full pl-8 pr-2.5 py-1.5 rounded-lg bg-black/40 border border-white/10 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+            </div>
+
             {/* Recipes Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {recipes.map(recipe => (
-                <div
-                  key={recipe.id}
-                  className="rounded-2xl border border-white/10 bg-[#131626] p-4 flex flex-col justify-between hover:border-white/25 transition-all shadow-lg"
-                >
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
-                        recipe.category === 'security'
-                          ? 'bg-amber-500/20 text-amber-300'
-                          : recipe.category === 'docker'
-                          ? 'bg-blue-500/20 text-blue-300'
-                          : recipe.category === 'maintenance'
-                          ? 'bg-emerald-500/20 text-emerald-300'
-                          : recipe.category === 'cleanup'
-                          ? 'bg-purple-500/20 text-purple-300'
-                          : 'bg-indigo-500/20 text-indigo-300'
-                      }`}>
-                        {recipe.category}
-                      </span>
-
-                      {recipe.isSudo && (
-                        <span className="flex items-center space-x-1 text-[10px] text-red-400">
-                          <Shield className="w-3 h-3" />
-                          <span>Requires Sudo</span>
+              {recipes
+                .filter(r => {
+                  const matchesCat = selectedRecipeCategory === 'all' || r.category === selectedRecipeCategory;
+                  const q = recipeSearchQuery.toLowerCase();
+                  const matchesSearch = !q || r.title.toLowerCase().includes(q) || r.description.toLowerCase().includes(q) || r.command.toLowerCase().includes(q);
+                  return matchesCat && matchesSearch;
+                })
+                .map(recipe => (
+                  <div
+                    key={recipe.id}
+                    className="rounded-2xl border border-white/10 bg-[#131626] p-4 flex flex-col justify-between hover:border-white/25 transition-all shadow-lg"
+                  >
+                    <div>
+                      <div className="flex items-center justify-between">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                          recipe.category === 'security'
+                            ? 'bg-amber-500/20 text-amber-300'
+                            : recipe.category === 'docker'
+                            ? 'bg-blue-500/20 text-blue-300'
+                            : recipe.category === 'maintenance'
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : recipe.category === 'cleanup'
+                            ? 'bg-purple-500/20 text-purple-300'
+                            : 'bg-indigo-500/20 text-indigo-300'
+                        }`}>
+                          {recipe.category}
                         </span>
-                      )}
+
+                        <div className="flex items-center space-x-1.5">
+                          {recipe.isSudo && (
+                            <span className="flex items-center space-x-1 text-[10px] text-red-400 font-semibold">
+                              <Shield className="w-3 h-3" />
+                              <span>Sudo</span>
+                            </span>
+                          )}
+                          {recipe.isBuiltIn ? (
+                            <span className="px-1.5 py-0.5 rounded text-[9px] bg-white/10 text-gray-400 font-mono">
+                              Built-In
+                            </span>
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded text-[9px] bg-indigo-500/20 text-indigo-300 font-mono">
+                              Custom
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <h3 className="mt-2 text-sm font-bold text-white">{recipe.title}</h3>
+                      <p className="mt-1 text-xs text-gray-400 line-clamp-2 leading-relaxed">
+                        {recipe.description}
+                      </p>
+
+                      <div className="mt-3 p-2.5 rounded-xl bg-black/60 border border-white/5 font-mono text-[10px] text-emerald-400/90 h-20 overflow-hidden select-text">
+                        <pre className="whitespace-pre-wrap">{recipe.command}</pre>
+                      </div>
                     </div>
 
-                    <h3 className="mt-2 text-sm font-bold text-white">{recipe.title}</h3>
-                    <p className="mt-1 text-xs text-gray-400 line-clamp-2 leading-relaxed">
-                      {recipe.description}
-                    </p>
+                    <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between">
+                      <div className="flex items-center space-x-1">
+                        <button
+                          onClick={() => handleOpenEditRecipe(recipe)}
+                          className="text-gray-400 hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-all cursor-pointer"
+                          title="Edit recipe"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                        {!recipe.isBuiltIn && (
+                          <button
+                            onClick={() => handleDeleteRecipe(recipe.id)}
+                            className="text-gray-400 hover:text-red-400 p-1.5 rounded-lg hover:bg-white/5 transition-all cursor-pointer"
+                            title="Delete custom recipe"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
 
-                    <div className="mt-3 p-2.5 rounded-xl bg-black/60 border border-white/5 font-mono text-[10px] text-emerald-400/90 h-20 overflow-hidden select-text">
-                      <pre className="whitespace-pre-wrap">{recipe.command}</pre>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between">
-                    {!recipe.isBuiltIn ? (
                       <button
-                        onClick={() => handleDeleteRecipe(recipe.id)}
-                        className="text-gray-500 hover:text-red-400 p-1.5 transition-all cursor-pointer"
-                        title="Delete custom recipe"
+                        onClick={() => {
+                          setSelectedRecipeId(recipe.id);
+                          setActiveTab('runner');
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 hover:text-white border border-blue-500/30 text-xs font-semibold flex items-center space-x-1 transition-all cursor-pointer"
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Load in Runner</span>
+                        <ArrowRight className="w-3 h-3" />
                       </button>
-                    ) : (
-                      <span className="text-[10px] text-gray-500 font-mono">Built-In</span>
-                    )}
-
-                    <button
-                      onClick={() => {
-                        setSelectedRecipeId(recipe.id);
-                        setActiveTab('runner');
-                      }}
-                      className="px-3 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 hover:text-white border border-blue-500/30 text-xs font-semibold flex items-center space-x-1 transition-all cursor-pointer"
-                    >
-                      <span>Load in Runner</span>
-                      <ArrowRight className="w-3 h-3" />
-                    </button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
             </div>
           </div>
         </div>
@@ -1858,7 +2215,7 @@ ${serversReport}
               <div>
                 <h2 className="text-lg font-bold text-white tracking-tight">Enterprise Fleet Matrix</h2>
                 <p className="text-xs text-gray-400">
-                  Manage infrastructure hierarchy: Organization &gt; Group &gt; Server. Automatically persisted to <code className="text-amber-300 font-mono text-[10px]">{serverFilePath}</code>.
+                  Manage infrastructure hierarchy: Organization &gt; Group &gt; Server. Directly add, edit, and delete servers inside this application.
                 </p>
               </div>
 
@@ -1892,21 +2249,27 @@ ${serversReport}
                 </button>
 
                 <button
-                  onClick={() => {
-                    if (connections.length === 0) {
-                      setBannerNotice({ text: 'No servers available to assign.', isError: true });
-                      return;
-                    }
-                    setAssignServerId(connections[0].id);
-                    setAssignOrgId(fleetMatrix.organizations[0]?.id || '');
-                    setAssignGroupId(fleetMatrix.groups[0]?.id || '');
-                    setIsAssignModalOpen(true);
-                  }}
-                  className="px-3 py-2 rounded-xl bg-cyan-600/30 hover:bg-cyan-600/50 text-cyan-300 hover:text-white border border-cyan-500/30 text-xs font-semibold flex items-center space-x-1.5 cursor-pointer"
+                  onClick={() => handleOpenAddServer()}
+                  className="px-3 py-2 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 hover:text-white border border-emerald-500/30 text-xs font-semibold flex items-center space-x-1.5 cursor-pointer"
                 >
-                  <MoveRight className="w-4 h-4" />
-                  <span>Assign Server</span>
+                  <Plus className="w-4 h-4" />
+                  <span>Add Server</span>
                 </button>
+
+                {connections.length > 0 && (
+                  <button
+                    onClick={() => {
+                      setImportOrgId(fleetMatrix.organizations[0]?.id || '');
+                      setImportGroupId(fleetMatrix.groups[0]?.id || '');
+                      setIsImportModalOpen(true);
+                    }}
+                    className="px-3 py-2 rounded-xl bg-cyan-600/30 hover:bg-cyan-600/50 text-cyan-300 hover:text-white border border-cyan-500/30 text-xs font-semibold flex items-center space-x-1.5 cursor-pointer"
+                    title="Import saved server logins from desktop into fleet matrix"
+                  >
+                    <MoveRight className="w-4 h-4" />
+                    <span>Import Logins ({connections.length})</span>
+                  </button>
+                )}
 
                 <button
                   onClick={() => handleSaveToServer(false)}
@@ -1953,6 +2316,17 @@ ${serversReport}
                       <div className="flex items-center space-x-2">
                         <button
                           onClick={() => {
+                            setEditingGroup(null);
+                            setGroupForm({ organizationId: org.id, name: '', description: '', color: '#3b82f6' });
+                            setIsGroupModalOpen(true);
+                          }}
+                          className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-gray-300 hover:text-white transition-all flex items-center space-x-1 cursor-pointer"
+                        >
+                          <Plus className="w-3 h-3" />
+                          <span>Add Group</span>
+                        </button>
+                        <button
+                          onClick={() => {
                             setEditingOrg(org);
                             setOrgForm({ name: org.name, description: org.description || '', color: org.color || '#6366f1' });
                             setIsOrgModalOpen(true);
@@ -1980,9 +2354,9 @@ ${serversReport}
                     ) : (
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {orgGroups.map(grp => {
-                          // Find all servers mapped to this group
-                          const assignedServers = connections.filter(
-                            c => fleetMatrix.mappings[c.id]?.groupId === grp.id
+                          // Find all servers belonging to this group
+                          const groupServers = (fleetMatrix.servers || []).filter(
+                            s => s.groupId === grp.id
                           );
 
                           return (
@@ -1999,11 +2373,19 @@ ${serversReport}
                                     />
                                     <h4 className="text-sm font-bold text-white">{grp.name}</h4>
                                     <span className="px-1.5 py-0.2 rounded text-[10px] bg-blue-500/20 text-blue-300 font-mono">
-                                      {assignedServers.length} Servers
+                                      {groupServers.length} Servers
                                     </span>
                                   </div>
 
                                   <div className="flex items-center space-x-1">
+                                    <button
+                                      onClick={() => handleOpenAddServer(org.id, grp.id)}
+                                      className="px-2 py-0.5 rounded bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 text-[10px] font-semibold flex items-center space-x-1 cursor-pointer"
+                                      title="Add new server directly into this group"
+                                    >
+                                      <Plus className="w-3 h-3" />
+                                      <span>Add Server</span>
+                                    </button>
                                     <button
                                       onClick={() => {
                                         setEditingGroup(grp);
@@ -2029,51 +2411,69 @@ ${serversReport}
                                 )}
                               </div>
 
-                              {/* Server Cards List */}
-                              <div className="space-y-1.5 max-h-48 overflow-y-auto">
-                                {assignedServers.length === 0 ? (
-                                  <div className="text-[11px] text-gray-500 italic py-2 text-center">
-                                    No servers assigned to this group.
+                              {/* Native Fleet Server Cards List inside this group */}
+                              <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                                {groupServers.length === 0 ? (
+                                  <div className="text-[11px] text-gray-500 italic py-3 text-center border border-dashed border-white/5 rounded-xl">
+                                    No servers created in this group. Click &quot;Add Server&quot; above to add one.
                                   </div>
                                 ) : (
-                                  assignedServers.map(s => {
+                                  groupServers.map(s => {
                                     const health = fleetHealth[s.id];
-                                    const isOnline = health ? health.reachable : false;
+                                    const isActive = s.status === 'active';
 
                                     return (
                                       <div
                                         key={s.id}
-                                        className="p-2 rounded-xl bg-black/40 border border-white/5 flex items-center justify-between text-xs"
+                                        className="p-2.5 rounded-xl bg-black/40 border border-white/5 flex items-center justify-between text-xs hover:border-white/15 transition-all"
                                       >
-                                        <div className="flex items-center space-x-2 min-w-0">
-                                          <span
-                                            className={`w-2 h-2 rounded-full shrink-0 ${
-                                              isOnline ? 'bg-emerald-400' : 'bg-red-500'
+                                        <div className="flex items-center space-x-2.5 min-w-0">
+                                          {/* Clickable 1-Click Status Toggle Indicator (Active Green / Inactive Red) */}
+                                          <button
+                                            onClick={(e) => handleToggleServerStatus(s.id, e)}
+                                            className={`p-1 rounded-full transition-all cursor-pointer ${
+                                              isActive
+                                                ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/40'
+                                                : 'bg-red-500/20 text-red-400 hover:bg-red-500/40'
                                             }`}
-                                          />
+                                            title={`Status is ${isActive ? 'ACTIVE' : 'INACTIVE'}. Click to toggle.`}
+                                          >
+                                            <span className={`block w-2.5 h-2.5 rounded-full ${isActive ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]' : 'bg-red-500'}`} />
+                                          </button>
+
                                           <div className="min-w-0 truncate">
-                                            <span className="font-semibold text-white truncate block">
-                                              {s.name || s.host}
-                                            </span>
+                                            <div className="flex items-center space-x-1.5">
+                                              <span className="font-bold text-white truncate block text-xs">
+                                                {s.name}
+                                              </span>
+                                              {s.tags && s.tags.length > 0 && (
+                                                <span className="px-1 py-0.2 rounded text-[9px] bg-white/10 text-gray-300">
+                                                  {s.tags[0]}
+                                                </span>
+                                              )}
+                                            </div>
                                             <span className="text-[10px] text-gray-400 font-mono">
-                                              {s.username}@{s.host}
+                                              {s.username}@{s.host}:{s.port}
                                             </span>
                                           </div>
                                         </div>
 
-                                        <button
-                                          onClick={() => {
-                                            const nextMappings = { ...fleetMatrix.mappings };
-                                            delete nextMappings[s.id];
-                                            const updated = { ...fleetMatrix, mappings: nextMappings };
-                                            setFleetMatrix(updated);
-                                            saveStoredFleetMatrix(updated);
-                                          }}
-                                          className="text-[10px] text-gray-500 hover:text-red-400 cursor-pointer"
-                                          title="Remove from group"
-                                        >
-                                          Remove
-                                        </button>
+                                        <div className="flex items-center space-x-1 shrink-0">
+                                          <button
+                                            onClick={() => handleOpenEditServer(s)}
+                                            className="p-1 rounded text-gray-400 hover:text-white hover:bg-white/10 cursor-pointer"
+                                            title="Edit Server Details"
+                                          >
+                                            <Edit3 className="w-3.5 h-3.5" />
+                                          </button>
+                                          <button
+                                            onClick={() => handleDeleteServer(s.id)}
+                                            className="p-1 rounded text-gray-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"
+                                            title="Delete Server from Fleet"
+                                          >
+                                            <Trash2 className="w-3.5 h-3.5" />
+                                          </button>
+                                        </div>
                                       </div>
                                     );
                                   })
@@ -2093,186 +2493,7 @@ ${serversReport}
       )}
 
       {/* ======================================================== */}
-      {/* 5. TAB 4: REPLICAS (CLUSTER & REPLICATION MANAGER)       */}
-      {/* ======================================================== */}
-      {activeTab === 'replicas' && (
-        <div className="flex-1 overflow-y-auto p-6 bg-[#0e101a]">
-          <div className="max-w-6xl mx-auto space-y-6">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-bold text-white tracking-tight">Replica Sets &amp; High-Availability</h2>
-                <p className="text-xs text-gray-400">
-                  Manage Primary-Replica cluster topologies, health checks, and sync commands. Stored in <code className="text-amber-300 font-mono text-[10px]">{serverFilePath}</code>.
-                </p>
-              </div>
-
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={() => {
-                    if (connections.length < 2) {
-                      setBannerNotice({ text: 'At least 2 server connections are required to form a replica set.', isError: true });
-                      return;
-                    }
-                    setEditingReplica(null);
-                    setReplicaForm({
-                      name: '',
-                      description: '',
-                      primaryServerId: connections[0].id,
-                      replicaServerIds: connections.slice(1).map(c => c.id),
-                      replicationType: 'database',
-                      syncCommand: 'systemctl is-active postgresql || systemctl is-active mysql',
-                      healthCheckCommand: 'uptime && free -h',
-                      autoFailover: false,
-                    });
-                    setIsReplicaModalOpen(true);
-                  }}
-                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-lg shadow-blue-500/25 flex items-center space-x-2 cursor-pointer"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Add Replica Set</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Replicas List */}
-            {replicaSets.length === 0 ? (
-              <div className="py-16 text-center text-xs text-gray-500 rounded-3xl border border-white/5 bg-[#121422]">
-                No replica cluster sets defined yet. Click &quot;Add Replica Set&quot; above to configure primary/replica nodes.
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 gap-4">
-                {replicaSets.map(replica => {
-                  const primaryConn = connections.find(c => c.id === replica.primaryServerId);
-                  const replicaConns = connections.filter(c => replica.replicaServerIds.includes(c.id));
-                  const primaryHealth = fleetHealth[replica.primaryServerId];
-
-                  return (
-                    <div
-                      key={replica.id}
-                      className="rounded-3xl border border-white/10 bg-[#131626] p-5 shadow-xl space-y-4"
-                    >
-                      <div className="flex items-center justify-between pb-3 border-b border-white/10">
-                        <div>
-                          <div className="flex items-center space-x-2">
-                            <h3 className="text-base font-bold text-white">{replica.name}</h3>
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-indigo-500/20 text-indigo-300">
-                              {replica.replicationType}
-                            </span>
-                            {replica.autoFailover && (
-                              <span className="px-2 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-300">
-                                Auto-Failover
-                              </span>
-                            )}
-                          </div>
-                          {replica.description && (
-                            <p className="text-xs text-gray-400 mt-1">{replica.description}</p>
-                          )}
-                        </div>
-
-                        <div className="flex items-center space-x-2">
-                          <button
-                            onClick={() => {
-                              setEditingReplica(replica);
-                              setReplicaForm({
-                                name: replica.name,
-                                description: replica.description || '',
-                                primaryServerId: replica.primaryServerId,
-                                replicaServerIds: replica.replicaServerIds,
-                                replicationType: replica.replicationType,
-                                syncCommand: replica.syncCommand || '',
-                                healthCheckCommand: replica.healthCheckCommand || '',
-                                autoFailover: !!replica.autoFailover,
-                              });
-                              setIsReplicaModalOpen(true);
-                            }}
-                            className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white transition-all cursor-pointer"
-                            title="Edit Replica Set"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => handleDeleteReplica(replica.id)}
-                            className="p-1.5 rounded-lg bg-white/5 hover:bg-red-500/20 text-gray-400 hover:text-red-400 transition-all cursor-pointer"
-                            title="Delete Replica Set"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Cluster Node Map: Primary -> Replicas */}
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        {/* Primary Node */}
-                        <div className="p-3 rounded-2xl bg-indigo-950/20 border border-indigo-500/40">
-                          <div className="flex items-center justify-between text-xs mb-1">
-                            <span className="font-bold text-indigo-300 flex items-center space-x-1">
-                              <span className="w-2 h-2 rounded-full bg-indigo-400" />
-                              <span>PRIMARY (LEADER)</span>
-                            </span>
-                            <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
-                              primaryHealth?.reachable ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'
-                            }`}>
-                              {primaryHealth?.reachable ? 'HEALTHY' : 'OFFLINE'}
-                            </span>
-                          </div>
-                          <div className="text-sm font-bold text-white truncate">
-                            {primaryConn?.name || primaryConn?.host || 'Unknown Node'}
-                          </div>
-                          <div className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">
-                            {primaryConn?.username}@{primaryConn?.host}:{primaryConn?.port}
-                          </div>
-                        </div>
-
-                        {/* Replica Nodes */}
-                        <div className="md:col-span-2 p-3 rounded-2xl bg-black/40 border border-white/10 space-y-2">
-                          <div className="text-xs font-bold text-gray-300 flex items-center space-x-1">
-                            <GitBranch className="w-3.5 h-3.5 text-blue-400" />
-                            <span>REPLICA NODES ({replicaConns.length})</span>
-                          </div>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                            {replicaConns.map(rep => {
-                              const repHealth = fleetHealth[rep.id];
-
-                              return (
-                                <div
-                                  key={rep.id}
-                                  className="p-2 rounded-xl bg-white/[0.03] border border-white/5 flex items-center justify-between text-xs"
-                                >
-                                  <div className="min-w-0">
-                                    <div className="font-semibold text-white truncate">{rep.name || rep.host}</div>
-                                    <div className="text-[10px] text-gray-500 font-mono truncate">
-                                      {rep.host}:{rep.port}
-                                    </div>
-                                  </div>
-                                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${
-                                    repHealth?.reachable ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'
-                                  }`}>
-                                    {repHealth?.reachable ? 'SYNC' : 'LAG/OFF'}
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Commands */}
-                      {replica.syncCommand && (
-                        <div className="p-2.5 rounded-xl bg-black/60 border border-white/5 font-mono text-[10px] text-gray-400 flex items-center justify-between">
-                          <span className="truncate">Sync: <code className="text-emerald-300">{replica.syncCommand}</code></span>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ======================================================== */}
-      {/* 6. TAB 5: RUN HISTORY (WITH DOWNLOAD ONE & DOWNLOAD ALL) */}
+      {/* 5. TAB 4: RUN HISTORY (WITH DOWNLOAD ONE & DOWNLOAD ALL) */}
       {/* ======================================================== */}
       {activeTab === 'history' && (
         <div className="flex-1 overflow-y-auto p-6 bg-[#0e101a]">
@@ -2389,7 +2610,7 @@ ${serversReport}
       )}
 
       {/* ======================================================== */}
-      {/* 7. MODAL: DETAILED SERVER OUTPUT INSPECTOR               */}
+      {/* 6. MODAL: DETAILED SERVER OUTPUT INSPECTOR               */}
       {/* ======================================================== */}
       {inspectResult && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-150">
@@ -2401,61 +2622,76 @@ ${serversReport}
                     ? 'bg-emerald-500/20 text-emerald-400'
                     : 'bg-red-500/20 text-red-400'
                 }`}>
-                  {inspectResult.status === 'success' ? <CheckCircle2 className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
+                  <Terminal className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="text-sm font-bold text-white">{inspectResult.serverName} Output Log</h3>
-                  <p className="text-[11px] text-gray-400 font-mono">
-                    {inspectResult.host}:{inspectResult.port} • Exit Code: {inspectResult.exitCode} • Runtime: {(inspectResult.durationMs / 1000).toFixed(2)}s
-                  </p>
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-sm font-bold text-white">{inspectResult.serverName}</h3>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${
+                      inspectResult.status === 'success' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'
+                    }`}>
+                      {inspectResult.status}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-gray-400 font-mono">
+                    {inspectResult.username}@{inspectResult.host}:{inspectResult.port} • Exit Code: {inspectResult.exitCode} • Runtime: {(inspectResult.durationMs / 1000).toFixed(2)}s
+                  </span>
                 </div>
               </div>
 
               <div className="flex items-center space-x-2">
                 <button
-                  onClick={() => handleDownloadSingleLog(inspectResult)}
-                  className="px-3 py-1.5 rounded-xl bg-cyan-600/20 hover:bg-cyan-600 text-cyan-300 hover:text-white text-xs font-semibold flex items-center space-x-1.5 transition-all cursor-pointer"
+                  onClick={() => handleDownloadSingleLog(inspectResult, selectedRecipeId)}
+                  className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-gray-200 flex items-center space-x-1.5 cursor-pointer"
                 >
-                  <Download className="w-3.5 h-3.5" />
+                  <Download className="w-3.5 h-3.5 text-cyan-400" />
                   <span>Download Log</span>
                 </button>
-                <button
-                  onClick={() => handleCopy(inspectResult.stdout || inspectResult.stderr, 'modal-output')}
-                  className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold flex items-center space-x-1.5 transition-all cursor-pointer"
-                >
-                  {copiedKey === 'modal-output' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span>Copy</span>
-                </button>
-                <button
-                  onClick={() => setInspectResult(null)}
-                  className="p-1.5 rounded-xl hover:bg-white/10 text-gray-400 hover:text-white transition-all cursor-pointer"
-                >
+                <button onClick={() => setInspectResult(null)} className="text-gray-400 hover:text-white cursor-pointer">
                   <X className="w-5 h-5" />
                 </button>
               </div>
             </div>
 
-            <div className="flex-1 p-5 overflow-y-auto bg-black font-mono text-xs select-text space-y-4">
+            <div className="p-6 overflow-y-auto space-y-4 font-mono text-xs">
               {inspectResult.stdout && (
                 <div>
-                  <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block mb-1">
-                    Standard Output (stdout):
-                  </span>
-                  <pre className="p-3 rounded-xl bg-white/[0.03] border border-white/5 text-gray-200 whitespace-pre-wrap leading-relaxed">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-semibold text-emerald-400 font-sans">Standard Output (STDOUT)</span>
+                    <button
+                      onClick={() => handleCopy(inspectResult.stdout, 'stdout')}
+                      className="text-[11px] text-gray-400 hover:text-white flex items-center space-x-1 cursor-pointer"
+                    >
+                      {copiedKey === 'stdout' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                      <span>Copy</span>
+                    </button>
+                  </div>
+                  <div className="p-4 rounded-2xl bg-black/70 border border-white/10 text-emerald-300 select-text leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
                     {inspectResult.stdout}
-                  </pre>
+                  </div>
                 </div>
               )}
 
               {inspectResult.stderr && (
                 <div>
-                  <span className="text-[10px] font-bold text-red-400 uppercase tracking-wider block mb-1">
-                    Standard Error (stderr):
-                  </span>
-                  <pre className="p-3 rounded-xl bg-red-950/20 border border-red-500/20 text-red-300 whitespace-pre-wrap leading-relaxed">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-semibold text-red-400 font-sans">Standard Error (STDERR)</span>
+                    <button
+                      onClick={() => handleCopy(inspectResult.stderr, 'stderr')}
+                      className="text-[11px] text-gray-400 hover:text-white flex items-center space-x-1 cursor-pointer"
+                    >
+                      {copiedKey === 'stderr' ? <Check className="w-3 h-3 text-red-400" /> : <Copy className="w-3 h-3" />}
+                      <span>Copy</span>
+                    </button>
+                  </div>
+                  <div className="p-4 rounded-2xl bg-black/70 border border-white/10 text-red-300 select-text leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
                     {inspectResult.stderr}
-                  </pre>
+                  </div>
                 </div>
+              )}
+
+              {!inspectResult.stdout && !inspectResult.stderr && (
+                <div className="py-8 text-center text-gray-500 italic">No output streams were captured for this node.</div>
               )}
             </div>
 
@@ -2472,14 +2708,467 @@ ${serversReport}
       )}
 
       {/* ======================================================== */}
-      {/* 8. MODAL: CREATE / EDIT ORGANIZATION                     */}
+      {/* 7. MODAL: NATIVE FLEET SERVER ADD / EDIT                 */}
+      {/* ======================================================== */}
+      {isServerModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-150">
+          <div className="w-full max-w-xl bg-[#141726] border border-white/15 rounded-3xl shadow-2xl flex flex-col overflow-hidden max-h-[90vh]">
+            <div className="p-5 border-b border-white/10 flex items-center justify-between bg-[#181c2e]">
+              <div className="flex items-center space-x-2">
+                <Server className="w-5 h-5 text-emerald-400" />
+                <h3 className="text-sm font-bold text-white">
+                  {editingServer ? `Edit Server: ${editingServer.name}` : 'Add New Server to Fleet Matrix'}
+                </h3>
+              </div>
+              <button onClick={() => setIsServerModalOpen(false)} className="text-gray-400 hover:text-white cursor-pointer">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 overflow-y-auto">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">Organization *</label>
+                  <select
+                    value={serverForm.organizationId}
+                    onChange={e => {
+                      const newOrgId = e.target.value;
+                      const validGroups = fleetMatrix.groups.filter(g => g.organizationId === newOrgId);
+                      setServerForm(prev => ({
+                        ...prev,
+                        organizationId: newOrgId,
+                        groupId: validGroups[0]?.id || '',
+                      }));
+                    }}
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
+                  >
+                    {fleetMatrix.organizations.map(o => (
+                      <option key={o.id} value={o.id}>{o.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">Group *</label>
+                  <select
+                    value={serverForm.groupId}
+                    onChange={e => setServerForm(prev => ({ ...prev, groupId: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
+                  >
+                    {fleetMatrix.groups
+                      .filter(g => g.organizationId === serverForm.organizationId)
+                      .map(g => (
+                        <option key={g.id} value={g.id}>{g.name}</option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-gray-300 block mb-1">Server Display Name</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Production Web Node 01"
+                  value={serverForm.name}
+                  onChange={e => setServerForm(prev => ({ ...prev, name: e.target.value }))}
+                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-2">
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">Host / IP Address *</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. 192.168.1.100 or web.company.internal"
+                    value={serverForm.host}
+                    onChange={e => setServerForm(prev => ({ ...prev, host: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white font-mono focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">SSH Port</label>
+                  <input
+                    type="number"
+                    value={serverForm.port}
+                    onChange={e => setServerForm(prev => ({ ...prev, port: Number(e.target.value) || 22 }))}
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white font-mono focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">SSH Username *</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. root, ubuntu, sharuk"
+                    value={serverForm.username}
+                    onChange={e => setServerForm(prev => ({ ...prev, username: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white font-mono focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">Authentication Type</label>
+                  <select
+                    value={serverForm.authType}
+                    onChange={e => setServerForm(prev => ({ ...prev, authType: e.target.value as 'password' | 'privateKey' | 'agent' }))}
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="password">Password</option>
+                    <option value="privateKey">Private Key</option>
+                    <option value="agent">SSH Agent</option>
+                  </select>
+                </div>
+              </div>
+
+              {serverForm.authType === 'password' ? (
+                <div>
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">SSH Password</label>
+                  <input
+                    type="password"
+                    placeholder="Enter password..."
+                    value={serverForm.password || ''}
+                    onChange={e => setServerForm(prev => ({ ...prev, password: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white font-mono focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">Private Key (PEM / OpenSSH)</label>
+                  <textarea
+                    rows={4}
+                    placeholder="Paste private key content (-----BEGIN OPENSSH PRIVATE KEY-----)..."
+                    value={serverForm.privateKey || ''}
+                    onChange={e => setServerForm(prev => ({ ...prev, privateKey: e.target.value }))}
+                    className="w-full p-2.5 rounded-xl bg-black/50 border border-white/15 text-xs text-white font-mono focus:outline-none focus:border-blue-500 resize-none"
+                  />
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">Status</label>
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setServerForm(prev => ({ ...prev, status: 'active' }))}
+                      className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-bold border transition-all flex items-center justify-center space-x-1.5 cursor-pointer ${
+                        serverForm.status === 'active'
+                          ? 'bg-emerald-600 text-white border-emerald-500 shadow-md'
+                          : 'bg-black/30 border-white/10 text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      <span className="w-2 h-2 rounded-full bg-emerald-300" />
+                      <span>Active</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setServerForm(prev => ({ ...prev, status: 'inactive' }))}
+                      className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-bold border transition-all flex items-center justify-center space-x-1.5 cursor-pointer ${
+                        serverForm.status === 'inactive'
+                          ? 'bg-red-600 text-white border-red-500 shadow-md'
+                          : 'bg-black/30 border-white/10 text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      <span className="w-2 h-2 rounded-full bg-red-400" />
+                      <span>Inactive</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">Tags (Comma-separated)</label>
+                  <input
+                    type="text"
+                    placeholder="web, production, eu-west"
+                    value={serverForm.tags}
+                    onChange={e => setServerForm(prev => ({ ...prev, tags: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-white/10 bg-[#181c2e] flex items-center justify-end space-x-2">
+              <button
+                onClick={() => setIsServerModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-semibold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveServer}
+                className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-500/25 cursor-pointer"
+              >
+                {editingServer ? 'Save Changes' : 'Add Server'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* 8. MODAL: IMPORT SAVED LOGINS INTO FLEET MATRIX           */}
+      {/* ======================================================== */}
+      {isImportModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-150">
+          <div className="w-full max-w-md bg-[#141726] border border-white/15 rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+            <div className="p-5 border-b border-white/10 flex items-center justify-between bg-[#181c2e]">
+              <h3 className="text-sm font-bold text-white">Import Saved Logins to Fleet Matrix</h3>
+              <button onClick={() => setIsImportModalOpen(false)} className="text-gray-400 hover:text-white cursor-pointer">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <p className="text-xs text-gray-300 leading-relaxed">
+                Found <span className="font-bold text-white">{connections.length} saved connection(s)</span> on this desktop. Select an organization and group to import them into:
+              </p>
+
+              <div>
+                <label className="text-xs font-semibold text-gray-300 block mb-1">Target Organization</label>
+                <select
+                  value={importOrgId}
+                  onChange={e => {
+                    const newOrgId = e.target.value;
+                    setImportOrgId(newOrgId);
+                    const validGroups = fleetMatrix.groups.filter(g => g.organizationId === newOrgId);
+                    setImportGroupId(validGroups[0]?.id || '');
+                  }}
+                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
+                >
+                  {fleetMatrix.organizations.map(o => (
+                    <option key={o.id} value={o.id}>{o.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-gray-300 block mb-1">Target Group</label>
+                <select
+                  value={importGroupId}
+                  onChange={e => setImportGroupId(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
+                >
+                  {fleetMatrix.groups
+                    .filter(g => g.organizationId === importOrgId)
+                    .map(g => (
+                      <option key={g.id} value={g.id}>{g.name}</option>
+                    ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-white/10 bg-[#181c2e] flex items-center justify-end space-x-2">
+              <button
+                onClick={() => setIsImportModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-semibold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleImportSavedConnections}
+                className="px-5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold shadow-lg shadow-cyan-500/25 cursor-pointer"
+              >
+                Import All
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* 9. MODAL: CREATE / EDIT RECIPE WITH MONACO EDITOR         */}
+      {/* ======================================================== */}
+      {isRecipeModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-150">
+          <div className="w-full max-w-3xl bg-[#141726] border border-white/15 rounded-3xl shadow-2xl flex flex-col overflow-hidden max-h-[92vh]">
+            <div className="p-5 border-b border-white/10 flex items-center justify-between bg-[#181c2e]">
+              <div className="flex items-center space-x-2">
+                <Layers className="w-4 h-4 text-blue-400" />
+                <h3 className="text-sm font-bold text-white">
+                  {editingRecipe ? `Edit Recipe: ${editingRecipe.title}` : 'Create Custom Automation Playbook'}
+                </h3>
+              </div>
+              <button onClick={() => setIsRecipeModalOpen(false)} className="text-gray-400 hover:text-white cursor-pointer">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 overflow-y-auto">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">Playbook Title *</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Flush Redis & Reload Service"
+                    value={recipeForm.title}
+                    onChange={e => setRecipeForm(prev => ({ ...prev, title: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">Category</label>
+                  <select
+                    value={recipeForm.category}
+                    onChange={e => setRecipeForm(prev => ({ ...prev, category: e.target.value as RecipeCategory }))}
+                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="custom">Custom</option>
+                    <option value="system">System</option>
+                    <option value="maintenance">Maintenance</option>
+                    <option value="security">Security</option>
+                    <option value="docker">Docker</option>
+                    <option value="web">Web Server</option>
+                    <option value="cleanup">Cleanup</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-gray-300 block mb-1">Description</label>
+                <input
+                  type="text"
+                  placeholder="Short description of what this automation does..."
+                  value={recipeForm.description}
+                  onChange={e => setRecipeForm(prev => ({ ...prev, description: e.target.value }))}
+                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="flex items-center space-x-6 p-3 rounded-xl bg-black/30 border border-white/10 text-xs">
+                <label className="flex items-center space-x-2 text-gray-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={recipeForm.isSudo}
+                    onChange={e => setRecipeForm(prev => ({ ...prev, isSudo: e.target.checked }))}
+                    className="w-4 h-4 rounded text-blue-600"
+                  />
+                  <span>Requires Sudo</span>
+                </label>
+
+                <label className="flex items-center space-x-2 text-gray-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={recipeForm.stopOnError}
+                    onChange={e => setRecipeForm(prev => ({ ...prev, stopOnError: e.target.checked }))}
+                    className="w-4 h-4 rounded text-blue-600"
+                  />
+                  <span>Stop on Error</span>
+                </label>
+
+                <div className="flex items-center space-x-2 ml-auto">
+                  <span className="text-gray-400">Timeout:</span>
+                  <input
+                    type="number"
+                    min={5}
+                    max={1200}
+                    value={recipeForm.timeoutSeconds}
+                    onChange={e => setRecipeForm(prev => ({ ...prev, timeoutSeconds: Number(e.target.value) || 60 }))}
+                    className="w-16 px-2 py-1 rounded bg-black/50 border border-white/15 text-center font-mono text-xs text-white"
+                  />
+                  <span className="text-gray-500 text-[10px]">sec</span>
+                </div>
+              </div>
+
+              {/* MONACO VS CODE EDITOR FOR RECIPES */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <label className="text-xs font-semibold text-gray-300 flex items-center space-x-1.5">
+                    <Terminal className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Bash Script / Commands</span>
+                  </label>
+
+                  <div className="flex items-center space-x-2">
+                    <div className="flex items-center space-x-1 bg-black/40 px-2 py-0.5 rounded-lg border border-white/10">
+                      <button
+                        type="button"
+                        onClick={() => setRecipeEditorFontSize(f => Math.max(f - 1, 9))}
+                        className="p-1 hover:text-white text-gray-400 cursor-pointer"
+                        title="Zoom Out (Ctrl + -)"
+                      >
+                        <ZoomOut className="w-3 h-3" />
+                      </button>
+                      <span className="text-[10px] font-mono text-gray-300 min-w-[28px] text-center">
+                        {recipeEditorFontSize}px
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setRecipeEditorFontSize(f => Math.min(f + 1, 28))}
+                        className="p-1 hover:text-white text-gray-400 cursor-pointer"
+                        title="Zoom In (Ctrl + +)"
+                      >
+                        <ZoomIn className="w-3 h-3" />
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setRecipeWordWrap(w => !w)}
+                      className={`px-2 py-0.5 rounded text-[10px] border cursor-pointer ${
+                        recipeWordWrap ? 'bg-blue-600/20 border-blue-500/40 text-blue-300' : 'bg-white/5 border-white/10 text-gray-400'
+                      }`}
+                      title="Toggle Word Wrap (Alt + Z)"
+                    >
+                      Wrap {recipeWordWrap ? 'ON' : 'OFF'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="h-64 rounded-2xl border border-white/15 bg-[#07090f] overflow-hidden">
+                  <Editor
+                    height="100%"
+                    language="shell"
+                    theme="vs-dark"
+                    value={recipeForm.command}
+                    onChange={val => setRecipeForm(prev => ({ ...prev, command: val || '' }))}
+                    options={{
+                      fontSize: recipeEditorFontSize,
+                      wordWrap: recipeWordWrap ? 'on' : 'off',
+                      minimap: { enabled: false },
+                      scrollBeyondLastLine: false,
+                      automaticLayout: true,
+                      fontFamily: "'JetBrains Mono', 'Fira Code', 'Menlo', 'Monaco', monospace",
+                      lineNumbers: 'on',
+                      renderWhitespace: 'selection',
+                      padding: { top: 8, bottom: 8 },
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-white/10 bg-[#181c2e] flex items-center justify-end space-x-2">
+              <button
+                onClick={() => setIsRecipeModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-semibold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveRecipe}
+                className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-500/25 cursor-pointer"
+              >
+                {editingRecipe ? 'Update Playbook' : 'Save Playbook'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* 10. MODAL: CREATE / EDIT ORGANIZATION                    */}
       {/* ======================================================== */}
       {isOrgModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-150">
           <div className="w-full max-w-md bg-[#141726] border border-white/15 rounded-3xl shadow-2xl flex flex-col overflow-hidden">
             <div className="p-5 border-b border-white/10 flex items-center justify-between">
               <h3 className="text-sm font-bold text-white">
-                {editingOrg ? 'Edit Organization' : 'Create Infrastructure Organization'}
+                {editingOrg ? 'Edit Organization' : 'Create Organization'}
               </h3>
               <button onClick={() => setIsOrgModalOpen(false)} className="text-gray-400 hover:text-white cursor-pointer">
                 <X className="w-5 h-5" />
@@ -2491,7 +3180,7 @@ ${serversReport}
                 <label className="text-xs font-semibold text-gray-300 block mb-1">Organization Name</label>
                 <input
                   type="text"
-                  placeholder="e.g. Production Infrastructure"
+                  placeholder="e.g. Acme Cloud Corp"
                   value={orgForm.name}
                   onChange={e => setOrgForm(prev => ({ ...prev, name: e.target.value }))}
                   className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
@@ -2502,7 +3191,7 @@ ${serversReport}
                 <label className="text-xs font-semibold text-gray-300 block mb-1">Description</label>
                 <input
                   type="text"
-                  placeholder="e.g. Primary cloud enterprise nodes"
+                  placeholder="Primary corporate infrastructure"
                   value={orgForm.description}
                   onChange={e => setOrgForm(prev => ({ ...prev, description: e.target.value }))}
                   className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
@@ -2510,15 +3199,19 @@ ${serversReport}
               </div>
 
               <div>
-                <label className="text-xs font-semibold text-gray-300 block mb-1">Color Accent</label>
+                <label className="text-xs font-semibold text-gray-300 block mb-1">Badge Color</label>
                 <div className="flex items-center space-x-2">
-                  <input
-                    type="color"
-                    value={orgForm.color}
-                    onChange={e => setOrgForm(prev => ({ ...prev, color: e.target.value }))}
-                    className="w-10 h-8 rounded bg-transparent cursor-pointer"
-                  />
-                  <span className="font-mono text-xs text-gray-300">{orgForm.color}</span>
+                  {['#6366f1', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6'].map(color => (
+                    <button
+                      key={color}
+                      type="button"
+                      onClick={() => setOrgForm(prev => ({ ...prev, color }))}
+                      className={`w-7 h-7 rounded-full border-2 transition-all cursor-pointer ${
+                        orgForm.color === color ? 'border-white scale-110 shadow-lg' : 'border-transparent opacity-60 hover:opacity-100'
+                      }`}
+                      style={{ backgroundColor: color }}
+                    />
+                  ))}
                 </div>
               </div>
             </div>
@@ -2542,14 +3235,14 @@ ${serversReport}
       )}
 
       {/* ======================================================== */}
-      {/* 9. MODAL: CREATE / EDIT GROUP                            */}
+      {/* 11. MODAL: CREATE / EDIT GROUP                           */}
       {/* ======================================================== */}
       {isGroupModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-150">
           <div className="w-full max-w-md bg-[#141726] border border-white/15 rounded-3xl shadow-2xl flex flex-col overflow-hidden">
             <div className="p-5 border-b border-white/10 flex items-center justify-between">
               <h3 className="text-sm font-bold text-white">
-                {editingGroup ? 'Edit Server Group' : 'Create Server Group'}
+                {editingGroup ? 'Edit Group' : 'Create Group'}
               </h3>
               <button onClick={() => setIsGroupModalOpen(false)} className="text-gray-400 hover:text-white cursor-pointer">
                 <X className="w-5 h-5" />
@@ -2574,7 +3267,7 @@ ${serversReport}
                 <label className="text-xs font-semibold text-gray-300 block mb-1">Group Name</label>
                 <input
                   type="text"
-                  placeholder="e.g. Web Tier / API Gateways"
+                  placeholder="e.g. EU Web Cluster"
                   value={groupForm.name}
                   onChange={e => setGroupForm(prev => ({ ...prev, name: e.target.value }))}
                   className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
@@ -2585,11 +3278,28 @@ ${serversReport}
                 <label className="text-xs font-semibold text-gray-300 block mb-1">Description</label>
                 <input
                   type="text"
-                  placeholder="e.g. Nginx reverse proxies and web services"
+                  placeholder="High-throughput frontend cluster"
                   value={groupForm.description}
                   onChange={e => setGroupForm(prev => ({ ...prev, description: e.target.value }))}
                   className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
                 />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-gray-300 block mb-1">Badge Color</label>
+                <div className="flex items-center space-x-2">
+                  {['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6', '#6366f1'].map(color => (
+                    <button
+                      key={color}
+                      type="button"
+                      onClick={() => setGroupForm(prev => ({ ...prev, color }))}
+                      className={`w-7 h-7 rounded-full border-2 transition-all cursor-pointer ${
+                        groupForm.color === color ? 'border-white scale-110 shadow-lg' : 'border-transparent opacity-60 hover:opacity-100'
+                      }`}
+                      style={{ backgroundColor: color }}
+                    />
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -2612,305 +3322,7 @@ ${serversReport}
       )}
 
       {/* ======================================================== */}
-      {/* 10. MODAL: ASSIGN SERVER TO ORGANIZATION & GROUP         */}
-      {/* ======================================================== */}
-      {isAssignModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-150">
-          <div className="w-full max-w-md bg-[#141726] border border-white/15 rounded-3xl shadow-2xl flex flex-col overflow-hidden">
-            <div className="p-5 border-b border-white/10 flex items-center justify-between">
-              <h3 className="text-sm font-bold text-white">Assign Server to Group</h3>
-              <button onClick={() => setIsAssignModalOpen(false)} className="text-gray-400 hover:text-white cursor-pointer">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4">
-              <div>
-                <label className="text-xs font-semibold text-gray-300 block mb-1">Select Server</label>
-                <select
-                  value={assignServerId}
-                  onChange={e => setAssignServerId(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
-                >
-                  {connections.map(c => (
-                    <option key={c.id} value={c.id}>{c.name || c.host} ({c.host})</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-gray-300 block mb-1">Target Organization</label>
-                <select
-                  value={assignOrgId}
-                  onChange={e => {
-                    setAssignOrgId(e.target.value);
-                    const matchingGroups = fleetMatrix.groups.filter(g => g.organizationId === e.target.value);
-                    if (matchingGroups.length > 0) {
-                      setAssignGroupId(matchingGroups[0].id);
-                    }
-                  }}
-                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
-                >
-                  {fleetMatrix.organizations.map(o => (
-                    <option key={o.id} value={o.id}>{o.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-gray-300 block mb-1">Target Group</label>
-                <select
-                  value={assignGroupId}
-                  onChange={e => setAssignGroupId(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
-                >
-                  {fleetMatrix.groups
-                    .filter(g => !assignOrgId || g.organizationId === assignOrgId)
-                    .map(g => (
-                      <option key={g.id} value={g.id}>{g.name}</option>
-                    ))}
-                </select>
-              </div>
-            </div>
-
-            <div className="p-4 border-t border-white/10 bg-[#181c2e] flex items-center justify-end space-x-2">
-              <button
-                onClick={() => setIsAssignModalOpen(false)}
-                className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-semibold cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleAssignServer}
-                className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-500/25 cursor-pointer"
-              >
-                Assign Server
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ======================================================== */}
-      {/* 11. MODAL: CREATE / EDIT REPLICA SET                     */}
-      {/* ======================================================== */}
-      {isReplicaModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-150">
-          <div className="w-full max-w-xl bg-[#141726] border border-white/15 rounded-3xl shadow-2xl flex flex-col overflow-hidden max-h-[90vh]">
-            <div className="p-5 border-b border-white/10 flex items-center justify-between">
-              <h3 className="text-sm font-bold text-white">
-                {editingReplica ? 'Edit Replica Cluster Set' : 'Configure New Replica Set'}
-              </h3>
-              <button onClick={() => setIsReplicaModalOpen(false)} className="text-gray-400 hover:text-white cursor-pointer">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4 overflow-y-auto">
-              <div>
-                <label className="text-xs font-semibold text-gray-300 block mb-1">Replica Cluster Name</label>
-                <input
-                  type="text"
-                  placeholder="e.g. PostgreSQL HA Main Cluster"
-                  value={replicaForm.name}
-                  onChange={e => setReplicaForm(prev => ({ ...prev, name: e.target.value }))}
-                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-semibold text-gray-300 block mb-1">Primary Node (Leader)</label>
-                  <select
-                    value={replicaForm.primaryServerId}
-                    onChange={e => setReplicaForm(prev => ({ ...prev, primaryServerId: e.target.value }))}
-                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
-                  >
-                    {connections.map(c => (
-                      <option key={c.id} value={c.id}>{c.name || c.host}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-xs font-semibold text-gray-300 block mb-1">Replication Type</label>
-                  <select
-                    value={replicaForm.replicationType}
-                    onChange={e => setReplicaForm(prev => ({ ...prev, replicationType: e.target.value as ReplicationType }))}
-                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
-                  >
-                    <option value="database">Database Streaming</option>
-                    <option value="rsync">Data / File Sync (rsync)</option>
-                    <option value="config">Config Mirroring</option>
-                    <option value="service">Service Failover</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-gray-300 block mb-1">
-                  Select Replica Nodes (Followers)
-                </label>
-                <div className="grid grid-cols-2 gap-2 max-h-36 overflow-y-auto p-2 rounded-xl bg-black/40 border border-white/10">
-                  {connections
-                    .filter(c => c.id !== replicaForm.primaryServerId)
-                    .map(c => {
-                      const isChecked = replicaForm.replicaServerIds.includes(c.id);
-
-                      return (
-                        <label
-                          key={c.id}
-                          className="flex items-center space-x-2 text-xs text-gray-300 cursor-pointer p-1 rounded hover:bg-white/5"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={() => {
-                              setReplicaForm(prev => ({
-                                ...prev,
-                                replicaServerIds: isChecked
-                                  ? prev.replicaServerIds.filter(id => id !== c.id)
-                                  : [...prev.replicaServerIds, c.id],
-                              }));
-                            }}
-                            className="w-3.5 h-3.5 rounded text-blue-600"
-                          />
-                          <span className="truncate">{c.name || c.host}</span>
-                        </label>
-                      );
-                    })}
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-gray-300 block mb-1">Sync / Trigger Command</label>
-                <input
-                  type="text"
-                  placeholder="e.g. systemctl is-active postgresql || pg_stat_replication"
-                  value={replicaForm.syncCommand}
-                  onChange={e => setReplicaForm(prev => ({ ...prev, syncCommand: e.target.value }))}
-                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white font-mono focus:outline-none focus:border-blue-500"
-                />
-              </div>
-            </div>
-
-            <div className="p-4 border-t border-white/10 bg-[#181c2e] flex items-center justify-end space-x-2">
-              <button
-                onClick={() => setIsReplicaModalOpen(false)}
-                className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-semibold cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveReplica}
-                className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-500/25 cursor-pointer"
-              >
-                Save Replica Set
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ======================================================== */}
-      {/* 12. MODAL: CREATE CUSTOM RECIPE                          */}
-      {/* ======================================================== */}
-      {isRecipeModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-150">
-          <div className="w-full max-w-xl bg-[#141726] border border-white/15 rounded-3xl shadow-2xl flex flex-col overflow-hidden">
-            <div className="p-5 border-b border-white/10 flex items-center justify-between">
-              <h3 className="text-sm font-bold text-white">Create Custom Automation Playbook</h3>
-              <button onClick={() => setIsRecipeModalOpen(false)} className="text-gray-400 hover:text-white cursor-pointer">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4">
-              <div>
-                <label className="text-xs font-semibold text-gray-300 block mb-1">Playbook Title</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Flush Redis & Reload Service"
-                  value={newRecipe.title || ''}
-                  onChange={e => setNewRecipe(prev => ({ ...prev, title: e.target.value }))}
-                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-semibold text-gray-300 block mb-1">Category</label>
-                  <select
-                    value={newRecipe.category || 'custom'}
-                    onChange={e => setNewRecipe(prev => ({ ...prev, category: e.target.value as RecipeCategory }))}
-                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
-                  >
-                    <option value="custom">Custom</option>
-                    <option value="system">System</option>
-                    <option value="maintenance">Maintenance</option>
-                    <option value="security">Security</option>
-                    <option value="docker">Docker</option>
-                    <option value="web">Web Server</option>
-                    <option value="cleanup">Cleanup</option>
-                  </select>
-                </div>
-
-                <div className="flex items-end pb-2">
-                  <label className="flex items-center space-x-2 text-xs text-gray-300 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={!!newRecipe.isSudo}
-                      onChange={e => setNewRecipe(prev => ({ ...prev, isSudo: e.target.checked }))}
-                      className="w-4 h-4 rounded text-blue-600"
-                    />
-                    <span>Requires Sudo Privileges</span>
-                  </label>
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-gray-300 block mb-1">Description</label>
-                <input
-                  type="text"
-                  placeholder="Short description of what this automation does..."
-                  value={newRecipe.description || ''}
-                  onChange={e => setNewRecipe(prev => ({ ...prev, description: e.target.value }))}
-                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-gray-300 block mb-1">Bash Command / Script</label>
-                <textarea
-                  rows={6}
-                  placeholder="# Enter bash commands..."
-                  value={newRecipe.command || ''}
-                  onChange={e => setNewRecipe(prev => ({ ...prev, command: e.target.value }))}
-                  className="w-full p-3 rounded-xl bg-black/60 border border-white/15 font-mono text-xs text-emerald-400 focus:outline-none focus:border-blue-500 resize-none leading-relaxed"
-                />
-              </div>
-            </div>
-
-            <div className="p-4 border-t border-white/10 bg-[#181c2e] flex items-center justify-end space-x-2">
-              <button
-                onClick={() => setIsRecipeModalOpen(false)}
-                className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 text-xs font-semibold cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveRecipe}
-                className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-500/25 cursor-pointer"
-              >
-                Save Playbook
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ======================================================== */}
-      {/* 13. MODAL: REMOTE SERVER STORAGE (~/.sshdesktop/automation.json) */}
+      {/* 12. MODAL: REMOTE SERVER STORAGE (~/.sshdesktop/automation.json) */}
       {/* ======================================================== */}
       {isSyncModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-150">
@@ -2936,7 +3348,7 @@ ${serversReport}
               <div className="p-3.5 rounded-2xl bg-blue-500/10 border border-blue-500/20 text-blue-200 text-xs flex items-start space-x-3">
                 <HardDrive className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
                 <div className="leading-relaxed">
-                  All custom recipes, execution audit logs, fleet matrix hierarchies, and replica sets are stored in your remote user profile at <code className="text-amber-300 font-mono text-[11px] bg-black/30 px-1.5 py-0.5 rounded">{serverFilePath}</code> for user <span className="font-semibold text-white">{username}</span>.
+                  All custom recipes, execution audit logs, and fleet matrix hierarchies are stored in your remote user profile at <code className="text-amber-300 font-mono text-[11px] bg-black/30 px-1.5 py-0.5 rounded">{serverFilePath}</code> for user <span className="font-semibold text-white">{username}</span>.
                 </div>
               </div>
 
@@ -3008,7 +3420,7 @@ ${serversReport}
                     custom_recipes: recipes.filter(r => !r.isBuiltIn),
                     history_count: history.length,
                     organizations_count: fleetMatrix.organizations.length,
-                    replicas_count: replicaSets.length,
+                    servers_count: allFleetServers.length,
                     path: serverFilePath,
                   }, null, 2)}</pre>
                 </div>
