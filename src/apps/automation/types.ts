@@ -1,6 +1,26 @@
 import { SavedConnection } from '../../lib/types';
 
-export type TargetServer = SavedConnection;
+export interface TargetServer {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  privateKey?: string;
+  private_key_path?: string;
+  privateKeyPath?: string;
+  authMethod?: string;
+  authType?: 'password' | 'privateKey' | 'agent';
+  color?: string;
+  group?: string;
+  tags?: string[];
+  status?: 'active' | 'inactive';
+  organizationId?: string;
+  groupId?: string;
+  notes?: string;
+  osType?: string;
+}
 
 export interface TargetHealth {
   serverId: string;
@@ -101,36 +121,31 @@ export interface FleetGroup {
   createdAt: number;
 }
 
+export interface FleetServer {
+  id: string;
+  organizationId: string;
+  groupId: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  privateKey?: string;
+  authType?: 'password' | 'privateKey' | 'agent';
+  tags?: string[];
+  osType?: string;
+  status: 'active' | 'inactive';
+  notes?: string;
+  lastChecked?: number;
+  createdAt: number;
+  updatedAt?: number;
+}
+
 export interface FleetMatrixData {
   organizations: FleetOrganization[];
   groups: FleetGroup[];
-  // Mapping of serverId to { organizationId, groupId }
-  mappings: Record<string, { organizationId: string; groupId: string }>;
-}
-
-// Replica Sets Cluster Management
-export type ReplicationType = 'database' | 'rsync' | 'config' | 'service';
-
-export interface ReplicaNodeStatus {
-  role: 'primary' | 'replica';
-  status: 'healthy' | 'lagging' | 'offline' | 'unknown';
-  lastChecked?: number;
-  details?: string;
-}
-
-export interface ReplicaSet {
-  id: string;
-  name: string;
-  description?: string;
-  primaryServerId: string;
-  replicaServerIds: string[];
-  replicationType: ReplicationType;
-  syncCommand?: string;
-  healthCheckCommand?: string;
-  autoFailover?: boolean;
-  healthStatus?: Record<string, ReplicaNodeStatus>;
-  createdAt: number;
-  updatedAt?: number;
+  servers: FleetServer[];
+  mappings?: Record<string, { organizationId: string; groupId: string }>;
 }
 
 export interface AutomationServerData {
@@ -140,7 +155,6 @@ export interface AutomationServerData {
   custom_recipes: AutomationRecipe[];
   history: AutomationExecutionRun[];
   fleet_matrix?: FleetMatrixData;
-  replica_sets?: ReplicaSet[];
   last_target_server_ids?: string[];
   client: string;
 }

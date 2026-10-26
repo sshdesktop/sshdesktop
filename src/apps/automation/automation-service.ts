@@ -8,9 +8,10 @@ import {
   ExecutionMode,
   AutomationServerData,
   FleetMatrixData,
-  ReplicaSet,
   FleetOrganization,
   FleetGroup,
+  FleetServer,
+  TargetServer,
 } from './types';
 
 // ==========================================
@@ -264,7 +265,7 @@ free -h`,
 // ==========================================
 export function interpolateCommand(
   template: string,
-  server: SavedConnection,
+  server: TargetServer,
   customVars: Record<string, string> = {}
 ): string {
   let result = template;
@@ -294,11 +295,31 @@ export function interpolateCommand(
 // INDIVIDUAL SERVER EXECUTION
 // ==========================================
 export async function executeOnServer(
-  server: SavedConnection,
+  server: TargetServer,
   command: string,
   isSudo: boolean = false
 ): Promise<ServerExecutionResult> {
   const startedAt = Date.now();
+
+  // If server is marked inactive, immediately return a skipped/failed result and do not execute
+  if (server.status === 'inactive') {
+    return {
+      serverId: server.id,
+      serverName: server.name || server.host,
+      host: server.host,
+      port: server.port,
+      username: server.username,
+      status: 'failed',
+      stdout: '',
+      stderr: `[DEACTIVATED] Server "${server.name || server.host}" (${server.host}:${server.port}) is marked inactive in Fleet Matrix. Execution skipped.`,
+      exitCode: 1,
+      durationMs: 0,
+      startedAt,
+      finishedAt: Date.now(),
+      error: 'Server is deactivated',
+    };
+  }
+
   let preparedCommand = command.trim();
 
   // If sudo is required and command does not already contain sudo
@@ -328,9 +349,9 @@ export async function executeOnServer(
           port: Number(server.port) || 22,
           username: server.username,
           password: server.password,
-          private_key_path: (server as any).privateKeyPath || (server as any).private_key_path,
-          auth_method: (server as any).authMethod || (server as any).auth_method,
-          color: server.color,
+          private_key_path: (server as any).privateKeyPath || (server as any).private_key_path || (server as any).privateKey,
+          auth_method: server.authType === 'privateKey' || (server as any).authMethod === 'key' ? 'key' : 'password',
+          color: (server as any).color,
           group: server.group,
           tags: server.tags || [],
         });
@@ -366,7 +387,7 @@ export async function executeOnServer(
       username: server.username,
       status: isSuccess ? 'success' : 'failed',
       stdout: res.stdout || '',
-      stderr: res.stderr || (isSuccess ? '' : `Failed to execute on ${server.name || server.host} (${server.host}:${server.port}). Node is inactive or unreachable.`),
+      stderr: res.stderr || (isSuccess ? '' : `Failed to execute on ${server.name || server.host} (${server.host}:${server.port}). Node is unreachable or returned exit code ${res.exit_code}.`),
       exitCode: isSuccess ? 0 : (res.exit_code === 0 ? 1 : res.exit_code),
       durationMs,
       startedAt,
@@ -395,7 +416,7 @@ export async function executeOnServer(
 // PARALLEL EXECUTION WITH CONCURRENCY POOL
 // ==========================================
 export async function executeParallelFleet(
-  servers: SavedConnection[],
+  servers: TargetServer[],
   commandTemplate: string,
   isSudo: boolean,
   variables: Record<string, string>,
@@ -451,7 +472,7 @@ export async function executeParallelFleet(
 // ROLLING / SEQUENTIAL EXECUTION
 // ==========================================
 export async function executeRollingFleet(
-  servers: SavedConnection[],
+  servers: TargetServer[],
   commandTemplate: string,
   isSudo: boolean,
   variables: Record<string, string>,
@@ -504,12 +525,24 @@ export async function executeRollingFleet(
 // TELEMETRY PROBE FOR FLEET HEALTH MATRIX
 // ==========================================
 export async function probeFleetTelemetry(
-  servers: SavedConnection[],
+  servers: TargetServer[],
   onServerUpdate?: (health: TargetHealth) => void
 ): Promise<TargetHealth[]> {
   const telemetryCommand = BUILT_IN_RECIPES[0].command;
 
   const probePromises = servers.map(async (server) => {
+    if (server.status === 'inactive') {
+      const item: TargetHealth = {
+        serverId: server.id,
+        reachable: false,
+        latencyMs: 0,
+        error: 'Server is deactivated in Fleet Matrix',
+        lastChecked: Date.now(),
+      };
+      onServerUpdate?.(item);
+      return item;
+    }
+
     const started = Date.now();
     try {
       const res = await executeOnServer(server, telemetryCommand, false);
@@ -537,7 +570,7 @@ export async function probeFleetTelemetry(
       const item: TargetHealth = {
         serverId: server.id,
         reachable: true,
-        os: getVal('OS') || 'Linux',
+        os: getVal('OS') || server.osType || 'Linux',
         kernel: getVal('KERNEL') || 'Unknown',
         uptime: getVal('UPTIME') || 'Up',
         loadAvg: getVal('LOAD') || '0.00, 0.00, 0.00',
@@ -645,19 +678,28 @@ export function clearHistory(): void {
 }
 
 // ==========================================
-// ENTERPRISE FLEET MATRIX & REPLICA STORAGE
+// ENTERPRISE FLEET MATRIX STORAGE
 // ==========================================
 const STORAGE_KEY_FLEET_MATRIX = 'sshdesktop_automation_fleet_matrix';
-const STORAGE_KEY_REPLICAS = 'sshdesktop_automation_replicas';
 
 export function getDefaultFleetMatrix(connections: SavedConnection[] = []): FleetMatrixData {
   const defaultOrgId = 'org-default';
   const defaultGroupId = 'grp-default';
 
-  const mappings: Record<string, { organizationId: string; groupId: string }> = {};
-  connections.forEach(c => {
-    mappings[c.id] = { organizationId: defaultOrgId, groupId: defaultGroupId };
-  });
+  const defaultServers: FleetServer[] = connections.map(c => ({
+    id: c.id,
+    organizationId: defaultOrgId,
+    groupId: defaultGroupId,
+    name: c.name || `${c.username}@${c.host}`,
+    host: c.host,
+    port: Number(c.port) || 22,
+    username: c.username,
+    password: c.password,
+    authType: (c as any).authMethod === 'key' ? 'privateKey' : 'password',
+    tags: c.tags || [],
+    status: 'active',
+    createdAt: Date.now(),
+  }));
 
   return {
     organizations: [
@@ -679,7 +721,8 @@ export function getDefaultFleetMatrix(connections: SavedConnection[] = []): Flee
         createdAt: Date.now(),
       },
     ],
-    mappings,
+    servers: defaultServers,
+    mappings: {},
   };
 }
 
@@ -690,6 +733,28 @@ export function loadStoredFleetMatrix(connections: SavedConnection[] = []): Flee
     const parsed = JSON.parse(raw) as FleetMatrixData;
     if (!parsed.organizations || parsed.organizations.length === 0) {
       return getDefaultFleetMatrix(connections);
+    }
+    if (!Array.isArray(parsed.servers)) {
+      parsed.servers = [];
+    }
+    // If parsed servers is empty but user has saved connections, auto-seed
+    if (parsed.servers.length === 0 && connections.length > 0) {
+      const defaultOrgId = parsed.organizations[0]?.id || 'org-default';
+      const defaultGroupId = parsed.groups[0]?.id || 'grp-default';
+      parsed.servers = connections.map(c => ({
+        id: c.id,
+        organizationId: defaultOrgId,
+        groupId: defaultGroupId,
+        name: c.name || `${c.username}@${c.host}`,
+        host: c.host,
+        port: Number(c.port) || 22,
+        username: c.username,
+        password: c.password,
+        authType: (c as any).authMethod === 'key' ? 'privateKey' : 'password',
+        tags: c.tags || [],
+        status: 'active',
+        createdAt: Date.now(),
+      }));
     }
     return parsed;
   } catch (err) {
@@ -708,26 +773,6 @@ export function saveStoredFleetMatrix(data: FleetMatrixData): FleetMatrixData {
   }
 }
 
-export function loadStoredReplicaSets(): ReplicaSet[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_REPLICAS);
-    return raw ? JSON.parse(raw) : [];
-  } catch (err) {
-    console.error('Failed to load replica sets:', err);
-    return [];
-  }
-}
-
-export function saveStoredReplicaSets(data: ReplicaSet[]): ReplicaSet[] {
-  try {
-    localStorage.setItem(STORAGE_KEY_REPLICAS, JSON.stringify(data));
-    return data;
-  } catch (err) {
-    console.error('Failed to save replica sets:', err);
-    return data;
-  }
-}
-
 // ==========================================
 // REMOTE SERVER PERSISTENCE (~/.sshdesktop/automation.json)
 // ==========================================
@@ -738,7 +783,7 @@ export function getAutomationServerFilePath(homeDir: string): string {
 }
 
 /**
- * Saves all automation application data (custom recipes, history, fleet matrix, and replica sets)
+ * Saves all automation application data (custom recipes, history, fleet matrix)
  * directly to the remote server at ~/.sshdesktop/automation.json for the login user (e.g. /home/sharuk/.sshdesktop/automation.json).
  */
 export async function saveAutomationToServer(
@@ -749,7 +794,6 @@ export async function saveAutomationToServer(
     customRecipes: AutomationRecipe[];
     history: AutomationExecutionRun[];
     fleetMatrix?: FleetMatrixData;
-    replicaSets?: ReplicaSet[];
     lastTargetServerIds?: string[];
   }
 ): Promise<{ success: boolean; path: string; timestamp: string; error?: string }> {
@@ -774,7 +818,6 @@ export async function saveAutomationToServer(
       custom_recipes: data.customRecipes,
       history: data.history.slice(0, 50), // keep latest 50
       fleet_matrix: data.fleetMatrix,
-      replica_sets: data.replicaSets,
       last_target_server_ids: data.lastTargetServerIds || [],
       client: 'SSH Desktop Multi-Server Enterprise Orchestrator',
     };
@@ -810,9 +853,6 @@ export async function saveAutomationToServer(
     localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(data.history.slice(0, 50)));
     if (data.fleetMatrix) {
       localStorage.setItem(STORAGE_KEY_FLEET_MATRIX, JSON.stringify(data.fleetMatrix));
-    }
-    if (data.replicaSets) {
-      localStorage.setItem(STORAGE_KEY_REPLICAS, JSON.stringify(data.replicaSets));
     }
 
     return { success: true, path: filePath, timestamp };
@@ -865,9 +905,6 @@ export async function loadAutomationFromServer(
     }
     if (parsed.fleet_matrix) {
       localStorage.setItem(STORAGE_KEY_FLEET_MATRIX, JSON.stringify(parsed.fleet_matrix));
-    }
-    if (Array.isArray(parsed.replica_sets)) {
-      localStorage.setItem(STORAGE_KEY_REPLICAS, JSON.stringify(parsed.replica_sets));
     }
 
     return { success: true, data: parsed, path: filePath, rawJson: content };
