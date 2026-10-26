@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { X, Copy, Check, Code2 } from 'lucide-react';
+import Editor from '@monaco-editor/react';
+import { X, Copy, Check, Code2, Download } from 'lucide-react';
 import { ApiTabState } from '../types';
 
 interface CodeSnippetModalProps {
@@ -9,6 +10,14 @@ interface CodeSnippetModalProps {
 }
 
 type SnippetLang = 'curl' | 'js_fetch' | 'python_requests' | 'go' | 'rust';
+
+const MONACO_LANG_MAP: Record<SnippetLang, { monacoLang: string; fileExt: string }> = {
+  curl: { monacoLang: 'shell', fileExt: 'sh' },
+  js_fetch: { monacoLang: 'javascript', fileExt: 'js' },
+  python_requests: { monacoLang: 'python', fileExt: 'py' },
+  go: { monacoLang: 'go', fileExt: 'go' },
+  rust: { monacoLang: 'rust', fileExt: 'rs' },
+};
 
 export default function CodeSnippetModal({ isOpen, onClose, request }: CodeSnippetModalProps) {
   const [lang, setLang] = useState<SnippetLang>('curl');
@@ -115,11 +124,22 @@ export default function CodeSnippetModal({ isOpen, onClose, request }: CodeSnipp
   };
 
   const codeSnippet = generateSnippet(lang);
+  const langConfig = MONACO_LANG_MAP[lang] || MONACO_LANG_MAP.curl;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(codeSnippet);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleDownload = () => {
+    const blob = new Blob([codeSnippet], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `api_request_${lang}.${langConfig.fileExt}`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -167,25 +187,60 @@ export default function CodeSnippetModal({ isOpen, onClose, request }: CodeSnipp
           ))}
         </div>
 
-        {/* Code Block */}
+        {/* Code Block with Monaco Editor */}
         <div className="p-5 space-y-3 bg-[#11111b] relative">
-          <pre className="p-4 bg-[#181825] border border-white/10 rounded-xl font-mono text-xs text-gray-200 overflow-x-auto max-h-80 whitespace-pre leading-relaxed select-all">
-            <code>{codeSnippet}</code>
-          </pre>
+          <div className="border border-white/10 rounded-2xl overflow-hidden bg-[#0f111a] h-72 shadow-inner">
+            <Editor
+              height="100%"
+              language={langConfig.monacoLang}
+              theme="vs-dark"
+              value={codeSnippet}
+              options={{
+                readOnly: true,
+                domReadOnly: true,
+                fontSize: 13,
+                wordWrap: 'on',
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                fontFamily: "'JetBrains Mono', 'Fira Code', 'Menlo', 'Monaco', 'Consolas', monospace",
+                lineNumbers: 'on',
+                bracketPairColorization: { enabled: true },
+                padding: { top: 12, bottom: 12 },
+              }}
+              loading={
+                <div className="h-full flex items-center justify-center text-xs text-gray-500 font-mono">
+                  Colorizing Code Snippet...
+                </div>
+              }
+            />
+          </div>
 
           <div className="flex items-center justify-between pt-2">
-            <span className="text-[11px] text-gray-500">
-              Ready to copy and execute in your terminal or codebase
+            <span className="text-[11px] text-gray-500 font-mono">
+              Ready to copy and execute in your terminal or application
             </span>
 
-            <button
-              type="button"
-              onClick={handleCopy}
-              className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-colors shadow-md active:scale-95 cursor-pointer"
-            >
-              {copied ? <Check className="w-3.5 h-3.5 text-emerald-300" /> : <Copy className="w-3.5 h-3.5" />}
-              <span>{copied ? 'Copied!' : 'Copy Snippet'}</span>
-            </button>
+            <div className="flex items-center space-x-2">
+              <button
+                type="button"
+                onClick={handleDownload}
+                className="px-3 py-1.5 bg-white/5 hover:bg-white/10 text-gray-300 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-colors border border-white/10 cursor-pointer"
+                title={`Download ${langConfig.fileExt.toUpperCase()} file`}
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleCopy}
+                className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition-colors shadow-md active:scale-95 cursor-pointer"
+              >
+                {copied ? <Check className="w-3.5 h-3.5 text-emerald-300" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copied ? 'Copied!' : 'Copy Snippet'}</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
