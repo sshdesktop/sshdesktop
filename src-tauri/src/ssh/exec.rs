@@ -27,7 +27,11 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
     {
         let handle_opt = {
             let sessions = state.sessions.lock().await;
-            sessions.get(conn_id).cloned().or_else(|| sessions.get("default").cloned())
+            if conn_id == "default" || conn_id.is_empty() {
+                sessions.get("default").cloned().or_else(|| sessions.values().next().cloned())
+            } else {
+                sessions.get(conn_id).cloned()
+            }
         };
         if let Some(handle) = handle_opt {
             match crate::ssh::session::run_exec_channel(&handle, command).await {
@@ -440,7 +444,11 @@ pub async fn run_cmd_with_stdin(
     {
         let handle_opt = {
             let sessions = state.sessions.lock().await;
-            sessions.get(conn_id).cloned().or_else(|| sessions.get("default").cloned())
+            if conn_id == "default" || conn_id.is_empty() {
+                sessions.get("default").cloned().or_else(|| sessions.values().next().cloned())
+            } else {
+                sessions.get(conn_id).cloned()
+            }
         };
         if let Some(handle) = handle_opt {
             match crate::ssh::session::run_exec_channel_with_stdin(&handle, command, stdin_data).await {
@@ -723,7 +731,11 @@ pub async fn ssh_exec_stream(
         let handle_opt = {
             let state_ref = app_clone.state::<AppState>();
             let sessions = state_ref.sessions.lock().await;
-            sessions.get(&conn_id_clone).cloned().or_else(|| sessions.get("default").cloned())
+            if conn_id_clone == "default" || conn_id_clone.is_empty() {
+                sessions.get("default").cloned().or_else(|| sessions.values().next().cloned())
+            } else {
+                sessions.get(&conn_id_clone).cloned()
+            }
         };
 
         if let Some(handle) = handle_opt {
