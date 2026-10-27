@@ -34,15 +34,17 @@ echo "===SYSTEMD_TIMER==="
 systemctl is-active certbot.timer certbot.service 2>/dev/null || true
 
 echo "===SERVERS==="
-(command -v nginx >/dev/null 2>&1 || [ -x /usr/sbin/nginx ] || [ -x /usr/bin/nginx ]) && echo "NGINX_INSTALLED"
-(command -v apache2 >/dev/null 2>&1 || [ -x /usr/sbin/apache2 ] || command -v httpd >/dev/null 2>&1 || [ -x /usr/sbin/httpd ]) && echo "APACHE_INSTALLED"
+(command -v nginx >/dev/null 2>&1 || [ -x /usr/sbin/nginx ] || [ -x /usr/bin/nginx ] || [ -x /sbin/nginx ] || [ -d /etc/nginx ] || [ -x /snap/bin/nginx ] || systemctl is-active --quiet nginx 2>/dev/null) && echo "NGINX_INSTALLED"
+(command -v apache2 >/dev/null 2>&1 || command -v httpd >/dev/null 2>&1 || [ -x /usr/sbin/apache2 ] || [ -x /usr/sbin/httpd ] || [ -x /usr/bin/apache2 ] || [ -x /usr/bin/httpd ] || [ -d /etc/apache2 ] || [ -d /etc/httpd ] || systemctl is-active --quiet apache2 2>/dev/null || systemctl is-active --quiet httpd 2>/dev/null) && echo "APACHE_INSTALLED"
 (command -v caddy >/dev/null 2>&1 || [ -x /usr/bin/caddy ]) && echo "CADDY_INSTALLED"
 
 echo "===PLUGINS==="
-(certbot plugins 2>/dev/null || /snap/bin/certbot plugins 2>/dev/null || /usr/bin/certbot plugins 2>/dev/null || true)
-(dpkg -l 2>/dev/null | grep -E "python3-certbot-nginx|python3-certbot-apache|certbot-nginx|certbot-apache" || true)
-(rpm -qa 2>/dev/null | grep -E "python3-certbot-nginx|python3-certbot-apache|certbot-nginx|certbot-apache" || true)
-(pacman -Q 2>/dev/null | grep -E "certbot-nginx|certbot-apache" || true)
+# Fast certbot plugin detection without slow dpkg-l / rpm-qa
+(certbot plugins 2>/dev/null || /snap/bin/certbot plugins 2>/dev/null || true)
+(python3 -c "import certbot_nginx" 2>/dev/null && echo "nginx") || true
+(python3 -c "import certbot_apache" 2>/dev/null && echo "apache") || true
+[ -d /usr/lib/python3/dist-packages/certbot_nginx ] && echo "nginx"
+[ -d /usr/lib/python3/dist-packages/certbot_apache ] && echo "apache"
 
 echo "===OS==="
 if [ -f /etc/os-release ]; then
@@ -344,18 +346,35 @@ export async function listCertificates(connId: string): Promise<SslCertificate[]
   const script = `
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
 
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  SUDO=""
+fi
+
 echo "===CERTBOT_CERTS==="
-sudo certbot certificates 2>/dev/null || certbot certificates 2>/dev/null || /snap/bin/certbot certificates 2>/dev/null || true
+$SUDO certbot certificates 2>/dev/null || certbot certificates 2>/dev/null || /snap/bin/certbot certificates 2>/dev/null || true
 
 echo "===CUSTOM_CERTS==="
-# Scan for additional custom fullchain or server certs in /etc/ssl/certs and webservers
-sudo find /etc/ssl/certs /etc/nginx/ssl /etc/apache2/ssl /etc/httpd/ssl /etc/ssl/private -maxdepth 2 -type f \\( -name "*.crt" -o -name "*.pem" \\) ! -name "ca-certificates.crt" ! -name "ca-bundle.crt" 2>/dev/null | head -n 15 | while read -r f; do
-  if [ -r "$f" ]; then
+# Fast custom certificate scan: only check specific webserver directories and non-symlink user certs
+for d in /etc/nginx/ssl /etc/apache2/ssl /etc/httpd/ssl /etc/ssl/private; do
+  if [ -d "$d" ]; then
+    find "$d" -maxdepth 1 -type f \( -name "*.crt" -o -name "*.pem" \) 2>/dev/null | head -n 5 | while read -r f; do
+      echo "FILE:$f"
+      openssl x509 -in "$f" -noout -subject -issuer -dates -serial 2>/dev/null || true
+      echo "---"
+    done
+  fi
+done
+
+# Check regular user files in /etc/ssl/certs (strictly exclude symlinks to system CAs to avoid slow loops)
+if [ -d /etc/ssl/certs ]; then
+  find /etc/ssl/certs -maxdepth 1 -type f ! -type l \( -name "*.crt" -o -name "*.pem" \) ! -name "ca-certificates.crt" ! -name "ca-bundle.crt" 2>/dev/null | head -n 5 | while read -r f; do
     echo "FILE:$f"
     openssl x509 -in "$f" -noout -subject -issuer -dates -serial 2>/dev/null || true
     echo "---"
-  fi
-done
+  done
+fi
 `;
 
   try {
@@ -742,20 +761,30 @@ else
   SUDO=""
 fi
 
-$SUDO mkdir -p "${outDir}"
+$SUDO mkdir -p "${outDir}" 2>&1
+
 $SUDO openssl req -x509 -nodes -days ${days} -newkey rsa:2048 -batch \\
   -keyout "${keyPath}" \\
   -out "${certPath}" \\
   -subj "/C=${country}/O=${org}/CN=${cleanDomain}" 2>&1
 
-chmod 644 "${certPath}" 2>/dev/null || true
-chmod 600 "${keyPath}" 2>/dev/null || true
-echo "===SELF_SIGNED_DONE==="
+$SUDO chmod 644 "${certPath}" 2>/dev/null || true
+$SUDO chmod 600 "${keyPath}" 2>/dev/null || true
+
+if [ -s "${certPath}" ] && [ -s "${keyPath}" ]; then
+  echo "===SELF_SIGNED_DONE==="
+  echo "Certificate File : ${certPath}"
+  echo "Private Key File : ${keyPath}"
+  echo "Common Name (CN) : ${cleanDomain}"
+  echo "Organization (O) : ${org}"
+  echo "Country (C)      : ${country}"
+  echo "Validity Period  : ${days} days"
+fi
 `;
 
   const res = await sshExec(connId, script);
   const out = (res.stdout || '') + (res.stderr ? '\n' + res.stderr : '');
-  const isSuccess = res.exit_code === 0 || out.includes('===SELF_SIGNED_DONE===');
+  const isSuccess = out.includes('===SELF_SIGNED_DONE===') || (res.exit_code === 0 && !out.toLowerCase().includes('error'));
 
   return {
     success: isSuccess,
