@@ -301,25 +301,6 @@ export async function executeOnServer(
 ): Promise<ServerExecutionResult> {
   const startedAt = Date.now();
 
-  // If server is marked inactive, immediately return a skipped/failed result and do not execute
-  if (server.status === 'inactive') {
-    return {
-      serverId: server.id,
-      serverName: server.name || server.host,
-      host: server.host,
-      port: server.port,
-      username: server.username,
-      status: 'failed',
-      stdout: '',
-      stderr: `[DEACTIVATED] Server "${server.name || server.host}" (${server.host}:${server.port}) is marked inactive in Fleet Matrix. Execution skipped.`,
-      exitCode: 1,
-      durationMs: 0,
-      startedAt,
-      finishedAt: Date.now(),
-      error: 'Server is deactivated',
-    };
-  }
-
   let preparedCommand = command.trim();
 
   // If sudo is required and command does not already contain sudo
@@ -337,10 +318,12 @@ export async function executeOnServer(
     let res = await sshExec(server.id, preparedCommand);
 
     // If connection was not ready or dropped, try auto-connecting and retry once
-    if (
-      res.exit_code === -1 &&
-      (res.stderr.includes('No active SSH connection') || res.stdout.includes('No active SSH connection'))
-    ) {
+    const isMissingConnection =
+      res.stderr.includes('No active SSH connection') ||
+      res.stdout.includes('No active SSH connection') ||
+      res.stderr.includes('Please connect to a server first');
+
+    if (isMissingConnection) {
       try {
         await sshConnect({
           id: server.id,
@@ -355,7 +338,7 @@ export async function executeOnServer(
           group: server.group,
           tags: server.tags || [],
         });
-        // Retry execution
+        // Retry execution after establishing connection
         res = await sshExec(server.id, preparedCommand);
       } catch (connErr: any) {
         return {
@@ -366,18 +349,23 @@ export async function executeOnServer(
           username: server.username,
           status: 'failed',
           stdout: '',
-          stderr: connErr?.message || String(connErr) || 'SSH connection failed',
-          exitCode: -1,
+          stderr: `[SERVER OFFLINE / UNREACHABLE] Could not establish SSH connection to "${server.name || server.host}" (${server.host}:${server.port}): ${connErr?.message || 'Server is offline or unreachable'}.`,
+          exitCode: 1,
           durationMs: Date.now() - startedAt,
           startedAt,
           finishedAt: Date.now(),
-          error: connErr?.message || 'Connection failed',
+          error: connErr?.message || 'Server connection failed',
         };
       }
     }
 
     const durationMs = Date.now() - startedAt;
-    const isSuccess = res.exit_code === 0 && !res.stderr.includes('No active SSH connection') && !res.stderr.includes('Network is unreachable') && !res.stderr.includes('Connection refused');
+    const isSuccess =
+      res.exit_code === 0 &&
+      !res.stderr.includes('No active SSH connection') &&
+      !res.stderr.includes('Network is unreachable') &&
+      !res.stderr.includes('Connection refused') &&
+      !res.stderr.includes('Host is down');
 
     return {
       serverId: server.id,
@@ -531,18 +519,6 @@ export async function probeFleetTelemetry(
   const telemetryCommand = BUILT_IN_RECIPES[0].command;
 
   const probePromises = servers.map(async (server) => {
-    if (server.status === 'inactive') {
-      const item: TargetHealth = {
-        serverId: server.id,
-        reachable: false,
-        latencyMs: 0,
-        error: 'Server is deactivated in Fleet Matrix',
-        lastChecked: Date.now(),
-      };
-      onServerUpdate?.(item);
-      return item;
-    }
-
     const started = Date.now();
     try {
       const res = await executeOnServer(server, telemetryCommand, false);

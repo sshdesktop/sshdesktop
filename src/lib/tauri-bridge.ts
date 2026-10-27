@@ -30,7 +30,20 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
         errMsg.includes('Socket closed') ||
         errMsg.includes('transport error');
 
-      if (isConnectionLoss && cmd !== 'ssh_test_connection' && cmd !== 'ssh_disconnect' && cmd !== 'store_delete_connection') {
+      // Do NOT trigger global disconnect alert when:
+      // 1. It is a connection test (ssh_test_connection)
+      // 2. It is an intentional disconnect or store deletion
+      // 3. It is an initial connection attempt (ssh_connect)
+      // 4. The error is simply that no connection exists for this ID (e.g. un-connected fleet node)
+      const isNotDropEvent = 
+        cmd === 'ssh_test_connection' || 
+        cmd === 'ssh_disconnect' || 
+        cmd === 'store_delete_connection' ||
+        cmd === 'ssh_connect' ||
+        errMsg.includes('No active SSH connection') ||
+        errMsg.includes('Please connect to a server first');
+
+      if (isConnectionLoss && !isNotDropEvent) {
         if (typeof window !== 'undefined') {
           const detail = { 
             connId: args?.connId,
