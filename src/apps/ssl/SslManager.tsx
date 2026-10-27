@@ -95,6 +95,12 @@ export default function SslManager() {
     outputDir: '/etc/ssl/certs',
   });
   const [isGeneratingSelfSigned, setIsGeneratingSelfSigned] = useState(false);
+  const [selfSignedResult, setSelfSignedResult] = useState<{
+    success: boolean;
+    certPath: string;
+    keyPath: string;
+    output: string;
+  } | null>(null);
 
   // SSL Diagnostics State
   const [diagDomain, setDiagDomain] = useState<string>('');
@@ -219,43 +225,9 @@ export default function SslManager() {
     }
   };
 
-  // Plugin Selection Handler: Checks dependency ONLY when user selects that webserver
+  // Plugin Selection Handler: Cleanly updates form selection without intrusive popups
   const handleSelectPlugin = (plugin: 'nginx' | 'apache' | 'standalone' | 'webroot' | 'dns') => {
     setIssueForm(prev => ({ ...prev, plugin }));
-
-    if (plugin === 'nginx' && certbotStatus) {
-      if (!certbotStatus.webServers.nginx) {
-        setMissingDepModal({
-          type: 'missing_webserver',
-          webserver: 'nginx',
-          title: 'Nginx Web Server Is Not Installed',
-          description: 'Nginx is not detected on this server. The Nginx Certbot plugin requires Nginx to be installed to configure vhosts and HTTPS redirects.',
-        });
-      } else if (!certbotStatus.plugins.nginx) {
-        setMissingDepModal({
-          type: 'missing_plugin',
-          webserver: 'nginx',
-          title: 'Certbot Nginx Plugin Is Not Installed',
-          description: 'Nginx is installed, but the Certbot Nginx plugin (python3-certbot-nginx) is missing. Install it to allow Certbot to automatically configure Nginx SSL.',
-        });
-      }
-    } else if (plugin === 'apache' && certbotStatus) {
-      if (!certbotStatus.webServers.apache) {
-        setMissingDepModal({
-          type: 'missing_webserver',
-          webserver: 'apache',
-          title: 'Apache Web Server Is Not Installed',
-          description: 'Apache (apache2/httpd) is not detected on this server. The Apache Certbot plugin requires Apache to be installed.',
-        });
-      } else if (!certbotStatus.plugins.apache) {
-        setMissingDepModal({
-          type: 'missing_plugin',
-          webserver: 'apache',
-          title: 'Certbot Apache Plugin Is Not Installed',
-          description: 'Apache is installed, but the Certbot Apache plugin (python3-certbot-apache) is missing. Install it to allow Certbot to automatically configure Apache SSL.',
-        });
-      }
-    }
   };
 
   // One-click install for missing webserver or plugin triggered from plugin selection
@@ -312,45 +284,23 @@ export default function SslManager() {
       return;
     }
 
-    // Guard: Check if selected plugin has missing webserver or plugin dependencies
-    if (issueForm.plugin === 'nginx') {
-      if (!certbotStatus.webServers.nginx) {
-        setMissingDepModal({
-          type: 'missing_webserver',
-          webserver: 'nginx',
-          title: 'Nginx Web Server Is Not Installed',
-          description: 'Cannot issue certificate using Nginx plugin because Nginx is not installed on this server.',
-        });
-        return;
-      }
-      if (!certbotStatus.plugins.nginx) {
-        setMissingDepModal({
-          type: 'missing_plugin',
-          webserver: 'nginx',
-          title: 'Certbot Nginx Plugin Is Not Installed',
-          description: 'Cannot issue certificate using Nginx plugin because python3-certbot-nginx is not installed.',
-        });
-        return;
-      }
-    } else if (issueForm.plugin === 'apache') {
-      if (!certbotStatus.webServers.apache) {
-        setMissingDepModal({
-          type: 'missing_webserver',
-          webserver: 'apache',
-          title: 'Apache Web Server Is Not Installed',
-          description: 'Cannot issue certificate using Apache plugin because Apache is not installed on this server.',
-        });
-        return;
-      }
-      if (!certbotStatus.plugins.apache) {
-        setMissingDepModal({
-          type: 'missing_plugin',
-          webserver: 'apache',
-          title: 'Certbot Apache Plugin Is Not Installed',
-          description: 'Cannot issue certificate using Apache plugin because python3-certbot-apache is not installed.',
-        });
-        return;
-      }
+    // Guard: Check if selected plugin has missing webserver dependencies
+    if (issueForm.plugin === 'nginx' && certbotStatus && !certbotStatus.webServers.nginx) {
+      setMissingDepModal({
+        type: 'missing_webserver',
+        webserver: 'nginx',
+        title: 'Nginx Web Server Is Not Installed',
+        description: 'Cannot issue certificate using Nginx plugin because Nginx is not installed on this server. Install Nginx or switch to Standalone mode.',
+      });
+      return;
+    } else if (issueForm.plugin === 'apache' && certbotStatus && !certbotStatus.webServers.apache) {
+      setMissingDepModal({
+        type: 'missing_webserver',
+        webserver: 'apache',
+        title: 'Apache Web Server Is Not Installed',
+        description: 'Cannot issue certificate using Apache plugin because Apache is not installed on this server. Install Apache or switch to Standalone mode.',
+      });
+      return;
     }
 
     setIsIssuing(true);
@@ -371,7 +321,8 @@ export default function SslManager() {
       setIssueOutput(res.output);
       if (res.success) {
         setMessage({ text: `SSL Certificate for "${issueForm.domains}" issued successfully!`, isError: false });
-        await refreshAll();
+        // Refresh certificates in background without freezing the UI
+        listCertificates(activeConnectionId).then(certs => setCertificates(certs)).catch(() => {});
       } else {
         setMessage({ text: 'Certificate issuance encountered an issue. Review the diagnostic log below.', isError: true });
       }
@@ -426,16 +377,17 @@ export default function SslManager() {
     }
   };
 
-  // Handle Self-Signed Generation (Fixed: -batch flag prevents infinite hanging)
+  // Handle Self-Signed Generation (Fast execution with immediate terminal log output)
   const handleGenerateSelfSigned = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeConnectionId) return;
     setIsGeneratingSelfSigned(true);
+    setSelfSignedResult(null);
     setMessage(null);
 
     try {
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('OpenSSL certificate generation timed out after 30 seconds.')), 30000)
+        setTimeout(() => reject(new Error('OpenSSL certificate generation timed out after 15 seconds.')), 15000)
       );
 
       const res = await Promise.race([
@@ -443,14 +395,22 @@ export default function SslManager() {
         timeoutPromise,
       ]) as { success: boolean; certPath: string; keyPath: string; output: string };
 
+      setSelfSignedResult(res);
+
       if (res.success) {
-        setMessage({ text: `Self-signed certificate generated at ${res.certPath}!`, isError: false });
-        await refreshAll();
-        setActiveTab('certificates');
+        setMessage({ text: `Self-signed certificate generated successfully at ${res.certPath}!`, isError: false });
+        // Background sync to update certificates list without blocking the current tab
+        listCertificates(activeConnectionId).then(certs => setCertificates(certs)).catch(() => {});
       } else {
-        setMessage({ text: `Failed: ${res.output}`, isError: true });
+        setMessage({ text: 'OpenSSL generation failed. Review terminal log below.', isError: true });
       }
     } catch (err: any) {
+      setSelfSignedResult({
+        success: false,
+        certPath: '',
+        keyPath: '',
+        output: String(err?.message || err),
+      });
       setMessage({ text: `Error: ${err?.message || err}`, isError: true });
     } finally {
       setIsGeneratingSelfSigned(false);
@@ -766,7 +726,7 @@ export default function SslManager() {
             </div>
 
             {/* Certificates Table / Cards */}
-            {isLoading ? (
+            {isLoading && certificates.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-20 text-gray-400 space-y-3">
                 <RefreshCw className="w-6 h-6 animate-spin text-emerald-400" />
                 <span className="text-xs">Scanning SSL certificates from remote server...</span>
@@ -1014,13 +974,13 @@ export default function SslManager() {
                   ))}
                 </div>
 
-                {/* Inline Dependency Alert for Nginx / Apache */}
+                {/* Inline Dependency Alert / Status for Nginx / Apache */}
                 {issueForm.plugin === 'nginx' && certbotStatus && (
                   !certbotStatus.webServers.nginx ? (
                     <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-between text-xs text-amber-200">
                       <div className="flex items-center space-x-2">
                         <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                        <span>Nginx is not installed on this server.</span>
+                        <span>Nginx is not detected on this server.</span>
                       </div>
                       <div className="flex items-center space-x-2">
                         <button
@@ -1067,7 +1027,12 @@ export default function SslManager() {
                         Install Nginx Plugin
                       </button>
                     </div>
-                  ) : null
+                  ) : (
+                    <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center space-x-2 text-xs text-emerald-300">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>Nginx web server and Certbot Nginx plugin are detected &amp; ready for automated configuration.</span>
+                    </div>
+                  )
                 )}
 
                 {issueForm.plugin === 'apache' && certbotStatus && (
@@ -1075,7 +1040,7 @@ export default function SslManager() {
                     <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-between text-xs text-amber-200">
                       <div className="flex items-center space-x-2">
                         <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                        <span>Apache is not installed on this server.</span>
+                        <span>Apache is not detected on this server.</span>
                       </div>
                       <div className="flex items-center space-x-2">
                         <button
@@ -1122,7 +1087,12 @@ export default function SslManager() {
                         Install Apache Plugin
                       </button>
                     </div>
-                  ) : null
+                  ) : (
+                    <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center space-x-2 text-xs text-emerald-300">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>Apache web server and Certbot Apache plugin are detected &amp; ready for automated configuration.</span>
+                    </div>
+                  )
                 )}
 
                 {issueForm.plugin === 'webroot' && (
@@ -1410,6 +1380,109 @@ export default function SslManager() {
                 </button>
               </div>
             </form>
+
+            {/* Dedicated Self-Signed Result Output Console */}
+            {selfSignedResult && (
+              <div className={`rounded-2xl border p-5 shadow-2xl space-y-4 backdrop-blur-md animate-in fade-in duration-200 ${
+                selfSignedResult.success 
+                  ? 'bg-emerald-950/20 border-emerald-500/30' 
+                  : 'bg-rose-950/20 border-rose-500/30'
+              }`}>
+                {/* Result Header */}
+                <div className="flex items-center justify-between pb-3 border-b border-white/10">
+                  <div className="flex items-center space-x-2.5">
+                    {selfSignedResult.success ? (
+                      <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                    ) : (
+                      <AlertCircle className="w-5 h-5 text-rose-400" />
+                    )}
+                    <div>
+                      <h4 className="text-sm font-bold text-white">
+                        {selfSignedResult.success 
+                          ? 'Self-Signed Certificate Generated Successfully' 
+                          : 'OpenSSL Generation Failed'}
+                      </h4>
+                      <p className="text-[11px] text-gray-400">
+                        {selfSignedResult.success 
+                          ? 'RSA 2048-bit key and X.509 certificate were created on the server disk.' 
+                          : 'Review the OpenSSL diagnostic error output below.'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {selfSignedResult.success && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('certificates')}
+                      className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer"
+                    >
+                      <Layers className="w-3.5 h-3.5" />
+                      <span>View in Certificate List</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* Generated File Paths */}
+                {selfSignedResult.success && (
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div className="p-3 rounded-xl bg-black/40 border border-white/5 space-y-1">
+                      <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Public Certificate (.crt)</div>
+                      <div className="flex items-center justify-between">
+                        <code className="text-emerald-300 font-mono text-[11px] truncate select-all">{selfSignedResult.certPath}</code>
+                        <button
+                          type="button"
+                          onClick={() => navigator.clipboard.writeText(selfSignedResult.certPath)}
+                          className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-white cursor-pointer ml-1"
+                          title="Copy certificate path"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-black/40 border border-white/5 space-y-1">
+                      <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Private Key (.key)</div>
+                      <div className="flex items-center justify-between">
+                        <code className="text-purple-300 font-mono text-[11px] truncate select-all">{selfSignedResult.keyPath}</code>
+                        <button
+                          type="button"
+                          onClick={() => navigator.clipboard.writeText(selfSignedResult.keyPath)}
+                          className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-white cursor-pointer ml-1"
+                          title="Copy private key path"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* OpenSSL Terminal Output Box */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-gray-300 flex items-center space-x-1.5">
+                      <Terminal className="w-3.5 h-3.5 text-purple-400" />
+                      <span>OpenSSL Console Output</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard.writeText(selfSignedResult.output)}
+                      className="text-[11px] text-gray-400 hover:text-white flex items-center space-x-1 cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copy Output</span>
+                    </button>
+                  </div>
+                  <pre className={`p-3.5 rounded-xl text-xs font-mono whitespace-pre-wrap break-all border overflow-y-auto max-h-60 leading-relaxed select-text ${
+                    selfSignedResult.success 
+                      ? 'bg-black/70 border-white/10 text-emerald-300' 
+                      : 'bg-rose-950/40 border-rose-500/30 text-rose-300'
+                  }`}>
+                    {selfSignedResult.output || '(No command output recorded)'}
+                  </pre>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
