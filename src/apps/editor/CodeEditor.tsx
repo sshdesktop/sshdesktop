@@ -246,9 +246,35 @@ export default function CodeEditor() {
   // Clipboard for copy / move
   const [clipboardItems, setClipboardItems] = useState<{ paths: string[]; mode: 'copy' | 'cut' } | null>(null);
 
+  // Sync refs for global keyboard shortcut listeners
+  const selectedTreePathsRef = useRef(selectedTreePaths);
+  selectedTreePathsRef.current = selectedTreePaths;
+  const selectedTreePathRef = useRef(selectedTreePath);
+  selectedTreePathRef.current = selectedTreePath;
+  const clipboardItemsRef = useRef(clipboardItems);
+  clipboardItemsRef.current = clipboardItems;
+  const selectedFolderRef = useRef(selectedFolder);
+  selectedFolderRef.current = selectedFolder;
+  const projectRootRef = useRef(projectRoot);
+  projectRootRef.current = projectRoot;
+  const activeSidebarTabRef = useRef(activeSidebarTab);
+  activeSidebarTabRef.current = activeSidebarTab;
+  const sidebarOpenRef = useRef(sidebarOpen);
+  sidebarOpenRef.current = sidebarOpen;
+
   // Right-click Context Menus
   const [treeContextMenu, setTreeContextMenu] = useState<TreeContextMenuState>({ visible: false, x: 0, y: 0, item: null });
   const [tabContextMenu, setTabContextMenu] = useState<TabContextMenuState>({ visible: false, x: 0, y: 0, tabId: '' });
+  const [termContextMenu, setTermContextMenu] = useState<{ x: number; y: number; tabId: string; hasSelection: boolean } | null>(null);
+  const [copiedNotice, setCopiedNotice] = useState<boolean>(false);
+  const [editorToast, setEditorToast] = useState<string | null>(null);
+
+  const showEditorToast = useCallback((msg: string) => {
+    setEditorToast(msg);
+    setTimeout(() => {
+      setEditorToast(curr => (curr === msg ? null : curr));
+    }, 2500);
+  }, []);
 
   // Creation Modals with In-Modal Error Display
   const [showCreateModal, setShowCreateModal] = useState<'file' | 'folder' | null>(null);
@@ -642,6 +668,20 @@ export default function CodeEditor() {
     const instance: TabInstance = { term, fitAddon, disposed: false };
     tabInstances.current.set(tabId, instance);
 
+    // Terminal contextmenu listener on the mounted DOM element
+    const onContextMenuHandler = (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const sel = term.getSelection() || '';
+      setTermContextMenu({
+        x: Math.min(e.clientX, window.innerWidth - 230),
+        y: Math.min(e.clientY, window.innerHeight - 280),
+        tabId,
+        hasSelection: Boolean(sel && sel.trim().length > 0),
+      });
+    };
+    el.addEventListener('contextmenu', onContextMenuHandler);
+
     term.onData(data => {
       const encoder = new TextEncoder();
       const bytes = Array.from(encoder.encode(data));
@@ -665,6 +705,70 @@ export default function CodeEditor() {
       term.writeln(`\r\n\x1b[31m[Failed to connect bash PTY: ${err?.message || err}]\x1b[0m\r\n`);
     }
   }, [activeConnId]);
+
+  // Terminal Context Menu Handlers
+  const handleTerminalContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const inst = tabInstances.current.get(tabId);
+    const sel = inst?.term.getSelection() || '';
+    setTermContextMenu({
+      x: Math.min(e.clientX, window.innerWidth - 230),
+      y: Math.min(e.clientY, window.innerHeight - 280),
+      tabId,
+      hasSelection: Boolean(sel && sel.trim().length > 0),
+    });
+  }, []);
+
+  const handleTermCopy = useCallback(() => {
+    if (!termContextMenu) return;
+    const inst = tabInstances.current.get(termContextMenu.tabId);
+    const sel = inst?.term.getSelection();
+    if (sel) {
+      navigator.clipboard.writeText(sel);
+      setCopiedNotice(true);
+      setTimeout(() => setCopiedNotice(false), 2000);
+    }
+    setTermContextMenu(null);
+  }, [termContextMenu]);
+
+  const handleTermPaste = useCallback(async () => {
+    if (!termContextMenu) return;
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        const bytes = Array.from(new TextEncoder().encode(text));
+        await terminalWrite(termContextMenu.tabId, bytes);
+      }
+    } catch (err) {
+      console.warn('Terminal paste failed:', err);
+    }
+    setTermContextMenu(null);
+  }, [termContextMenu]);
+
+  const handleTermSelectAll = useCallback(() => {
+    if (!termContextMenu) return;
+    const inst = tabInstances.current.get(termContextMenu.tabId);
+    inst?.term.selectAll();
+    setTermContextMenu(null);
+  }, [termContextMenu]);
+
+  const handleTermClear = useCallback(() => {
+    if (!termContextMenu) return;
+    const inst = tabInstances.current.get(termContextMenu.tabId);
+    inst?.term.clear();
+    const bytes = Array.from(new TextEncoder().encode('clear\r'));
+    terminalWrite(termContextMenu.tabId, bytes).catch(() => {});
+    setTermContextMenu(null);
+  }, [termContextMenu]);
+
+  const handleTermReset = useCallback(() => {
+    if (!termContextMenu) return;
+    const inst = tabInstances.current.get(termContextMenu.tabId);
+    inst?.term.reset();
+    try { inst?.fitAddon.fit(); } catch {}
+    setTermContextMenu(null);
+  }, [termContextMenu]);
 
   // Fit terminal on toggle or tab switch without destroying canvas
   useEffect(() => {
@@ -870,6 +974,35 @@ export default function CodeEditor() {
     }
   }, [pendingFilePath, openPathInEditor, clearPendingFile]);
 
+  // Helper to reliably save remote files with elevated sudo temp-file fallback
+  const saveFileWithElevatedFallback = useCallback(async (connId: string, remotePath: string, content: string) => {
+    const isProtectedSystemPath = /^\/(etc|var|usr|lib|boot|opt|root)(\/|$)/.test(remotePath);
+
+    // If not a system path, try direct SFTP write first
+    if (!isProtectedSystemPath) {
+      try {
+        await sftpWriteTextFile(connId, remotePath, content);
+        return;
+      } catch (err: any) {
+        console.warn('Direct SFTP write failed, attempting elevated temp-file write:', err);
+      }
+    }
+
+    // Elevated write via temporary file in /tmp/ (safe for any file size, no command-line length limits)
+    const tempFile = `/tmp/.sshdesktop_edit_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.tmp`;
+    await sftpWriteTextFile(connId, tempFile, content);
+
+    const escapedTemp = tempFile.replace(/'/g, "'\\''");
+    const escapedDest = remotePath.replace(/'/g, "'\\''");
+    const elevatedCmd = `sudo cp -f '${escapedTemp}' '${escapedDest}' && sudo chmod 644 '${escapedDest}' && rm -f '${escapedTemp}' 2>/dev/null || true`;
+
+    const res = await sshExec(connId, elevatedCmd);
+    if (res.exit_code !== 0) {
+      await sshExec(connId, `rm -f '${escapedTemp}' 2>/dev/null || true`).catch(() => {});
+      throw new Error(res.stderr || res.stdout || 'Permission denied: Sudo privileges required to write to this file');
+    }
+  }, []);
+
   // Save active file
   const handleSave = useCallback(async () => {
     if (!activeFile || activeFile.isMedia) return;
@@ -879,23 +1012,19 @@ export default function CodeEditor() {
     setPermissionAlert(null);
 
     try {
-      try {
-        await sftpWriteTextFile(activeConnId, activeFile.remotePath, activeFile.content);
-      } catch (writeErr: any) {
-        // Fallback: If regular write fails, try privileged save with sudo (routes directly to run_cmd_priv)
-        const b64 = btoa(unescape(encodeURIComponent(activeFile.content)));
-        const privCmd = `sudo sh -c 'printf "%s" "${b64}" | base64 -d > "${activeFile.remotePath}"'`;
-        const res = await sshExec(activeConnId, privCmd);
-        if (res.exit_code !== 0) {
-          const detail = res.stdout || res.stderr || writeErr?.message || 'Permission denied';
-          throw new Error(detail);
-        }
-      }
+      // Guard with 15s timeout to prevent infinite loading spinners
+      await Promise.race([
+        saveFileWithElevatedFallback(activeConnId, activeFile.remotePath, activeFile.content),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Save operation timed out after 15 seconds. Please check server connection.')), 15000)
+        ),
+      ]);
 
       setFiles(prev =>
         prev.map(f => (f.id === activeFile.id ? { ...f, isModified: false } : f))
       );
       setSavedSuccess(true);
+      showEditorToast(`Saved ${activeFile.name} successfully`);
       setTimeout(() => setSavedSuccess(false), 2500);
     } catch (err: any) {
       const errMsg = String(err?.message || err);
@@ -916,7 +1045,7 @@ export default function CodeEditor() {
       setLoading(false);
       setLoadingAction(null);
     }
-  }, [activeConnId, activeFile]);
+  }, [activeConnId, activeFile, saveFileWithElevatedFallback, showEditorToast]);
 
   // Keep ref up to date to prevent stale closures in Monaco keybindings
   useEffect(() => {
@@ -936,17 +1065,12 @@ export default function CodeEditor() {
 
     for (const f of modified) {
       try {
-        try {
-          await sftpWriteTextFile(activeConnId, f.remotePath, f.content);
-        } catch (writeErr: any) {
-          const b64 = btoa(unescape(encodeURIComponent(f.content)));
-          const privCmd = `sudo sh -c 'printf "%s" "${b64}" | base64 -d > "${f.remotePath}"'`;
-          const res = await sshExec(activeConnId, privCmd);
-          if (res.exit_code !== 0) {
-            const detail = res.stdout || res.stderr || writeErr?.message || 'Permission denied';
-            throw new Error(detail);
-          }
-        }
+        await Promise.race([
+          saveFileWithElevatedFallback(activeConnId, f.remotePath, f.content),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`Save timed out for ${f.name}`)), 15000)
+          ),
+        ]);
         successfullySavedIds.add(f.id);
       } catch (err: any) {
         const errMsg = String(err?.message || err);
@@ -969,7 +1093,7 @@ export default function CodeEditor() {
 
     setLoading(false);
     setLoadingAction(null);
-  }, [activeConnId, files]);
+  }, [activeConnId, files, saveFileWithElevatedFallback]);
 
   useEffect(() => {
     handleSaveAllRef.current = handleSaveAll;
@@ -1215,6 +1339,45 @@ export default function CodeEditor() {
         fetchGitData();
         return;
       }
+
+      // Explorer Left Sidebar shortcuts for Ctrl+C, Ctrl+X, Ctrl+V
+      if (isCtrlOrCmd && !e.shiftKey && activeSidebarTabRef.current === 'explorer' && sidebarOpenRef.current) {
+        const activeEl = document.activeElement;
+        const isEditingInMonaco = activeEl?.classList.contains('inputarea') || activeEl?.closest('.monaco-editor');
+        const isInputField = activeEl?.tagName === 'INPUT' || activeEl?.tagName === 'TEXTAREA';
+
+        if (!isEditingInMonaco && !isInputField) {
+          const key = e.key.toLowerCase();
+          const paths = selectedTreePathsRef.current.size > 0
+            ? Array.from(selectedTreePathsRef.current)
+            : selectedTreePathRef.current
+            ? [selectedTreePathRef.current]
+            : [];
+
+          if (key === 'c' && paths.length > 0) {
+            e.preventDefault();
+            handleCopyItems(paths);
+            return;
+          }
+          if (key === 'x' && paths.length > 0) {
+            e.preventDefault();
+            handleCutItems(paths);
+            return;
+          }
+          if (key === 'v' && clipboardItemsRef.current) {
+            e.preventDefault();
+            let targetDir = selectedFolderRef.current || projectRootRef.current;
+            if (selectedTreePathRef.current) {
+              const item = visibleItemsRef.current.find(it => it.path === selectedTreePathRef.current);
+              if (item) {
+                targetDir = item.isDir ? item.path : item.path.substring(0, item.path.lastIndexOf('/')) || targetDir;
+              }
+            }
+            handlePasteItems(targetDir);
+            return;
+          }
+        }
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -1341,38 +1504,127 @@ export default function CodeEditor() {
   };
 
   // ─── File & Folder Copy / Cut / Paste ─────────────────────────────
-  const handleCopyItems = (paths: string[]) => {
+  const handleCopyItems = useCallback((paths: string[]) => {
     if (paths.length === 0) return;
     setClipboardItems({ paths, mode: 'copy' });
     setTreeContextMenu(prev => ({ ...prev, visible: false }));
-  };
+    const name = paths.length === 1 ? paths[0].split('/').pop() : `${paths.length} items`;
+    showEditorToast(`Copied ${name} (Ctrl+V to paste)`);
+  }, [showEditorToast]);
 
-  const handleCutItems = (paths: string[]) => {
+  const handleCutItems = useCallback((paths: string[]) => {
     if (paths.length === 0) return;
     setClipboardItems({ paths, mode: 'cut' });
     setTreeContextMenu(prev => ({ ...prev, visible: false }));
+    const name = paths.length === 1 ? paths[0].split('/').pop() : `${paths.length} items`;
+    showEditorToast(`Cut ${name} (Ctrl+V to paste)`);
+  }, [showEditorToast]);
+
+  // Generate duplicate naming pattern: 1.txt -> 1 - Copy.txt -> 1 - Copy(2).txt -> 1 - Copy(3).txt
+  const generateDuplicateName = (originalName: string, existingNames: Set<string>): string => {
+    const lastDot = originalName.lastIndexOf('.');
+    const base = lastDot > 0 ? originalName.substring(0, lastDot) : originalName;
+    const ext = lastDot > 0 ? originalName.substring(lastDot) : '';
+
+    const copyNumRegex = /^(.*) - Copy\((\d+)\)$/;
+    const copySingleRegex = /^(.*) - Copy$/;
+
+    let stem = base;
+    let nextNum = 1;
+
+    const numMatch = base.match(copyNumRegex);
+    if (numMatch) {
+      stem = numMatch[1];
+      nextNum = parseInt(numMatch[2], 10) + 1;
+    } else {
+      const singleMatch = base.match(copySingleRegex);
+      if (singleMatch) {
+        stem = singleMatch[1];
+        nextNum = 2;
+      }
+    }
+
+    while (true) {
+      let candidate = '';
+      if (nextNum === 1) {
+        candidate = `${stem} - Copy${ext}`;
+        nextNum = 2;
+      } else {
+        candidate = `${stem} - Copy(${nextNum})${ext}`;
+        nextNum++;
+      }
+
+      if (!existingNames.has(candidate)) {
+        existingNames.add(candidate);
+        return candidate;
+      }
+    }
   };
 
-  const handlePasteItems = async (destFolder: string) => {
+  const handlePasteItems = useCallback(async (destFolder: string) => {
     if (!clipboardItems || clipboardItems.paths.length === 0) return;
-    const targetDir = destFolder.replace(/\/+$/, '');
+    const targetDir = destFolder.replace(/\/+$/, '') || '/';
     setLoading(true);
     setLoadingAction(clipboardItems.mode === 'copy' ? 'Copying files...' : 'Moving files...');
     setError(null);
 
     try {
-      for (const src of clipboardItems.paths) {
-        const cmd = clipboardItems.mode === 'copy'
-          ? `cp -r '${src.replace(/'/g, "'\\''")}' '${targetDir}/'`
-          : `mv '${src.replace(/'/g, "'\\''")}' '${targetDir}/'`;
-        const res = await sshExec(activeConnId, cmd);
-        if (res.exit_code !== 0) {
-          throw new Error(res.stderr || res.stdout || 'Operation failed');
-        }
+      // 1. Discover existing files in destination directory
+      let existingNames = new Set<string>();
+      try {
+        const entries = await sftpListDir(activeConnId, targetDir);
+        existingNames = new Set(entries.map(e => e.name));
+      } catch (err) {
+        console.warn('Could not list target directory before paste:', err);
       }
+
+      let count = 0;
+
+      for (const src of clipboardItems.paths) {
+        const srcFileName = src.split('/').pop() || src;
+        const srcDir = src.substring(0, src.lastIndexOf('/')) || '/';
+        const isSameDir = srcDir === targetDir;
+
+        let targetFileName = srcFileName;
+        // If copying into the same folder OR if target file already exists, create duplicate name
+        if (clipboardItems.mode === 'copy' && (isSameDir || existingNames.has(srcFileName))) {
+          targetFileName = generateDuplicateName(srcFileName, existingNames);
+        } else {
+          existingNames.add(targetFileName);
+        }
+
+        const targetFullPath = `${targetDir}/${targetFileName}`;
+        const escapedSrc = src.replace(/'/g, "'\\''");
+        const escapedDest = targetFullPath.replace(/'/g, "'\\''");
+
+        const cmd = clipboardItems.mode === 'copy'
+          ? `cp -r '${escapedSrc}' '${escapedDest}' 2>&1`
+          : `mv '${escapedSrc}' '${escapedDest}' 2>&1`;
+
+        let res = await sshExec(activeConnId, cmd);
+        if (res.exit_code !== 0) {
+          // Elevated fallback with sudo
+          const sudoCmd = clipboardItems.mode === 'copy'
+            ? `sudo cp -r '${escapedSrc}' '${escapedDest}' 2>&1`
+            : `sudo mv '${escapedSrc}' '${escapedDest}' 2>&1`;
+          res = await sshExec(activeConnId, sudoCmd);
+          if (res.exit_code !== 0) {
+            throw new Error(res.stderr || res.stdout || `Failed to ${clipboardItems.mode} ${srcFileName}`);
+          }
+        }
+        count++;
+      }
+
       if (clipboardItems.mode === 'cut') {
         setClipboardItems(null);
       }
+
+      showEditorToast(
+        clipboardItems.mode === 'copy'
+          ? `Pasted ${count} item(s) as copy`
+          : `Moved ${count} item(s) successfully`
+      );
+
       await refreshProjectTree();
     } catch (err: any) {
       setError(parsePermissionError(err));
@@ -1381,7 +1633,7 @@ export default function CodeEditor() {
       setLoadingAction(null);
       setTreeContextMenu(prev => ({ ...prev, visible: false }));
     }
-  };
+  }, [activeConnId, clipboardItems, refreshProjectTree, showEditorToast]);
 
   // ─── Git Operations (Complete VS Code Git Engine) ─────────────────
   const fetchGitData = async () => {
@@ -1629,6 +1881,8 @@ export default function CodeEditor() {
   }, []);
 
   const visibleItems = useMemo(() => getVisibleTreeItems(treeItems), [getVisibleTreeItems, treeItems]);
+  const visibleItemsRef = useRef(visibleItems);
+  visibleItemsRef.current = visibleItems;
 
   // Tree click with Folder expansion & Multi-select handling
   const handleItemClick = async (item: TreeItem, e: React.MouseEvent) => {
@@ -1705,12 +1959,49 @@ export default function CodeEditor() {
       setSelectedFolder(parentDir || projectRoot);
       openPathInEditor(item.path);
     }
+    // Maintain keyboard focus on tree container for instant shortcuts
+    treeContainerRef.current?.focus();
   };
 
-  // Tree Keyboard Navigation: Arrow Up, Arrow Down, Enter
+  // Tree Keyboard Navigation: Arrow Up, Arrow Down, Enter, Delete, Ctrl+C (Copy), Ctrl+X (Cut), Ctrl+V (Paste)
   const handleTreeKeyDown = (e: React.KeyboardEvent) => {
     if (visibleItems.length === 0) return;
+    const isCtrlOrCmd = e.ctrlKey || e.metaKey;
     const currentIndex = visibleItems.findIndex(it => it.path === selectedTreePath);
+
+    // Ctrl + C: Copy selected file(s)
+    if (isCtrlOrCmd && !e.shiftKey && e.key.toLowerCase() === 'c') {
+      e.preventDefault();
+      const paths = selectedTreePaths.size > 0 ? Array.from(selectedTreePaths) : selectedTreePath ? [selectedTreePath] : [];
+      if (paths.length > 0) {
+        handleCopyItems(paths);
+      }
+      return;
+    }
+
+    // Ctrl + X: Cut selected file(s)
+    if (isCtrlOrCmd && !e.shiftKey && e.key.toLowerCase() === 'x') {
+      e.preventDefault();
+      const paths = selectedTreePaths.size > 0 ? Array.from(selectedTreePaths) : selectedTreePath ? [selectedTreePath] : [];
+      if (paths.length > 0) {
+        handleCutItems(paths);
+      }
+      return;
+    }
+
+    // Ctrl + V: Paste file(s)
+    if (isCtrlOrCmd && !e.shiftKey && e.key.toLowerCase() === 'v') {
+      e.preventDefault();
+      let targetDir = selectedFolder || projectRoot;
+      if (selectedTreePath) {
+        const item = visibleItems.find(it => it.path === selectedTreePath);
+        if (item) {
+          targetDir = item.isDir ? item.path : item.path.substring(0, item.path.lastIndexOf('/')) || targetDir;
+        }
+      }
+      handlePasteItems(targetDir);
+      return;
+    }
 
     if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -1776,6 +2067,7 @@ export default function CodeEditor() {
     const closeMenus = () => {
       setTreeContextMenu(prev => ({ ...prev, visible: false }));
       setTabContextMenu(prev => ({ ...prev, visible: false }));
+      setTermContextMenu(null);
     };
     window.addEventListener('click', closeMenus);
     return () => window.removeEventListener('click', closeMenus);
@@ -1793,6 +2085,10 @@ export default function CodeEditor() {
             style={{ paddingLeft: `${depth * 14 + 10}px` }}
             className={`py-1 pr-2 flex items-center justify-between text-xs cursor-pointer transition-colors group select-none ${
               item.loading ? 'cursor-mac-wait opacity-75' : ''
+            } ${
+              clipboardItems?.mode === 'cut' && clipboardItems.paths.includes(item.path)
+                ? 'opacity-40 italic'
+                : ''
             } ${
               isSelected
                 ? 'bg-blue-600/30 text-blue-200 font-medium border-l-2 border-blue-500'
@@ -2847,6 +3143,7 @@ export default function CodeEditor() {
                     key={term.id}
                     style={{ display: isActive ? 'block' : 'none' }}
                     className="w-full h-full p-2"
+                    onContextMenu={(e) => handleTerminalContextMenu(e, term.id)}
                     ref={el => {
                       if (el) {
                         terminalContainers.current.set(term.id, el);
@@ -2868,6 +3165,7 @@ export default function CodeEditor() {
                       key={`split-${term.id}`}
                       style={{ display: isSplit ? 'block' : 'none' }}
                       className="w-full h-full p-2"
+                      onContextMenu={(e) => handleTerminalContextMenu(e, term.id)}
                       ref={el => {
                         if (el) {
                           mountPtyTerminal(term.id, term.folder, el);
@@ -2980,17 +3278,23 @@ export default function CodeEditor() {
           {/* Copy & Cut */}
           <button
             onClick={() => handleCopyItems(selectedTreePaths.size > 0 ? Array.from(selectedTreePaths) : [treeContextMenu.item!.path])}
-            className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-blue-600 hover:text-white text-left transition-colors"
+            className="w-full px-3 py-1.5 flex items-center justify-between hover:bg-blue-600 hover:text-white text-left transition-colors cursor-pointer"
           >
-            <Copy className="w-3.5 h-3.5 text-gray-400" />
-            <span>Copy</span>
+            <div className="flex items-center gap-2">
+              <Copy className="w-3.5 h-3.5 text-blue-400" />
+              <span>Copy</span>
+            </div>
+            <kbd className="text-[10px] text-gray-400 font-mono">Ctrl+C</kbd>
           </button>
           <button
             onClick={() => handleCutItems(selectedTreePaths.size > 0 ? Array.from(selectedTreePaths) : [treeContextMenu.item!.path])}
-            className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-blue-600 hover:text-white text-left transition-colors"
+            className="w-full px-3 py-1.5 flex items-center justify-between hover:bg-blue-600 hover:text-white text-left transition-colors cursor-pointer"
           >
-            <Scissors className="w-3.5 h-3.5 text-gray-400" />
-            <span>Cut</span>
+            <div className="flex items-center gap-2">
+              <Scissors className="w-3.5 h-3.5 text-amber-400" />
+              <span>Cut</span>
+            </div>
+            <kbd className="text-[10px] text-gray-400 font-mono">Ctrl+X</kbd>
           </button>
 
           {/* Paste */}
@@ -3000,10 +3304,13 @@ export default function CodeEditor() {
                 const targetDir = treeContextMenu.item!.isDir ? treeContextMenu.item!.path : treeContextMenu.item!.path.substring(0, treeContextMenu.item!.path.lastIndexOf('/'));
                 handlePasteItems(targetDir);
               }}
-              className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-blue-600 hover:text-white text-left transition-colors text-emerald-400"
+              className="w-full px-3 py-1.5 flex items-center justify-between hover:bg-blue-600 hover:text-white text-left transition-colors text-emerald-400 cursor-pointer"
             >
-              <Clipboard className="w-3.5 h-3.5" />
-              <span>Paste ({clipboardItems.paths.length} items)</span>
+              <div className="flex items-center gap-2">
+                <Clipboard className="w-3.5 h-3.5" />
+                <span>Paste ({clipboardItems.paths.length} items)</span>
+              </div>
+              <kbd className="text-[10px] text-emerald-300 font-mono">Ctrl+V</kbd>
             </button>
           )}
 
@@ -3492,6 +3799,105 @@ export default function CodeEditor() {
         onSelectLanguage={handleSelectLanguage}
         onClose={() => setIsLanguagePickerOpen(false)}
       />
+
+      {/* ─── 18. Terminal Right-Click Context Menu ───────────────────── */}
+      {termContextMenu && (
+        <div
+          style={{ top: termContextMenu.y, left: termContextMenu.x }}
+          className="fixed z-50 w-56 bg-[#181825] border border-white/10 rounded-lg shadow-2xl py-1 text-xs font-sans text-gray-200 backdrop-blur-xl animate-in fade-in duration-100 select-none"
+          onClick={e => e.stopPropagation()}
+        >
+          {termContextMenu.hasSelection ? (
+            <button
+              onClick={handleTermCopy}
+              className="w-full px-3 py-1.5 flex items-center justify-between hover:bg-blue-600 hover:text-white text-left transition-colors cursor-pointer"
+            >
+              <div className="flex items-center space-x-2">
+                <Copy className="w-3.5 h-3.5 text-blue-400" />
+                <span>Copy Selection</span>
+              </div>
+              <kbd className="text-[10px] text-gray-400 font-mono">Ctrl+C</kbd>
+            </button>
+          ) : (
+            <button
+              disabled
+              className="w-full px-3 py-1.5 flex items-center justify-between text-gray-500 text-left cursor-not-allowed opacity-50"
+            >
+              <div className="flex items-center space-x-2">
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy</span>
+              </div>
+              <span className="text-[10px] font-mono">Ctrl+C</span>
+            </button>
+          )}
+
+          <button
+            onClick={handleTermPaste}
+            className="w-full px-3 py-1.5 flex items-center justify-between hover:bg-blue-600 hover:text-white text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center space-x-2">
+              <Clipboard className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Paste into Terminal</span>
+            </div>
+            <kbd className="text-[10px] text-gray-400 font-mono">Ctrl+V</kbd>
+          </button>
+
+          <button
+            onClick={handleTermSelectAll}
+            className="w-full px-3 py-1.5 flex items-center justify-between hover:bg-blue-600 hover:text-white text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center space-x-2">
+              <CheckSquare className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Select All</span>
+            </div>
+            <kbd className="text-[10px] text-gray-400 font-mono">Ctrl+A</kbd>
+          </button>
+
+          <div className="my-1 border-t border-white/10 mx-2" />
+
+          <button
+            onClick={handleTermClear}
+            className="w-full px-3 py-1.5 flex items-center space-x-2 hover:bg-blue-600 hover:text-white text-left transition-colors cursor-pointer"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-amber-400" />
+            <span>Clear Screen (clear)</span>
+          </button>
+
+          <button
+            onClick={handleTermReset}
+            className="w-full px-3 py-1.5 flex items-center space-x-2 hover:bg-blue-600 hover:text-white text-left transition-colors cursor-pointer"
+          >
+            <RotateCcw className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Reset & Redraw</span>
+          </button>
+
+          <div className="my-1 border-t border-white/10 mx-2" />
+
+          <button
+            onClick={() => { addNewTerminal(); setTermContextMenu(null); }}
+            className="w-full px-3 py-1.5 flex items-center space-x-2 hover:bg-blue-600 hover:text-white text-left transition-colors cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5 text-emerald-400" />
+            <span>New Terminal Tab</span>
+          </button>
+        </div>
+      )}
+
+      {/* Copied Notice Toast */}
+      {copiedNotice && (
+        <div className="fixed bottom-12 right-6 bg-emerald-600 text-white px-3 py-1.5 rounded-lg shadow-2xl text-xs flex items-center space-x-2 backdrop-blur-md animate-in fade-in slide-in-from-bottom-2 select-none z-50">
+          <Check className="w-3.5 h-3.5" />
+          <span>Copied to clipboard!</span>
+        </div>
+      )}
+
+      {/* Editor Toast Notification */}
+      {editorToast && (
+        <div className="fixed bottom-12 right-6 bg-[#181825] border border-blue-500/40 text-blue-200 px-3.5 py-2 rounded-lg shadow-2xl text-xs flex items-center space-x-2 backdrop-blur-md animate-in fade-in slide-in-from-bottom-2 select-none z-50">
+          <Check className="w-3.5 h-3.5 text-blue-400" />
+          <span>{editorToast}</span>
+        </div>
+      )}
     </div>
   );
 }

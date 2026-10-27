@@ -54,32 +54,44 @@ pub async fn run_exec_channel_with_stdin(
     stdin_data: &[u8],
 ) -> Result<(String, i32), Box<dyn std::error::Error + Send + Sync>> {
     let mut channel = handle.channel_open_session().await?;
-    let _ = channel.request_pty(false, "xterm-256color", 80, 24, 0, 0, &[]).await;
+    // Note: Do NOT request a PTY here. Stdin pipes (like base64 -d) require true channel EOF
+    // without terminal echoing, carriage return conversions, or pseudo-terminal blocking.
     channel.exec(true, cmd).await?;
     if !stdin_data.is_empty() {
         channel.data(stdin_data).await?;
     }
     channel.eof().await?;
-    let mut stdout = Vec::new();
-    let mut exit_code = 0;
 
-    while let Some(msg) = channel.wait().await {
-        match msg {
-            ChannelMsg::Data { ref data } => {
-                stdout.extend_from_slice(data);
+    let res = tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let mut stdout = Vec::new();
+        let mut exit_code = 0;
+
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                ChannelMsg::Data { ref data } => {
+                    stdout.extend_from_slice(data);
+                }
+                ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                    stdout.extend_from_slice(data);
+                }
+                ChannelMsg::ExitStatus { exit_status } => {
+                    exit_code = exit_status as i32;
+                }
+                _ => {}
             }
-            ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                stdout.extend_from_slice(data);
-            }
-            ChannelMsg::ExitStatus { exit_status } => {
-                exit_code = exit_status as i32;
-            }
-            _ => {}
+        }
+
+        let clean_out = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
+        (clean_out, exit_code)
+    }).await;
+
+    match res {
+        Ok((out, code)) => Ok((out, code)),
+        Err(_) => {
+            log::warn!("SSH Desktop: run_exec_channel_with_stdin timed out after 25s for cmd: {}", cmd);
+            Err("Command timed out while processing input stream".into())
         }
     }
-
-    let clean_out = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
-    Ok((clean_out, exit_code))
 }
 
 pub async fn run_stream_channel(
