@@ -196,6 +196,8 @@ pub async fn sftp_write_bytes(
         let mv_cmd = format!("mv -f '{}' '{}'", tmp_file, escaped_path);
         let (s_out, s_code) = crate::ssh::exec::run_cmd_priv(state, conn_id, &mv_cmd).await;
         if s_code == 0 {
+            // Ensure readable permissions on system files (e.g. 644 for configs like /etc/nginx/nginx.conf)
+            let _ = crate::ssh::exec::run_cmd_priv(state, conn_id, &format!("chmod 644 '{}'", escaped_path)).await;
             log::info!("SSH Desktop: Saved remote file with elevated privileges via sudo mv: {}", path);
             return Ok(());
         }
