@@ -60,6 +60,8 @@ import {
 } from '../../lib/tauri-bridge';
 import { listen } from '@tauri-apps/api/event';
 import { useConnectionStore, useEditorStore, useSettingsStore, useWindowStore } from '../../lib/store';
+import { LanguagePickerModal } from './LanguagePickerModal';
+import { detectLanguage, getLanguageDisplayName } from './languages';
 
 // ─── Types & Interfaces ─────────────────────────────────────────────
 interface FileTab {
@@ -124,32 +126,6 @@ interface GitDiffState {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
-function detectLanguage(filename: string): string {
-  const ext = filename.split('.').pop()?.toLowerCase() || '';
-  switch (ext) {
-    case 'py': return 'python';
-    case 'js': case 'jsx': case 'mjs': case 'cjs': return 'javascript';
-    case 'ts': case 'tsx': return 'typescript';
-    case 'json': return 'json';
-    case 'yml': case 'yaml': return 'yaml';
-    case 'sh': case 'bash': case 'zsh': return 'shell';
-    case 'rs': return 'rust';
-    case 'sql': return 'sql';
-    case 'html': case 'htm': return 'html';
-    case 'css': case 'scss': case 'less': return 'css';
-    case 'conf': case 'cfg': case 'ini': return 'ini';
-    case 'md': case 'markdown': return 'markdown';
-    case 'dockerfile': return 'dockerfile';
-    case 'c': case 'h': return 'c';
-    case 'cpp': case 'hpp': case 'cc': return 'cpp';
-    case 'go': return 'go';
-    case 'java': return 'java';
-    case 'php': return 'php';
-    case 'rb': return 'ruby';
-    case 'xml': case 'svg': return 'xml';
-    default: return 'plaintext';
-  }
-}
 
 function isImageFile(filename: string): boolean {
   return /\.(png|jpe?g|gif|webp|svg|ico|bmp)$/i.test(filename);
@@ -240,8 +216,13 @@ export default function CodeEditor() {
 
   // Editor ref for Monaco instance & latest callback refs to prevent stale closures
   const editorRef = useRef<any>(null);
+  const monacoRef = useRef<any>(null);
   const handleSaveRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const handleSaveAllRef = useRef<() => Promise<void>>(() => Promise.resolve());
+
+  // VS Code Language Mode Selector State
+  const [isLanguagePickerOpen, setIsLanguagePickerOpen] = useState<boolean>(false);
+  const chordRef = useRef<{ key: string; time: number } | null>(null);
 
   // VS Code Activity Bar: 'explorer' | 'git' | 'settings'
   const [activeSidebarTab, setActiveSidebarTab] = useState<'explorer' | 'git' | 'settings'>('explorer');
@@ -383,6 +364,21 @@ export default function CodeEditor() {
     return selectedFolder || projectRoot || defaultUserHome;
   }, [activeFile, selectedFolder, projectRoot, defaultUserHome]);
 
+  // Handle changing language mode for the active document
+  const handleSelectLanguage = useCallback((newLangId: string) => {
+    if (!activeFile) return;
+    setFiles(prev =>
+      prev.map(f => (f.id === activeFile.id ? { ...f, language: newLangId } : f))
+    );
+    // Dynamically update active Monaco model language
+    if (editorRef.current && monacoRef.current) {
+      const model = editorRef.current.getModel();
+      if (model) {
+        monacoRef.current.editor.setModelLanguage(model, newLangId);
+      }
+    }
+  }, [activeFile]);
+
   // ─── Fetch real remote home directory on mount ──────────────────
   useEffect(() => {
     let isCancelled = false;
@@ -428,6 +424,7 @@ export default function CodeEditor() {
   // ─── Define Custom Monaco Themes ─────────────────────────────────
   const handleMonacoMount = (editor: any, monaco: any) => {
     editorRef.current = editor;
+    monacoRef.current = monaco;
 
     // 1. Monokai
     monaco.editor.defineTheme('monokai', {
@@ -551,6 +548,16 @@ export default function CodeEditor() {
     editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.KeyZ, () => {
       setWordWrap(prev => (prev === 'on' ? 'off' : 'on'));
     });
+
+    // Select Language Mode chord: Ctrl+K M / Cmd+K M
+    try {
+      editor.addCommand(
+        monaco.KeyMod.chord(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, monaco.KeyCode.KeyM),
+        () => {
+          setIsLanguagePickerOpen(true);
+        }
+      );
+    } catch {}
 
     editor.onDidChangeCursorPosition((e: any) => {
       setCursorPos({ line: e.position.lineNumber, col: e.position.column });
@@ -1093,6 +1100,23 @@ export default function CodeEditor() {
         e.preventDefault();
         setWordWrap(prev => (prev === 'on' ? 'off' : 'on'));
         return;
+      }
+
+      // Ctrl + K -> M chord: Select Language Mode
+      if (isCtrlOrCmd && !e.shiftKey && e.key.toLowerCase() === 'k') {
+        chordRef.current = { key: 'k', time: Date.now() };
+        return;
+      }
+      if (chordRef.current && chordRef.current.key === 'k' && Date.now() - chordRef.current.time < 1500) {
+        if (e.key.toLowerCase() === 'm') {
+          e.preventDefault();
+          chordRef.current = null;
+          setIsLanguagePickerOpen(true);
+          return;
+        }
+      }
+      if (e.key.toLowerCase() !== 'control' && e.key.toLowerCase() !== 'meta') {
+        chordRef.current = null;
       }
 
       // Ctrl + + / Ctrl + =: Zoom font size in
@@ -1829,6 +1853,7 @@ export default function CodeEditor() {
     { title: 'Preferences: One Dark Pro Theme', shortcut: '', action: () => setEditorTheme('one-dark-pro') },
     { title: 'Preferences: GitHub Dark Theme', shortcut: '', action: () => setEditorTheme('github-dark') },
     { title: 'Preferences: Catppuccin Mocha Theme', shortcut: '', action: () => setEditorTheme('catppuccin-mocha') },
+    { title: 'Change Language Mode (Syntax Highlighting)', shortcut: 'Ctrl+K M', action: () => setIsLanguagePickerOpen(true) },
     { title: 'Terminal: Add New Bash Terminal in Current Folder', shortcut: '', action: () => addNewTerminal() },
   ], [handleSave, handleSaveAll, activeFile, addNewTerminal]);
 
@@ -2889,9 +2914,18 @@ export default function CodeEditor() {
             <span>Spaces: {tabSize}</span>
             <span>Font: {fontSize}px</span>
             <span>Wrap: {wordWrap.toUpperCase()}</span>
-            <span className="uppercase text-[10px] tracking-wider text-blue-400 font-semibold">
-              {activeFile?.language || 'Plain Text'}
-            </span>
+            {/* Language Mode Selector Button */}
+            <button
+              onClick={() => setIsLanguagePickerOpen(true)}
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-sans font-medium text-blue-400 hover:text-white hover:bg-blue-600/25 transition-all border border-blue-500/20 hover:border-blue-400/50 cursor-pointer shadow-sm group select-none"
+              title="Select Language Mode (Change syntax highlighting) [Ctrl+K M]"
+            >
+              <Code2 className="w-3 h-3 text-blue-400 group-hover:scale-110 transition-transform" />
+              <span className="truncate max-w-[140px]">
+                {getLanguageDisplayName(activeFile?.language || 'plaintext')}
+              </span>
+              <ChevronDown className="w-2.5 h-2.5 text-blue-400/60 group-hover:text-blue-300 transition-colors" />
+            </button>
             <span className={activeFile?.isModified ? 'text-amber-400 font-semibold' : 'text-emerald-400'}>
               {activeFile?.isModified ? '● Modified' : '✓ Clean'}
             </span>
@@ -3450,6 +3484,14 @@ export default function CodeEditor() {
           </div>
         </div>
       )}
+      {/* ─── 17. VS Code Select Language Mode Modal (Ctrl+K M) ───────── */}
+      <LanguagePickerModal
+        isOpen={isLanguagePickerOpen}
+        currentLanguage={activeFile?.language || 'plaintext'}
+        fileName={activeFile?.name}
+        onSelectLanguage={handleSelectLanguage}
+        onClose={() => setIsLanguagePickerOpen(false)}
+      />
     </div>
   );
 }
