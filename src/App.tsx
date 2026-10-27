@@ -69,8 +69,17 @@ export default function App() {
 
     // Global listener for SSH disconnect events dispatched by bridge
     const handleDisconnectEvent = (e: any) => {
-      const reason = e?.detail?.reason || 'SSH connection was lost or server was stopped.';
       const connId = e?.detail?.connId;
+      const activeConnId = useConnectionStore.getState().activeConnectionId;
+
+      // When a secondary or fleet automation server (e.g. srv-...) is unreachable or disconnected,
+      // NEVER trigger the full-screen disconnect alert for the primary desktop workspace!
+      if (connId && activeConnId && connId !== activeConnId) {
+        console.warn(`[Disconnect Event] Suppressed disconnect alert for non-active fleet server "${connId}"`);
+        return;
+      }
+
+      const reason = e?.detail?.reason || 'SSH connection was lost or server was stopped.';
       useConnectionStore.getState().triggerDisconnectAlert(reason, connId);
     };
     window.addEventListener('sshdesktop-ssh-disconnected', handleDisconnectEvent);

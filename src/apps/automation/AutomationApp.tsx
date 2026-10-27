@@ -146,7 +146,6 @@ export default function AutomationApp() {
     password?: string;
     privateKey?: string;
     authType: 'password' | 'privateKey' | 'agent';
-    status: 'active' | 'inactive';
     tags: string;
     osType: string;
     notes: string;
@@ -160,11 +159,16 @@ export default function AutomationApp() {
     password: '',
     privateKey: '',
     authType: 'password',
-    status: 'active',
     tags: '',
     osType: 'Linux',
     notes: '',
   });
+
+  // History Tab: View All Run Log Modal
+  const [viewingAllRunLog, setViewingAllRunLog] = useState<AutomationExecutionRun | null>(null);
+  const [allLogSearchQuery, setAllLogSearchQuery] = useState('');
+  const [selectedNodeFilter, setSelectedNodeFilter] = useState<'all' | string>('all');
+  const [copiedAllLogs, setCopiedAllLogs] = useState(false);
 
   // Import Saved Logins Modal
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -325,13 +329,37 @@ export default function AutomationApp() {
     return fleetMatrix.servers || [];
   }, [fleetMatrix.servers]);
 
-  // Auto-select active servers initially if none selected
+  // Live Active Check: Returns true if server is currently connected or verified reachable by telemetry probe
+  const isServerLiveActive = useCallback((serverId: string) => {
+    if (serverId === activeConnectionId) return true;
+    return fleetHealth[serverId]?.reachable === true;
+  }, [activeConnectionId, fleetHealth]);
+
+  // Single Server Live Probe
+  const handleProbeSingleServer = async (server: TargetServer, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setBannerNotice({ text: `Testing live connection to "${server.name || server.host}"...` });
+    try {
+      await probeFleetTelemetry([server], (health) => {
+        setFleetHealth(prev => ({ ...prev, [health.serverId]: health }));
+      });
+      const isReachable = fleetHealth[server.id]?.reachable ?? true;
+      setBannerNotice({
+        text: `Server "${server.name || server.host}" is ${isReachable ? 'LIVE & ACTIVE' : 'OFFLINE / UNREACHABLE'}.`,
+        isError: !isReachable,
+      });
+    } catch (err: any) {
+      setBannerNotice({ text: `Connection test failed: ${err.message}`, isError: true });
+    }
+  };
+
+  // Auto-select live active servers initially if none selected
   useEffect(() => {
     if (allFleetServers.length > 0 && selectedServerIds.length === 0) {
-      const activeIds = allFleetServers.filter(s => s.status === 'active').map(s => s.id);
-      setSelectedServerIds(activeIds.length > 0 ? activeIds : allFleetServers.map(s => s.id));
+      const liveIds = allFleetServers.filter(s => isServerLiveActive(s.id)).map(s => s.id);
+      setSelectedServerIds(liveIds.length > 0 ? liveIds : allFleetServers.map(s => s.id));
     }
-  }, [allFleetServers]);
+  }, [allFleetServers, isServerLiveActive]);
 
   // Initial Probe on Mount to establish health/telemetry
   useEffect(() => {
@@ -403,14 +431,15 @@ export default function AutomationApp() {
         s.username.toLowerCase().includes(q) ||
         (s.tags && s.tags.some(t => t.toLowerCase().includes(q)));
 
+      const isLive = isServerLiveActive(s.id);
       const matchesStatus =
         statusFilter === 'all' ||
-        (statusFilter === 'active' && s.status === 'active') ||
-        (statusFilter === 'inactive' && s.status === 'inactive');
+        (statusFilter === 'active' && isLive) ||
+        (statusFilter === 'inactive' && !isLive);
 
       return matchesSearch && matchesStatus;
     });
-  }, [allFleetServers, serverSearchQuery, statusFilter]);
+  }, [allFleetServers, serverSearchQuery, statusFilter, isServerLiveActive]);
 
   // Selected Target Servers for Execution (TargetServer[])
   const targetServers: FleetServer[] = useMemo(() => {
@@ -463,7 +492,7 @@ export default function AutomationApp() {
   };
 
   const selectActiveTargets = () => {
-    setSelectedServerIds(filteredServers.filter(s => s.status === 'active').map(s => s.id));
+    setSelectedServerIds(filteredServers.filter(s => isServerLiveActive(s.id)).map(s => s.id));
   };
 
   const deselectAllTargets = () => {
@@ -712,6 +741,47 @@ ${serversReport}
     downloadTextFile(filename, fullDoc, 'text/markdown;charset=utf-8');
   };
 
+  // Helper: Generate Plain Text Log for Copy in Modal
+  const generateRunLogText = (run: AutomationExecutionRun, filterNodeId: string = 'all') => {
+    const list = filterNodeId === 'all'
+      ? Object.values(run.results)
+      : Object.values(run.results).filter(r => r.serverId === filterNodeId);
+
+    return list.map((res, idx) => {
+      return `================================================================================
+[#${idx + 1}] NODE: ${res.serverName} (${res.username}@${res.host}:${res.port})
+STATUS: ${res.status.toUpperCase()} | EXIT CODE: ${res.exitCode} | RUNTIME: ${(res.durationMs / 1000).toFixed(2)}s
+================================================================================
+>>> COMMAND:
+${run.command}
+
+>>> STDOUT:
+${res.stdout || '(none)'}
+
+>>> STDERR:
+${res.stderr || '(none)'}
+`;
+    }).join('\n\n');
+  };
+
+  // Helper: Filter Results by Node and Search Query
+  const getFilteredResults = (run: AutomationExecutionRun, filterNodeId: string, search: string) => {
+    let list = filterNodeId === 'all'
+      ? Object.values(run.results)
+      : Object.values(run.results).filter(r => r.serverId === filterNodeId);
+
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter(r =>
+        r.serverName.toLowerCase().includes(q) ||
+        r.host.toLowerCase().includes(q) ||
+        (r.stdout && r.stdout.toLowerCase().includes(q)) ||
+        (r.stderr && r.stderr.toLowerCase().includes(q))
+      );
+    }
+    return list;
+  };
+
   // Recipe CRUD: Save (Add or Edit)
   const handleSaveRecipe = () => {
     if (!recipeForm.title.trim() || !recipeForm.command.trim()) {
@@ -942,7 +1012,6 @@ ${serversReport}
       password: '',
       privateKey: '',
       authType: 'password',
-      status: 'active',
       tags: '',
       osType: 'Linux',
       notes: '',
@@ -962,7 +1031,6 @@ ${serversReport}
       password: server.password || '',
       privateKey: server.privateKey || '',
       authType: server.authType || 'password',
-      status: server.status || 'active',
       tags: (server.tags || []).join(', '),
       osType: server.osType || 'Linux',
       notes: server.notes || '',
@@ -983,10 +1051,12 @@ ${serversReport}
     const tagsArray = serverForm.tags.split(',').map(t => t.trim()).filter(Boolean);
 
     let nextServers = [...(fleetMatrix.servers || [])];
+    let savedTarget: FleetServer | null = null;
+
     if (editingServer) {
       nextServers = nextServers.map(s => {
         if (s.id === editingServer.id) {
-          return {
+          const updated: FleetServer = {
             ...s,
             name: serverForm.name.trim() || `${serverForm.username}@${serverForm.host}`,
             organizationId: serverForm.organizationId,
@@ -997,16 +1067,18 @@ ${serversReport}
             password: serverForm.password || undefined,
             privateKey: serverForm.privateKey || undefined,
             authType: serverForm.authType,
-            status: serverForm.status,
+            status: 'active',
             tags: tagsArray,
             osType: serverForm.osType,
             notes: serverForm.notes,
             updatedAt: Date.now(),
           };
+          savedTarget = updated;
+          return updated;
         }
         return s;
       });
-      setBannerNotice({ text: `Server "${serverForm.name || serverForm.host}" updated.` });
+      setBannerNotice({ text: `Server "${serverForm.name || serverForm.host}" updated. Probing live connectivity...` });
     } else {
       const newServer: FleetServer = {
         id: `srv-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -1019,14 +1091,15 @@ ${serversReport}
         password: serverForm.password || undefined,
         privateKey: serverForm.privateKey || undefined,
         authType: serverForm.authType,
-        status: serverForm.status,
+        status: 'active',
         tags: tagsArray,
         osType: serverForm.osType,
         notes: serverForm.notes,
         createdAt: Date.now(),
       };
+      savedTarget = newServer;
       nextServers.push(newServer);
-      setBannerNotice({ text: `Server "${newServer.name}" added to Fleet Matrix.` });
+      setBannerNotice({ text: `Server "${newServer.name}" added to Fleet Matrix. Probing live connectivity...` });
     }
 
     const updatedMatrix = { ...fleetMatrix, servers: nextServers };
@@ -1034,6 +1107,13 @@ ${serversReport}
     saveStoredFleetMatrix(updatedMatrix);
     setIsServerModalOpen(false);
     setEditingServer(null);
+
+    // Immediately probe live connectivity for this saved/updated server
+    if (savedTarget) {
+      probeFleetTelemetry([savedTarget as any], (health) => {
+        setFleetHealth(prev => ({ ...prev, [health.serverId]: health }));
+      }).catch(() => {});
+    }
 
     if (activeConnectionId && homeDir) {
       saveAutomationToServer(activeConnectionId, homeDir, {
@@ -1056,30 +1136,6 @@ ${serversReport}
     saveStoredFleetMatrix(updatedMatrix);
     setSelectedServerIds(prev => prev.filter(id => id !== serverId));
     setBannerNotice({ text: `Server deleted from Fleet Matrix.` });
-
-    if (activeConnectionId && homeDir) {
-      saveAutomationToServer(activeConnectionId, homeDir, {
-        username,
-        customRecipes: recipes.filter(r => !r.isBuiltIn),
-        history,
-        fleetMatrix: updatedMatrix,
-        lastTargetServerIds: selectedServerIds,
-      }).catch(() => {});
-    }
-  };
-
-  const handleToggleServerStatus = (serverId: string, e?: React.MouseEvent) => {
-    e?.stopPropagation();
-    const nextServers = (fleetMatrix.servers || []).map(s => {
-      if (s.id === serverId) {
-        const nextStatus: 'active' | 'inactive' = s.status === 'active' ? 'inactive' : 'active';
-        return { ...s, status: nextStatus, updatedAt: Date.now() };
-      }
-      return s;
-    });
-    const updatedMatrix = { ...fleetMatrix, servers: nextServers };
-    setFleetMatrix(updatedMatrix);
-    saveStoredFleetMatrix(updatedMatrix);
 
     if (activeConnectionId && homeDir) {
       saveAutomationToServer(activeConnectionId, homeDir, {
@@ -1502,7 +1558,7 @@ ${serversReport}
                                         const isSelected = selectedServerIds.includes(server.id);
                                         const health = fleetHealth[server.id];
                                         const execRes = executionResults[server.id];
-                                        const isActive = server.status === 'active';
+                                        const isActive = isServerLiveActive(server.id);
 
                                         return (
                                           <div
@@ -1535,14 +1591,14 @@ ${serversReport}
                                               </div>
                                             </div>
 
-                                            {/* Bright Green Active / Bright Red Inactive status badge */}
+                                            {/* Live Active (Green) / Inactive (Red) status badge */}
                                             <div className="shrink-0 flex items-center space-x-1.5">
                                               {execRes && execRes.status === 'running' ? (
                                                 <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-400" />
                                               ) : isActive ? (
                                                 <span
                                                   className="flex items-center space-x-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_8px_rgba(52,211,153,0.3)]"
-                                                  title={`Active node${health?.latencyMs ? ` (${health.latencyMs}ms)` : ''}`}
+                                                  title={`Live Active node${health?.latencyMs ? ` (${health.latencyMs}ms)` : ''}`}
                                                 >
                                                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                                                   <span>Active</span>
@@ -1550,7 +1606,7 @@ ${serversReport}
                                               ) : (
                                                 <span
                                                   className="flex items-center space-x-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-red-500/20 text-red-300 border border-red-500/40 shadow-[0_0_8px_rgba(239,68,68,0.3)]"
-                                                  title="Deactivated in Fleet Matrix. Execution will be skipped."
+                                                  title={`Node is currently unreachable or offline${health?.error ? `: ${health.error}` : ''}`}
                                                 >
                                                   <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
                                                   <span>Inactive</span>
@@ -1580,7 +1636,7 @@ ${serversReport}
               <div className="flex items-center space-x-1.5 font-mono">
                 <span className="font-bold text-white">{selectedServerIds.length} Nodes</span>
                 <span className="text-[10px] text-emerald-400">
-                  ({targetServers.filter(s => s.status === 'active').length} active)
+                  ({targetServers.filter(s => isServerLiveActive(s.id)).length} active)
                 </span>
               </div>
             </div>
@@ -1701,12 +1757,12 @@ ${serversReport}
                 </div>
               </div>
 
-              {/* Inactive servers warning pill if any inactive servers are in selection */}
-              {targetServers.some(s => s.status === 'inactive') && (
-                <div className="p-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-300 text-[11px] flex items-center space-x-2">
+              {/* Inactive servers warning pill if any inactive/unreachable servers are in selection */}
+              {targetServers.some(s => !isServerLiveActive(s.id)) && (
+                <div className="p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px] flex items-center space-x-2">
                   <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
                   <span>
-                    Note: {targetServers.filter(s => s.status === 'inactive').length} selected server(s) are deactivated in Fleet Matrix and will be cleanly marked skipped without executing commands.
+                    Note: {targetServers.filter(s => !isServerLiveActive(s.id)).length} selected server(s) are currently unreachable or offline. Execution will attempt to connect and report results cleanly without halting active nodes.
                   </span>
                 </div>
               )}
@@ -2420,7 +2476,7 @@ ${serversReport}
                                 ) : (
                                   groupServers.map(s => {
                                     const health = fleetHealth[s.id];
-                                    const isActive = s.status === 'active';
+                                    const isLive = isServerLiveActive(s.id);
 
                                     return (
                                       <div
@@ -2428,18 +2484,18 @@ ${serversReport}
                                         className="p-2.5 rounded-xl bg-black/40 border border-white/5 flex items-center justify-between text-xs hover:border-white/15 transition-all"
                                       >
                                         <div className="flex items-center space-x-2.5 min-w-0">
-                                          {/* Clickable 1-Click Status Toggle Indicator (Active Green / Inactive Red) */}
-                                          <button
-                                            onClick={(e) => handleToggleServerStatus(s.id, e)}
-                                            className={`p-1 rounded-full transition-all cursor-pointer ${
-                                              isActive
-                                                ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/40'
-                                                : 'bg-red-500/20 text-red-400 hover:bg-red-500/40'
+                                          {/* Live Server Active (Green) / Inactive (Red) Status Indicator */}
+                                          <div
+                                            className={`flex items-center space-x-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold border transition-all ${
+                                              isLive
+                                                ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300 shadow-[0_0_8px_rgba(52,211,153,0.25)]'
+                                                : 'bg-red-500/15 border-red-500/30 text-red-300'
                                             }`}
-                                            title={`Status is ${isActive ? 'ACTIVE' : 'INACTIVE'}. Click to toggle.`}
+                                            title={isLive ? `Live Server: ACTIVE (${health?.latencyMs || 0}ms latency)` : `Live Server: INACTIVE / OFFLINE (${health?.error || 'Unreachable'})`}
                                           >
-                                            <span className={`block w-2.5 h-2.5 rounded-full ${isActive ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]' : 'bg-red-500'}`} />
-                                          </button>
+                                            <span className={`w-2 h-2 rounded-full ${isLive ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)] animate-pulse' : 'bg-red-500'}`} />
+                                            <span className="uppercase">{isLive ? 'Active' : 'Inactive'}</span>
+                                          </div>
 
                                           <div className="min-w-0 truncate">
                                             <div className="flex items-center space-x-1.5">
@@ -2459,6 +2515,13 @@ ${serversReport}
                                         </div>
 
                                         <div className="flex items-center space-x-1 shrink-0">
+                                          <button
+                                            onClick={(e) => handleProbeSingleServer(s as any, e)}
+                                            className="p-1 rounded text-cyan-400 hover:text-white hover:bg-white/10 cursor-pointer"
+                                            title="Test Live Connectivity"
+                                          >
+                                            <RefreshCw className="w-3.5 h-3.5" />
+                                          </button>
                                           <button
                                             onClick={() => handleOpenEditServer(s)}
                                             className="p-1 rounded text-gray-400 hover:text-white hover:bg-white/10 cursor-pointer"
@@ -2545,10 +2608,24 @@ ${serversReport}
                       </div>
 
                       <div className="flex items-center space-x-2">
+                        {/* View All Log Button */}
+                        <button
+                          onClick={() => {
+                            setViewingAllRunLog(run);
+                            setSelectedNodeFilter('all');
+                            setAllLogSearchQuery('');
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white text-xs font-semibold transition-all flex items-center space-x-1.5 cursor-pointer shadow-sm"
+                          title="View complete multi-server fleet execution log for all nodes"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>View All Log</span>
+                        </button>
+
                         {/* Download All Report Button */}
                         <button
                           onClick={() => handleDownloadAllLogs(run)}
-                          className="px-2.5 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600 text-cyan-300 hover:text-white text-xs font-semibold transition-all flex items-center space-x-1 cursor-pointer"
+                          className="px-2.5 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600 text-cyan-300 hover:text-white text-xs font-semibold transition-all flex items-center space-x-1.5 cursor-pointer"
                           title="Download complete multi-server fleet execution report (.md)"
                         >
                           <Download className="w-3.5 h-3.5" />
@@ -2557,7 +2634,7 @@ ${serversReport}
 
                         <button
                           onClick={() => handleRerunHistory(run)}
-                          className="px-2.5 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white text-xs font-semibold transition-all flex items-center space-x-1 cursor-pointer"
+                          className="px-2.5 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white text-xs font-semibold transition-all flex items-center space-x-1.5 cursor-pointer"
                         >
                           <Play className="w-3 h-3 fill-current" />
                           <span>Re-Run</span>
@@ -2570,7 +2647,7 @@ ${serversReport}
                       {run.command}
                     </div>
 
-                    {/* Servers Result Grid with Individual Log Downloads */}
+                    {/* Servers Result Grid with Individual Log View & Downloads */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-1">
                       {Object.values(run.results).map(res => (
                         <div
@@ -2590,6 +2667,18 @@ ${serversReport}
                             }`}>
                               {res.status.toUpperCase()}
                             </span>
+
+                            {/* View Single Server Log */}
+                            <button
+                              onClick={() => setInspectResult(res)}
+                              className="px-2 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white text-[10px] font-semibold transition-all flex items-center space-x-1 cursor-pointer"
+                              title="View server execution log"
+                            >
+                              <Eye className="w-3 h-3" />
+                              <span>View Log</span>
+                            </button>
+
+                            {/* Download Single Server Log */}
                             <button
                               onClick={() => handleDownloadSingleLog(res, run.recipeTitle)}
                               className="p-1 rounded bg-white/5 hover:bg-white/15 text-gray-300 hover:text-white transition-all cursor-pointer"
@@ -2698,6 +2787,177 @@ ${serversReport}
             <div className="p-4 border-t border-white/10 bg-[#171a2e] flex items-center justify-end">
               <button
                 onClick={() => setInspectResult(null)}
+                className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* 6.5. MODAL: VIEW ALL LOGS FOR FLEET RUN                  */}
+      {/* ======================================================== */}
+      {viewingAllRunLog && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-150">
+          <div className="w-full max-w-5xl bg-[#121524] border border-white/15 rounded-3xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-5 border-b border-white/10 flex items-center justify-between bg-[#171a2e]">
+              <div className="flex items-center space-x-3">
+                <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                  <Terminal className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-sm font-bold text-white">{viewingAllRunLog.recipeTitle}</h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-blue-500/20 text-blue-300 uppercase">
+                      {viewingAllRunLog.mode}
+                    </span>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/20 text-emerald-300">
+                      {viewingAllRunLog.successCount} / {viewingAllRunLog.totalServers} Succeeded
+                    </span>
+                    {viewingAllRunLog.failureCount > 0 && (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-red-500/20 text-red-300">
+                        {viewingAllRunLog.failureCount} Failed
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-gray-400 font-mono">
+                    Run ID: {viewingAllRunLog.id} • {new Date(viewingAllRunLog.timestamp).toLocaleString()} • Duration: {(viewingAllRunLog.durationMs / 1000).toFixed(2)}s
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => {
+                    const textToCopy = generateRunLogText(viewingAllRunLog, selectedNodeFilter);
+                    navigator.clipboard.writeText(textToCopy);
+                    setCopiedAllLogs(true);
+                    setTimeout(() => setCopiedAllLogs(false), 2000);
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-gray-200 flex items-center space-x-1.5 transition-all cursor-pointer"
+                >
+                  {copiedAllLogs ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedAllLogs ? 'Copied!' : 'Copy Logs'}</span>
+                </button>
+                <button
+                  onClick={() => handleDownloadAllLogs(viewingAllRunLog)}
+                  className="px-2.5 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600 text-cyan-300 hover:text-white text-xs font-semibold transition-all flex items-center space-x-1.5 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download Report</span>
+                </button>
+                <button
+                  onClick={() => setViewingAllRunLog(null)}
+                  className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-all cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Filter and Search Bar */}
+            <div className="p-3 border-b border-white/5 bg-[#14172a] flex flex-wrap items-center justify-between gap-2 text-xs">
+              {/* Node Filter Tabs */}
+              <div className="flex items-center space-x-1.5 overflow-x-auto max-w-2xl py-0.5">
+                <button
+                  onClick={() => setSelectedNodeFilter('all')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer shrink-0 ${
+                    selectedNodeFilter === 'all'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'bg-white/5 text-gray-400 hover:text-white'
+                  }`}
+                >
+                  All Nodes ({Object.keys(viewingAllRunLog.results).length})
+                </button>
+                {Object.values(viewingAllRunLog.results).map(r => (
+                  <button
+                    key={r.serverId}
+                    onClick={() => setSelectedNodeFilter(r.serverId)}
+                    className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer shrink-0 flex items-center space-x-1.5 ${
+                      selectedNodeFilter === r.serverId
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'bg-white/5 text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    <span className={`w-1.5 h-1.5 rounded-full ${r.status === 'success' ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                    <span className="truncate max-w-[120px]">{r.serverName}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Search Inside Logs */}
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  placeholder="Filter log text..."
+                  value={allLogSearchQuery}
+                  onChange={e => setAllLogSearchQuery(e.target.value)}
+                  className="pl-8 pr-3 py-1 rounded-lg bg-black/40 border border-white/10 text-xs text-white focus:outline-none focus:border-blue-500 w-48"
+                />
+              </div>
+            </div>
+
+            {/* Modal Body: Monospace Logs */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#0a0c16] font-mono text-xs select-text">
+              {getFilteredResults(viewingAllRunLog, selectedNodeFilter, allLogSearchQuery).map((res, index) => (
+                <div
+                  key={res.serverId}
+                  className="rounded-2xl border border-white/10 bg-black/60 overflow-hidden shadow-md"
+                >
+                  {/* Node Header Banner */}
+                  <div className="px-4 py-2 bg-white/[0.04] border-b border-white/10 flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <span className="text-gray-500 font-bold">#{index + 1}</span>
+                      <span className="text-white font-bold">{res.serverName}</span>
+                      <span className="text-gray-400 text-[10px]">({res.username}@{res.host}:{res.port})</span>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      <span className="text-gray-400 text-[10px]">{(res.durationMs / 1000).toFixed(2)}s</span>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                        res.status === 'success' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'
+                      }`}>
+                        EXIT {res.exitCode} • {res.status.toUpperCase()}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Node Output */}
+                  <div className="p-3 space-y-2">
+                    {res.stdout && (
+                      <div>
+                        <div className="text-[10px] uppercase font-bold text-gray-500 mb-1">STDOUT:</div>
+                        <pre className="text-emerald-300 whitespace-pre-wrap break-all bg-black/30 p-2.5 rounded-xl border border-white/5 max-h-80 overflow-y-auto">
+                          {res.stdout}
+                        </pre>
+                      </div>
+                    )}
+                    {res.stderr && (
+                      <div>
+                        <div className="text-[10px] uppercase font-bold text-red-400 mb-1">STDERR:</div>
+                        <pre className="text-red-400 whitespace-pre-wrap break-all bg-red-950/20 p-2.5 rounded-xl border border-red-500/20 max-h-80 overflow-y-auto">
+                          {res.stderr}
+                        </pre>
+                      </div>
+                    )}
+                    {!res.stdout && !res.stderr && (
+                      <div className="text-gray-500 italic p-2">(No standard output or error recorded)</div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-white/10 bg-[#171a2e] flex items-center justify-between">
+              <span className="text-xs text-gray-400">
+                Viewing {getFilteredResults(viewingAllRunLog, selectedNodeFilter, allLogSearchQuery).length} of {Object.keys(viewingAllRunLog.results).length} nodes
+              </span>
+              <button
+                onClick={() => setViewingAllRunLog(null)}
                 className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold cursor-pointer"
               >
                 Close
@@ -2848,47 +3108,15 @@ ${serversReport}
                 </div>
               )}
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-semibold text-gray-300 block mb-1">Status</label>
-                  <div className="flex items-center space-x-2">
-                    <button
-                      type="button"
-                      onClick={() => setServerForm(prev => ({ ...prev, status: 'active' }))}
-                      className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-bold border transition-all flex items-center justify-center space-x-1.5 cursor-pointer ${
-                        serverForm.status === 'active'
-                          ? 'bg-emerald-600 text-white border-emerald-500 shadow-md'
-                          : 'bg-black/30 border-white/10 text-gray-400 hover:text-white'
-                      }`}
-                    >
-                      <span className="w-2 h-2 rounded-full bg-emerald-300" />
-                      <span>Active</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setServerForm(prev => ({ ...prev, status: 'inactive' }))}
-                      className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-bold border transition-all flex items-center justify-center space-x-1.5 cursor-pointer ${
-                        serverForm.status === 'inactive'
-                          ? 'bg-red-600 text-white border-red-500 shadow-md'
-                          : 'bg-black/30 border-white/10 text-gray-400 hover:text-white'
-                      }`}
-                    >
-                      <span className="w-2 h-2 rounded-full bg-red-400" />
-                      <span>Inactive</span>
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-xs font-semibold text-gray-300 block mb-1">Tags (Comma-separated)</label>
-                  <input
-                    type="text"
-                    placeholder="web, production, eu-west"
-                    value={serverForm.tags}
-                    onChange={e => setServerForm(prev => ({ ...prev, tags: e.target.value }))}
-                    className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
-                  />
-                </div>
+              <div>
+                <label className="text-xs font-semibold text-gray-300 block mb-1">Tags (Comma-separated)</label>
+                <input
+                  type="text"
+                  placeholder="web, production, eu-west"
+                  value={serverForm.tags}
+                  onChange={e => setServerForm(prev => ({ ...prev, tags: e.target.value }))}
+                  className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white focus:outline-none focus:border-blue-500"
+                />
               </div>
             </div>
 
