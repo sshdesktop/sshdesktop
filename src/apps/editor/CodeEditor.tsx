@@ -811,7 +811,7 @@ export default function CodeEditor() {
     addNewTerminal(folder);
   }, [addNewTerminal]);
 
-  const closeTerminal = (id: string, e?: React.MouseEvent) => {
+  const closeTerminal = useCallback((id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     if (terminals.length <= 1) return;
     const inst = tabInstances.current.get(id);
@@ -824,27 +824,84 @@ export default function CodeEditor() {
     const remaining = terminals.filter(t => t.id !== id);
     setTerminals(remaining);
     if (activeTermId === id) {
-      setActiveTermId(remaining[remaining.length - 1].id);
+      const nextActive = remaining.find(t => t.id !== splitTermId) || remaining[0];
+      setActiveTermId(nextActive.id);
     }
     if (splitTermId === id) {
+      const nextSplit = remaining.find(t => t.id !== activeTermId);
+      if (nextSplit && remaining.length >= 2) {
+        setSplitTermId(nextSplit.id);
+      } else {
+        setIsSplitTerminal(false);
+        setSplitTermId('');
+      }
+    }
+  }, [terminals, activeTermId, splitTermId]);
+
+  // Split Terminal handler: ensures dedicated terminal instance for right split pane and triggers re-fit
+  const handleToggleSplitTerminal = useCallback(() => {
+    if (isSplitTerminal) {
       setIsSplitTerminal(false);
       setSplitTermId('');
+      setTimeout(() => {
+        const inst = tabInstances.current.get(activeTermId);
+        try { inst?.fitAddon.fit(); } catch {}
+      }, 50);
+      return;
     }
-  };
+
+    // Toggle ON: If only 1 terminal exists, spawn a second bash terminal for the right split pane!
+    if (terminals.length <= 1) {
+      const newId = `editor-term-${Date.now()}`;
+      const ptyCount = terminals.length + 1;
+      const folder = currentWorkingDir;
+      const newTab: TerminalTab = {
+        id: newId,
+        title: `${ptyCount}: bash`,
+        folder
+      };
+      setTerminals(prev => [...prev, newTab]);
+      setSplitTermId(newId);
+      setIsSplitTerminal(true);
+      setShowTerminal(true);
+    } else {
+      // Pick a terminal that is not the active one
+      const other = terminals.find(t => t.id !== activeTermId) || terminals[0];
+      setSplitTermId(other.id);
+      setIsSplitTerminal(true);
+      setShowTerminal(true);
+    }
+
+    setTimeout(() => {
+      const leftInst = tabInstances.current.get(activeTermId);
+      try { leftInst?.fitAddon.fit(); } catch {}
+      if (splitTermId) {
+        const rightInst = tabInstances.current.get(splitTermId);
+        try { rightInst?.fitAddon.fit(); } catch {}
+      }
+    }, 100);
+  }, [isSplitTerminal, terminals, activeTermId, currentWorkingDir, splitTermId]);
 
   // ─── Directory Loader with Safe Permission Handling ───────────────
   const loadDirectory = useCallback(async (dirPath: string): Promise<TreeItem[]> => {
     try {
       const items = await sftpListDir(activeConnId, dirPath);
       if (Array.isArray(items)) {
-        return items.map((it: any) => ({
-          name: it.name,
-          path: it.path || `${dirPath}/${it.name}`.replace(/\/+/g, '/'),
-          isDir: Boolean(it.is_dir || it.isDir),
-          size: it.size || 0,
-          isOpen: false,
-          children: it.is_dir ? [] : undefined
-        })).sort((a, b) => {
+        return items.map((it: any) => {
+          const cleanName = (it.name || '').replace(/^['"]|['"]$/g, '').trim();
+          const cleanPath = (it.path || `${dirPath}/${cleanName}`)
+            .replace(/'/g, '')
+            .replace(/"/g, '')
+            .replace(/\/+/g, '/');
+          return {
+            name: cleanName,
+            path: cleanPath,
+            isDir: Boolean(it.is_dir || it.isDir),
+            size: it.size || 0,
+            isOpen: false,
+            children: it.is_dir ? [] : undefined
+          };
+        }).sort((a, b) => {
           if (a.isDir && !b.isDir) return -1;
           if (!a.isDir && b.isDir) return 1;
           return a.name.localeCompare(b.name);
@@ -1521,7 +1578,9 @@ export default function CodeEditor() {
   }, [showEditorToast]);
 
   // Generate duplicate naming pattern: 1.txt -> 1 - Copy.txt -> 1 - Copy(2).txt -> 1 - Copy(3).txt
-  const generateDuplicateName = (originalName: string, existingNames: Set<string>): string => {
+  const generateDuplicateName = (rawOriginalName: string, existingNames: Set<string>): string => {
+    // Strip any leading/trailing quotes
+    const originalName = rawOriginalName.replace(/^['"]|['"]$/g, '').trim();
     const lastDot = originalName.lastIndexOf('.');
     const base = lastDot > 0 ? originalName.substring(0, lastDot) : originalName;
     const ext = lastDot > 0 ? originalName.substring(lastDot) : '';
@@ -1569,19 +1628,23 @@ export default function CodeEditor() {
     setError(null);
 
     try {
-      // 1. Discover existing files in destination directory
+      // 1. Discover existing files in destination directory (normalized without quotes)
       let existingNames = new Set<string>();
       try {
         const entries = await sftpListDir(activeConnId, targetDir);
-        existingNames = new Set(entries.map(e => e.name));
+        existingNames = new Set(
+          entries.map(e => (e.name || '').replace(/^['"]|['"]$/g, '').trim())
+        );
       } catch (err) {
         console.warn('Could not list target directory before paste:', err);
       }
 
       let count = 0;
 
-      for (const src of clipboardItems.paths) {
-        const srcFileName = src.split('/').pop() || src;
+      for (const rawSrc of clipboardItems.paths) {
+        // Strip any quotes that might exist on path or filename
+        const src = rawSrc.replace(/'/g, '').replace(/"/g, '').trim();
+        const srcFileName = (src.split('/').pop() || src).replace(/^['"]|['"]$/g, '').trim();
         const srcDir = src.substring(0, src.lastIndexOf('/')) || '/';
         const isSameDir = srcDir === targetDir;
 
@@ -1592,6 +1655,9 @@ export default function CodeEditor() {
         } else {
           existingNames.add(targetFileName);
         }
+
+        // Clean target filename strictly of any quotes
+        targetFileName = targetFileName.replace(/^['"]|['"]$/g, '').trim();
 
         const targetFullPath = `${targetDir}/${targetFileName}`;
         const escapedSrc = src.replace(/'/g, "'\\''");
@@ -3064,29 +3130,47 @@ export default function CodeEditor() {
           <div className="h-8 bg-[#181825] px-2 flex items-center justify-between border-b border-white/[0.08] text-xs select-none">
             {/* Terminal Tabs */}
             <div className="flex items-center space-x-1 overflow-x-auto scrollbar-none flex-1">
-              {terminals.map(term => (
-                <div
-                  key={term.id}
-                  onClick={() => setActiveTermId(term.id)}
-                  className={`px-2.5 py-1 rounded text-xs font-mono flex items-center space-x-1.5 cursor-pointer transition-colors ${
-                    activeTermId === term.id
-                      ? 'bg-[#11111b] text-emerald-400 font-bold border-b border-emerald-400'
-                      : 'text-gray-400 hover:bg-white/5 hover:text-white'
-                  }`}
-                >
-                  <TerminalIcon className="w-3 h-3 text-emerald-400 shrink-0" />
-                  <span className="truncate max-w-[120px]">{term.title}</span>
-                  {terminals.length > 1 && (
-                    <button
-                      onClick={(e) => closeTerminal(term.id, e)}
-                      className="hover:bg-white/20 p-0.5 rounded text-gray-500 hover:text-white"
-                      title="Kill Terminal"
-                    >
-                      <X className="w-2.5 h-2.5" />
-                    </button>
-                  )}
-                </div>
-              ))}
+              {terminals.map(term => {
+                const isLeftActive = activeTermId === term.id;
+                const isRightSplit = isSplitTerminal && splitTermId === term.id;
+                return (
+                  <div
+                    key={term.id}
+                    onClick={() => {
+                      if (isSplitTerminal && isRightSplit) {
+                        const inst = tabInstances.current.get(term.id);
+                        try { inst?.term.focus(); } catch {}
+                      } else {
+                        setActiveTermId(term.id);
+                        const inst = tabInstances.current.get(term.id);
+                        try { inst?.term.focus(); } catch {}
+                      }
+                    }}
+                    className={`px-2.5 py-1 rounded text-xs font-mono flex items-center space-x-1.5 cursor-pointer transition-colors ${
+                      isLeftActive
+                        ? 'bg-[#11111b] text-emerald-400 font-bold border-b border-emerald-400'
+                        : isRightSplit
+                        ? 'bg-[#11111b] text-cyan-400 font-bold border-b border-cyan-400'
+                        : 'text-gray-400 hover:bg-white/5 hover:text-white'
+                    }`}
+                  >
+                    <TerminalIcon className={`w-3 h-3 shrink-0 ${isRightSplit ? 'text-cyan-400' : 'text-emerald-400'}`} />
+                    <span className="truncate max-w-[120px]">{term.title}</span>
+                    {isRightSplit && (
+                      <span className="text-[9px] bg-cyan-500/20 text-cyan-300 px-1 rounded">Right</span>
+                    )}
+                    {terminals.length > 1 && (
+                      <button
+                        onClick={(e) => closeTerminal(term.id, e)}
+                        className="hover:bg-white/20 p-0.5 rounded text-gray-500 hover:text-white"
+                        title="Kill Terminal"
+                      >
+                        <X className="w-2.5 h-2.5" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
 
               {/* Add Bash Terminal Button */}
               <button
@@ -3104,14 +3188,9 @@ export default function CodeEditor() {
                 📁 {currentWorkingDir}
               </span>
               <button
-                onClick={() => {
-                  setIsSplitTerminal(prev => !prev);
-                  if (!isSplitTerminal && terminals.length > 1 && !splitTermId) {
-                    setSplitTermId(terminals[1].id);
-                  }
-                }}
-                className={`p-1 rounded ${isSplitTerminal ? 'bg-emerald-500/20 text-emerald-400' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
-                title="Split Terminal Side by Side"
+                onClick={handleToggleSplitTerminal}
+                className={`p-1 rounded transition-colors ${isSplitTerminal ? 'bg-emerald-500/20 text-emerald-400' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
+                title={isSplitTerminal ? "Unsplit Terminal (Merge Panes)" : "Split Terminal Side by Side"}
               >
                 <Columns2 className="w-3.5 h-3.5" />
               </button>
@@ -3134,46 +3213,102 @@ export default function CodeEditor() {
 
           {/* Terminal Panes */}
           <div className="flex-1 overflow-hidden relative bg-[#11111b] flex">
-            {/* Primary Terminal Canvas */}
-            <div className="flex-1 h-full relative">
-              {terminals.map(term => {
-                const isActive = term.id === activeTermId;
-                return (
-                  <div
-                    key={term.id}
-                    style={{ display: isActive ? 'block' : 'none' }}
-                    className="w-full h-full p-2"
-                    onContextMenu={(e) => handleTerminalContextMenu(e, term.id)}
-                    ref={el => {
-                      if (el) {
-                        terminalContainers.current.set(term.id, el);
-                        mountPtyTerminal(term.id, term.folder, el);
-                      }
-                    }}
-                  />
-                );
-              })}
+            {/* Primary / Left Terminal Pane */}
+            <div className="flex-1 h-full relative overflow-hidden flex flex-col">
+              {isSplitTerminal && (
+                <div className="h-6 bg-[#181825] border-b border-white/[0.08] px-2 flex items-center justify-between text-[11px] font-mono text-gray-400 select-none shrink-0">
+                  <span className="flex items-center gap-1.5 text-emerald-400 font-semibold truncate">
+                    <TerminalIcon className="w-3 h-3 text-emerald-400" />
+                    <span>{terminals.find(t => t.id === activeTermId)?.title || 'Left Terminal'}</span>
+                  </span>
+                  <span className="text-[10px] text-gray-500 font-mono">Pane 1</span>
+                </div>
+              )}
+              <div className="flex-1 h-full relative overflow-hidden">
+                {terminals
+                  .filter(term => !isSplitTerminal || term.id !== splitTermId)
+                  .map(term => {
+                    const isActive = term.id === activeTermId;
+                    return (
+                      <div
+                        key={term.id}
+                        style={{ display: isActive ? 'block' : 'none' }}
+                        className="w-full h-full p-2"
+                        onContextMenu={(e) => handleTerminalContextMenu(e, term.id)}
+                        ref={el => {
+                          if (el) {
+                            terminalContainers.current.set(term.id, el);
+                            mountPtyTerminal(term.id, term.folder, el);
+                          }
+                        }}
+                      />
+                    );
+                  })}
+              </div>
             </div>
 
-            {/* Split Secondary Terminal Canvas */}
-            {isSplitTerminal && (
-              <div className="flex-1 h-full relative border-l border-white/10">
-                {terminals.map(term => {
-                  const isSplit = term.id === (splitTermId || terminals[terminals.length - 1]?.id);
-                  return (
-                    <div
-                      key={`split-${term.id}`}
-                      style={{ display: isSplit ? 'block' : 'none' }}
-                      className="w-full h-full p-2"
-                      onContextMenu={(e) => handleTerminalContextMenu(e, term.id)}
-                      ref={el => {
-                        if (el) {
-                          mountPtyTerminal(term.id, term.folder, el);
-                        }
-                      }}
-                    />
-                  );
-                })}
+            {/* Split Secondary / Right Terminal Pane */}
+            {isSplitTerminal && splitTermId && (
+              <div className="flex-1 h-full relative overflow-hidden border-l border-white/10 flex flex-col">
+                <div className="h-6 bg-[#181825] border-b border-white/[0.08] px-2 flex items-center justify-between text-[11px] font-mono text-gray-400 select-none shrink-0">
+                  <div className="flex items-center gap-1.5 truncate">
+                    <TerminalIcon className="w-3 h-3 text-cyan-400" />
+                    {terminals.length > 2 ? (
+                      <select
+                        value={splitTermId}
+                        onChange={e => {
+                          const newSplitId = e.target.value;
+                          setSplitTermId(newSplitId);
+                          setTimeout(() => {
+                            const inst = tabInstances.current.get(newSplitId);
+                            try { inst?.fitAddon.fit(); } catch {}
+                          }, 50);
+                        }}
+                        className="bg-transparent border-none text-cyan-400 font-semibold text-[11px] font-mono focus:outline-none cursor-pointer"
+                      >
+                        {terminals
+                          .filter(t => t.id !== activeTermId)
+                          .map(t => (
+                            <option key={t.id} value={t.id} className="bg-[#181825] text-white">
+                              {t.title}
+                            </option>
+                          ))}
+                      </select>
+                    ) : (
+                      <span className="text-cyan-400 font-semibold truncate">
+                        {terminals.find(t => t.id === splitTermId)?.title || 'Right Terminal'}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-[10px] text-gray-500 font-mono mr-1">Pane 2</span>
+                    <button
+                      onClick={handleToggleSplitTerminal}
+                      className="p-0.5 rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+                      title="Close Split Terminal"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex-1 h-full relative overflow-hidden">
+                  {terminals
+                    .filter(term => term.id === splitTermId)
+                    .map(term => (
+                      <div
+                        key={`split-${term.id}`}
+                        className="w-full h-full p-2"
+                        onContextMenu={(e) => handleTerminalContextMenu(e, term.id)}
+                        ref={el => {
+                          if (el) {
+                            terminalContainers.current.set(term.id, el);
+                            mountPtyTerminal(term.id, term.folder, el);
+                          }
+                        }}
+                      />
+                    ))}
+                </div>
               </div>
             )}
           </div>

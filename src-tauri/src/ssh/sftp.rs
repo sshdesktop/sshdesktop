@@ -34,10 +34,10 @@ pub async fn sftp_list_dir(
         if p.is_empty() { "/" } else { p }
     };
     let escaped = shell_escape(clean_path);
-    // --time-style=+%s gives a Unix epoch timestamp; capture 2>&1 to detect permission denied
+    // --time-style=+%s gives a Unix epoch timestamp; -N (--literal) prevents ls from quoting filenames with spaces
     let cmd = format!(
-        "ls -la --time-style=+%s '{}' 2>&1 || ls -la '{}' 2>&1",
-        escaped, escaped
+        "ls -la -N --time-style=+%s '{}' 2>&1 || ls -la -N '{}' 2>&1 || ls -la --time-style=+%s '{}' 2>&1 || ls -la '{}' 2>&1",
+        escaped, escaped, escaped, escaped
     );
     let (stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
 
@@ -82,8 +82,15 @@ pub async fn sftp_list_dir(
                 continue;
             }
 
-            // For symlinks "name -> target", keep just the name
-            let display_name = name.split(" -> ").next().unwrap_or(&name).to_string();
+            // For symlinks "name -> target", keep just the name and strip any surrounding quotes added by ls
+            let raw_target = name.split(" -> ").next().unwrap_or(&name).trim();
+            let display_name = if (raw_target.starts_with('\'') && raw_target.ends_with('\'') && raw_target.len() >= 2)
+                || (raw_target.starts_with('"') && raw_target.ends_with('"') && raw_target.len() >= 2)
+            {
+                raw_target[1..raw_target.len() - 1].to_string()
+            } else {
+                raw_target.to_string()
+            };
 
             let is_dir = parts[0].starts_with('d');
             let is_symlink = parts[0].starts_with('l');
