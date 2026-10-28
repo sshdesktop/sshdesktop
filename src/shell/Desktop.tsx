@@ -186,33 +186,37 @@ export default function Desktop() {
 
   // Initialize server directories & auto-restore application settings on login: ~/.sshdesktop, ~/Desktop, ~/Downloads, ~/Documents
   useEffect(() => {
-    if (!activeConnectionId || !userHome) return;
+    if (!activeConnectionId) return;
+    const effectiveUserHome = userHome || (username === 'root' ? '/root' : username ? `/home/${username}` : (activeServer?.username === 'root' ? '/root' : activeServer?.username ? `/home/${activeServer.username}` : '/home/sharuk'));
     setDesktopFolderItems([]);
     const initServer = async () => {
       try {
-        await ensureServerDirectories(activeConnectionId, userHome);
+        await ensureServerDirectories(activeConnectionId, effectiveUserHome);
 
         // Auto-restore settings from ~/.sshdesktop/settings.json if present on server for login user
-        try {
-          const res = await loadSettingsFromServer(activeConnectionId, userHome);
-          if (res.success && res.data) {
-            const serverData = res.data;
-            restoreSettingsToStore(serverData);
-            if (serverData.icon_positions && Object.keys(serverData.icon_positions).length > 0) {
-              const savedPositions = serverData.icon_positions;
-              setIconPositions(prev => ({ ...savedPositions, ...prev }));
+        const shouldAutoRestore = typeof window !== 'undefined' ? localStorage.getItem('sshdesktop_auto_restore_on_login') !== 'false' : true;
+        if (shouldAutoRestore) {
+          try {
+            const res = await loadSettingsFromServer(activeConnectionId, effectiveUserHome);
+            if (res.success && res.data) {
+              const serverData = res.data;
+              restoreSettingsToStore(serverData);
+              if (serverData.icon_positions && Object.keys(serverData.icon_positions).length > 0) {
+                const savedPositions = serverData.icon_positions;
+                setIconPositions(prev => ({ ...savedPositions, ...prev }));
+              }
+              if (serverData.sticky_notes) {
+                setStickyNoteContent(serverData.sticky_notes);
+              }
             }
-            if (serverData.sticky_notes) {
-              setStickyNoteContent(serverData.sticky_notes);
-            }
+          } catch (settingsErr) {
+            console.warn('[Server Settings] Auto-restore notice:', settingsErr);
           }
-        } catch (settingsErr) {
-          console.warn('[Server Settings] Auto-restore notice:', settingsErr);
         }
 
         // Hydrate icon positions if ~/.sshdesktop/icon_positions.json exists
         try {
-          const iconJson = await sftpReadTextFile(activeConnectionId, `${userHome}/.sshdesktop/icon_positions.json`).catch(() => '');
+          const iconJson = await sftpReadTextFile(activeConnectionId, `${effectiveUserHome}/.sshdesktop/icon_positions.json`).catch(() => '');
           if (iconJson) {
             const parsed = JSON.parse(iconJson);
             if (parsed && typeof parsed === 'object') {
@@ -223,7 +227,7 @@ export default function Desktop() {
 
         // Hydrate stickies from ~/.sshdesktop/stickies.txt
         try {
-          const stickiesTxt = await sftpReadTextFile(activeConnectionId, `${userHome}/.sshdesktop/stickies.txt`).catch(() => '');
+          const stickiesTxt = await sftpReadTextFile(activeConnectionId, `${effectiveUserHome}/.sshdesktop/stickies.txt`).catch(() => '');
           if (stickiesTxt && stickiesTxt.trim().length > 0) {
             setStickyNoteContent(stickiesTxt);
             localStorage.setItem('sshdesktop_desktop_stickies', stickiesTxt);
@@ -236,7 +240,7 @@ export default function Desktop() {
       }
     };
     initServer();
-  }, [activeConnectionId, userHome, loadDesktopFolder]);
+  }, [activeConnectionId, userHome, username, activeServer?.username, loadDesktopFolder]);
 
   // Listen for external updates to stickies and icon positions from Settings restore
   useEffect(() => {

@@ -84,6 +84,13 @@ export default function AppSettings() {
   });
   const { username, homeDir: userHome } = useUserPrivilege();
 
+  // Compute robust effective login user home: e.g. /home/sharuk or /root
+  const effectiveHome = userHome || (username === 'root' ? '/root' : username ? `/home/${username}` : (activeServer?.username === 'root' ? '/root' : activeServer?.username ? `/home/${activeServer.username}` : '/home/sharuk'));
+  const effectiveUsername = username || activeServer?.username || (effectiveHome.includes('/root') ? 'root' : 'sharuk');
+  const sshDesktopPath = getSshDesktopDirPath(effectiveHome);
+  const sshDesktopBackupsPath = getSshDesktopBackupsDirPath(effectiveHome);
+  const serverSettingsPath = getServerSettingsFilePath(effectiveHome);
+
   // Server Backup & Restore States (~/.sshdesktop/settings.json)
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
@@ -100,17 +107,18 @@ export default function AppSettings() {
   const [autoSyncServer, setAutoSyncServer] = useState<boolean>(() => {
     return localStorage.getItem('sshdesktop_auto_sync_server') !== 'false';
   });
-
-  const serverSettingsPath = getServerSettingsFilePath(userHome || '/root');
+  const [autoRestoreOnLogin, setAutoRestoreOnLogin] = useState<boolean>(() => {
+    return localStorage.getItem('sshdesktop_auto_restore_on_login') !== 'false';
+  });
 
   const refreshServerStatus = useCallback(async () => {
-    if (!activeConnectionId || !userHome) {
+    if (!activeConnectionId) {
       setServerFileStatus(null);
       return;
     }
-    const status = await checkServerSettingsFile(activeConnectionId, userHome);
+    const status = await checkServerSettingsFile(activeConnectionId, effectiveHome);
     setServerFileStatus(status);
-  }, [activeConnectionId, userHome]);
+  }, [activeConnectionId, effectiveHome]);
 
   useEffect(() => {
     if (activeTab === 'backup') {
@@ -119,7 +127,7 @@ export default function AppSettings() {
   }, [activeTab, refreshServerStatus]);
 
   const handleBackupToServer = async () => {
-    if (!activeConnectionId || !userHome) {
+    if (!activeConnectionId) {
       setBackupMessage({ text: 'No active SSH connection to server.', isError: true });
       return;
     }
@@ -128,13 +136,14 @@ export default function AppSettings() {
     try {
       const res = await saveSettingsToServer(
         activeConnectionId,
-        userHome,
+        effectiveHome,
         useSettingsStore.getState(),
-        { username: username || activeServer?.username || 'user' }
+        { username: effectiveUsername }
       );
       if (res.success) {
-        setBackupMessage({ text: `Settings successfully backed up to ${res.path}!`, isError: false });
+        setBackupMessage({ text: `Settings successfully backed up to ${res.path} for user ${effectiveUsername}!`, isError: false });
         await refreshServerStatus();
+        await refreshTarBackupData();
       } else {
         throw new Error(res.error || 'Failed to save settings.json on server');
       }
@@ -146,14 +155,14 @@ export default function AppSettings() {
   };
 
   const handleRestoreFromServer = async () => {
-    if (!activeConnectionId || !userHome) {
+    if (!activeConnectionId) {
       setBackupMessage({ text: 'No active SSH connection to server.', isError: true });
       return;
     }
     setIsRestoring(true);
     setBackupMessage(null);
     try {
-      const res = await loadSettingsFromServer(activeConnectionId, userHome);
+      const res = await loadSettingsFromServer(activeConnectionId, effectiveHome);
       if (res.success && res.data) {
         restoreSettingsToStore(res.data);
         setBackupMessage({ text: `Settings successfully restored from ${res.path}!`, isError: false });
@@ -169,10 +178,6 @@ export default function AppSettings() {
   };
 
   // .sshdesktop Full Directory Tar Backup & Recovery States
-  const effectiveHome = userHome || (username ? `/home/${username}` : '/home/sharuk');
-  const sshDesktopPath = getSshDesktopDirPath(effectiveHome);
-  const sshDesktopBackupsPath = getSshDesktopBackupsDirPath(effectiveHome);
-
   const [sshDesktopFiles, setSshDesktopFiles] = useState<SshDesktopFileEntry[]>([]);
   const [sshDesktopTotalSize, setSshDesktopTotalSize] = useState<string>('—');
   const [sshDesktopFileCount, setSshDesktopFileCount] = useState<number>(0);
@@ -187,7 +192,7 @@ export default function AppSettings() {
   const [showJsonSyncCard, setShowJsonSyncCard] = useState<boolean>(false);
   const [copiedTargetDir, setCopiedTargetDir] = useState(false);
 
-  // Modals for Tar Inspect & Restore Confirmation
+  // Modals for Tar Inspect, Restore Confirmation & Delete Confirmation
   const [inspectModal, setInspectModal] = useState<{
     open: boolean;
     archiveName: string;
@@ -197,6 +202,11 @@ export default function AppSettings() {
     loading: boolean;
   } | null>(null);
   const [restoreConfirmModal, setRestoreConfirmModal] = useState<{
+    open: boolean;
+    archiveName: string;
+    archivePath: string;
+  } | null>(null);
+  const [deleteArchiveConfirmModal, setDeleteArchiveConfirmModal] = useState<{
     open: boolean;
     archiveName: string;
     archivePath: string;
@@ -338,12 +348,22 @@ export default function AppSettings() {
     }
   };
 
-  const handleDeleteArchive = async (archivePath: string, archiveName: string) => {
+  const handleDeleteArchive = (archivePath: string, archiveName: string) => {
     if (!activeConnectionId) return;
-    if (!confirm(`Delete backup archive "${archiveName}" from server?`)) return;
+    setDeleteArchiveConfirmModal({
+      open: true,
+      archiveName,
+      archivePath,
+    });
+  };
+
+  const handleConfirmDeleteArchive = async () => {
+    if (!deleteArchiveConfirmModal || !activeConnectionId) return;
+    const { archivePath, archiveName } = deleteArchiveConfirmModal;
     try {
       await deleteBackupArchive(activeConnectionId, archivePath);
-      setTarMessage({ text: `Deleted archive ${archiveName}`, isError: false });
+      setTarMessage({ text: `Deleted archive "${archiveName}" from server.`, isError: false });
+      setDeleteArchiveConfirmModal(null);
       await refreshTarBackupData();
     } catch (err: any) {
       setTarMessage({ text: `Delete failed: ${err?.message || err}`, isError: true });
@@ -574,7 +594,7 @@ export default function AppSettings() {
   const navItems = [
     { id: 'appearance', label: 'Appearance', icon: Palette, color: 'text-pink-400' },
     { id: 'wallpaper', label: 'Wallpaper (4K)', icon: ImageIcon, color: 'text-blue-400' },
-    { id: 'backup', label: 'Backup & Recover (.tar)', icon: FolderArchive, color: 'text-emerald-400' },
+    { id: 'backup', label: 'Backup & Restore', icon: FolderArchive, color: 'text-emerald-400' },
     { id: 'datetime', label: 'Date & Time (Server)', icon: Clock, color: 'text-teal-400' },
     { id: 'terminal', label: 'Terminal Emulator', icon: Terminal, color: 'text-sky-400' },
     { id: 'editor', label: 'Code Editor', icon: FileCode, color: 'text-purple-400' },
@@ -812,17 +832,17 @@ export default function AppSettings() {
             </div>
           )}
 
-          {/* TAB: SERVER BACKUP & RECOVER (.TAR) */}
+          {/* TAB: SERVER BACKUP & RESTORE */}
           {activeTab === 'backup' && (
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-lg font-bold text-white tracking-tight flex items-center space-x-2">
                     <FolderArchive className="w-5 h-5 text-emerald-400" />
-                    <span>Server Data Backup & Recover (.tar)</span>
+                    <span>Server Data Backup & Restore (~/.sshdesktop)</span>
                   </h2>
                   <p className="text-xs text-gray-400 mt-0.5">
-                    Backup and recover all files inside <code className="text-amber-300 font-mono text-[11px]">{sshDesktopPath}</code> into compressed <code className="text-emerald-300 font-mono text-[11px]">.tar.gz</code> or <code className="text-emerald-300 font-mono text-[11px]">.tar</code> archives.
+                    Backup and restore all settings, preferences, and data inside <code className="text-amber-300 font-mono text-[11px]">{sshDesktopPath}</code> for the login user.
                   </p>
                 </div>
                 <button
@@ -873,15 +893,15 @@ export default function AppSettings() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-2 text-xs font-semibold text-emerald-300">
                     <FolderArchive className="w-4 h-4 text-emerald-400" />
-                    <span>Target Directory for Backup & Recovery</span>
+                    <span>Target Directory for Backup & Restore</span>
                   </div>
-                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-medium flex items-center space-x-1 ${
+                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-medium flex items-center space-x-1.5 ${
                     activeConnectionId 
                       ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
                       : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                   }`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${activeConnectionId ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-                    <span>{activeConnectionId ? `Connected (${activeServer?.name || activeServer?.host})` : 'Offline (No Connection)'}</span>
+                    <span className={`w-2 h-2 rounded-full ${activeConnectionId ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                    <span>{activeConnectionId ? `User Login OK (${effectiveUsername}@${activeServer?.name || activeServer?.host})` : 'Offline (No Connection)'}</span>
                   </span>
                 </div>
 
@@ -912,7 +932,7 @@ export default function AppSettings() {
                 <div className="grid grid-cols-4 gap-2 text-[11px] text-gray-400 pt-1">
                   <div className="bg-white/5 p-2 rounded-lg border border-white/5">
                     <span className="text-gray-500 block text-[10px]">Login User</span>
-                    <strong className="text-white font-mono text-xs">{username || activeServer?.username || 'sharuk'}</strong>
+                    <strong className="text-white font-mono text-xs">{effectiveUsername}</strong>
                   </div>
                   <div className="bg-white/5 p-2 rounded-lg border border-white/5">
                     <span className="text-gray-500 block text-[10px]">Files Inside</span>
@@ -926,6 +946,73 @@ export default function AppSettings() {
                     <span className="text-gray-500 block text-[10px]">Backups Folder</span>
                     <span className="text-gray-300 font-mono text-[10px] truncate block" title={sshDesktopBackupsPath}>{sshDesktopBackupsPath}</span>
                   </div>
+                </div>
+              </div>
+
+              {/* Quick 1-Click Backup & Restore for User Environment Card */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 shadow-xl backdrop-blur-md space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-500/20 to-teal-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/30 shrink-0">
+                      <FolderArchive className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-white flex items-center space-x-2">
+                        <span>Desktop Settings Backup & Restore</span>
+                        <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full font-mono">
+                          User Login OK
+                        </span>
+                      </h3>
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        Backup and restore settings, wallpaper, dock preferences, notes, and icon layout to <code className="text-amber-300 font-mono text-[11px]">{serverSettingsPath}</code>
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 1-Click Backup and Restore Buttons */}
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <button
+                    onClick={handleBackupToServer}
+                    disabled={isBackingUp || !activeConnectionId}
+                    className="flex items-center justify-center space-x-2 py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 active:scale-[0.98] text-white text-xs font-semibold shadow-lg shadow-blue-600/30 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    {isBackingUp ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                    <span>{isBackingUp ? 'Backing Up to Server...' : 'Backup Now to ~/.sshdesktop'}</span>
+                  </button>
+
+                  <button
+                    onClick={handleRestoreFromServer}
+                    disabled={isRestoring || !activeConnectionId}
+                    className="flex items-center justify-center space-x-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white text-xs font-semibold shadow-lg shadow-emerald-600/30 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    {isRestoring ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+                    <span>{isRestoring ? 'Restoring from Server...' : 'Restore Now from ~/.sshdesktop'}</span>
+                  </button>
+                </div>
+
+                {/* Auto-Restore on User Login Toggle Setting */}
+                <div className="flex items-center justify-between p-3 rounded-xl bg-white/[0.03] border border-white/5">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center space-x-2">
+                      <span className="text-xs font-semibold text-white">Auto-Restore on User Login</span>
+                      <span className="text-[9px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 rounded font-mono">User Login OK</span>
+                    </div>
+                    <p className="text-[11px] text-gray-400">
+                      Automatically restores your desktop layout, wallpaper, notes, and preferences whenever user <strong className="text-gray-300">{effectiveUsername}</strong> logs in.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const next = !autoRestoreOnLogin;
+                      setAutoRestoreOnLogin(next);
+                      localStorage.setItem('sshdesktop_auto_restore_on_login', String(next));
+                    }}
+                    className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${autoRestoreOnLogin ? 'bg-emerald-600' : 'bg-white/10'}`}
+                    title={autoRestoreOnLogin ? 'Auto-restore active on user login' : 'Auto-restore disabled'}
+                  >
+                    <span className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${autoRestoreOnLogin ? 'left-5.5' : 'left-0.5'}`} />
+                  </button>
                 </div>
               </div>
 
@@ -1825,6 +1912,46 @@ export default function AppSettings() {
                   <Check className="w-3.5 h-3.5" />
                 )}
                 <span>{isRestoringTar ? 'Restoring...' : 'Confirm & Recover'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 3. Modal: Confirm Delete Archive */}
+      {deleteArchiveConfirmModal?.open && (
+        <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/70 backdrop-blur-sm animate-in fade-in duration-200 p-4">
+          <div className="bg-[#181825] border border-red-500/30 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-in zoom-in-95 duration-200">
+            <div className="w-12 h-12 rounded-2xl bg-red-500/20 text-red-400 flex items-center justify-center border border-red-500/30 mx-auto">
+              <Trash2 className="w-6 h-6" />
+            </div>
+
+            <div className="text-center space-y-1.5">
+              <h3 className="text-sm font-bold text-white">Delete Backup Archive</h3>
+              <p className="text-xs text-gray-300 leading-relaxed">
+                Are you sure you want to delete this backup archive from the server?
+              </p>
+              <div className="p-2 bg-[#101018] rounded-xl border border-white/10 font-mono text-xs text-red-300 break-all select-all">
+                {deleteArchiveConfirmModal.archiveName}
+              </div>
+              <p className="text-[11px] text-gray-400 pt-1">
+                This file will be permanently removed from <code className="text-amber-300 font-mono text-[10px]">{sshDesktopBackupsPath}</code>.
+              </p>
+            </div>
+
+            <div className="flex items-center space-x-2 pt-2">
+              <button
+                onClick={() => setDeleteArchiveConfirmModal(null)}
+                className="flex-1 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmDeleteArchive}
+                className="flex-1 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold flex items-center justify-center space-x-1.5 transition-all cursor-pointer shadow-lg shadow-red-600/30"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Confirm Delete</span>
               </button>
             </div>
           </div>
