@@ -132,39 +132,68 @@ pub async fn user_add(
     }
 
     let sh = shell.unwrap_or_else(|| "/bin/bash".into());
-    let mut effective_groups = groups.unwrap_or_default();
-    // If sudo group was requested, add wheel as well for cross-distribution compatibility (Ubuntu/Debian vs RHEL/CentOS/Fedora/Arch/Amazon Linux)
-    if effective_groups.iter().any(|g| g == "sudo") && !effective_groups.iter().any(|g| g == "wheel") {
-        effective_groups.push("wheel".to_string());
-    }
+    let effective_groups = groups.unwrap_or_default();
+    let wants_sudo = effective_groups.iter().any(|g| g == "sudo" || g == "wheel" || g == "admin");
+    let custom_groups: Vec<String> = effective_groups
+        .into_iter()
+        .filter(|g| g != "sudo" && g != "wheel" && g != "admin" && g.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-'))
+        .collect();
 
-    let grp_arg = if !effective_groups.is_empty() {
-        format!(" -G '{}'", effective_groups.join(","))
-    } else {
-        String::new()
-    };
-
-    let cmd = if let Some(ref pwd) = password {
+    // Base user creation without hardcoding -G to prevent aborting on distros where 'wheel' (Ubuntu/Debian) or 'sudo' (RHEL/CentOS) does not exist
+    let useradd_base = if let Some(ref pwd) = password {
         if !pwd.trim().is_empty() {
             let escaped_pwd = pwd.replace('\'', r"'\''");
             format!(
                 "HASH=$(openssl passwd -6 '{pwd}' 2>/dev/null || openssl passwd -1 '{pwd}' 2>/dev/null); \
                  if [ -n \"$HASH\" ]; then \
-                     useradd -m -p \"$HASH\" -s '{sh}'{grp_arg} '{username}' 2>&1 || (useradd -m -s '{sh}'{grp_arg} '{username}' 2>&1 && usermod -p \"$HASH\" '{username}' 2>&1); \
+                     useradd -m -p \"$HASH\" -s '{sh}' '{username}' 2>&1 || (useradd -m -s '{sh}' '{username}' 2>&1 && usermod -p \"$HASH\" '{username}' 2>&1); \
                  else \
-                     useradd -m -s '{sh}'{grp_arg} '{username}' 2>&1 && echo '{username}:{pwd}' | chpasswd 2>&1; \
+                     useradd -m -s '{sh}' '{username}' 2>&1 && echo '{username}:{pwd}' | chpasswd 2>&1; \
                  fi",
                 pwd = escaped_pwd,
                 sh = sh,
-                grp_arg = grp_arg,
                 username = username
             )
         } else {
-            format!("useradd -m -s '{}'{} '{}' 2>&1", sh, grp_arg, username)
+            format!("useradd -m -s '{}' '{}' 2>&1", sh, username)
         }
     } else {
-        format!("useradd -m -s '{}'{} '{}' 2>&1", sh, grp_arg, username)
+        format!("useradd -m -s '{}' '{}' 2>&1", sh, username)
     };
+
+    // Cross-distribution administrative group assignment:
+    // Debian/Ubuntu uses 'sudo', RHEL/CentOS/Fedora/Arch/Amazon Linux uses 'wheel', macOS/BSD uses 'admin'
+    let sudo_cmd = if wants_sudo {
+        format!(
+            " && ( \
+                 ADDED_ADMIN=0; \
+                 if getent group sudo >/dev/null 2>&1 || grep -q '^sudo:' /etc/group 2>/dev/null; then \
+                     usermod -aG sudo '{username}' 2>&1 && ADDED_ADMIN=1; \
+                 fi; \
+                 if getent group wheel >/dev/null 2>&1 || grep -q '^wheel:' /etc/group 2>/dev/null; then \
+                     usermod -aG wheel '{username}' 2>&1 && ADDED_ADMIN=1; \
+                 fi; \
+                 if [ \"$ADDED_ADMIN\" -eq 0 ] && (getent group admin >/dev/null 2>&1 || grep -q '^admin:' /etc/group 2>/dev/null); then \
+                     usermod -aG admin '{username}' 2>&1; \
+                 fi; \
+                 true \
+             )",
+            username = username
+        )
+    } else {
+        String::new()
+    };
+
+    let mut custom_groups_cmd = String::new();
+    for grp in custom_groups {
+        custom_groups_cmd.push_str(&format!(
+            " && ( if getent group '{grp}' >/dev/null 2>&1 || grep -q '^{grp}:' /etc/group 2>/dev/null; then usermod -aG '{grp}' '{username}' 2>&1; fi; true )",
+            grp = grp,
+            username = username
+        ));
+    }
+
+    let cmd = format!("{}{}{}", useradd_base, sudo_cmd, custom_groups_cmd);
 
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
     if code == -1 {
@@ -230,9 +259,35 @@ pub async fn user_toggle_sudo(
     }
 
     let cmd = if grant {
-        format!("usermod -aG sudo '{username}' 2>&1 || usermod -aG wheel '{username}' 2>&1")
+        format!(
+            "ADDED_ADMIN=0; \
+             if getent group sudo >/dev/null 2>&1 || grep -q '^sudo:' /etc/group 2>/dev/null; then \
+                 usermod -aG sudo '{username}' 2>&1 && ADDED_ADMIN=1; \
+             fi; \
+             if getent group wheel >/dev/null 2>&1 || grep -q '^wheel:' /etc/group 2>/dev/null; then \
+                 usermod -aG wheel '{username}' 2>&1 && ADDED_ADMIN=1; \
+             fi; \
+             if [ \"$ADDED_ADMIN\" -eq 0 ] && (getent group admin >/dev/null 2>&1 || grep -q '^admin:' /etc/group 2>/dev/null); then \
+                 usermod -aG admin '{username}' 2>&1 && ADDED_ADMIN=1; \
+             fi; \
+             if [ \"$ADDED_ADMIN\" -eq 0 ]; then \
+                 echo \"No sudo, wheel, or admin group found on remote system.\" >&2; \
+                 exit 1; \
+             fi"
+        )
     } else {
-        format!("gpasswd -d '{username}' sudo 2>&1; gpasswd -d '{username}' wheel 2>&1; deluser '{username}' sudo 2>/dev/null; deluser '{username}' wheel 2>/dev/null; true")
+        format!(
+            "if getent group sudo >/dev/null 2>&1 || grep -q '^sudo:' /etc/group 2>/dev/null; then \
+                 gpasswd -d '{username}' sudo 2>&1 || deluser '{username}' sudo 2>/dev/null || true; \
+             fi; \
+             if getent group wheel >/dev/null 2>&1 || grep -q '^wheel:' /etc/group 2>/dev/null; then \
+                 gpasswd -d '{username}' wheel 2>&1 || deluser '{username}' wheel 2>/dev/null || true; \
+             fi; \
+             if getent group admin >/dev/null 2>&1 || grep -q '^admin:' /etc/group 2>/dev/null; then \
+                 gpasswd -d '{username}' admin 2>&1 || deluser '{username}' admin 2>/dev/null || true; \
+             fi; \
+             true"
+        )
     };
 
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;

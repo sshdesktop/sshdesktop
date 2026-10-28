@@ -166,7 +166,7 @@ export default function UserManager() {
           home: u.home || `/home/${u.username}`,
           shell: u.shell || '/bin/bash',
           groups: u.groups || [],
-          isSudo: (u.groups || []).includes('sudo') || (u.groups || []).includes('wheel') || u.uid === 0,
+          isSudo: (u.groups || []).includes('sudo') || (u.groups || []).includes('wheel') || (u.groups || []).includes('admin') || u.uid === 0,
           isLocked: !!u.locked
         }));
         setUsers(mappedUsers);
@@ -381,12 +381,24 @@ export default function UserManager() {
     setIsAddingUser(true);
     setAddUserError(null);
     try {
+      // Determine appropriate administrative group based on the server's existing groups
+      let sudoGroups: string[] = [];
+      if (newUser.sudo) {
+        const hasWheel = groups.some(g => g.name === 'wheel');
+        const hasSudo = groups.some(g => g.name === 'sudo');
+        if (hasWheel && !hasSudo) {
+          sudoGroups = ['wheel'];
+        } else {
+          sudoGroups = ['sudo'];
+        }
+      }
+
       await userAdd(
         activeConnId,
         newUser.username.trim(),
         newUser.password.trim() || undefined,
         newUser.shell,
-        newUser.sudo ? ['sudo', 'wheel'] : []
+        sudoGroups
       );
       setShowAddModal(false);
       setAddUserError(null);
