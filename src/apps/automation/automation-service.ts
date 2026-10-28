@@ -653,6 +653,18 @@ export function clearHistory(): void {
   }
 }
 
+export function deleteHistoryRun(id: string): AutomationExecutionRun[] {
+  try {
+    const current = loadStoredHistory();
+    const updated = current.filter(r => r.id !== id);
+    localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(updated));
+    return updated;
+  } catch (err) {
+    console.error('Failed to delete history run:', err);
+    return [];
+  }
+}
+
 // ==========================================
 // ENTERPRISE FLEET MATRIX STORAGE
 // ==========================================
