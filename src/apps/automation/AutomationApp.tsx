@@ -36,6 +36,7 @@ import {
   loadStoredHistory,
   saveHistoryEntry,
   clearHistory,
+  deleteHistoryRun,
   interpolateCommand,
   getAutomationServerFilePath,
   saveAutomationToServer,
@@ -169,6 +170,16 @@ export default function AutomationApp() {
   const [allLogSearchQuery, setAllLogSearchQuery] = useState('');
   const [selectedNodeFilter, setSelectedNodeFilter] = useState<'all' | string>('all');
   const [copiedAllLogs, setCopiedAllLogs] = useState(false);
+
+  // Delete Confirmation Alert Modal
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    isOpen: boolean;
+    title: string;
+    itemName: string;
+    itemType: string;
+    description: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   // Import Saved Logins Modal
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -676,6 +687,43 @@ export default function AutomationApp() {
     setBannerNotice({ text: `Loaded previous run: "${run.recipeTitle}" on ${targetIds.length} target servers.` });
   };
 
+  // Clear All History with Confirmation Modal
+  const handleClearHistory = () => {
+    setDeleteConfirm({
+      isOpen: true,
+      title: 'Confirm to Clear Audit History',
+      itemName: `${history.length} Execution Run(s)`,
+      itemType: 'Audit History',
+      description: `Are you sure you want to clear all ${history.length} execution audit runs and outputs? All saved run reports and node logs will be permanently deleted.`,
+      onConfirm: () => {
+        clearHistory();
+        setHistory([]);
+        setBannerNotice({ text: 'Automation audit history cleared.' });
+        setTimeout(() => setBannerNotice(null), 4000);
+        setDeleteConfirm(null);
+      }
+    });
+  };
+
+  // Delete Individual History Run with Confirmation Modal
+  const handleDeleteHistoryRun = (runId: string) => {
+    const run = history.find(r => r.id === runId);
+    setDeleteConfirm({
+      isOpen: true,
+      title: 'Confirm to Delete Run History',
+      itemName: run?.recipeTitle || runId,
+      itemType: 'Execution Run',
+      description: `Are you sure you want to delete the execution history and logs for "${run?.recipeTitle || runId}"?`,
+      onConfirm: () => {
+        const updated = deleteHistoryRun(runId);
+        setHistory(updated);
+        setBannerNotice({ text: 'Execution run removed from history.' });
+        setTimeout(() => setBannerNotice(null), 4000);
+        setDeleteConfirm(null);
+      }
+    });
+  };
+
   // Download Single Server Log
   const handleDownloadSingleLog = (res: ServerExecutionResult, runTitle?: string) => {
     const filename = `automation-${res.serverName.replace(/\s+/g, '_')}-${Date.now()}.log`;
@@ -864,27 +912,36 @@ ${res.stderr || '(none)'}
     setIsRecipeModalOpen(true);
   };
 
-  // Recipe CRUD: Delete Recipe
+  // Recipe CRUD: Delete Recipe with Confirmation Modal
   const handleDeleteRecipe = (id: string) => {
     const target = recipes.find(r => r.id === id);
-    if (!confirm(`Are you sure you want to delete recipe "${target?.title || id}"?`)) return;
+    setDeleteConfirm({
+      isOpen: true,
+      title: 'Confirm to Delete Recipe',
+      itemName: target?.title || id,
+      itemType: 'Automation Recipe',
+      description: `Are you sure you want to permanently delete custom recipe "${target?.title || id}"? All associated automation command scripts will be removed.`,
+      onConfirm: () => {
+        const updated = deleteCustomRecipe(id);
+        setRecipes(updated);
+        if (selectedRecipeId === id) {
+          setSelectedRecipeId(BUILT_IN_RECIPES[0].id);
+        }
+        setBannerNotice({ text: `Custom recipe "${target?.title || id}" deleted.` });
+        setTimeout(() => setBannerNotice(null), 4000);
+        setDeleteConfirm(null);
 
-    const updated = deleteCustomRecipe(id);
-    setRecipes(updated);
-    if (selectedRecipeId === id) {
-      setSelectedRecipeId(BUILT_IN_RECIPES[0].id);
-    }
-    setBannerNotice({ text: 'Custom recipe deleted.' });
-
-    if (activeConnectionId && homeDir) {
-      saveAutomationToServer(activeConnectionId, homeDir, {
-        username,
-        customRecipes: updated.filter(r => !r.isBuiltIn),
-        history,
-        fleetMatrix,
-        lastTargetServerIds: selectedServerIds,
-      }).catch(() => {});
-    }
+        if (activeConnectionId && homeDir) {
+          saveAutomationToServer(activeConnectionId, homeDir, {
+            username,
+            customRecipes: updated.filter(r => !r.isBuiltIn),
+            history,
+            fleetMatrix,
+            lastTargetServerIds: selectedServerIds,
+          }).catch(() => {});
+        }
+      }
+    });
   };
 
   // Fleet Matrix: Organization CRUD
@@ -921,23 +978,36 @@ ${res.stderr || '(none)'}
 
   const handleDeleteOrg = (orgId: string) => {
     const org = fleetMatrix.organizations.find(o => o.id === orgId);
-    if (!confirm(`Are you sure you want to delete Organization "${org?.name || orgId}" and its hierarchy?`)) return;
+    const affectedGroups = fleetMatrix.groups.filter(g => g.organizationId === orgId);
+    const affectedServers = (fleetMatrix.servers || []).filter(s => s.organizationId === orgId);
+    setDeleteConfirm({
+      isOpen: true,
+      title: 'Confirm to Delete Organization',
+      itemName: org?.name || orgId,
+      itemType: 'Organization',
+      description: `Are you sure you want to delete Organization "${org?.name || orgId}"? This will also remove ${affectedGroups.length} group(s) and ${affectedServers.length} server(s) inside this organization.`,
+      onConfirm: () => {
+        const nextOrgs = fleetMatrix.organizations.filter(o => o.id !== orgId);
+        const nextGroups = fleetMatrix.groups.filter(g => g.organizationId !== orgId);
+        const nextServers = (fleetMatrix.servers || []).filter(s => s.organizationId !== orgId);
+        const updatedMatrix = { ...fleetMatrix, organizations: nextOrgs, groups: nextGroups, servers: nextServers };
+        setFleetMatrix(updatedMatrix);
+        saveStoredFleetMatrix(updatedMatrix);
+        setBannerNotice({ text: `Organization "${org?.name || orgId}" deleted.` });
+        setTimeout(() => setBannerNotice(null), 4000);
+        setDeleteConfirm(null);
 
-    const nextOrgs = fleetMatrix.organizations.filter(o => o.id !== orgId);
-    const nextGroups = fleetMatrix.groups.filter(g => g.organizationId !== orgId);
-    const nextServers = (fleetMatrix.servers || []).filter(s => s.organizationId !== orgId);
-    const updatedMatrix = { ...fleetMatrix, organizations: nextOrgs, groups: nextGroups, servers: nextServers };
-    setFleetMatrix(updatedMatrix);
-    saveStoredFleetMatrix(updatedMatrix);
-    if (activeConnectionId && homeDir) {
-      saveAutomationToServer(activeConnectionId, homeDir, {
-        username,
-        customRecipes: recipes.filter(r => !r.isBuiltIn),
-        history,
-        fleetMatrix: updatedMatrix,
-        lastTargetServerIds: selectedServerIds,
-      }).catch(() => {});
-    }
+        if (activeConnectionId && homeDir) {
+          saveAutomationToServer(activeConnectionId, homeDir, {
+            username,
+            customRecipes: recipes.filter(r => !r.isBuiltIn),
+            history,
+            fleetMatrix: updatedMatrix,
+            lastTargetServerIds: selectedServerIds,
+          }).catch(() => {});
+        }
+      }
+    });
   };
 
   // Fleet Matrix: Group CRUD
@@ -981,22 +1051,34 @@ ${res.stderr || '(none)'}
 
   const handleDeleteGroup = (groupId: string) => {
     const grp = fleetMatrix.groups.find(g => g.id === groupId);
-    if (!confirm(`Are you sure you want to delete Group "${grp?.name || groupId}" and its servers?`)) return;
+    const affectedServers = (fleetMatrix.servers || []).filter(s => s.groupId === groupId);
+    setDeleteConfirm({
+      isOpen: true,
+      title: 'Confirm to Delete Group',
+      itemName: grp?.name || groupId,
+      itemType: 'Fleet Group',
+      description: `Are you sure you want to delete Group "${grp?.name || groupId}"? This will also remove ${affectedServers.length} server(s) assigned to this group.`,
+      onConfirm: () => {
+        const nextGroups = fleetMatrix.groups.filter(g => g.id !== groupId);
+        const nextServers = (fleetMatrix.servers || []).filter(s => s.groupId !== groupId);
+        const updatedMatrix = { ...fleetMatrix, groups: nextGroups, servers: nextServers };
+        setFleetMatrix(updatedMatrix);
+        saveStoredFleetMatrix(updatedMatrix);
+        setBannerNotice({ text: `Group "${grp?.name || groupId}" deleted.` });
+        setTimeout(() => setBannerNotice(null), 4000);
+        setDeleteConfirm(null);
 
-    const nextGroups = fleetMatrix.groups.filter(g => g.id !== groupId);
-    const nextServers = (fleetMatrix.servers || []).filter(s => s.groupId !== groupId);
-    const updatedMatrix = { ...fleetMatrix, groups: nextGroups, servers: nextServers };
-    setFleetMatrix(updatedMatrix);
-    saveStoredFleetMatrix(updatedMatrix);
-    if (activeConnectionId && homeDir) {
-      saveAutomationToServer(activeConnectionId, homeDir, {
-        username,
-        customRecipes: recipes.filter(r => !r.isBuiltIn),
-        history,
-        fleetMatrix: updatedMatrix,
-        lastTargetServerIds: selectedServerIds,
-      }).catch(() => {});
-    }
+        if (activeConnectionId && homeDir) {
+          saveAutomationToServer(activeConnectionId, homeDir, {
+            username,
+            customRecipes: recipes.filter(r => !r.isBuiltIn),
+            history,
+            fleetMatrix: updatedMatrix,
+            lastTargetServerIds: selectedServerIds,
+          }).catch(() => {});
+        }
+      }
+    });
   };
 
   // Fleet Matrix: Native Server CRUD (Add / Edit / Delete)
@@ -1128,24 +1210,33 @@ ${res.stderr || '(none)'}
 
   const handleDeleteServer = (serverId: string) => {
     const srv = (fleetMatrix.servers || []).find(s => s.id === serverId);
-    if (!confirm(`Are you sure you want to delete server "${srv?.name || serverId}" from Fleet Matrix?`)) return;
+    setDeleteConfirm({
+      isOpen: true,
+      title: 'Confirm to Delete Server',
+      itemName: srv?.name || serverId,
+      itemType: 'Fleet Server',
+      description: `Are you sure you want to delete server "${srv?.name || serverId}" (${srv?.host || ''}) from the Fleet Matrix?`,
+      onConfirm: () => {
+        const nextServers = (fleetMatrix.servers || []).filter(s => s.id !== serverId);
+        const updatedMatrix = { ...fleetMatrix, servers: nextServers };
+        setFleetMatrix(updatedMatrix);
+        saveStoredFleetMatrix(updatedMatrix);
+        setSelectedServerIds(prev => prev.filter(id => id !== serverId));
+        setBannerNotice({ text: `Server "${srv?.name || serverId}" deleted from Fleet Matrix.` });
+        setTimeout(() => setBannerNotice(null), 4000);
+        setDeleteConfirm(null);
 
-    const nextServers = (fleetMatrix.servers || []).filter(s => s.id !== serverId);
-    const updatedMatrix = { ...fleetMatrix, servers: nextServers };
-    setFleetMatrix(updatedMatrix);
-    saveStoredFleetMatrix(updatedMatrix);
-    setSelectedServerIds(prev => prev.filter(id => id !== serverId));
-    setBannerNotice({ text: `Server deleted from Fleet Matrix.` });
-
-    if (activeConnectionId && homeDir) {
-      saveAutomationToServer(activeConnectionId, homeDir, {
-        username,
-        customRecipes: recipes.filter(r => !r.isBuiltIn),
-        history,
-        fleetMatrix: updatedMatrix,
-        lastTargetServerIds: selectedServerIds,
-      }).catch(() => {});
-    }
+        if (activeConnectionId && homeDir) {
+          saveAutomationToServer(activeConnectionId, homeDir, {
+            username,
+            customRecipes: recipes.filter(r => !r.isBuiltIn),
+            history,
+            fleetMatrix: updatedMatrix,
+            lastTargetServerIds: selectedServerIds,
+          }).catch(() => {});
+        }
+      }
+    });
   };
 
   // Import Saved Connections from Login Screen into Fleet Matrix
@@ -2571,11 +2662,9 @@ ${res.stderr || '(none)'}
 
               {history.length > 0 && (
                 <button
-                  onClick={() => {
-                    clearHistory();
-                    setHistory([]);
-                  }}
+                  onClick={handleClearHistory}
                   className="px-3 py-1.5 rounded-lg bg-red-600/10 hover:bg-red-600/20 text-red-400 text-xs font-semibold border border-red-500/20 flex items-center space-x-1.5 transition-all cursor-pointer"
+                  title="Clear all execution history"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>Clear History</span>
@@ -2638,6 +2727,14 @@ ${res.stderr || '(none)'}
                         >
                           <Play className="w-3 h-3 fill-current" />
                           <span>Re-Run</span>
+                        </button>
+
+                        <button
+                          onClick={() => handleDeleteHistoryRun(run.id)}
+                          className="p-1.5 rounded-lg bg-red-600/10 hover:bg-red-600/25 text-red-400 hover:text-red-300 transition-all cursor-pointer"
+                          title="Delete this execution run from history"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     </div>
@@ -3668,6 +3765,77 @@ ${res.stderr || '(none)'}
                 className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold cursor-pointer"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* 9. MODAL: DELETE CONFIRMATION ALERT                      */}
+      {/* ======================================================== */}
+      {deleteConfirm && deleteConfirm.isOpen && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="w-full max-w-md bg-[#161828] border border-white/15 rounded-3xl p-6 shadow-2xl space-y-4 animate-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-white/10">
+              <div className="flex items-center space-x-3">
+                <div className="w-9 h-9 rounded-2xl bg-red-500/20 text-red-400 flex items-center justify-center shadow-inner">
+                  <Trash2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-white">{deleteConfirm.title}</h3>
+                  <span className="text-[10px] text-gray-400 font-mono">Confirm permanent removal</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeleteConfirm(null)}
+                className="p-1 hover:bg-white/10 rounded-lg text-gray-400 hover:text-white cursor-pointer transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Item Card Details */}
+            <div className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/10 flex items-center space-x-3">
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-red-500 to-rose-700 flex items-center justify-center font-bold text-white text-xs shadow">
+                {deleteConfirm.itemType[0]?.toUpperCase() || 'D'}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="font-bold text-xs text-white truncate font-mono">{deleteConfirm.itemName}</div>
+                <div className="text-[10px] text-gray-400">{deleteConfirm.itemType}</div>
+              </div>
+            </div>
+
+            {/* Description / Warning Message */}
+            <p className="text-xs text-gray-300 leading-relaxed">
+              {deleteConfirm.description}
+            </p>
+
+            <div className="p-3 rounded-2xl bg-red-500/15 border border-red-500/30 text-red-300 text-[11px] flex items-start space-x-2">
+              <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+              <span>
+                <strong>Warning:</strong> This deletion is permanent and cannot be reversed.
+              </span>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex justify-end space-x-2 pt-3 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirm(null)}
+                className="px-4 py-2 rounded-xl text-xs text-gray-300 hover:text-white hover:bg-white/5 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={deleteConfirm.onConfirm}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-red-600 hover:bg-red-500 text-white shadow-lg transition-all active:scale-95 flex items-center space-x-1.5 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Confirm to Delete</span>
               </button>
             </div>
           </div>
