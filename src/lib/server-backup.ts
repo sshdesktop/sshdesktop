@@ -26,12 +26,12 @@ export interface TarArchiveContentItem {
 }
 
 export function getSshDesktopDirPath(homeDir?: string): string {
-  const cleanHome = homeDir?.replace(/\/+$/, '') || '/home/sharuk';
+  const cleanHome = homeDir?.replace(/\/+$/, '') || '~';
   return `${cleanHome}/.sshdesktop`;
 }
 
 export function getSshDesktopBackupsDirPath(homeDir?: string): string {
-  const cleanHome = homeDir?.replace(/\/+$/, '') || '/home/sharuk';
+  const cleanHome = homeDir?.replace(/\/+$/, '') || '~';
   return `${cleanHome}/.sshdesktop_backups`;
 }
 
@@ -186,7 +186,7 @@ export async function listBackupArchives(
   homeDir: string
 ): Promise<BackupArchiveEntry[]> {
   const backupsDir = getSshDesktopBackupsDirPath(homeDir);
-  const cleanHome = homeDir?.replace(/\/+$/, '') || '/home/sharuk';
+  const cleanHome = homeDir?.replace(/\/+$/, '') || '~';
 
   try {
     // Ensure backups dir exists
