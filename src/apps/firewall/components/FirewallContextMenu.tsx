@@ -1,8 +1,9 @@
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import {
   Trash2, Edit, RefreshCw, Copy, ExternalLink, Zap, Lock, Radio, Sliders, Check
 } from 'lucide-react';
 import { FirewallRuleItem } from '../../../lib/tauri-bridge';
+import { PortalContextMenu } from '../../../components/PortalContextMenu';
 
 interface FirewallContextMenuProps {
   x: number;
@@ -27,29 +28,6 @@ export default function FirewallContextMenu({
   onToggleAction,
   onTestPort,
 }: FirewallContextMenuProps) {
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-
-    window.addEventListener('mousedown', handleClickOutside);
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('mousedown', handleClickOutside);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [onClose]);
-
-  const posX = Math.min(x, window.innerWidth - 220);
-  const posY = Math.min(y, window.innerHeight - 260);
-
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     onClose();
@@ -66,10 +44,11 @@ export default function FirewallContextMenu({
   };
 
   return (
-    <div
-      ref={menuRef}
-      style={{ left: posX, top: posY }}
-      className="fixed z-50 w-56 bg-[#181825]/95 backdrop-blur-xl border border-white/15 rounded-2xl shadow-2xl py-1.5 text-xs text-gray-200 select-none animate-in fade-in zoom-in-95 duration-100"
+    <PortalContextMenu
+      x={x}
+      y={y}
+      onClose={onClose}
+      className="w-56 bg-[#181825]/95 backdrop-blur-xl border border-white/15 rounded-2xl shadow-2xl py-1.5 text-xs text-gray-200 select-none"
     >
       <div className="px-3 py-1.5 border-b border-white/10 flex items-center justify-between font-mono text-[11px] text-gray-400">
         <span className="font-bold text-white truncate">Rule #{rule.number}: {rule.to_port}</span>
@@ -141,6 +120,6 @@ export default function FirewallContextMenu({
           <span>Delete Rule</span>
         </button>
       </div>
-    </div>
+    </PortalContextMenu>
   );
 }

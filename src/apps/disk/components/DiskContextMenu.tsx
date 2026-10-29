@@ -1,10 +1,11 @@
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import {
   FolderPlus, HardDrive, Wrench, Shield, Lock, Trash2, Sliders,
   CheckCircle2, RefreshCw, Copy, Tag, Flag, Terminal, ArrowUpRight,
   ArrowDownRight, Maximize2, Minimize2, ExternalLink, Layers, Disc
 } from 'lucide-react';
 import { BlockDeviceInfo } from '../../../lib/tauri-bridge';
+import { PortalContextMenu } from '../../../components/PortalContextMenu';
 
 export interface ContextMenuTarget {
   type: 'disk' | 'partition';
@@ -48,30 +49,6 @@ export default function DiskContextMenu({
   onCheckFs,
   onSmartHealth,
 }: DiskContextMenuProps) {
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-
-    window.addEventListener('mousedown', handleClickOutside);
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('mousedown', handleClickOutside);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [onClose]);
-
-  // Adjust coordinates if menu overflows window edges
-  const posX = Math.min(x, window.innerWidth - 240);
-  const posY = Math.min(y, window.innerHeight - 380);
-
   const { type, item } = target;
   const isMounted = !!item.mountpoint && item.mountpoint !== '—';
   const isSystem = !!item.is_system;
@@ -82,10 +59,11 @@ export default function DiskContextMenu({
   };
 
   return (
-    <div
-      ref={menuRef}
-      style={{ left: posX, top: posY }}
-      className="fixed z-50 w-56 bg-[#181825]/95 backdrop-blur-xl border border-white/15 rounded-2xl shadow-2xl py-1.5 text-xs text-gray-200 select-none animate-in fade-in zoom-in-95 duration-100"
+    <PortalContextMenu
+      x={x}
+      y={y}
+      onClose={onClose}
+      className="w-56 bg-[#181825]/95 backdrop-blur-xl border border-white/15 rounded-2xl shadow-2xl py-1.5 text-xs text-gray-200 select-none"
     >
       {/* Target Title Badge */}
       <div className="px-3 py-1.5 border-b border-white/10 flex items-center justify-between font-mono text-[11px] text-gray-400">
@@ -271,6 +249,6 @@ export default function DiskContextMenu({
           </>
         )}
       </div>
-    </div>
+    </PortalContextMenu>
   );
 }

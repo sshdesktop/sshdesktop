@@ -16,6 +16,7 @@ import { useWindowManager } from '../../lib/hooks/useWindowManager';
 import { useUserPrivilege } from '../../lib/permissions';
 import PermissionAlertBanner from '../../components/PermissionAlertBanner';
 import PermissionAlertModal from '../../components/PermissionAlertModal';
+import { PortalContextMenu } from '../../components/PortalContextMenu';
 
 export interface PackageItem {
   name: string;
@@ -541,7 +542,7 @@ export default function PackageManager() {
       )}
 
       {/* macOS Top Navigation Toolbar */}
-      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto no-scrollbar">
+      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto scrollbar-thin">
         {/* Segmented Tab Controls */}
         <div className="flex items-center space-x-2 shrink-0">
           <div className="mac-segmented-container">
@@ -1026,11 +1027,11 @@ export default function PackageManager() {
       {/* 4. ROW RIGHT-CLICK CONTEXT MENU                                              */}
       {/* ──────────────────────────────────────────────────────────────────────────── */}
       {contextMenu && (
-        <div
-          ref={contextMenuRef}
-          style={{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }}
-          className="fixed z-50 bg-[#1e2030]/95 backdrop-blur-xl border border-white/15 rounded-2xl shadow-2xl p-1.5 min-w-[210px] text-xs font-sans animate-in fade-in zoom-in-95 duration-100"
-          onClick={e => e.stopPropagation()}
+        <PortalContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          className="bg-[#1e2030]/95 backdrop-blur-xl border border-white/15 rounded-2xl shadow-2xl p-1.5 min-w-[210px] text-xs font-sans text-gray-200"
         >
           <div className="px-2.5 py-1.5 border-b border-white/10 mb-1">
             <span className="font-mono font-bold text-white block truncate">{contextMenu.pkg.name}</span>
@@ -1109,7 +1110,7 @@ export default function PackageManager() {
             <Trash2 className="w-3.5 h-3.5 text-rose-400" />
             <span>Uninstall Package</span>
           </button>
-        </div>
+        </PortalContextMenu>
       )}
 
       {/* ──────────────────────────────────────────────────────────────────────────── */}

@@ -104,9 +104,9 @@ export const FinderToolbar: React.FC<FinderToolbarProps> = ({
   const pathParts = currentPath.split('/').filter(Boolean);
 
   return (
-    <div className="h-12 border-b border-white/[0.08] flex items-center justify-between px-3.5 bg-[#14141e]/90 backdrop-blur-md select-none shrink-0 relative z-30 overflow-visible gap-2">
+    <div className="h-12 border-b border-white/[0.08] flex items-center justify-between px-3 bg-[#14141e]/90 backdrop-blur-md select-none shrink-0 relative z-30 overflow-x-auto scrollbar-none gap-2">
       {/* Left: Navigation Buttons & Path Bar */}
-      <div className="flex items-center space-x-2 min-w-0 flex-1 mr-3 shrink-0">
+      <div className="flex items-center space-x-2 min-w-0 flex-1 mr-2">
         {/* Nav Arrows */}
         <div className="flex items-center space-x-1 shrink-0 bg-white/[0.03] p-1 rounded-xl border border-white/5">
           <button
@@ -440,10 +440,10 @@ export const FinderToolbar: React.FC<FinderToolbarProps> = ({
           <input
             ref={searchInputRef}
             type="text"
-            placeholder="Global search (Ctrl+S)..."
+            placeholder="Search (Ctrl+S)..."
             value={search}
             onChange={e => setSearch(e.target.value)}
-            className="bg-transparent pl-8 pr-3 py-1 text-xs text-gray-200 focus:outline-none w-36 focus:w-56 transition-all font-sans"
+            className="bg-transparent pl-8 pr-3 py-1 text-xs text-gray-200 focus:outline-none w-24 sm:w-36 focus:w-48 transition-all font-sans"
           />
           {isSearchingGlobal && (
             <RefreshCw className="w-3 h-3 text-blue-400 animate-spin absolute right-2 pointer-events-none" />

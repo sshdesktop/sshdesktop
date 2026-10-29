@@ -356,7 +356,7 @@ export default function FirewallManager() {
       )}
 
       {/* Top Header Toolbar */}
-      <div className="h-14 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/10 px-4 flex items-center justify-between shrink-0 gap-3 overflow-x-auto no-scrollbar">
+      <div className="h-14 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/10 px-4 flex items-center justify-between shrink-0 gap-3 overflow-x-auto scrollbar-thin">
         {/* Left: Backend status & switcher */}
         <div className="flex items-center space-x-3 shrink-0">
           <div className="flex items-center space-x-2">

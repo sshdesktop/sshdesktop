@@ -4,6 +4,7 @@ import {
   Scissors, Info, Archive, PackageOpen, Trash2, ClipboardPaste, RefreshCw, Plus, HardDrive 
 } from 'lucide-react';
 import { RemoteFile, ContextMenuState } from '../types';
+import { PortalContextMenu } from '../../../components/PortalContextMenu';
 
 interface FinderContextMenuProps {
   contextMenu: ContextMenuState | null;
@@ -67,13 +68,11 @@ export const FinderContextMenu: React.FC<FinderContextMenuProps> = ({
   if (!contextMenu) return null;
 
   return (
-    <div 
-      className="fixed z-50 bg-[#1e1e2e]/98 backdrop-blur-2xl border border-white/20 rounded-2xl shadow-2xl py-1.5 min-w-[210px] text-xs font-sans animate-in fade-in zoom-in-95 duration-100"
-      style={{ 
-        left: `${Math.min(contextMenu.x, window.innerWidth - 230)}px`, 
-        top: `${Math.min(contextMenu.y, window.innerHeight - 380)}px` 
-      }}
-      onClick={e => e.stopPropagation()}
+    <PortalContextMenu
+      x={contextMenu.x}
+      y={contextMenu.y}
+      onClose={onClose}
+      className="bg-[#1e1e2e]/98 backdrop-blur-2xl border border-white/20 rounded-2xl shadow-2xl py-1.5 min-w-[210px] text-xs font-sans text-gray-200"
     >
       {contextMenu.file ? (
         <>
@@ -335,6 +334,6 @@ export const FinderContextMenu: React.FC<FinderContextMenuProps> = ({
           </div>
         </>
       )}
-    </div>
+    </PortalContextMenu>
   );
 };
