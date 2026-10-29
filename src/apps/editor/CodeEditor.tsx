@@ -596,9 +596,8 @@ export default function CodeEditor() {
   useEffect(() => {
     let isCancelled = false;
     let unlistenFn: (() => void) | undefined;
-    listen<any>('terminal-output', (event) => {
-      if (isCancelled) return;
-      const payload = event.payload;
+
+    const handlePayload = (payload: any) => {
       if (!payload || !payload.terminal_id) return;
       const instance = tabInstances.current.get(payload.terminal_id);
       if (instance && !instance.disposed) {
@@ -609,16 +608,32 @@ export default function CodeEditor() {
           instance.term.write(u8);
         }
       }
+    };
+
+    // 1. Web DOM event listener
+    const handleWebTerminalOutput = (e: any) => {
+      if (isCancelled) return;
+      handlePayload(e.detail || e);
+    };
+    window.addEventListener('terminal-output', handleWebTerminalOutput);
+
+    // 2. Native Tauri IPC listener
+    listen<any>('terminal-output', (event) => {
+      if (isCancelled) return;
+      handlePayload(event.payload);
     }).then(fn => {
       if (isCancelled) {
         fn();
       } else {
         unlistenFn = fn;
       }
+    }).catch(() => {
+      // In web mode without native Tauri
     });
 
     return () => {
       isCancelled = true;
+      window.removeEventListener('terminal-output', handleWebTerminalOutput);
       if (unlistenFn) unlistenFn();
     };
   }, []);

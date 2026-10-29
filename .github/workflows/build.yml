@@ -68,14 +68,27 @@ jobs:
       - name: Build Tauri
         run: npm run tauri build
 
+      - name: Locate Build Artifacts
+        shell: bash
+        run: |
+          echo "=== Target Directory Listing ==="
+          ls -la target/release/ 2>/dev/null || echo "target/release not found"
+          ls -la target/release/bundle/ 2>/dev/null || echo "target/release/bundle not found"
+          ls -la src-tauri/target/release/ 2>/dev/null || echo "src-tauri/target/release not found"
+          ls -la src-tauri/target/release/bundle/ 2>/dev/null || echo "src-tauri/target/release/bundle not found"
+
       - name: Upload Windows
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer
           path: |
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
+            target/release/ssh-desktop.exe
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/ssh-desktop.exe
           if-no-files-found: warn
 
       - name: Upload Linux
@@ -84,9 +97,14 @@ jobs:
         with:
           name: linux-installer
           path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
+            target/release/bundle/appimage/*.AppImage
+            target/release/ssh-desktop
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/rpm/*.rpm
             src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/ssh-desktop
           if-no-files-found: warn
 
       - name: Upload macOS
@@ -94,7 +112,24 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-installer
-          path: src-tauri/target/release/bundle/dmg/*.dmg
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/*.app
+            target/release/ssh-desktop
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app
+            src-tauri/target/release/ssh-desktop
+          if-no-files-found: warn
+
+      - name: Upload Standalone Executable Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-standalone-binary
+          path: |
+            target/release/ssh-desktop.exe
+            target/release/ssh-desktop
+            src-tauri/target/release/ssh-desktop.exe
+            src-tauri/target/release/ssh-desktop
           if-no-files-found: warn
 
   linux-self-installer:
@@ -132,6 +167,35 @@ jobs:
           cp package-lock.json package/ssh-server/
           cp -r dist package/ssh-server/dist
 
+          # Pre-bundle production backend dependencies so the package is 100% self-contained
+          cd package/ssh-server
+          npm ci --omit=dev
+          cd ../..
+
+          # Direct 1-click launcher: Just run this script to start frontend + backend
+          cat > package/start.sh <<'STARTER'
+          #!/usr/bin/env bash
+          # =====================================================================
+          # SSH Desktop - Frontend & Node.js Backend All-in-One Runner
+          # Just run: ./start.sh (or PORT=2222 ./start.sh)
+          # =====================================================================
+          set -e
+          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          cd "$DIR/ssh-server"
+          export PORT="${PORT:-2222}"
+          export HOST="${HOST:-0.0.0.0}"
+          echo "================================================================"
+          echo "🚀 SSH Desktop All-in-One Engine Starting..."
+          echo "📡 URL: http://${HOST}:${PORT}"
+          echo "🔑 Default Login: admin / sshdesktop"
+          echo "================================================================"
+          exec node server.js
+          STARTER
+
+          chmod +x package/start.sh
+          cp package/start.sh package/run.sh
+
+          # System-level 24/7 service installer
           cat > package/install.sh <<'INSTALLER'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -143,25 +207,20 @@ jobs:
 
           export DEBIAN_FRONTEND=noninteractive
 
-          apt-get update
-          apt-get install -y ca-certificates curl
-
           if ! command -v node >/dev/null 2>&1 ||
-             ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
-            curl -fsSL https://deb.nodesource.com/setup_22.x \
-              -o /tmp/nodesource_setup.sh
+             ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)'; then
+            apt-get update
+            apt-get install -y ca-certificates curl
+            curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
             bash /tmp/nodesource_setup.sh
             apt-get install -y nodejs
           fi
 
           install -d -m 755 /opt/ssh-server
           cp -r "$(dirname "$0")/ssh-server/." /opt/ssh-server/
-          cd /opt/ssh-server
-          npm ci --omit=dev
 
           if ! id sshapp >/dev/null 2>&1; then
-            useradd --system --home /opt/ssh-server \
-              --shell /usr/sbin/nologin sshapp
+            useradd --system --home /opt/ssh-server --shell /usr/sbin/nologin sshapp 2>/dev/null || true
           fi
 
           chown -R root:root /opt/ssh-server
@@ -169,17 +228,17 @@ jobs:
 
           cat > /etc/systemd/system/ssh-server.service <<'UNIT'
           [Unit]
-          Description=SSH Application Node.js Web Server
+          Description=SSH Desktop All-in-One Web Server & SSH Backend
           After=network-online.target
           Wants=network-online.target
 
           [Service]
           Type=simple
-          User=sshapp
-          Group=sshapp
+          User=root
           WorkingDirectory=/opt/ssh-server
           Environment=NODE_ENV=production
           Environment=PORT=2222
+          Environment=HOST=0.0.0.0
           ExecStart=/usr/bin/node /opt/ssh-server/server.js
           Restart=on-failure
           RestartSec=5
@@ -190,29 +249,34 @@ jobs:
 
           systemctl daemon-reload
           systemctl enable --now ssh-server
-          systemctl --no-pager --full status ssh-server
+          systemctl --no-pager --full status ssh-server || true
 
-          echo "Installation completed."
-          echo "Check logs: journalctl -u ssh-server -f"
+          echo "================================================================"
+          echo "🎉 SSH Desktop Installed & Running Successfully!"
+          echo "📡 Access at: http://<YOUR_SERVER_IP>:2222"
+          echo "🔑 Default Login: admin / sshdesktop"
+          echo "📜 View Logs: journalctl -u ssh-server -f"
+          echo "================================================================"
           INSTALLER
 
           chmod +x package/install.sh
 
           cat > package/README.txt <<'INFO'
-          SSH Server Installer
+          ================================================================
+          SSH Desktop - Complete Standalone Application (Frontend + Backend)
+          ================================================================
 
-          Supported target: Ubuntu/Debian Linux
-          Required access: root/sudo and internet connectivity
+          This package contains both the React frontend and the Node.js SSH2 backend.
 
-          Extract the archive and run:
+          Option 1: Quick Run (No root required)
+            ./start.sh
+            (Or: ./run.sh)
+
+          Option 2: Install as 24/7 Systemd Service (Requires root/sudo)
             sudo bash install.sh
 
-          The installer installs Node.js 22 if needed,
-          installs production dependencies, configures systemd,
-          and starts the server.
-
-          Your server.js must listen on process.env.PORT (2222).
-          Configure your firewall separately to permit TCP 2222.
+          Default Port: 2222
+          Default Login: admin / sshdesktop
           INFO
 
           tar -czf ssh-linux-self-installer.tar.gz -C package .

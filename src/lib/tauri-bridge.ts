@@ -58,13 +58,83 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
     }
   }
 
-  // When running in a standard web browser (http://localhost:1420) without native Tauri runtime:
-  if (cmd === 'ssh_connect' || cmd === 'ssh_test_connection' || cmd === 'terminal_create') {
-    throw new Error(
-      'Native Desktop Runtime Required: Standard web browser tabs (http://localhost:1420) cannot open raw SSH sockets (port 22) or spawn PTY processes directly. Please launch the SSH Desktop application (sshdesktop.exe) or run "npm run tauri:dev".'
-    );
+  // Web / Node.js Backend Mode (e.g. running via node server.js on port 2222 or web preview)
+  try {
+    const res = await fetch('/api/invoke', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ cmd, args }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.error) {
+        throw new Error(data.error);
+      }
+      return (data ? data.result : fallback) as T;
+    } else {
+      const errText = await res.text();
+      let parsedMsg = errText;
+      try {
+        const jsonErr = JSON.parse(errText);
+        parsedMsg = jsonErr.error || errText;
+      } catch {}
+      throw new Error(parsedMsg || `HTTP ${res.status}: Failed to invoke '${cmd}'`);
+    }
+  } catch (err: any) {
+    console.error(`[SSH Desktop Web IPC] Command '${cmd}' failed:`, err);
+    if (
+      cmd === 'ssh_connect' || 
+      cmd === 'ssh_test_connection' || 
+      cmd === 'terminal_create' || 
+      cmd.startsWith('auth_')
+    ) {
+      throw err;
+    }
+    return fallback;
   }
-  return fallback;
+}
+
+// ----------------- Web Terminal WebSocket Session Cache -----------------
+const webTerminalSockets = new Map<string, WebSocket>();
+
+function setupWebTerminalSocket(termId: string, connId: string, cols: number, rows: number) {
+  if (typeof window === 'undefined') return;
+  try {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/terminal?termId=${encodeURIComponent(termId)}&connId=${encodeURIComponent(connId)}&cols=${cols}&rows=${rows}`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        if (parsed.type === 'output' && parsed.text) {
+          window.dispatchEvent(new CustomEvent('terminal-output', {
+            detail: { terminal_id: termId, text: parsed.text }
+          }));
+          return;
+        }
+      } catch {}
+
+      window.dispatchEvent(new CustomEvent('terminal-output', {
+        detail: { terminal_id: termId, text: String(event.data) }
+      }));
+    };
+
+    ws.onclose = () => {
+      webTerminalSockets.delete(termId);
+    };
+
+    ws.onerror = (e) => {
+      console.warn('[SSH Desktop Web Terminal] WebSocket notice:', e);
+    };
+
+    webTerminalSockets.set(termId, ws);
+  } catch (e) {
+    console.warn('[SSH Desktop] Failed to connect web terminal WebSocket:', e);
+  }
 }
 
 // ----------------- SSH Commands -----------------
@@ -129,18 +199,44 @@ export async function sshExecStop(streamId: string): Promise<void> {
 
 // ----------------- Terminal Commands -----------------
 export async function terminalCreate(connId: string, rows: number = 24, cols: number = 80, terminalId?: string): Promise<string> {
-  return safeInvoke<string>('terminal_create', { connId, rows, cols, terminalId }, terminalId || 'term-1');
+  const termId = await safeInvoke<string>('terminal_create', { connId, rows, cols, terminalId }, terminalId || 'term-1');
+  if (!isTauri() && typeof window !== 'undefined') {
+    setupWebTerminalSocket(termId, connId, cols, rows);
+  }
+  return termId;
 }
 
 export async function terminalWrite(terminalId: string, data: number[]): Promise<void> {
+  if (!isTauri()) {
+    const ws = webTerminalSockets.get(terminalId);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(new Uint8Array(data));
+      return;
+    }
+  }
   return safeInvoke<void>('terminal_write', { terminalId, data }, undefined);
 }
 
 export async function terminalResize(terminalId: string, rows: number, cols: number): Promise<void> {
+  if (!isTauri()) {
+    const ws = webTerminalSockets.get(terminalId);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ type: 'resize', rows, cols }));
+      } catch {}
+    }
+  }
   return safeInvoke<void>('terminal_resize', { terminalId, rows, cols }, undefined);
 }
 
 export async function terminalClose(terminalId: string): Promise<void> {
+  if (!isTauri()) {
+    const ws = webTerminalSockets.get(terminalId);
+    if (ws) {
+      try { ws.close(); } catch {}
+      webTerminalSockets.delete(terminalId);
+    }
+  }
   return safeInvoke<void>('terminal_close', { terminalId }, undefined);
 }
 
