@@ -84,9 +84,9 @@ export default function AppSettings() {
   });
   const { username, homeDir: userHome } = useUserPrivilege();
 
-  // Compute robust effective login user home: e.g. /home/sharuk or /root
-  const effectiveHome = userHome || (username === 'root' ? '/root' : username ? `/home/${username}` : (activeServer?.username === 'root' ? '/root' : activeServer?.username ? `/home/${activeServer.username}` : '/home/sharuk'));
-  const effectiveUsername = username || activeServer?.username || (effectiveHome.includes('/root') ? 'root' : 'sharuk');
+  // Compute dynamic login user home directory based on authenticated user: e.g. /root or /home/<username>
+  const effectiveUsername = username || activeServer?.username || 'root';
+  const effectiveHome = userHome || (effectiveUsername === 'root' ? '/root' : `/home/${effectiveUsername}`);
   const sshDesktopPath = getSshDesktopDirPath(effectiveHome);
   const sshDesktopBackupsPath = getSshDesktopBackupsDirPath(effectiveHome);
   const serverSettingsPath = getServerSettingsFilePath(effectiveHome);

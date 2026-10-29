@@ -1878,7 +1878,7 @@ export default function ConnectionScreen() {
                         type="text"
                         value={modalForm.privateKeyPath}
                         onChange={e => setModalForm(f => ({ ...f, privateKeyPath: e.target.value }))}
-                        placeholder="e.g. C:\Users\Sharuk\.ssh\id_rsa or /home/.../key.pem"
+                        placeholder="e.g. ~/.ssh/id_rsa or /home/username/.ssh/id_rsa"
                         className="flex-1 bg-[#10121d] border border-white/10 rounded-xl px-3 py-2 text-white font-mono text-xs focus:outline-none focus:border-blue-500"
                       />
                       <button

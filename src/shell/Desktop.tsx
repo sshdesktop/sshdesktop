@@ -39,6 +39,8 @@ export default function Desktop() {
   const { activeConnectionId, connections } = useConnectionStore();
   const activeServer = connections.find(c => c.id === activeConnectionId);
   const { username, homeDir: userHome, hasSudo, isRoot } = useUserPrivilege();
+  const effectiveLoginUser = username || activeServer?.username || 'root';
+  const effectiveUserHome = userHome || (effectiveLoginUser === 'root' ? '/root' : `/home/${effectiveLoginUser}`);
 
   const { wallpaper, theme, updateSettings, desktopIconSize } = useSettingsStore();
   const { openApp } = useWindowManager();
@@ -134,12 +136,12 @@ export default function Desktop() {
 
   // Load Remote Files strictly from ~/Desktop (Never list home root ~ so dotfiles & cache don't appear!)
   const loadDesktopFolder = useCallback(async () => {
-    if (!activeConnectionId || !userHome) {
+    if (!activeConnectionId || !effectiveUserHome) {
       setDesktopFolderItems([]);
       return;
     }
     try {
-      const desktopDir = `${userHome}/Desktop`;
+      const desktopDir = `${effectiveUserHome}/Desktop`;
       let entries = await sftpListDir(activeConnectionId, desktopDir).catch(async () => {
         // If Desktop doesn't exist yet, create it and retry
         await sftpMkdir(activeConnectionId, desktopDir).catch(() => {});
@@ -172,7 +174,7 @@ export default function Desktop() {
           if (changed) {
             try {
               localStorage.setItem('sshdesktop_desktop_icon_positions', JSON.stringify(next));
-              sftpWriteTextFile(activeConnectionId, `${userHome}/.sshdesktop/icon_positions.json`, JSON.stringify(next, null, 2)).catch(() => {});
+              sftpWriteTextFile(activeConnectionId, `${effectiveUserHome}/.sshdesktop/icon_positions.json`, JSON.stringify(next, null, 2)).catch(() => {});
             } catch {}
             return next;
           }
@@ -182,12 +184,11 @@ export default function Desktop() {
     } catch {
       setDesktopFolderItems([]);
     }
-  }, [activeConnectionId, userHome]);
+  }, [activeConnectionId, effectiveUserHome]);
 
   // Initialize server directories & auto-restore application settings on login: ~/.sshdesktop, ~/Desktop, ~/Downloads, ~/Documents
   useEffect(() => {
     if (!activeConnectionId) return;
-    const effectiveUserHome = userHome || (username === 'root' ? '/root' : username ? `/home/${username}` : (activeServer?.username === 'root' ? '/root' : activeServer?.username ? `/home/${activeServer.username}` : '/home/sharuk'));
     setDesktopFolderItems([]);
     const initServer = async () => {
       try {
@@ -240,7 +241,7 @@ export default function Desktop() {
       }
     };
     initServer();
-  }, [activeConnectionId, userHome, username, activeServer?.username, loadDesktopFolder]);
+  }, [activeConnectionId, effectiveUserHome, loadDesktopFolder]);
 
   // Listen for external updates to stickies and icon positions from Settings restore
   useEffect(() => {
@@ -342,12 +343,12 @@ export default function Desktop() {
       try {
         localStorage.setItem('sshdesktop_desktop_icon_positions', JSON.stringify(next));
         if (activeConnectionId) {
-          sftpWriteTextFile(activeConnectionId, `${userHome}/.sshdesktop/icon_positions.json`, JSON.stringify(next, null, 2)).catch(() => {});
+          sftpWriteTextFile(activeConnectionId, `${effectiveUserHome}/.sshdesktop/icon_positions.json`, JSON.stringify(next, null, 2)).catch(() => {});
         }
       } catch {}
       return next;
     });
-  }, [activeConnectionId, userHome, desktopIconSize]);
+  }, [activeConnectionId, effectiveUserHome, desktopIconSize]);
 
   // Freeform pointer drag for desktop icons
   useEffect(() => {
@@ -413,7 +414,7 @@ export default function Desktop() {
           navigateFinder(item.path);
           openApp('files', 'File Manager');
         } else if (isMedia) {
-          navigateFinder(`${userHome}/Desktop`);
+          navigateFinder(`${effectiveUserHome}/Desktop`);
           openApp('files', 'File Manager');
         } else {
           openFileInEditor(item.path);
@@ -502,10 +503,10 @@ export default function Desktop() {
     setIsActionSubmitting(true);
     try {
       if (actionModal.type === 'folder') {
-        const desktopPath = `${userHome}/Desktop/${name.trim()}`;
+        const desktopPath = `${effectiveUserHome}/Desktop/${name.trim()}`;
         await sftpMkdir(activeConnectionId, desktopPath);
       } else if (actionModal.type === 'file') {
-        const desktopPath = `${userHome}/Desktop/${name.trim()}`;
+        const desktopPath = `${effectiveUserHome}/Desktop/${name.trim()}`;
         await sftpWriteTextFile(activeConnectionId, desktopPath, '');
         openFileInEditor(desktopPath);
         openApp('editor', 'Code Editor');
@@ -615,8 +616,8 @@ export default function Desktop() {
   // Unified Paste (from clipboard to Desktop or specific folder)
   const handlePasteItems = async (targetFolder?: string) => {
     if (!activeConnectionId || !clipboard || clipboard.items.length === 0) return;
-    const dest = targetFolder || `${userHome}/Desktop`;
-    const isDesktop = !targetFolder || targetFolder === `${userHome}/Desktop`;
+    const dest = targetFolder || `${effectiveUserHome}/Desktop`;
+    const isDesktop = !targetFolder || targetFolder === `${effectiveUserHome}/Desktop`;
     const currentNames = isDesktop ? desktopFolderItems.map(i => i.name) : [];
     try {
       for (const item of clipboard.items) {
@@ -658,7 +659,7 @@ export default function Desktop() {
     try {
       localStorage.setItem('sshdesktop_desktop_icon_positions', JSON.stringify(newPositions));
       if (activeConnectionId) {
-        sftpWriteTextFile(activeConnectionId, `${userHome}/.sshdesktop/icon_positions.json`, JSON.stringify(newPositions, null, 2)).catch(() => {});
+        sftpWriteTextFile(activeConnectionId, `${effectiveUserHome}/.sshdesktop/icon_positions.json`, JSON.stringify(newPositions, null, 2)).catch(() => {});
       }
     } catch {}
   };
@@ -814,7 +815,7 @@ export default function Desktop() {
           setStickyNoteContent(content);
           localStorage.setItem('sshdesktop_desktop_stickies', content);
           if (activeConnectionId) {
-            sftpWriteTextFile(activeConnectionId, `${userHome}/.sshdesktop/stickies.txt`, content).catch(() => {});
+            sftpWriteTextFile(activeConnectionId, `${effectiveUserHome}/.sshdesktop/stickies.txt`, content).catch(() => {});
           }
         }}
         stickyColor={stickyColor}
@@ -895,7 +896,7 @@ export default function Desktop() {
           localStorage.removeItem('sshdesktop_desktop_icon_positions');
           localStorage.removeItem('clouddesk_desktop_icon_positions');
           if (activeConnectionId) {
-            sftpWriteTextFile(activeConnectionId, `${userHome}/.sshdesktop/icon_positions.json`, '{}').catch(() => {});
+            sftpWriteTextFile(activeConnectionId, `${effectiveUserHome}/.sshdesktop/icon_positions.json`, '{}').catch(() => {});
           }
         }}
         useStacks={useStacks}
@@ -908,7 +909,7 @@ export default function Desktop() {
         onMinimizeAllWindows={() => minimizeAllWindows()}
         onLockScreen={() => setIsLocked(true)}
         onOpenTerminalHere={() => {
-          openTerminalInDir(`${userHome}/Desktop`);
+          openTerminalInDir(`${effectiveUserHome}/Desktop`);
           openApp('terminal', 'Terminal');
         }}
         onResetItemPosition={(item) => updateIconPosition(item.id, 24, 48)}
