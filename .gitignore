@@ -4,6 +4,9 @@ node_modules/
 # Production build outputs
 dist/
 build/
+dist-server/
+dist-bin/
+bin/
 
 # Rust build artifacts
 src-tauri/target/

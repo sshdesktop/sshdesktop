@@ -1,0 +1,22 @@
+[Unit]
+Description=SSH Desktop All-in-One Engine (Frontend: 2222, Backend: 2020)
+After=network.target network-online.target sshd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+Environment=FRONTEND_PORT=2222
+Environment=BACKEND_PORT=2020
+Environment=HOST=0.0.0.0
+ExecStart=/usr/local/bin/sshdesktop
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sshdesktop
+
+[Install]
+WantedBy=multi-user.target

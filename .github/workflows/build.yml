@@ -132,8 +132,8 @@ jobs:
             src-tauri/target/release/ssh-desktop
           if-no-files-found: warn
 
-  linux-self-installer:
-    name: Build Self-Installing Linux Server
+  linux-standalone-binary:
+    name: Build Standalone Linux Executable Binary (Dual Engine 2222/2020)
     runs-on: ubuntu-22.04
 
     steps:
@@ -146,144 +146,48 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install frontend dependencies
+      - name: Install dependencies
         run: npm ci
 
-      - name: Build web frontend
+      - name: Build React frontend
         run: npm run build
 
-      - name: Check server syntax
+      - name: Verify server code
         run: node --check server.js
 
-      - name: Create self-installing package
+      - name: Prepare Single Executable Application (SEA) Blob
+        run: npm run build:sea-prep
+
+      - name: Build Standalone Linux Binary Executable
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p dist-bin
+          
+          # Inject SEA blob into Node runtime to create 100% self-contained standalone binary
+          cp $(command -v node) dist-bin/sshdesktop
+          npx --yes postject dist-bin/sshdesktop NODE_SEA_BLOB dist-server/sea-prep.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+          chmod +x dist-bin/sshdesktop
+          cp dist-bin/sshdesktop dist-bin/sshdesktop-linux-x64
+          
+          # Include single service file and runner scripts
+          cp scripts/sshdesktop.service dist-bin/
+          cp install.sh dist-bin/
+          cp start.sh dist-bin/
 
-          mkdir -p package/ssh-server
+          # Test binary execution help / verification
+          ./dist-bin/sshdesktop --version || true
 
-          cp server.js package/ssh-server/
-          cp package.json package/ssh-server/
-          cp package-lock.json package/ssh-server/
-          cp -r dist package/ssh-server/dist
-
-          # Pre-bundle production backend dependencies so the package is 100% self-contained
-          cd package/ssh-server
-          npm ci --omit=dev
-          cd ../..
-
-          # Direct 1-click launcher: Just run this script to start frontend + backend
-          cat > package/start.sh <<'STARTER'
-          #!/usr/bin/env bash
-          # =====================================================================
-          # SSH Desktop - Frontend & Node.js Backend All-in-One Runner
-          # Just run: ./start.sh (or PORT=2222 ./start.sh)
-          # =====================================================================
-          set -e
-          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          cd "$DIR/ssh-server"
-          export PORT="${PORT:-2222}"
-          export HOST="${HOST:-0.0.0.0}"
-          echo "================================================================"
-          echo "🚀 SSH Desktop All-in-One Engine Starting..."
-          echo "📡 URL: http://${HOST}:${PORT}"
-          echo "🔑 Default Login: admin / sshdesktop"
-          echo "================================================================"
-          exec node server.js
-          STARTER
-
-          chmod +x package/start.sh
-          cp package/start.sh package/run.sh
-
-          # System-level 24/7 service installer
-          cat > package/install.sh <<'INSTALLER'
-          #!/usr/bin/env bash
-          set -euo pipefail
-
-          if [ "$(id -u)" -ne 0 ]; then
-            echo "Run: sudo bash install.sh"
-            exit 1
-          fi
-
-          export DEBIAN_FRONTEND=noninteractive
-
-          if ! command -v node >/dev/null 2>&1 ||
-             ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)'; then
-            apt-get update
-            apt-get install -y ca-certificates curl
-            curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
-            bash /tmp/nodesource_setup.sh
-            apt-get install -y nodejs
-          fi
-
-          install -d -m 755 /opt/ssh-server
-          cp -r "$(dirname "$0")/ssh-server/." /opt/ssh-server/
-
-          if ! id sshapp >/dev/null 2>&1; then
-            useradd --system --home /opt/ssh-server --shell /usr/sbin/nologin sshapp 2>/dev/null || true
-          fi
-
-          chown -R root:root /opt/ssh-server
-          chmod -R go-w /opt/ssh-server
-
-          cat > /etc/systemd/system/ssh-server.service <<'UNIT'
-          [Unit]
-          Description=SSH Desktop All-in-One Web Server & SSH Backend
-          After=network-online.target
-          Wants=network-online.target
-
-          [Service]
-          Type=simple
-          User=root
-          WorkingDirectory=/opt/ssh-server
-          Environment=NODE_ENV=production
-          Environment=PORT=2222
-          Environment=HOST=0.0.0.0
-          ExecStart=/usr/bin/node /opt/ssh-server/server.js
-          Restart=on-failure
-          RestartSec=5
-
-          [Install]
-          WantedBy=multi-user.target
-          UNIT
-
-          systemctl daemon-reload
-          systemctl enable --now ssh-server
-          systemctl --no-pager --full status ssh-server || true
-
-          echo "================================================================"
-          echo "🎉 SSH Desktop Installed & Running Successfully!"
-          echo "📡 Access at: http://<YOUR_SERVER_IP>:2222"
-          echo "🔑 Default Login: admin / sshdesktop"
-          echo "📜 View Logs: journalctl -u ssh-server -f"
-          echo "================================================================"
-          INSTALLER
-
-          chmod +x package/install.sh
-
-          cat > package/README.txt <<'INFO'
-          ================================================================
-          SSH Desktop - Complete Standalone Application (Frontend + Backend)
-          ================================================================
-
-          This package contains both the React frontend and the Node.js SSH2 backend.
-
-          Option 1: Quick Run (No root required)
-            ./start.sh
-            (Or: ./run.sh)
-
-          Option 2: Install as 24/7 Systemd Service (Requires root/sudo)
-            sudo bash install.sh
-
-          Default Port: 2222
-          Default Login: admin / sshdesktop
-          INFO
-
-          tar -czf ssh-linux-self-installer.tar.gz -C package .
-
-      - name: Upload self-installing package
+      - name: Upload Single Standalone Linux Binary (Direct Executable)
         uses: actions/upload-artifact@v4
         with:
-          name: linux-self-installer
-          path: ssh-linux-self-installer.tar.gz
+          name: sshdesktop-linux-x64
+          path: dist-bin/sshdesktop-linux-x64
+          if-no-files-found: error
+
+      - name: Upload Standalone Linux Bundle (Binary + Service + Installer)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sshdesktop-linux-complete-bundle
+          path: dist-bin/*
           if-no-files-found: error
