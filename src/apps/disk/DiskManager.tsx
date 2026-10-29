@@ -330,7 +330,7 @@ export default function DiskManager() {
       )}
 
       {/* Top macOS Disk Utility Toolbar */}
-      <div className="h-12 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/10 px-4 flex items-center justify-between shrink-0 overflow-x-auto no-scrollbar gap-2">
+      <div className="h-12 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/10 px-4 flex items-center justify-between shrink-0 overflow-x-auto scrollbar-thin gap-2">
         <div className="flex items-center space-x-2 shrink-0">
           {/* Partitions & Disks Manager */}
           <button
@@ -546,7 +546,7 @@ export default function DiskManager() {
         </div>
 
         {/* Right Detail Pane */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div className="flex-1 min-w-0 overflow-y-auto p-4 sm:p-6 space-y-6">
           {/* Action Toasts */}
           {statusToast && (
             <div className={`p-3 rounded-2xl text-xs flex items-center space-x-2 animate-in fade-in duration-200 ${

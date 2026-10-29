@@ -21,6 +21,7 @@ import { useWindowManager } from '../../lib/hooks/useWindowManager';
 import { useUserPrivilege } from '../../lib/permissions';
 import PermissionAlertBanner from '../../components/PermissionAlertBanner';
 import PermissionAlertModal from '../../components/PermissionAlertModal';
+import { PortalContextMenu } from '../../components/PortalContextMenu';
 
 export * from './types';
 export * from './templates';
@@ -1942,7 +1943,7 @@ export default function DockerManager() {
 
       {/* macOS Top Header Toolbar (Hidden in Fullscreen Editor Mode) */}
       {!isEditorFullscreen && (
-        <header className="px-5 py-3.5 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between shrink-0 overflow-x-auto no-scrollbar gap-3">
+        <header className="px-5 py-3.5 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between shrink-0 overflow-x-auto scrollbar-thin gap-3">
           
           {/* Left: App Identity & Server Status */}
           <div className="flex items-center space-x-3.5 shrink-0">
@@ -2176,7 +2177,7 @@ export default function DockerManager() {
 
       {/* Main Sub-Toolbar: Metrics & Filter Bar (Hidden in Fullscreen or Editor Mode) */}
       {!isEditorFullscreen && activeTab !== 'editor' && (
-      <div className="px-5 py-3 bg-[#161622] border-b border-white/[0.06] flex items-center justify-between shrink-0 gap-4">
+      <div className="px-5 py-3 bg-[#161622] border-b border-white/[0.06] flex items-center justify-between shrink-0 gap-4 overflow-x-auto scrollbar-thin">
         
         {/* 4 Metric Pill Cards */}
         <div className="flex items-center space-x-3 overflow-x-auto py-0.5">
@@ -3873,13 +3874,11 @@ export default function DockerManager() {
 
       {/* ================= CONTEXT MENU ================= */}
       {contextMenu && (
-        <div
-          ref={contextMenuRef}
-          style={{ 
-            top: `${Math.min(contextMenu.y, window.innerHeight - 340)}px`, 
-            left: `${Math.min(contextMenu.x, window.innerWidth - 240)}px` 
-          }}
-          className="fixed z-50 min-w-[220px] bg-[#1a1b26]/95 border border-white/15 rounded-xl shadow-2xl backdrop-blur-xl py-1 text-xs text-gray-200 animate-in fade-in zoom-in-95 duration-100"
+        <PortalContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          className="min-w-[220px] bg-[#1a1b26]/95 border border-white/15 rounded-xl shadow-2xl backdrop-blur-xl py-1 text-xs text-gray-200"
         >
           {contextMenu.container && (
             <>
@@ -4265,7 +4264,7 @@ export default function DockerManager() {
               )}
             </>
           )}
-        </div>
+        </PortalContextMenu>
       )}
 
       {/* Permission Denied Alert Modal */}

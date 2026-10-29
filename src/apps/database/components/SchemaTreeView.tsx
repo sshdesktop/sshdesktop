@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { TableItem, RoutineItem, TriggerItem, DbEngine } from '../types';
 import { ConfirmModal } from './ConfirmModal';
+import { PortalContextMenu } from '../../../components/PortalContextMenu';
 
 interface SchemaTreeViewProps {
   engine?: DbEngine;
@@ -564,10 +565,11 @@ export const SchemaTreeView: React.FC<SchemaTreeViewProps> = ({
 
       {/* 3. Tree Context Menu (Right Click) */}
       {contextMenu && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          style={{ top: contextMenu.y, left: contextMenu.x }}
-          className="fixed z-50 min-w-[210px] bg-[#1e1e2e]/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl py-1.5 text-xs text-gray-200 animate-in fade-in zoom-in duration-100 select-none"
+        <PortalContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          className="min-w-[210px] bg-[#1e1e2e]/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl py-1.5 text-xs text-gray-200 select-none"
         >
           {/* Header Badge */}
           <div className="px-3 py-1 font-mono text-[10px] text-gray-400 border-b border-white/5 flex items-center justify-between gap-2">
@@ -741,7 +743,7 @@ export const SchemaTreeView: React.FC<SchemaTreeViewProps> = ({
               <span>Drop {contextMenu.objectType.charAt(0).toUpperCase() + contextMenu.objectType.slice(1)}</span>
             </button>
           )}
-        </div>
+        </PortalContextMenu>
       )}
 
       {/* 4. Drop Confirm Modal */}
