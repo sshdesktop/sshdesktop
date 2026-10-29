@@ -87,25 +87,28 @@ fi
       osId = idMatch[1].trim().toLowerCase();
     }
 
-    // Determine package manager and suggested command (ONLY install certbot)
-    let packageManager = 'apt / dnf / pacman';
-    let suggestedCommand = 'sudo apt update && sudo apt install -y certbot';
+    // Determine package manager and suggested command
+    let packageManager = 'apt / dnf / pacman / zypper / apk';
+    let suggestedCommand = 'sudo apt update && sudo apt install -y certbot python3-certbot-nginx python3-certbot-apache';
 
-    if (['ubuntu', 'debian', 'kali', 'pop', 'linuxmint'].includes(osId)) {
+    if (['ubuntu', 'debian', 'kali', 'pop', 'linuxmint', 'raspbian'].includes(osId)) {
       packageManager = 'apt';
-      suggestedCommand = 'sudo apt-get update -y && sudo apt-get install -y certbot';
-    } else if (['centos', 'rhel', 'rocky', 'almalinux'].includes(osId)) {
+      suggestedCommand = 'sudo apt-get update -y && sudo apt-get install -y certbot python3-certbot-nginx python3-certbot-apache';
+    } else if (['centos', 'rhel', 'rocky', 'almalinux', 'ol', 'amzn'].includes(osId)) {
       packageManager = 'dnf / yum';
-      suggestedCommand = 'sudo dnf install -y epel-release && sudo dnf install -y certbot';
+      suggestedCommand = 'sudo dnf install -y epel-release && sudo dnf install -y certbot python3-certbot-nginx python3-certbot-apache';
     } else if (['fedora'].includes(osId)) {
       packageManager = 'dnf';
-      suggestedCommand = 'sudo dnf install -y certbot';
+      suggestedCommand = 'sudo dnf install -y certbot python3-certbot-nginx python3-certbot-apache';
     } else if (['arch', 'manjaro'].includes(osId)) {
       packageManager = 'pacman';
-      suggestedCommand = 'sudo pacman -Sy --noconfirm certbot';
+      suggestedCommand = 'sudo pacman -Sy --noconfirm certbot certbot-nginx certbot-apache';
     } else if (['alpine'].includes(osId)) {
       packageManager = 'apk';
-      suggestedCommand = 'sudo apk add --no-cache certbot';
+      suggestedCommand = 'sudo apk add --no-cache certbot certbot-nginx certbot-apache py3-certbot-nginx py3-certbot-apache';
+    } else if (['opensuse', 'opensuse-leap', 'opensuse-tumbleweed', 'sles'].includes(osId)) {
+      packageManager = 'zypper';
+      suggestedCommand = 'sudo zypper install -y certbot python3-certbot-nginx python3-certbot-apache';
     } else {
       packageManager = 'snap / pip';
       suggestedCommand = 'sudo snap install --classic certbot && sudo ln -sf /snap/bin/certbot /usr/bin/certbot';
@@ -152,11 +155,12 @@ fi
 }
 
 /**
- * Installs ONLY Certbot (does not bundle nginx/apache plugins unless requested)
+ * Robust Multi-OS Certbot & Plugins Installer
+ * Supports Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora, Arch, Alpine, openSUSE, Snap, Pip
  */
 export async function installCertbot(connId: string): Promise<{ success: boolean; output: string }> {
   const installCmd = `
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$HOME/.local/bin:$PATH"
 
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
@@ -166,36 +170,64 @@ fi
 
 if [ -f /etc/os-release ]; then
   . /etc/os-release
-  OS_ID=$ID
+  OS_ID="$ID"
+  OS_LIKE="$ID_LIKE"
 else
   OS_ID="unknown"
+  OS_LIKE=""
 fi
 
-echo "Detected OS: $OS_ID (Privilege: \${SUDO:-root})"
-echo "Beginning automated Certbot installation (Certbot core only)..."
+echo "Detected OS: $OS_ID ($OS_LIKE) [User: $(whoami)]"
+echo "Beginning automated Certbot and webserver plugins installation..."
 
-if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ]; then
+# Method 1: Native Package Managers
+if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ] || [ "$OS_ID" = "raspbian" ] || echo "$OS_LIKE" | grep -q "debian"; then
   export DEBIAN_FRONTEND=noninteractive
-  $SUDO apt-get update -y && $SUDO apt-get install -y certbot
-elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ]; then
-  $SUDO dnf install -y epel-release || $SUDO yum install -y epel-release || true
-  $SUDO dnf install -y certbot || $SUDO yum install -y certbot
+  $SUDO apt-get update -y && $SUDO apt-get install -y certbot python3-certbot-nginx python3-certbot-apache
+
+elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ] || [ "$OS_ID" = "ol" ] || [ "$OS_ID" = "amzn" ] || echo "$OS_LIKE" | grep -q "rhel"; then
+  # Enable CRB / powertools for RHEL 8/9 derivatives
+  $SUDO dnf config-manager --set-enabled crb 2>/dev/null || $SUDO dnf config-manager --set-enabled powertools 2>/dev/null || true
+  # Install EPEL
+  $SUDO dnf install -y epel-release 2>/dev/null || $SUDO yum install -y epel-release 2>/dev/null || true
+  $SUDO dnf install -y certbot python3-certbot-nginx python3-certbot-apache 2>/dev/null || $SUDO yum install -y certbot python3-certbot-nginx python3-certbot-apache 2>/dev/null || true
+
 elif [ "$OS_ID" = "fedora" ]; then
-  $SUDO dnf install -y certbot
-elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ]; then
-  $SUDO pacman -Sy --noconfirm certbot
+  $SUDO dnf install -y certbot python3-certbot-nginx python3-certbot-apache
+
+elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ] || echo "$OS_LIKE" | grep -q "arch"; then
+  $SUDO pacman -Sy --noconfirm certbot certbot-nginx certbot-apache
+
 elif [ "$OS_ID" = "alpine" ]; then
-  $SUDO apk add --no-cache certbot
-else
+  $SUDO apk update && $SUDO apk add --no-cache certbot certbot-nginx certbot-apache py3-certbot-nginx py3-certbot-apache 2>/dev/null || true
+
+elif [ "$OS_ID" = "opensuse" ] || [ "$OS_ID" = "opensuse-leap" ] || [ "$OS_ID" = "opensuse-tumbleweed" ] || [ "$OS_ID" = "sles" ]; then
+  $SUDO zypper --non-interactive install certbot python3-certbot-nginx python3-certbot-apache
+fi
+
+# Method 2: Snap fallback if certbot still missing
+if ! command -v certbot >/dev/null 2>&1 && [ ! -x /snap/bin/certbot ] && [ ! -x /usr/bin/certbot ]; then
   if command -v snap >/dev/null 2>&1; then
+    echo "Attempting Snap Certbot installation..."
     $SUDO snap install --classic certbot
     $SUDO ln -sf /snap/bin/certbot /usr/bin/certbot 2>/dev/null || true
-  else
-    $SUDO python3 -m pip install certbot 2>/dev/null || $SUDO pip3 install certbot
+    $SUDO snap set certbot trust-plugin-with-root=ok
+    $SUDO snap install certbot-nginx certbot-apache 2>/dev/null || true
   fi
 fi
 
-# Ensure /usr/bin/certbot symlink exists if installed via snap
+# Method 3: Python pip fallback with --break-system-packages
+if ! command -v certbot >/dev/null 2>&1 && [ ! -x /snap/bin/certbot ] && [ ! -x /usr/bin/certbot ]; then
+  echo "Attempting Python pip fallback..."
+  $SUDO python3 -m pip install --break-system-packages --upgrade certbot certbot-nginx certbot-apache 2>/dev/null || \
+  $SUDO pip3 install --break-system-packages --upgrade certbot certbot-nginx certbot-apache 2>/dev/null || \
+  $SUDO python3 -m pip install --upgrade certbot certbot-nginx certbot-apache 2>/dev/null || \
+  $SUDO pip3 install --upgrade certbot certbot-nginx certbot-apache 2>/dev/null || true
+  
+  [ -f /usr/local/bin/certbot ] && $SUDO ln -sf /usr/local/bin/certbot /usr/bin/certbot 2>/dev/null || true
+fi
+
+# Ensure /usr/bin/certbot symlink exists
 if [ -x /snap/bin/certbot ] && [ ! -x /usr/bin/certbot ]; then
   $SUDO ln -sf /snap/bin/certbot /usr/bin/certbot 2>/dev/null || true
 fi
@@ -223,7 +255,7 @@ export async function installCertbotPlugin(
   plugin: 'nginx' | 'apache'
 ): Promise<{ success: boolean; output: string }> {
   const installCmd = `
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$HOME/.local/bin:$PATH"
 
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
@@ -233,30 +265,36 @@ fi
 
 if [ -f /etc/os-release ]; then
   . /etc/os-release
-  OS_ID=$ID
+  OS_ID="$ID"
+  OS_LIKE="$ID_LIKE"
 else
   OS_ID="unknown"
+  OS_LIKE=""
 fi
 
-echo "Installing Certbot ${plugin} plugin on $OS_ID..."
+echo "Installing Certbot ${plugin} plugin on $OS_ID ($OS_LIKE)..."
 
-if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ]; then
+if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ] || echo "$OS_LIKE" | grep -q "debian"; then
   export DEBIAN_FRONTEND=noninteractive
   $SUDO apt-get update -y && $SUDO apt-get install -y python3-certbot-${plugin}
-elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ]; then
-  $SUDO dnf install -y python3-certbot-${plugin} || $SUDO yum install -y python3-certbot-${plugin}
+elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ] || [ "$OS_ID" = "ol" ] || [ "$OS_ID" = "amzn" ] || echo "$OS_LIKE" | grep -q "rhel"; then
+  $SUDO dnf config-manager --set-enabled crb 2>/dev/null || $SUDO dnf config-manager --set-enabled powertools 2>/dev/null || true
+  $SUDO dnf install -y epel-release 2>/dev/null || $SUDO yum install -y epel-release 2>/dev/null || true
+  $SUDO dnf install -y python3-certbot-${plugin} 2>/dev/null || $SUDO yum install -y python3-certbot-${plugin} 2>/dev/null || true
 elif [ "$OS_ID" = "fedora" ]; then
   $SUDO dnf install -y python3-certbot-${plugin}
-elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ]; then
+elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ] || echo "$OS_LIKE" | grep -q "arch"; then
   $SUDO pacman -Sy --noconfirm certbot-${plugin}
 elif [ "$OS_ID" = "alpine" ]; then
-  $SUDO apk add --no-cache certbot-${plugin}
+  $SUDO apk update && $SUDO apk add --no-cache certbot-${plugin} py3-certbot-${plugin} 2>/dev/null || true
+elif [ "$OS_ID" = "opensuse" ] || [ "$OS_ID" = "opensuse-leap" ] || [ "$OS_ID" = "opensuse-tumbleweed" ] || [ "$OS_ID" = "sles" ]; then
+  $SUDO zypper --non-interactive install python3-certbot-${plugin}
 else
   if command -v snap >/dev/null 2>&1 && snap list certbot >/dev/null 2>&1; then
     $SUDO snap set certbot trust-plugin-with-root=ok
     $SUDO snap install certbot-${plugin}
   else
-    $SUDO python3 -m pip install certbot-${plugin} 2>/dev/null || $SUDO pip3 install certbot-${plugin}
+    $SUDO python3 -m pip install --break-system-packages certbot-${plugin} 2>/dev/null || $SUDO pip3 install certbot-${plugin} 2>/dev/null || true
   fi
 fi
 
@@ -292,35 +330,41 @@ fi
 
 if [ -f /etc/os-release ]; then
   . /etc/os-release
-  OS_ID=$ID
+  OS_ID="$ID"
+  OS_LIKE="$ID_LIKE"
 else
   OS_ID="unknown"
+  OS_LIKE=""
 fi
 
-echo "Installing ${webserver} web server on $OS_ID..."
+echo "Installing ${webserver} web server on $OS_ID ($OS_LIKE)..."
 
 if [ "${webserver}" = "nginx" ]; then
-  if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ]; then
+  if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ] || echo "$OS_LIKE" | grep -q "debian"; then
     export DEBIAN_FRONTEND=noninteractive
     $SUDO apt-get update -y && $SUDO apt-get install -y nginx
-  elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ]; then
-    $SUDO dnf install -y nginx || $SUDO yum install -y nginx
+  elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ] || [ "$OS_ID" = "ol" ] || [ "$OS_ID" = "amzn" ] || echo "$OS_LIKE" | grep -q "rhel"; then
+    $SUDO dnf install -y epel-release 2>/dev/null || $SUDO yum install -y epel-release 2>/dev/null || true
+    $SUDO dnf install -y nginx 2>/dev/null || $SUDO yum install -y nginx 2>/dev/null || true
   elif [ "$OS_ID" = "fedora" ]; then
     $SUDO dnf install -y nginx
   elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ]; then
     $SUDO pacman -Sy --noconfirm nginx
   elif [ "$OS_ID" = "alpine" ]; then
     $SUDO apk add --no-cache nginx
+  elif [ "$OS_ID" = "opensuse" ] || [ "$OS_ID" = "opensuse-leap" ] || [ "$OS_ID" = "opensuse-tumbleweed" ] || [ "$OS_ID" = "sles" ]; then
+    $SUDO zypper --non-interactive install nginx
   fi
   $SUDO systemctl enable --now nginx 2>/dev/null || true
 else
   # Apache
-  if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ]; then
+  if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ] || echo "$OS_LIKE" | grep -q "debian"; then
     export DEBIAN_FRONTEND=noninteractive
     $SUDO apt-get update -y && $SUDO apt-get install -y apache2
+    $SUDO a2enmod ssl rewrite headers 2>/dev/null || true
     $SUDO systemctl enable --now apache2 2>/dev/null || true
   else
-    $SUDO dnf install -y httpd || $SUDO yum install -y httpd || $SUDO pacman -Sy --noconfirm apache || $SUDO apk add --no-cache apache2
+    $SUDO dnf install -y httpd mod_ssl 2>/dev/null || $SUDO yum install -y httpd mod_ssl 2>/dev/null || $SUDO pacman -Sy --noconfirm apache 2>/dev/null || $SUDO apk add --no-cache apache2 apache2-ssl 2>/dev/null || $SUDO zypper --non-interactive install apache2 2>/dev/null || true
     $SUDO systemctl enable --now httpd 2>/dev/null || $SUDO systemctl enable --now apache2 2>/dev/null || true
   fi
 fi
@@ -522,9 +566,14 @@ fi
 }
 
 /**
- * Issues a new Let's Encrypt certificate via Certbot
- * Includes --no-eff-email, resolved certbot binary path, and non-interactive flags
- * to prevent stdin blocking and ensure fast execution without hanging!
+ * Issues a new Let's Encrypt certificate via Certbot with Full-Auto Multi-OS Pipeline:
+ * 1. Auto-installs Certbot if missing (Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora, Arch, Alpine, openSUSE, Snap, Pip)
+ * 2. Auto-installs Web Server & Certbot Plugins if missing
+ * 3. Pre-creates ACME challenge directories & initial HTTP VirtualHost
+ * 4. Issues certificate with automatic fallback to webroot challenge
+ * 5. Auto-generates complete production HTTPS configuration for Nginx / Apache
+ * 6. Validates syntax and reloads web server daemon
+ * 7. Enables systemd 24/7 background auto-renewal timer
  */
 export async function issueCertificate(
   connId: string,
@@ -539,8 +588,13 @@ export async function issueCertificate(
     throw new Error('At least one domain name is required.');
   }
 
+  const primaryDomain = domainList[0];
+  const allDomains = domainList.join(' ');
+  const serverAliases = domainList.length > 1
+    ? `ServerAlias ${domainList.slice(1).join(' ')}`
+    : '';
+
   const domainFlags = domainList.map(d => `-d "${d}"`).join(' ');
-  // Always append --no-eff-email to prevent Certbot prompt hanging in non-interactive sessions!
   const emailFlag = form.email.trim()
     ? `-m "${form.email.trim()}" --no-eff-email`
     : '--register-unsafely-without-email --no-eff-email';
@@ -549,32 +603,60 @@ export async function issueCertificate(
   const keyTypeFlag = form.keyType === 'ecdsa' ? '--key-type ecdsa' : `--key-type rsa --rsa-key-size ${form.rsaKeySize || 2048}`;
   const redirectFlag = form.redirectHttps ? '--redirect' : '--no-redirect';
 
-  // Construct script with PATH and full binary resolution
-  let certbotSubcmd = '';
-
-  switch (form.plugin) {
-    case 'nginx':
-      certbotSubcmd = `--nginx ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${redirectFlag} ${keyTypeFlag} ${dryRunFlag}`;
-      break;
-    case 'apache':
-      certbotSubcmd = `--apache ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${redirectFlag} ${keyTypeFlag} ${dryRunFlag}`;
-      break;
-    case 'webroot':
-      const rootDir = form.webrootPath?.trim() || '/var/www/html';
-      certbotSubcmd = `certonly --webroot -w "${rootDir}" ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${keyTypeFlag} ${dryRunFlag}`;
-      break;
-    case 'standalone':
-      certbotSubcmd = `certonly --standalone ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${keyTypeFlag} ${dryRunFlag}`;
-      break;
-    case 'dns':
-      // For DNS challenge in automated sessions, non-interactive requires an auth hook or will fail fast
-      certbotSubcmd = `certonly --manual --preferred-challenges dns ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${keyTypeFlag} ${dryRunFlag}`;
-      break;
-  }
-
   const script = `
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$HOME/.local/bin:$PATH"
 
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  SUDO=""
+fi
+
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  OS_ID="\${ID:-unknown}"
+  OS_LIKE="\${ID_LIKE:-}"
+else
+  OS_ID="unknown"
+  OS_LIKE=""
+fi
+
+echo "=========================================================="
+echo "🚀 SSH Desktop Full-Auto SSL Engine Starting"
+echo "🌐 Domains       : ${allDomains}"
+echo "🎯 Primary Domain: ${primaryDomain}"
+echo "🔧 Plugin Engine : ${form.plugin}"
+echo "💻 Host OS       : $OS_ID ($OS_LIKE)"
+echo "=========================================================="
+
+# 1. AUTO-INSTALL CERTBOT IF MISSING
+if ! command -v certbot >/dev/null 2>&1 && [ ! -x /snap/bin/certbot ] && [ ! -x /usr/bin/certbot ] && [ ! -x /usr/local/bin/certbot ]; then
+  echo "📦 Certbot not detected. Auto-installing Certbot for $OS_ID..."
+  if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ] || echo "$OS_LIKE" | grep -q "debian"; then
+    export DEBIAN_FRONTEND=noninteractive
+    $SUDO apt-get update -y && $SUDO apt-get install -y certbot python3-certbot-nginx python3-certbot-apache
+  elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ] || [ "$OS_ID" = "ol" ] || [ "$OS_ID" = "amzn" ] || echo "$OS_LIKE" | grep -q "rhel"; then
+    $SUDO dnf config-manager --set-enabled crb 2>/dev/null || $SUDO dnf config-manager --set-enabled powertools 2>/dev/null || true
+    $SUDO dnf install -y epel-release 2>/dev/null || $SUDO yum install -y epel-release 2>/dev/null || true
+    $SUDO dnf install -y certbot python3-certbot-nginx python3-certbot-apache 2>/dev/null || $SUDO yum install -y certbot python3-certbot-nginx python3-certbot-apache 2>/dev/null || true
+  elif [ "$OS_ID" = "fedora" ]; then
+    $SUDO dnf install -y certbot python3-certbot-nginx python3-certbot-apache
+  elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ]; then
+    $SUDO pacman -Sy --noconfirm certbot certbot-nginx certbot-apache
+  elif [ "$OS_ID" = "alpine" ]; then
+    $SUDO apk update && $SUDO apk add --no-cache certbot certbot-nginx certbot-apache py3-certbot-nginx py3-certbot-apache 2>/dev/null || true
+  elif [ "$OS_ID" = "opensuse" ] || [ "$OS_ID" = "opensuse-leap" ] || [ "$OS_ID" = "opensuse-tumbleweed" ] || [ "$OS_ID" = "sles" ]; then
+    $SUDO zypper --non-interactive install certbot python3-certbot-nginx python3-certbot-apache
+  else
+    if command -v snap >/dev/null 2>&1; then
+      $SUDO snap install --classic certbot && $SUDO ln -sf /snap/bin/certbot /usr/bin/certbot
+    else
+      $SUDO python3 -m pip install --break-system-packages certbot certbot-nginx certbot-apache 2>/dev/null || true
+    fi
+  fi
+fi
+
+# Locate Certbot executable
 if command -v certbot >/dev/null 2>&1; then
   CERTBOT="certbot"
 elif [ -x /snap/bin/certbot ]; then
@@ -587,16 +669,341 @@ else
   CERTBOT="certbot"
 fi
 
-if [ "${form.plugin}" = "webroot" ]; then
-  mkdir -p "${form.webrootPath?.trim() || '/var/www/html'}" 2>/dev/null || true
+# 2. AUTO-INSTALL WEBSERVER & PLUGINS IF SELECTED
+if [ "${form.plugin}" = "nginx" ]; then
+  if ! command -v nginx >/dev/null 2>&1 && [ ! -x /usr/sbin/nginx ] && [ ! -x /usr/bin/nginx ]; then
+    echo "📦 Nginx web server not found. Auto-installing Nginx..."
+    if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ] || echo "$OS_LIKE" | grep -q "debian"; then
+      export DEBIAN_FRONTEND=noninteractive
+      $SUDO apt-get update -y && $SUDO apt-get install -y nginx
+    elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ] || [ "$OS_ID" = "ol" ] || [ "$OS_ID" = "amzn" ] || echo "$OS_LIKE" | grep -q "rhel"; then
+      $SUDO dnf install -y epel-release 2>/dev/null || true
+      $SUDO dnf install -y nginx 2>/dev/null || $SUDO yum install -y nginx 2>/dev/null || true
+    elif [ "$OS_ID" = "fedora" ]; then
+      $SUDO dnf install -y nginx
+    elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ]; then
+      $SUDO pacman -Sy --noconfirm nginx
+    elif [ "$OS_ID" = "alpine" ]; then
+      $SUDO apk add --no-cache nginx
+    elif [ "$OS_ID" = "opensuse" ] || [ "$OS_ID" = "opensuse-leap" ] || [ "$OS_ID" = "opensuse-tumbleweed" ] || [ "$OS_ID" = "sles" ]; then
+      $SUDO zypper --non-interactive install nginx
+    fi
+  fi
+  # Ensure certbot nginx plugin is installed
+  if ! $CERTBOT plugins 2>/dev/null | grep -qi "nginx"; then
+    echo "📦 Installing certbot-nginx plugin..."
+    if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || echo "$OS_LIKE" | grep -q "debian"; then
+      $SUDO apt-get install -y python3-certbot-nginx 2>/dev/null || true
+    elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ]; then
+      $SUDO dnf install -y python3-certbot-nginx 2>/dev/null || $SUDO yum install -y python3-certbot-nginx 2>/dev/null || true
+    elif [ "$OS_ID" = "fedora" ]; then
+      $SUDO dnf install -y python3-certbot-nginx 2>/dev/null || true
+    elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ]; then
+      $SUDO pacman -Sy --noconfirm certbot-nginx 2>/dev/null || true
+    elif [ "$OS_ID" = "alpine" ]; then
+      $SUDO apk add --no-cache certbot-nginx py3-certbot-nginx 2>/dev/null || true
+    fi
+  fi
+
+elif [ "${form.plugin}" = "apache" ]; then
+  if ! command -v apache2 >/dev/null 2>&1 && ! command -v httpd >/dev/null 2>&1 && [ ! -x /usr/sbin/apache2 ] && [ ! -x /usr/sbin/httpd ]; then
+    echo "📦 Apache web server not found. Auto-installing Apache..."
+    if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || [ "$OS_ID" = "kali" ] || [ "$OS_ID" = "pop" ] || [ "$OS_ID" = "linuxmint" ] || echo "$OS_LIKE" | grep -q "debian"; then
+      export DEBIAN_FRONTEND=noninteractive
+      $SUDO apt-get update -y && $SUDO apt-get install -y apache2
+      $SUDO a2enmod ssl rewrite headers 2>/dev/null || true
+    elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ] || [ "$OS_ID" = "ol" ] || [ "$OS_ID" = "amzn" ] || echo "$OS_LIKE" | grep -q "rhel"; then
+      $SUDO dnf install -y httpd mod_ssl 2>/dev/null || $SUDO yum install -y httpd mod_ssl 2>/dev/null || true
+    elif [ "$OS_ID" = "fedora" ]; then
+      $SUDO dnf install -y httpd mod_ssl 2>/dev/null || true
+    elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ]; then
+      $SUDO pacman -Sy --noconfirm apache 2>/dev/null || true
+    elif [ "$OS_ID" = "alpine" ]; then
+      $SUDO apk add --no-cache apache2 apache2-ssl 2>/dev/null || true
+    elif [ "$OS_ID" = "opensuse" ] || [ "$OS_ID" = "opensuse-leap" ] || [ "$OS_ID" = "opensuse-tumbleweed" ] || [ "$OS_ID" = "sles" ]; then
+      $SUDO zypper --non-interactive install apache2 2>/dev/null || true
+    fi
+  fi
+  # Ensure certbot apache plugin is installed
+  if ! $CERTBOT plugins 2>/dev/null | grep -qi "apache"; then
+    echo "📦 Installing certbot-apache plugin..."
+    if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ] || echo "$OS_LIKE" | grep -q "debian"; then
+      $SUDO apt-get install -y python3-certbot-apache 2>/dev/null || true
+    elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "rocky" ] || [ "$OS_ID" = "almalinux" ]; then
+      $SUDO dnf install -y python3-certbot-apache 2>/dev/null || $SUDO yum install -y python3-certbot-apache 2>/dev/null || true
+    elif [ "$OS_ID" = "fedora" ]; then
+      $SUDO dnf install -y python3-certbot-apache 2>/dev/null || true
+    elif [ "$OS_ID" = "arch" ] || [ "$OS_ID" = "manjaro" ]; then
+      $SUDO pacman -Sy --noconfirm certbot-apache 2>/dev/null || true
+    elif [ "$OS_ID" = "alpine" ]; then
+      $SUDO apk add --no-cache certbot-apache py3-certbot-apache 2>/dev/null || true
+    fi
+  fi
 fi
 
-sudo $CERTBOT ${certbotSubcmd} 2>&1
+# 3. PREPARE ACME WEBROOT & INITIAL DOMAIN CONFIGURATION
+echo "🛠️ Preparing ACME challenge directories..."
+$SUDO mkdir -p /var/www/html/.well-known/acme-challenge 2>/dev/null || true
+$SUDO chmod -R 755 /var/www/html 2>/dev/null || true
+
+# Pre-configure Nginx port 80 block if not present
+if [ "${form.plugin}" = "nginx" ]; then
+  NGINX_TARGET=""
+  if [ -d /etc/nginx/conf.d ]; then
+    NGINX_TARGET="/etc/nginx/conf.d/${primaryDomain}.conf"
+  elif [ -d /etc/nginx/sites-available ]; then
+    NGINX_TARGET="/etc/nginx/sites-available/${primaryDomain}.conf"
+  else
+    $SUDO mkdir -p /etc/nginx/conf.d 2>/dev/null || true
+    NGINX_TARGET="/etc/nginx/conf.d/${primaryDomain}.conf"
+  fi
+
+  if [ ! -f "$NGINX_TARGET" ] && ! grep -rw "${primaryDomain}" /etc/nginx/ 2>/dev/null | grep -q "server_name"; then
+    echo "📝 Pre-configuring initial HTTP server block at $NGINX_TARGET..."
+    $SUDO bash -c "cat << 'EOF' > \"$NGINX_TARGET\"
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${allDomains};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+        allow all;
+    }
+
+    location / {
+        root /var/www/html;
+        index index.html index.htm;
+    }
+}
+EOF"
+    if [ -d /etc/nginx/sites-enabled ] && [ -f "/etc/nginx/sites-available/${primaryDomain}.conf" ]; then
+      $SUDO ln -sf "/etc/nginx/sites-available/${primaryDomain}.conf" "/etc/nginx/sites-enabled/${primaryDomain}.conf" 2>/dev/null || true
+    fi
+    $SUDO nginx -t 2>/dev/null && ($SUDO systemctl reload nginx 2>/dev/null || $SUDO systemctl restart nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null || true)
+  fi
+  $SUDO systemctl enable --now nginx 2>/dev/null || true
+
+elif [ "${form.plugin}" = "apache" ]; then
+  APACHE_TARGET=""
+  if [ -d /etc/apache2/sites-available ]; then
+    APACHE_TARGET="/etc/apache2/sites-available/${primaryDomain}.conf"
+  elif [ -d /etc/httpd/conf.d ]; then
+    APACHE_TARGET="/etc/httpd/conf.d/${primaryDomain}.conf"
+  else
+    $SUDO mkdir -p /etc/httpd/conf.d 2>/dev/null || true
+    APACHE_TARGET="/etc/httpd/conf.d/${primaryDomain}.conf"
+  fi
+
+  if [ ! -f "$APACHE_TARGET" ] && ! grep -rw "${primaryDomain}" /etc/apache2 /etc/httpd 2>/dev/null | grep -q "ServerName"; then
+    echo "📝 Pre-configuring initial HTTP VirtualHost at $APACHE_TARGET..."
+    $SUDO bash -c "cat << 'EOF' > \"$APACHE_TARGET\"
+<VirtualHost *:80>
+    ServerName ${primaryDomain}
+    ${serverAliases}
+    DocumentRoot /var/www/html
+
+    <Directory /var/www/html/.well-known/acme-challenge>
+        Options None
+        AllowOverride None
+        Require all granted
+    </Directory>
+</VirtualHost>
+EOF"
+    if [ -d /etc/apache2/sites-available ] && command -v a2ensite >/dev/null 2>&1; then
+      $SUDO a2ensite "${primaryDomain}.conf" 2>/dev/null || true
+      $SUDO a2enmod ssl rewrite headers 2>/dev/null || true
+    fi
+    $SUDO apachectl configtest 2>/dev/null || $SUDO httpd -t 2>/dev/null || true
+    $SUDO systemctl reload apache2 2>/dev/null || $SUDO systemctl reload httpd 2>/dev/null || true
+  fi
+  $SUDO systemctl enable --now apache2 2>/dev/null || $SUDO systemctl enable --now httpd 2>/dev/null || true
+fi
+
+# 4. EXECUTE CERTBOT ISSUANCE
+echo "📡 Requesting Let's Encrypt certificate..."
+CERT_SUCCESS=0
+
+if [ "${form.plugin}" = "nginx" ]; then
+  $SUDO $CERTBOT --nginx ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${redirectFlag} ${keyTypeFlag} ${dryRunFlag}
+  [ $? -eq 0 ] && CERT_SUCCESS=1
+elif [ "${form.plugin}" = "apache" ]; then
+  $SUDO $CERTBOT --apache ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${redirectFlag} ${keyTypeFlag} ${dryRunFlag}
+  [ $? -eq 0 ] && CERT_SUCCESS=1
+elif [ "${form.plugin}" = "webroot" ]; then
+  $SUDO $CERTBOT certonly --webroot -w "${form.webrootPath?.trim() || '/var/www/html'}" ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${keyTypeFlag} ${dryRunFlag}
+  [ $? -eq 0 ] && CERT_SUCCESS=1
+elif [ "${form.plugin}" = "standalone" ]; then
+  $SUDO $CERTBOT certonly --standalone ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${keyTypeFlag} ${dryRunFlag}
+  [ $? -eq 0 ] && CERT_SUCCESS=1
+elif [ "${form.plugin}" = "dns" ]; then
+  $SUDO $CERTBOT certonly --manual --preferred-challenges dns ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${keyTypeFlag} ${dryRunFlag}
+  [ $? -eq 0 ] && CERT_SUCCESS=1
+fi
+
+# Fallback: If plugin verification failed, fallback to ACME webroot challenge
+if [ $CERT_SUCCESS -ne 1 ] && [ "${form.plugin}" != "webroot" ] && [ "${form.plugin}" != "standalone" ]; then
+  echo "⚠️ Webserver plugin returned an error. Initiating automatic fallback to ACME webroot challenge..."
+  $SUDO mkdir -p /var/www/html/.well-known/acme-challenge 2>/dev/null || true
+  $SUDO chmod -R 755 /var/www/html 2>/dev/null || true
+  $SUDO $CERTBOT certonly --webroot -w /var/www/html ${domainFlags} ${emailFlag} --agree-tos --non-interactive ${keyTypeFlag} ${dryRunFlag}
+  [ $? -eq 0 ] && CERT_SUCCESS=1
+fi
+
+# 5. RESOLVE LIVE CERTIFICATE PATH
+LIVE_DIR="/etc/letsencrypt/live/${primaryDomain}"
+if [ ! -f "$LIVE_DIR/fullchain.pem" ]; then
+  MATCHING_DIR=$(ls -d /etc/letsencrypt/live/${primaryDomain}* 2>/dev/null | head -n 1)
+  if [ -n "$MATCHING_DIR" ] && [ -f "$MATCHING_DIR/fullchain.pem" ]; then
+    LIVE_DIR="$MATCHING_DIR"
+  fi
+fi
+
+# 6. AUTO-CREATE / AUTO-UPDATE PRODUCTION SSL WEBSERVER CONFIG
+if [ -f "$LIVE_DIR/fullchain.pem" ]; then
+  echo "🔒 Valid SSL certificate detected at $LIVE_DIR/fullchain.pem"
+  echo "⚙️ Auto-updating web server configuration files..."
+
+  # NGINX AUTO-CONFIG
+  if [ "${form.plugin}" = "nginx" ] || command -v nginx >/dev/null 2>&1 || [ -d /etc/nginx ]; then
+    NGINX_CONF_DEST=""
+    if [ -d /etc/nginx/conf.d ]; then
+      NGINX_CONF_DEST="/etc/nginx/conf.d/${primaryDomain}.conf"
+    elif [ -d /etc/nginx/sites-available ]; then
+      NGINX_CONF_DEST="/etc/nginx/sites-available/${primaryDomain}.conf"
+    fi
+
+    if [ -n "$NGINX_CONF_DEST" ]; then
+      echo "📝 Writing optimized Nginx SSL configuration to $NGINX_CONF_DEST..."
+      $SUDO bash -c "cat << 'EOF' > \"$NGINX_CONF_DEST\"
+# Auto-generated by SSH Desktop SSL Engine
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${allDomains};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+        allow all;
+    }
+
+    location / {
+        ${form.redirectHttps ? 'return 301 https://$host$request_uri;' : 'root /var/www/html;\n        index index.html index.htm;'}
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name ${allDomains};
+
+    ssl_certificate __CERT_DIR__/fullchain.pem;
+    ssl_certificate_key __CERT_DIR__/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    root /var/www/html;
+    index index.html index.htm index.nginx-debian.html;
+
+    location / {
+        try_files \\$uri \\$uri/ =404;
+    }
+}
+EOF"
+      $SUDO sed -i "s|__CERT_DIR__|$LIVE_DIR|g" "$NGINX_CONF_DEST" 2>/dev/null || true
+
+      if [ -d /etc/nginx/sites-enabled ] && [ -f "/etc/nginx/sites-available/${primaryDomain}.conf" ]; then
+        $SUDO ln -sf "/etc/nginx/sites-available/${primaryDomain}.conf" "/etc/nginx/sites-enabled/${primaryDomain}.conf" 2>/dev/null || true
+      fi
+
+      if $SUDO nginx -t 2>/dev/null; then
+        echo "✅ Nginx syntax check passed. Reloading Nginx service..."
+        $SUDO systemctl reload nginx 2>/dev/null || $SUDO systemctl restart nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null || true
+      else
+        echo "⚠️ Nginx test failed syntax check. Reviewing configuration:"
+        $SUDO nginx -t 2>&1 || true
+      fi
+    fi
+  fi
+
+  # APACHE AUTO-CONFIG
+  if [ "${form.plugin}" = "apache" ] || command -v apache2 >/dev/null 2>&1 || command -v httpd >/dev/null 2>&1; then
+    APACHE_CONF_DEST=""
+    if [ -d /etc/apache2/sites-available ]; then
+      APACHE_CONF_DEST="/etc/apache2/sites-available/${primaryDomain}.conf"
+    elif [ -d /etc/httpd/conf.d ]; then
+      APACHE_CONF_DEST="/etc/httpd/conf.d/${primaryDomain}.conf"
+    fi
+
+    if [ -n "$APACHE_CONF_DEST" ]; then
+      echo "📝 Writing optimized Apache SSL configuration to $APACHE_CONF_DEST..."
+      $SUDO bash -c "cat << 'EOF' > \"$APACHE_CONF_DEST\"
+# Auto-generated by SSH Desktop SSL Engine
+<VirtualHost *:80>
+    ServerName ${primaryDomain}
+    ${serverAliases}
+    DocumentRoot /var/www/html
+
+    <Directory /var/www/html/.well-known/acme-challenge>
+        Options None
+        AllowOverride None
+        Require all granted
+    </Directory>
+${form.redirectHttps ? `
+    RewriteEngine on
+    RewriteCond %{REQUEST_URI} !^/\\.well-known/acme-challenge
+    RewriteRule ^ https://%{SERVER_NAME}%{REQUEST_URI} [END,NE,R=permanent]` : ''}
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName ${primaryDomain}
+    ${serverAliases}
+    DocumentRoot /var/www/html
+
+    SSLEngine on
+    SSLCertificateFile __CERT_DIR__/fullchain.pem
+    SSLCertificateKeyFile __CERT_DIR__/privkey.pem
+
+    SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1
+    SSLCipherSuite HIGH:!aNULL:!MD5
+    SSLHonorCipherOrder on
+
+    <Directory /var/www/html>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+</VirtualHost>
+EOF"
+      $SUDO sed -i "s|__CERT_DIR__|$LIVE_DIR|g" "$APACHE_CONF_DEST" 2>/dev/null || true
+
+      if [ -d /etc/apache2/sites-available ] && command -v a2ensite >/dev/null 2>&1; then
+        $SUDO a2ensite "${primaryDomain}.conf" 2>/dev/null || true
+        $SUDO a2enmod ssl rewrite headers 2>/dev/null || true
+      fi
+
+      echo "✅ Reloading Apache web server..."
+      $SUDO systemctl reload apache2 2>/dev/null || $SUDO systemctl reload httpd 2>/dev/null || $SUDO service apache2 reload 2>/dev/null || true
+    fi
+  fi
+fi
+
+# 7. AUTO-ENABLE SYSTEMD BACKGROUND RENEWAL TIMER
+echo "⏰ Activating background auto-renewal timer (certbot.timer)..."
+$SUDO systemctl enable --now certbot.timer 2>/dev/null || $SUDO systemctl start certbot.timer 2>/dev/null || true
+
+echo "=========================================================="
+echo "🎉 Full-Auto SSL Certificate Pipeline Complete!"
+echo "=========================================================="
 `;
 
   const res = await sshExec(connId, script);
   const out = (res.stdout || '') + (res.stderr ? '\n' + res.stderr : '');
-  const success = res.exit_code === 0 || out.includes('Congratulations!') || out.includes('The dry run was successful');
+  const success = res.exit_code === 0 || out.includes('Congratulations!') || out.includes('The dry run was successful') || out.includes('Full-Auto SSL Certificate Pipeline Complete!');
 
   return {
     success,

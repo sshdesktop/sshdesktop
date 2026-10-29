@@ -274,43 +274,19 @@ export default function SslManager() {
     }
   };
 
-  // Issue Let's Encrypt Certificate
+  // Issue Let's Encrypt Certificate - 100% Full-Auto Multi-OS Pipeline
   const handleIssueSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeConnectionId) return;
 
-    if (!certbotStatus?.installed) {
-      setShowInstallAlertModal(true);
-      return;
-    }
-
-    // Guard: Check if selected plugin has missing webserver dependencies
-    if (issueForm.plugin === 'nginx' && certbotStatus && !certbotStatus.webServers.nginx) {
-      setMissingDepModal({
-        type: 'missing_webserver',
-        webserver: 'nginx',
-        title: 'Nginx Web Server Is Not Installed',
-        description: 'Cannot issue certificate using Nginx plugin because Nginx is not installed on this server. Install Nginx or switch to Standalone mode.',
-      });
-      return;
-    } else if (issueForm.plugin === 'apache' && certbotStatus && !certbotStatus.webServers.apache) {
-      setMissingDepModal({
-        type: 'missing_webserver',
-        webserver: 'apache',
-        title: 'Apache Web Server Is Not Installed',
-        description: 'Cannot issue certificate using Apache plugin because Apache is not installed on this server. Install Apache or switch to Standalone mode.',
-      });
-      return;
-    }
-
     setIsIssuing(true);
-    setIssueOutput('Contacting Let\'s Encrypt ACME server and verifying domain challenge...\n(This usually takes 10 to 30 seconds)');
+    setIssueOutput('🚀 Running Full-Auto SSL Pipeline:\n• Checking & auto-installing Certbot and plugins across Linux distribution...\n• Ensuring web server (Nginx/Apache) is installed and active...\n• Pre-configuring ACME challenge directories and HTTP VirtualHost...\n• Requesting SSL certificate from Let\'s Encrypt...\n• Auto-generating and applying production HTTPS configuration...\n• Validating syntax and reloading web service...\n\n(This automated process usually takes 20 to 50 seconds)');
     setMessage(null);
 
     try {
-      // 90-second timeout guard to prevent infinite hanging
+      // 120-second timeout guard to allow multi-package installation on slower hosts
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Operation timed out after 90 seconds. Please check DNS resolution, firewall port 80/443, and server connectivity.')), 90000)
+        setTimeout(() => reject(new Error('Operation timed out after 120 seconds. Please check DNS resolution, firewall port 80/443, and package manager connectivity.')), 120000)
       );
 
       const res = await Promise.race([
@@ -320,9 +296,15 @@ export default function SslManager() {
 
       setIssueOutput(res.output);
       if (res.success) {
-        setMessage({ text: `SSL Certificate for "${issueForm.domains}" issued successfully!`, isError: false });
-        // Refresh certificates in background without freezing the UI
-        listCertificates(activeConnectionId).then(certs => setCertificates(certs)).catch(() => {});
+        setMessage({ text: `SSL Certificate for "${issueForm.domains}" issued and web server configured successfully!`, isError: false });
+        // Refresh certificates and certbot status in background
+        Promise.all([
+          listCertificates(activeConnectionId),
+          detectCertbotStatus(activeConnectionId)
+        ]).then(([certs, status]) => {
+          setCertificates(certs);
+          setCertbotStatus(status);
+        }).catch(() => {});
       } else {
         setMessage({ text: 'Certificate issuance encountered an issue. Review the diagnostic log below.', isError: true });
       }
@@ -882,23 +864,23 @@ export default function SslManager() {
             </div>
 
             {!certbotStatus?.installed && (
-              <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex items-center justify-between shadow-xl">
+              <div className="p-4 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-200 flex items-center justify-between shadow-xl">
                 <div className="flex items-center space-x-3">
-                  <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
+                  <Sparkles className="w-5 h-5 text-indigo-400 shrink-0" />
                   <div>
-                    <h4 className="text-xs font-bold text-white">Certbot Application Required</h4>
-                    <p className="text-[11px] text-amber-300/80">
-                      Certbot is not installed on this server. Click &quot;Install Certbot&quot; below to install Certbot core.
+                    <h4 className="text-xs font-bold text-white">Full-Auto Multi-OS SSL &amp; Web Server Engine</h4>
+                    <p className="text-[11px] text-indigo-300/80">
+                      Certbot and web server dependencies will be automatically installed and configured across any Linux distribution when you issue a certificate.
                     </p>
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => setShowInstallAlertModal(true)}
-                  className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold shadow-md cursor-pointer flex items-center space-x-1.5 shrink-0"
+                  className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md cursor-pointer flex items-center space-x-1.5 shrink-0"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Install Certbot</span>
+                  <span>Pre-Install Now</span>
                 </button>
               </div>
             )}

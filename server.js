@@ -424,15 +424,7 @@ async function handleInvokeCommand(cmd, args) {
     // ==========================================
     case 'ssh_exec': {
       const { command } = args || {};
-      if (!entry) {
-        return {
-          stdout: '',
-          stderr: `No active SSH connection for '${connId}'. Please connect to a server first.`,
-          exit_code: 1,
-          duration_ms: 0
-        };
-      }
-      return await runRemoteExec(entry.client, command || '');
+      return await runRemoteExec(entry?.client, command || '');
     }
 
     // ==========================================
