@@ -200,6 +200,37 @@ SSH Desktop ships with 19 full-featured native applications:
 
 ---
 
+## 🚀 Linux Server Standalone Single Binary Mode (Dual Engine 2222 / 2020)
+
+In addition to the native desktop application, SSH Desktop can be deployed directly on any Linux server as a **single standalone binary executable** with **zero external dependencies**:
+
+- **Frontend Web Desktop**: Port `2222` (interactive macOS desktop shell in your browser)
+- **Backend API & SSH Engine**: Port `2020` (Node SEA SSH2 engine, reverse-proxied transparently)
+- **Single Systemd Service**: Managed via `sshdesktop.service`
+
+### Quick Run
+```bash
+# Download and run the single binary (no Node.js or npm needed)
+chmod +x sshdesktop-linux-x64
+./sshdesktop-linux-x64
+```
+Access at: `http://<YOUR_SERVER_IP>:2222`  
+Default Login: `admin` / `sshdesktop`
+
+### 24/7 Systemd Service Installation
+```bash
+sudo bash install.sh
+```
+Check status: `systemctl status sshdesktop`  
+View live logs: `journalctl -u sshdesktop -f`
+
+### Build Single Standalone Binary from Source
+```bash
+npm run build:binary
+```
+
+---
+
 ## 🛠️ Getting Started & Development
 
 ### Prerequisites
