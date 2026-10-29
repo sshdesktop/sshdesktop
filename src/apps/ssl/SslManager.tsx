@@ -477,7 +477,7 @@ export default function SslManager() {
     <div className="flex flex-col h-full bg-[#14141e] text-[#cdd6f4] select-none font-sans overflow-hidden">
       
       {/* 1. Header Bar */}
-      <header className="h-14 border-b border-white/[0.08] bg-[#181825]/90 backdrop-blur-2xl px-5 flex items-center justify-between shrink-0">
+      <header className="h-14 border-b border-white/[0.08] bg-[#181825]/90 backdrop-blur-2xl px-4 flex items-center justify-between shrink-0 overflow-x-auto scrollbar-thin gap-3">
         
         {/* Left: App Title & Real-time Certbot Status */}
         <div className="flex items-center space-x-3">
@@ -578,7 +578,7 @@ export default function SslManager() {
       )}
 
       {/* Top Metric Cards */}
-      <div className="grid grid-cols-5 gap-3 p-5 shrink-0">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 p-4 shrink-0 overflow-y-auto max-h-48 sm:max-h-none">
         <div className="bg-[#181825]/90 border border-white/10 rounded-2xl p-3.5 shadow-md flex items-center justify-between">
           <div>
             <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Installed Certs</div>
@@ -643,7 +643,7 @@ export default function SslManager() {
       </div>
 
       {/* Navigation Tabs */}
-      <div className="px-5 border-b border-white/[0.08] flex items-center space-x-1 shrink-0 bg-[#14141e]">
+      <div className="px-4 border-b border-white/[0.08] flex items-center space-x-1 shrink-0 bg-[#14141e] overflow-x-auto scrollbar-thin">
         {[
           { id: 'certificates', label: `Certificates (${certificates.length})`, icon: ShieldCheck },
           { id: 'issue', label: 'Issue New SSL', icon: Plus },
@@ -671,7 +671,7 @@ export default function SslManager() {
       </div>
 
       {/* Tab Content Area */}
-      <div className="flex-1 overflow-y-auto p-5">
+      <div className="flex-1 min-w-0 min-h-0 overflow-y-auto p-4 sm:p-5">
         
         {/* TAB 1: CERTIFICATES LIST */}
         {activeTab === 'certificates' && (

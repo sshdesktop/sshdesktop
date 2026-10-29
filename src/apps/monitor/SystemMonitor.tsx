@@ -16,6 +16,7 @@ import {
   systemGetStats, systemGetDisks, systemGetNetwork, 
   processList, processKill, processRenice, sshExec 
 } from '../../lib/tauri-bridge';
+import { PortalContextMenu } from '../../components/PortalContextMenu';
 
 interface HistoryPoint {
   time: string;
@@ -658,7 +659,7 @@ export default function SystemMonitor() {
       )}
 
       {/* 1. macOS Activity Monitor Top Bar & Toolbar */}
-      <header className="px-5 py-3 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between shrink-0 overflow-x-auto no-scrollbar gap-3">
+      <header className="px-5 py-3 bg-[#14141e]/90 backdrop-blur-xl border-b border-white/[0.08] flex items-center justify-between shrink-0 overflow-x-auto scrollbar-thin gap-3">
         
         {/* Left: Window Controls / Process Action Buttons */}
         <div className="flex items-center space-x-2 shrink-0">
@@ -1106,7 +1107,7 @@ export default function SystemMonitor() {
       </div>
 
       {/* 3. ICONIC macOS Activity Monitor Dynamic Footer Panel */}
-      <footer className="h-44 bg-[#14141e]/95 backdrop-blur-xl border-t border-white/[0.08] px-6 py-3 flex items-center justify-between shrink-0 gap-6 overflow-hidden">
+      <footer className="h-44 bg-[#14141e]/95 backdrop-blur-xl border-t border-white/[0.08] px-6 py-3 flex items-center justify-between shrink-0 gap-6 overflow-x-auto scrollbar-thin">
         
         {/* --- DYNAMIC FOOTER: CPU TAB --- */}
         {activeTab === 'cpu' && (
@@ -1565,10 +1566,11 @@ export default function SystemMonitor() {
 
       {/* ================= RIGHT-CLICK CONTEXT MENU ================= */}
       {contextMenu && (
-        <div
-          onClick={e => e.stopPropagation()}
-          className="fixed z-50 bg-[#181825]/95 backdrop-blur-2xl border border-white/20 rounded-2xl shadow-2xl py-1.5 w-56 text-xs text-gray-200 font-sans animate-in fade-in zoom-in-95 duration-100"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
+        <PortalContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          className="w-56 bg-[#181825]/95 backdrop-blur-2xl border border-white/20 rounded-2xl shadow-2xl py-1.5 text-xs text-gray-200 font-sans"
         >
           <div className="px-3 py-1.5 border-b border-white/10 mb-1 flex items-center justify-between">
             <span className="font-bold text-white truncate max-w-[120px]">{contextMenu.process.name}</span>
@@ -1685,7 +1687,7 @@ export default function SystemMonitor() {
             <Terminal className="w-3.5 h-3.5 text-emerald-400" />
             <span>Open in Terminal</span>
           </button>
-        </div>
+        </PortalContextMenu>
       )}
 
       {/* ================= MODAL: PROCESS INSPECTOR ================= */}

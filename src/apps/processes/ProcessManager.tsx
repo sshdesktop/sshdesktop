@@ -10,6 +10,7 @@ import {
 import { processList, processKill, processRenice, sshExec, systemGetStats } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
+import { PortalContextMenu } from '../../components/PortalContextMenu';
 
 interface ProcessRow {
   pid: number;
@@ -325,7 +326,7 @@ export default function ProcessManager() {
   return (
     <div className="flex flex-col h-full bg-[#181825] text-[#cdd6f4] select-none min-h-0 overflow-hidden font-sans">
       {/* macOS Top Toolbar & Segmented View Bar */}
-      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto no-scrollbar">
+      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto scrollbar-thin">
         {/* Left: macOS Stop (Quit Process) & Inspect buttons */}
         <div className="flex items-center space-x-2 shrink-0">
           {/* Quit Process Button (macOS Octagon-X icon) */}
@@ -623,7 +624,7 @@ export default function ProcessManager() {
         </div>
 
         {/* macOS Activity Monitor Live Bottom Dashboard with Animated Visual Gauges */}
-        <div className="bg-[#11111a] border-t border-white/[0.08] px-5 py-3 flex items-center justify-between text-xs shrink-0 font-sans shadow-lg">
+        <div className="bg-[#11111a] border-t border-white/[0.08] px-5 py-3 flex items-center justify-between text-xs shrink-0 font-sans shadow-lg overflow-x-auto scrollbar-thin gap-4">
           <div className="flex items-center space-x-8">
             {/* CPU Load Gauge Bar */}
             <div className="space-y-1">
@@ -917,13 +918,11 @@ export default function ProcessManager() {
 
       {/* Right-Click macOS Context Menu */}
       {contextMenu && (
-        <div
-          className="fixed z-50 bg-[#1e1e2e]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl py-1.5 w-64 text-xs text-gray-200 font-sans select-none animate-in fade-in duration-100"
-          style={{
-            top: Math.min(contextMenu.y, window.innerHeight - 340),
-            left: Math.min(contextMenu.x, window.innerWidth - 270)
-          }}
-          onClick={e => e.stopPropagation()}
+        <PortalContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          className="w-64 bg-[#1e1e2e]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl py-1.5 text-xs text-gray-200 font-sans"
         >
           <div className="px-3.5 py-1 text-[11px] font-bold text-gray-400 border-b border-white/10 mb-1 flex items-center justify-between">
             <span className="truncate">{contextMenu.process.name}</span>
@@ -1011,7 +1010,7 @@ export default function ProcessManager() {
             <CornerDownRight className="w-3.5 h-3.5" />
             <span>Copy Command Line</span>
           </div>
-        </div>
+        </PortalContextMenu>
       )}
     </div>
   );

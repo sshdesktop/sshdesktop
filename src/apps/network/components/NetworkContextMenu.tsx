@@ -1,9 +1,10 @@
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import { 
   Copy, Zap, Terminal, ExternalLink, Compass, Activity, 
   Trash2, ShieldAlert, ArrowDownUp, Shield, Network as NetworkIcon,
   Radio, Check
 } from 'lucide-react';
+import { PortalContextMenu } from '../../../components/PortalContextMenu';
 
 export interface ContextMenuTarget {
   type: 'port' | 'conn' | 'iface';
@@ -35,30 +36,6 @@ export default function NetworkContextMenu({
   onSwitchToSpeedTest,
   onPingHost,
 }: NetworkContextMenuProps) {
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-
-    window.addEventListener('mousedown', handleClickOutside);
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('mousedown', handleClickOutside);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [onClose]);
-
-  // Adjust coordinates if menu overflows window edges
-  const posX = Math.min(x, window.innerWidth - 240);
-  const posY = Math.min(y, window.innerHeight - 340);
-
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     onClose();
@@ -67,10 +44,11 @@ export default function NetworkContextMenu({
   const { type, data } = target;
 
   return (
-    <div
-      ref={menuRef}
-      style={{ left: posX, top: posY }}
-      className="fixed z-50 w-56 bg-[#181825]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl py-1.5 text-xs text-gray-200 select-none animate-in fade-in zoom-in-95 duration-100"
+    <PortalContextMenu
+      x={x}
+      y={y}
+      onClose={onClose}
+      className="w-56 bg-[#181825]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl py-1.5 text-xs text-gray-200 select-none"
     >
       {/* 1. PORT TARGET */}
       {type === 'port' && (
@@ -325,6 +303,6 @@ export default function NetworkContextMenu({
           </div>
         </>
       )}
-    </div>
+    </PortalContextMenu>
   );
 }

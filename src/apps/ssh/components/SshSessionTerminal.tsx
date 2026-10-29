@@ -13,6 +13,7 @@ import { SshSessionTab } from '../types';
 import { terminalCreate, terminalWrite, terminalResize, terminalClose, sshLaunchPutty } from '../../../lib/tauri-bridge';
 import { listen } from '@tauri-apps/api/event';
 import { useSshStore } from '../sshStore';
+import { PortalContextMenu } from '../../../components/PortalContextMenu';
 
 const THEMES = {
   catppuccin: {
@@ -490,13 +491,11 @@ export default function SshSessionTerminal({
 
       {/* Floating Terminal Context Menu */}
       {contextMenu && (
-        <div 
-          className="fixed z-[9999999] w-52 bg-[#181825]/95 backdrop-blur-xl border border-white/15 rounded-xl shadow-[0_15px_50px_rgba(0,0,0,0.6)] py-1.5 text-xs text-gray-200 animate-in fade-in zoom-in-95 duration-100 select-none font-sans"
-          style={{ 
-            top: `${Math.min(contextMenu.y, window.innerHeight - 240)}px`, 
-            left: `${Math.min(contextMenu.x, window.innerWidth - 220)}px` 
-          }}
-          onClick={(e) => e.stopPropagation()}
+        <PortalContextMenu 
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          className="w-52 bg-[#181825]/95 backdrop-blur-xl border border-white/15 rounded-xl shadow-[0_15px_50px_rgba(0,0,0,0.6)] py-1.5 text-xs text-gray-200 select-none font-sans"
         >
           {contextMenu.hasSelection && (
             <button
@@ -560,7 +559,7 @@ export default function SshSessionTerminal({
             <ExternalLink className="w-3.5 h-3.5 text-blue-400" />
             <span>Launch Standalone PuTTY</span>
           </button>
-        </div>
+        </PortalContextMenu>
       )}
 
       {/* Copied / Exported Notification Toast */}
