@@ -62,6 +62,7 @@ import { listen } from '@tauri-apps/api/event';
 import { useConnectionStore, useEditorStore, useSettingsStore, useWindowStore } from '../../lib/store';
 import { LanguagePickerModal } from './LanguagePickerModal';
 import { detectLanguage, getLanguageDisplayName } from './languages';
+import { PortalContextMenu } from '../../components/PortalContextMenu';
 
 // ─── Types & Interfaces ─────────────────────────────────────────────
 interface FileTab {
@@ -3231,10 +3232,11 @@ export default function CodeEditor() {
 
       {/* ─── 6. Context Menu on File Tree Items ──────────────────────── */}
       {treeContextMenu.visible && treeContextMenu.item && (
-        <div
-          style={{ top: treeContextMenu.y, left: treeContextMenu.x }}
-          className="fixed z-50 w-52 bg-[#181825] border border-white/10 rounded-lg shadow-2xl py-1 text-xs font-sans text-gray-200 backdrop-blur-xl animate-in fade-in duration-100"
-          onClick={e => e.stopPropagation()}
+        <PortalContextMenu
+          x={treeContextMenu.x}
+          y={treeContextMenu.y}
+          onClose={() => setTreeContextMenu(prev => ({ ...prev, visible: false }))}
+          className="w-52 bg-[#181825] border border-white/10 rounded-lg shadow-2xl py-1 text-xs font-sans text-gray-200 backdrop-blur-xl"
         >
           <div className="px-3 py-1 text-[10px] text-gray-400 font-mono truncate border-b border-white/10">
             {treeContextMenu.item.name}
@@ -3359,15 +3361,16 @@ export default function CodeEditor() {
             <Trash2 className="w-3.5 h-3.5" />
             <span>Delete</span>
           </button>
-        </div>
+        </PortalContextMenu>
       )}
 
       {/* ─── 7. Context Menu on File Tabs ───────────────────────────── */}
       {tabContextMenu.visible && (
-        <div
-          style={{ top: tabContextMenu.y, left: tabContextMenu.x }}
-          className="fixed z-50 w-48 bg-[#181825] border border-white/10 rounded-lg shadow-2xl py-1 text-xs font-sans text-gray-200 backdrop-blur-xl animate-in fade-in duration-100"
-          onClick={e => e.stopPropagation()}
+        <PortalContextMenu
+          x={tabContextMenu.x}
+          y={tabContextMenu.y}
+          onClose={() => setTabContextMenu(prev => ({ ...prev, visible: false }))}
+          className="w-48 bg-[#181825] border border-white/10 rounded-lg shadow-2xl py-1 text-xs font-sans text-gray-200 backdrop-blur-xl"
         >
           <button
             onClick={() => {
@@ -3407,7 +3410,7 @@ export default function CodeEditor() {
           >
             Close All Tabs
           </button>
-        </div>
+        </PortalContextMenu>
       )}
 
       {/* ─── 8. Unsaved File Close Confirmation Modal ───────────────── */}
@@ -3793,10 +3796,11 @@ export default function CodeEditor() {
 
       {/* ─── 18. Terminal Right-Click Context Menu ───────────────────── */}
       {termContextMenu && (
-        <div
-          style={{ top: termContextMenu.y, left: termContextMenu.x }}
-          className="fixed z-50 w-56 bg-[#181825] border border-white/10 rounded-lg shadow-2xl py-1 text-xs font-sans text-gray-200 backdrop-blur-xl animate-in fade-in duration-100 select-none"
-          onClick={e => e.stopPropagation()}
+        <PortalContextMenu
+          x={termContextMenu.x}
+          y={termContextMenu.y}
+          onClose={() => setTermContextMenu(null)}
+          className="w-56 bg-[#181825] border border-white/10 rounded-lg shadow-2xl py-1 text-xs font-sans text-gray-200 backdrop-blur-xl select-none"
         >
           {termContextMenu.hasSelection ? (
             <button
@@ -3871,7 +3875,7 @@ export default function CodeEditor() {
             <Plus className="w-3.5 h-3.5 text-emerald-400" />
             <span>New Terminal Tab</span>
           </button>
-        </div>
+        </PortalContextMenu>
       )}
 
       {/* Copied Notice Toast */}

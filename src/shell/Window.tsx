@@ -230,12 +230,11 @@ export default function Window({ window: win, children }: { window: WindowState;
             updatePosition(win.id, position.x, position.y);
           }
         }}
-        minWidth={Math.min(500, viewport.w - 20)}
-        minHeight={Math.min(320, viewport.h - 60)}
+        minWidth={Math.min(420, viewport.w - 20)}
+        minHeight={Math.min(280, viewport.h - 60)}
         onMouseDown={() => { focusWindow(win.id); bringToFront(win.id); }}
         onContextMenu={(e: any) => {
           e.preventDefault();
-          e.stopPropagation();
         }}
         className={`absolute window-shell select-none ${win.minimized ? 'pointer-events-none' : 'pointer-events-auto'}`}
         style={{ 
@@ -246,13 +245,12 @@ export default function Window({ window: win, children }: { window: WindowState;
         <motion.div 
           onContextMenu={(e) => {
             e.preventDefault();
-            e.stopPropagation();
           }}
           initial={{ opacity: 0, scale: 0.96 }}
           animate={{ opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 0.96 }}
           transition={{ duration: 0.15, ease: 'easeOut' }}
-          className={`window-inner-frame w-full h-full flex flex-col backdrop-blur-3xl overflow-hidden transition-all duration-200 border ${
+          className={`window-inner-frame w-full h-full flex flex-col min-w-0 min-h-0 backdrop-blur-3xl overflow-hidden transition-all duration-200 border ${
             isFullScreen ? 'rounded-none border-none' : 'rounded-2xl'
           } ${
             isLight
@@ -518,7 +516,7 @@ export default function Window({ window: win, children }: { window: WindowState;
         </div>
 
         {/* Content Area */}
-        <div className={`window-content-canvas flex-1 overflow-auto relative ${
+        <div className={`window-content-canvas flex-1 min-w-0 min-h-0 overflow-auto relative ${
           isLight ? 'bg-white text-slate-900' : 'bg-[#181825]/90 text-gray-200'
         }`}>
           {children}

@@ -13,6 +13,7 @@ import { useUserPrivilege } from '../../lib/permissions';
 import PermissionAlertBanner from '../../components/PermissionAlertBanner';
 import PermissionAlertModal from '../../components/PermissionAlertModal';
 import EditServiceModal from './modals/EditServiceModal';
+import { PortalContextMenu } from '../../components/PortalContextMenu';
 
 interface ServiceItem {
   name: string;
@@ -302,7 +303,7 @@ export default function ServiceManager() {
   return (
     <div className="flex flex-col h-full bg-[#181825] text-[#cdd6f4] select-none font-sans overflow-hidden relative">
       {/* macOS Top Toolbar & Segmented View Bar */}
-      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto no-scrollbar">
+      <div className="bg-[#14141e]/90 backdrop-blur-2xl border-b border-white/[0.08] px-4 py-2.5 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto scrollbar-thin">
         {/* Left: macOS Segmented Filter Buttons */}
         <div className="flex items-center space-x-2 shrink-0">
           <div className="mac-segmented-container">
@@ -1073,13 +1074,11 @@ export default function ServiceManager() {
 
       {/* macOS Right-Click Context Menu */}
       {contextMenu && (
-        <div
-          className="fixed z-50 bg-[#1e1e2e]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl py-1.5 w-60 text-xs text-gray-200 font-sans select-none animate-in fade-in duration-100"
-          style={{
-            top: Math.min(contextMenu.y, window.innerHeight - 340),
-            left: Math.min(contextMenu.x, window.innerWidth - 260)
-          }}
-          onClick={e => e.stopPropagation()}
+        <PortalContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          className="w-60 bg-[#1e1e2e]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl py-1.5 text-xs text-gray-200 font-sans"
         >
           <div className="px-3.5 py-1 text-[11px] font-bold text-gray-400 border-b border-white/10 mb-1 truncate">
             {contextMenu.service.name}
@@ -1182,7 +1181,7 @@ export default function ServiceManager() {
             <Copy className="w-3.5 h-3.5" />
             <span>Copy Unit Name</span>
           </div>
-        </div>
+        </PortalContextMenu>
       )}
 
       {/* Permission Denied Alert Modal */}

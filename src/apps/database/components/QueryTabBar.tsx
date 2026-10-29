@@ -14,6 +14,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { QueryTab } from '../types';
+import { PortalContextMenu } from '../../../components/PortalContextMenu';
 
 interface QueryTabBarProps {
   tabs: QueryTab[];
@@ -216,10 +217,11 @@ export const QueryTabBar: React.FC<QueryTabBarProps> = ({
 
       {/* Right-Click Context Menu */}
       {contextMenu && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          style={{ top: contextMenu.y, left: contextMenu.x }}
-          className="fixed z-50 min-w-[190px] bg-[#1e1e2e]/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl py-1.5 text-xs text-gray-200 animate-in fade-in zoom-in duration-100"
+        <PortalContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          className="min-w-[190px] bg-[#1e1e2e]/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl py-1.5 text-xs text-gray-200"
         >
           {onRenameTab && (
             <button
@@ -297,7 +299,7 @@ export const QueryTabBar: React.FC<QueryTabBarProps> = ({
             <Trash2 className="w-3.5 h-3.5 text-red-400" />
             <span>Close All Tabs</span>
           </button>
-        </div>
+        </PortalContextMenu>
       )}
 
     </div>

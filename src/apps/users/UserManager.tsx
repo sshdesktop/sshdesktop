@@ -17,6 +17,7 @@ import { useWindowManager } from '../../lib/hooks/useWindowManager';
 import { useUserPrivilege } from '../../lib/permissions';
 import PermissionAlertBanner from '../../components/PermissionAlertBanner';
 import PermissionAlertModal from '../../components/PermissionAlertModal';
+import { PortalContextMenu } from '../../components/PortalContextMenu';
 
 interface UserEntry {
   username: string;
@@ -722,7 +723,7 @@ export default function UserManager() {
     });
   };
 
-  // Clamped Right-Click Context Menu inside window boundaries
+  // Clamped Right-Click Context Menu using universal Portal
   const openContextMenu = (e: React.MouseEvent, type: 'user' | 'group' | 'session', data: any) => {
     e.preventDefault();
     e.stopPropagation();
@@ -734,23 +735,10 @@ export default function UserManager() {
       if (idx >= 0) setSelectedSessionIndex(idx);
     }
 
-    const container = containerRef.current;
-    if (!container) return;
-    const rect = container.getBoundingClientRect();
-
-    const menuWidth = 220;
-    const menuHeight = type === 'user' ? 240 : type === 'group' ? 190 : 140;
-
-    const rawX = e.clientX - rect.left;
-    const rawY = e.clientY - rect.top;
-
-    const clampedX = Math.max(8, Math.min(rawX, rect.width - menuWidth - 8));
-    const clampedY = Math.max(8, Math.min(rawY, rect.height - menuHeight - 8));
-
     setContextMenu({
       visible: true,
-      x: clampedX,
-      y: clampedY,
+      x: e.clientX,
+      y: e.clientY,
       type,
       data
     });
@@ -838,7 +826,7 @@ export default function UserManager() {
         <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-blue-500 via-indigo-400 to-blue-500 animate-top-progress z-30 pointer-events-none" />
       )}
       {/* macOS Top Navigation Toolbar */}
-      <div className="bg-[#14141e]/95 backdrop-blur-2xl border-b border-white/[0.08] px-4 pt-1.5 pb-0 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto no-scrollbar">
+      <div className="bg-[#14141e]/95 backdrop-blur-2xl border-b border-white/[0.08] px-4 pt-1.5 pb-0 flex items-center justify-between shrink-0 space-x-3 overflow-x-auto scrollbar-thin">
         {/* Animated Straight Line Moving Left Right Tab Bar */}
         <div className="flex items-center space-x-1 relative">
           {[
@@ -1807,12 +1795,13 @@ export default function UserManager() {
         </div>
       )}
 
-      {/* Clamped In-Window Context Menu */}
+      {/* Clamped Portal Context Menu */}
       {contextMenu && contextMenu.visible && (
-        <div
-          style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
-          className="absolute z-50 w-52 bg-[#1b1c2b]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl p-1.5 text-xs text-gray-200 animate-in fade-in zoom-in-95 duration-100 divide-y divide-white/[0.06]"
-          onClick={e => e.stopPropagation()}
+        <PortalContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          className="w-52 bg-[#1b1c2b]/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl p-1.5 text-xs text-gray-200 divide-y divide-white/[0.06]"
         >
           {/* User Context Menu Items */}
           {contextMenu.type === 'user' && (
@@ -2011,7 +2000,7 @@ export default function UserManager() {
               </div>
             </>
           )}
-        </div>
+        </PortalContextMenu>
       )}
 
       {/* Confirmation Alert Modal (Delete User, Delete Group, and Kick Session) */}
