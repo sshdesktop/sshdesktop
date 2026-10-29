@@ -11,6 +11,7 @@ import { useConnectionStore, useSettingsStore, useWindowStore, useTelemetryStore
 import { useWindowManager } from '../lib/hooks/useWindowManager';
 import { pickKeyFile } from '../lib/tauri-bridge';
 import { SshDesktopLogo } from '../components/SshDesktopLogo';
+import { MainWindowControls } from '../components/MainWindowControls';
 
 const TASKBAR_ICONS: Record<string, React.ElementType> = {
   automation: Workflow,
@@ -280,7 +281,9 @@ export default function Taskbar({
   const isLight = theme === 'light';
 
   return (
-    <div className={`taskbar-bar fixed top-0 left-0 w-full h-8 backdrop-blur-xl border-b flex items-center justify-between px-2.5 z-[999999] text-xs window-drag select-none shadow-sm ${
+    <div 
+      data-tauri-drag-region
+      className={`taskbar-bar fixed top-0 left-0 w-full h-8 backdrop-blur-xl border-b flex items-center justify-between px-2.5 z-[999999] text-xs window-drag select-none shadow-sm ${
       isLight ? 'bg-white/85 text-slate-800 border-black/10' : 'bg-[#14141e]/90 text-gray-300 border-white/[0.08]'
     }`}>
       {/* LEFT SECTION: Clean Brand Logo & Title (Start, System Settings & Active Tabs Removed) */}
@@ -403,6 +406,10 @@ export default function Taskbar({
 
         {/* Clock */}
         <span className="text-gray-200 font-sans pl-1">{time}</span>
+
+        {/* Window Controls */}
+        <div className={`h-4 w-px mx-1 shrink-0 ${isLight ? 'bg-black/10' : 'bg-white/10'}`} />
+        <MainWindowControls variant={isLight ? 'light' : 'dark'} />
       </div>
 
       {/* Centered Connect Another Linux Server Modal */}

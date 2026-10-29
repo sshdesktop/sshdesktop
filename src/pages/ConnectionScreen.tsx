@@ -11,6 +11,7 @@ import {
 import { sshTestConnection, sshLaunchPutty, pickKeyFile, storeListConnections } from '../lib/tauri-bridge';
 import { WALLPAPERS } from '../shell/Desktop';
 import { SshDesktopLogo } from '../components/SshDesktopLogo';
+import { MainWindowControls } from '../components/MainWindowControls';
 
 interface UploadedKeyInfo {
   name: string;
@@ -813,7 +814,10 @@ export default function ConnectionScreen() {
       <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-transparent to-black/60 pointer-events-none" />
 
       {/* Top macOS Menu Bar */}
-      <div className="relative z-30 shrink-0 w-full h-8 bg-black/40 backdrop-blur-2xl border-b border-white/10 px-4 flex items-center justify-between text-xs text-white/90">
+      <div 
+        data-tauri-drag-region
+        className="relative z-30 shrink-0 w-full h-8 bg-black/40 backdrop-blur-2xl border-b border-white/10 px-4 flex items-center justify-between text-xs text-white/90 window-drag"
+      >
         {/* Left Apple Menu & App Identity */}
         <div className="flex items-center space-x-4">
           <div className="relative">
@@ -951,6 +955,10 @@ export default function ConnectionScreen() {
             <span className="text-white/80">{liveDate}</span>
             <span className="font-bold text-white font-mono">{liveTime || '12:00'}</span>
           </div>
+
+          {/* Window Controls */}
+          <div className="h-4 w-px bg-white/10 mx-1 shrink-0" />
+          <MainWindowControls variant="dark" />
         </div>
       </div>
 
