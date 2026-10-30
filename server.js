@@ -136,6 +136,12 @@ const CONNECTIONS_FILE = path.join(DATA_DIR, 'connections.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+const KEYS_DIR = path.join(DATA_DIR, 'keys');
+try {
+  if (!fs.existsSync(KEYS_DIR)) {
+    fs.mkdirSync(KEYS_DIR, { recursive: true, mode: 0o700 });
+  }
+} catch {}
 
 // MIME types dictionary
 const MIME_TYPES = {
@@ -726,6 +732,94 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
     // ==========================================
     // 2. SSH Connection Management
     // ==========================================
+function buildSshClientConfig(config, targetId) {
+  const connectConfig = {
+    host: config.host,
+    port: parseInt(config.port || 22, 10),
+    username: config.username || 'root',
+    readyTimeout: 20000,
+    keepaliveInterval: 10000,
+    tryKeyboard: true,
+    algorithms: {
+      kex: [
+        'curve25519-sha256',
+        'curve25519-sha256@libssh.org',
+        'ecdh-sha2-nistp256',
+        'ecdh-sha2-nistp384',
+        'ecdh-sha2-nistp521',
+        'diffie-hellman-group-exchange-sha256',
+        'diffie-hellman-group14-sha256',
+        'diffie-hellman-group14-sha1',
+        'diffie-hellman-group-exchange-sha1',
+        'diffie-hellman-group1-sha1'
+      ],
+      cipher: [
+        'chacha20-poly1305@openssh.com',
+        'aes128-gcm@openssh.com',
+        'aes256-gcm@openssh.com',
+        'aes128-ctr',
+        'aes192-ctr',
+        'aes256-ctr',
+        'aes128-cbc',
+        'aes192-cbc',
+        'aes256-cbc',
+        '3des-cbc'
+      ],
+      serverHostKey: [
+        'ssh-ed25519',
+        'ecdsa-sha2-nistp256',
+        'ecdsa-sha2-nistp384',
+        'ecdsa-sha2-nistp521',
+        'rsa-sha2-512',
+        'rsa-sha2-256',
+        'ssh-rsa',
+        'ssh-dss'
+      ]
+    }
+  };
+
+  const rawKey = config.private_key || config.private_key_path || config.privateKeyPath || config.key_path || config.keyPath;
+  if (rawKey && typeof rawKey === 'string' && rawKey.trim()) {
+    const trimmed = rawKey.trim();
+    if (trimmed.includes('PRIVATE KEY') || trimmed.includes('PuTTY-User-Key-File') || trimmed.includes('\n')) {
+      connectConfig.privateKey = trimmed;
+      try {
+        const ext = trimmed.includes('PuTTY-User-Key-File') ? 'ppk' : 'pem';
+        const cachedPath = path.join(KEYS_DIR, `${targetId || 'default'}.${ext}`);
+        fs.writeFileSync(cachedPath, trimmed, { mode: 0o600 });
+      } catch {}
+    } else if (fs.existsSync(trimmed)) {
+      try {
+        connectConfig.privateKey = fs.readFileSync(trimmed);
+      } catch (e) {
+        console.warn(`[SSH Desktop] Failed to read private key from ${trimmed}:`, e.message);
+      }
+    } else {
+      const inKeys = path.join(KEYS_DIR, trimmed);
+      const baseInKeys = path.join(KEYS_DIR, path.basename(trimmed));
+      const idKey = path.join(KEYS_DIR, `${targetId || 'default'}.pem`);
+      if (fs.existsSync(inKeys)) {
+        connectConfig.privateKey = fs.readFileSync(inKeys);
+      } else if (fs.existsSync(baseInKeys)) {
+        connectConfig.privateKey = fs.readFileSync(baseInKeys);
+      } else if (fs.existsSync(idKey)) {
+        connectConfig.privateKey = fs.readFileSync(idKey);
+      }
+    }
+
+    if (config.passphrase) {
+      connectConfig.passphrase = config.passphrase;
+    }
+  }
+
+  if (config.password) {
+    connectConfig.password = config.password;
+  }
+
+  return connectConfig;
+}
+
+
     case 'ssh_connect': {
       const { config } = args || {};
       if (!config) throw new Error('Missing SSH connection config');
@@ -734,21 +828,12 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
 
       return new Promise((resolve, reject) => {
         let connected = false;
-        const connectConfig = {
-          host: config.host,
-          port: parseInt(config.port || 22, 10),
-          username: config.username || 'root',
-          readyTimeout: 15000,
-          keepaliveInterval: 10000
-        };
+        const connectConfig = buildSshClientConfig(config, targetId);
 
-        if (config.auth_type === 'key' || config.authType === 'key' || config.private_key || config.key_path) {
-          if (config.private_key) connectConfig.privateKey = config.private_key;
-          else if (config.key_path && fs.existsSync(config.key_path)) connectConfig.privateKey = fs.readFileSync(config.key_path);
-          if (config.passphrase) connectConfig.passphrase = config.passphrase;
-        } else {
-          connectConfig.password = config.password || '';
-        }
+        client.on('keyboard-interactive', (name, instructions, instructionsLang, prompts, finish) => {
+          const pwd = config.password || '';
+          finish(prompts.map(() => pwd));
+        });
 
         client.on('ready', async () => {
           connected = true;
@@ -841,7 +926,11 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
         const timer = setTimeout(() => {
           try { client.end(); } catch {}
           resolve(false);
-        }, 8000);
+        }, 12000);
+        client.on('keyboard-interactive', (name, instructions, instructionsLang, prompts, finish) => {
+          const pwd = config.password || '';
+          finish(prompts.map(() => pwd));
+        });
         client.on('ready', () => {
           clearTimeout(timer);
           try { client.end(); } catch {}
@@ -851,19 +940,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
           clearTimeout(timer);
           resolve(false);
         });
-        const connectConfig = {
-          host: config.host,
-          port: parseInt(config.port || 22, 10),
-          username: config.username || 'root',
-          readyTimeout: 7000
-        };
-        if (config.auth_type === 'key' || config.private_key || config.key_path) {
-          if (config.private_key) connectConfig.privateKey = config.private_key;
-          else if (config.key_path && fs.existsSync(config.key_path)) connectConfig.privateKey = fs.readFileSync(config.key_path);
-          if (config.passphrase) connectConfig.passphrase = config.passphrase;
-        } else {
-          connectConfig.password = config.password || '';
-        }
+        const connectConfig = buildSshClientConfig(config, 'test');
         try { client.connect(connectConfig); } catch { resolve(false); }
       });
     }
@@ -2548,6 +2625,15 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     // ==========================================
     case 'store_list_connections': {
       return readJsonSafe(CONNECTIONS_FILE, []);
+    }
+
+    case 'store_upload_key': {
+      const { filename, content } = args || {};
+      if (!content) throw new Error('Key content is required');
+      const safeName = (filename || `key-${Date.now()}.pem`).replace(/[^a-zA-Z0-9._-]/g, '_');
+      const targetPath = path.join(KEYS_DIR, safeName);
+      fs.writeFileSync(targetPath, content, { mode: 0o600 });
+      return targetPath;
     }
 
     case 'store_save_connection': {
