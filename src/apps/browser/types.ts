@@ -32,6 +32,7 @@ export interface BrowserTab {
   error?: string | null;
   serverHost?: string;
   bytesReceived?: number;
+  executedCommand?: string;
 }
 
 export interface DiscoveredWebService {
