@@ -749,31 +749,35 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
 
     case 'ssh_get_user_privilege': {
       if (!entry) {
+        const localUser = process.env.USER || process.env.LOGNAME || (typeof os.userInfo === 'function' ? os.userInfo().username : 'root') || 'root';
+        const localHome = os.homedir() || (localUser === 'root' ? '/root' : `/home/${localUser}`);
+        const isRoot = localUser === 'root' || (typeof process.getuid === 'function' && process.getuid() === 0);
         return {
-          username: 'root',
-          uid: 0,
-          gid: 0,
-          home_dir: '/root',
-          is_root: true,
-          has_sudo: true,
-          sudo_type: 'root',
-          groups: ['root']
+          username: localUser,
+          uid: isRoot ? 0 : 1000,
+          gid: isRoot ? 0 : 1000,
+          home_dir: localHome,
+          is_root: isRoot,
+          has_sudo: isRoot,
+          sudo_type: isRoot ? 'root' : 'none',
+          groups: [localUser]
         };
       }
-      const script = "id -u; id -un; id -Gn; sudo -n true 2>/dev/null && echo 'SUDO_OK' || echo 'SUDO_NO'";
+      const script = "id -u; id -un; id -Gn; echo \"$HOME\"; sudo -n true 2>/dev/null && echo 'SUDO_OK' || echo 'SUDO_NO'";
       const res = await runRemoteExec(entry.client, script, 8000);
       const lines = res.stdout.trim().split('\n').map(s => s.trim());
       const uid = parseInt(lines[0] || '0', 10);
-      const username = lines[1] || 'root';
+      const username = lines[1] || entry?.config?.username || 'root';
       const groups = (lines[2] || '').split(' ').filter(Boolean);
-      const hasSudo = lines[3] === 'SUDO_OK' || uid === 0;
+      const detectedHome = lines[3] || (uid === 0 || username === 'root' ? '/root' : `/home/${username}`);
+      const hasSudo = lines[4] === 'SUDO_OK' || uid === 0;
 
       return {
         username,
         uid,
         gid: uid,
-        home_dir: uid === 0 ? '/root' : `/home/${username}`,
-        is_root: uid === 0,
+        home_dir: detectedHome,
+        is_root: uid === 0 || username === 'root',
         has_sudo: hasSudo,
         sudo_type: uid === 0 ? 'root' : (hasSudo ? 'passwordless' : 'password'),
         groups
