@@ -243,17 +243,6 @@ export default function App() {
 
   return (
     <div className={`w-screen h-screen overflow-hidden bg-[var(--bg)] text-[var(--text)] flex flex-col ${isLight ? 'theme-light' : 'theme-dark'} ${launchingAppId ? 'is-app-launching' : ''}`}>
-      {!isTauriNative && (
-        <div className="bg-amber-950/90 border-b border-amber-500/40 text-amber-200 text-xs px-4 py-1.5 flex items-center justify-between shrink-0 z-[999999] select-none backdrop-blur-md">
-          <div className="flex items-center space-x-2">
-            <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
-            <span>
-              <strong>Web Browser Preview (http://localhost:1420):</strong> Real SSH sockets & raw PTY require the native desktop runtime. Please launch <strong>SSH Desktop (.exe)</strong> or run <code className="bg-black/30 px-1 py-0.5 rounded">npm run tauri:dev</code>.
-            </span>
-          </div>
-          <span className="text-amber-400 font-mono text-[10px] hidden sm:inline-block">Desktop App (.exe) is active</span>
-        </div>
-      )}
       <div className="flex-1 w-full h-full overflow-hidden relative">
         {activeConnectionId ? <Desktop /> : <ConnectionScreen />}
         <DisconnectAlertModal />
