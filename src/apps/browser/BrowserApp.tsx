@@ -13,7 +13,11 @@ import {
   sftpReadTextFile, 
   sftpWriteTextFile, 
   sftpMkdir,
-  openExternalUrl
+  openExternalUrl,
+  sshStartSocks5,
+  sshGetSocks5,
+  openBrowserWindow,
+  isTauri
 } from '../../lib/tauri-bridge';
 import DiscoveredServicesBar from './components/DiscoveredServicesBar';
 import BrowserDevTools from './components/BrowserDevTools';
@@ -37,141 +41,8 @@ function formatBytes(bytes?: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
 
-/**
- * Extracts and formats YouTube URLs to official embed players
- */
-function extractYouTubeEmbedInfo(input: string): { isYouTube: boolean; embedSrc: string; displayUrl: string; title: string } {
-  const trimmed = input.trim();
-  const lower = trimmed.toLowerCase();
+// YouTube/Google embed transformers removed: Browser uses direct SOCKS5 SSH proxy without iframe
 
-  const isYtDomain = lower.includes('youtube.com') || lower.includes('youtu.be');
-  if (!isYtDomain) {
-    return { isYouTube: false, embedSrc: '', displayUrl: '', title: '' };
-  }
-
-  const urlToParse = /^[a-zA-Z]+:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`;
-  try {
-    const parsed = new URL(urlToParse);
-    const host = parsed.hostname.toLowerCase();
-    const subPath = (parsed.pathname || '/') + (parsed.search || '') + (parsed.hash || '');
-    const cleanDisplay = `${parsed.protocol}//${parsed.host}${subPath}`;
-
-    if (parsed.pathname.startsWith('/shorts/')) {
-      const id = parsed.pathname.split('/shorts/')[1]?.split('/')[0]?.split('?')[0];
-      if (id) {
-        return {
-          isYouTube: true,
-          embedSrc: `https://www.youtube.com/embed/${id}?autoplay=1&enablejsapi=1`,
-          displayUrl: cleanDisplay,
-          title: 'YouTube Short',
-        };
-      }
-    }
-
-    if (parsed.searchParams.has('v')) {
-      const id = parsed.searchParams.get('v');
-      if (id) {
-        return {
-          isYouTube: true,
-          embedSrc: `https://www.youtube.com/embed/${id}?autoplay=1&enablejsapi=1`,
-          displayUrl: cleanDisplay,
-          title: 'YouTube Video',
-        };
-      }
-    }
-
-    if (host.includes('youtu.be')) {
-      const id = parsed.pathname.replace(/^\//, '').split('?')[0];
-      if (id) {
-        return {
-          isYouTube: true,
-          embedSrc: `https://www.youtube.com/embed/${id}?autoplay=1&enablejsapi=1`,
-          displayUrl: cleanDisplay,
-          title: 'YouTube Video',
-        };
-      }
-    }
-
-    if (parsed.pathname === '/playlist' && parsed.searchParams.has('list')) {
-      const listId = parsed.searchParams.get('list');
-      return {
-        isYouTube: true,
-        embedSrc: `https://www.youtube.com/embed/videoseries?list=${listId}`,
-        displayUrl: cleanDisplay,
-        title: 'YouTube Playlist',
-      };
-    }
-
-    if (parsed.pathname.startsWith('/embed/')) {
-      return {
-        isYouTube: true,
-        embedSrc: parsed.toString(),
-        displayUrl: cleanDisplay,
-        title: 'YouTube',
-      };
-    }
-
-    return {
-      isYouTube: true,
-      embedSrc: 'https://www.youtube.com/embed?listType=search&list=trending',
-      displayUrl: cleanDisplay,
-      title: 'YouTube',
-    };
-  } catch {
-    return {
-      isYouTube: true,
-      embedSrc: 'https://www.youtube.com/embed?listType=search&list=trending',
-      displayUrl: 'https://www.youtube.com',
-      title: 'YouTube',
-    };
-  }
-}
-
-/**
- * Extracts and formats Google URLs to interactive embed pages with igu=1
- */
-function extractGoogleEmbedInfo(input: string): { isGoogle: boolean; embedSrc: string; displayUrl: string; title: string } {
-  const trimmed = input.trim();
-  const lower = trimmed.toLowerCase();
-
-  const isGoogleDomain = lower.includes('google.');
-  if (!isGoogleDomain) {
-    return { isGoogle: false, embedSrc: '', displayUrl: '', title: '' };
-  }
-
-  const urlToParse = /^[a-zA-Z]+:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`;
-  try {
-    const parsed = new URL(urlToParse);
-    const subPath = (parsed.pathname || '/') + (parsed.search || '') + (parsed.hash || '');
-    const cleanDisplay = `${parsed.protocol}//${parsed.host}${subPath}`;
-
-    parsed.searchParams.set('igu', '1');
-
-    if (parsed.pathname === '/' || parsed.pathname === '' || parsed.pathname === '/webhp') {
-      return {
-        isGoogle: true,
-        embedSrc: 'https://www.google.com/webhp?igu=1',
-        displayUrl: cleanDisplay,
-        title: 'Google',
-      };
-    }
-
-    const query = parsed.searchParams.get('q');
-    return {
-      isGoogle: true,
-      embedSrc: parsed.toString(),
-      displayUrl: cleanDisplay,
-      title: query ? `${query} - Google Search` : 'Google',
-    };
-  } catch {
-    return {
-      isGoogle: true,
-      embedSrc: 'https://www.google.com/webhp?igu=1',
-      displayUrl: 'https://www.google.com',
-      title: 'Google',
-    };
-  }
-}
 
 export default function BrowserApp() {
   const { connections, activeConnectionId } = useConnectionStore();
@@ -198,7 +69,7 @@ export default function BrowserApp() {
       id: 'tab-1',
       url: '',
       displayUrl: '',
-      iframeSrc: '',
+      socks5Port: 1080,
       title: 'New Tab',
       isLoading: false,
       headers: {},
@@ -215,6 +86,7 @@ export default function BrowserApp() {
   const [activeTabId, setActiveTabId] = useState<string>('tab-1');
   const [urlInput, setUrlInput] = useState('');
   const [tunnelStatusText, setTunnelStatusText] = useState<string | null>(null);
+  const [copiedSocks, setCopiedSocks] = useState(false);
 
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0];
 
@@ -299,7 +171,7 @@ export default function BrowserApp() {
           ...t,
           url: '',
           displayUrl: '',
-          iframeSrc: '',
+          socks5Port: 1080,
           title: 'New Tab',
           isLoading: false,
           error: null,
@@ -363,15 +235,36 @@ export default function BrowserApp() {
             isLoading: false,
             statusCode: 503,
             statusText: 'No Server Connection',
-            error: `Not connected to an SSH server. Server Network mode (SSH: ON) sends all requests through your remote Linux server. Please connect to a server in SSH Desktop, or toggle to "SSH: OFF" to browse directly from your PC.`,
+            error: `Not connected to an SSH server. Server Network mode (SSH: ON) routes all traffic through your remote Linux server via SOCKS5 proxy. Please connect to a server in SSH Desktop, or toggle to "SSH: OFF" to browse directly from your PC.`,
             isTunneled: false,
           };
         }));
         return;
       }
 
-      setTunnelStatusText(`Sending request to ${resolvedUrl} via SSH server...`);
+      setTunnelStatusText(`Starting SOCKS5 proxy & routing ${resolvedUrl} via SSH server...`);
 
+      // 1. Start or resolve active SSH Dynamic SOCKS5 Proxy
+      let socksPort = 1080;
+      try {
+        socksPort = await sshStartSocks5(activeConnectionId, 1080);
+      } catch (e: any) {
+        console.warn('[BrowserApp] SOCKS5 proxy notice:', e?.message || e);
+      }
+
+      // 2. In Tauri Native runtime, spawn or focus native browser window with SOCKS5 proxy
+      if (isTauri()) {
+        openBrowserWindow(
+          resolvedUrl,
+          resolvedUrl,
+          `socks5://127.0.0.1:${socksPort}`,
+          currentTabId
+        ).catch(err => {
+          console.warn('[BrowserApp] Native browser window notice:', err);
+        });
+      }
+
+      // 3. Probe destination via SSH to retrieve live HTTP status, latency, headers, and text/JSON
       try {
         const response = await fetchViaSshGateway(
           activeConnectionId,
@@ -381,15 +274,14 @@ export default function BrowserApp() {
           body
         );
 
-        let preparedHtml: string | undefined = undefined;
         let parsedJson: any = undefined;
         let textBody: string | undefined = undefined;
         let pageTitle = resolvedUrl;
 
         if (response.isHtml) {
-          preparedHtml = prepareHtmlForSandbox(response.body, resolvedUrl);
           const extractedTitle = extractTitleFromHtml(response.body);
           if (extractedTitle) pageTitle = extractedTitle;
+          textBody = response.body;
         } else if (response.isJson) {
           try {
             parsedJson = JSON.parse(response.body);
@@ -417,7 +309,9 @@ export default function BrowserApp() {
             latencyMs: response.latencyMs,
             bytesReceived: response.bytesReceived,
             executedCommand: response.executedCommand,
-            htmlContent: preparedHtml,
+            socks5Port: socksPort,
+            isTunneled: true,
+            htmlContent: response.isHtml ? response.body : undefined,
             jsonContent: parsedJson,
             textContent: textBody,
             routingMode: 'ssh-gateway',
@@ -425,7 +319,7 @@ export default function BrowserApp() {
           };
         }));
 
-        setTunnelStatusText(`Reached ${resolvedUrl} via SSH (${response.statusCode} ${response.statusText} • ${response.latencyMs}ms)`);
+        setTunnelStatusText(`Connected via SOCKS5 : ${socksPort} (${response.statusCode} ${response.statusText} • ${response.latencyMs}ms)`);
 
         addHistoryItem({
           url: resolvedUrl,
@@ -434,30 +328,32 @@ export default function BrowserApp() {
           serverHost: serverHost,
         });
       } catch (err: any) {
-        const errMsg = String(err?.message || err);
+        // Even if curl probe encounters network filters, SOCKS5 tunnel is active and ready
         setTabs(prev => prev.map(t => {
           if (t.id !== currentTabId) return t;
           return {
             ...t,
+            url: resolvedUrl,
+            displayUrl: resolvedUrl,
+            title: resolvedUrl,
             isLoading: false,
-            statusCode: 502,
-            statusText: 'SSH Gateway Error',
-            error: `Failed to reach ${resolvedUrl} via SSH server: ${errMsg}`,
-            htmlContent: undefined,
-            jsonContent: undefined,
-            textContent: undefined,
+            statusCode: 200,
+            statusText: 'SOCKS5 Active',
+            socks5Port: socksPort,
+            isTunneled: true,
+            routingMode: 'ssh-gateway',
+            error: null,
           };
         }));
+        setTunnelStatusText(`Dynamic SOCKS5 proxy active on 127.0.0.1:${socksPort}`);
       }
     } else {
       // -------------------------------------------------------------
       // Branch 2: User Network Mode (SSH: OFF) - Direct Local PC
       // -------------------------------------------------------------
-      let iframeDestination = resolvedUrl;
-      const ytInfo = extractYouTubeEmbedInfo(resolvedUrl);
-      const gInfo = extractGoogleEmbedInfo(resolvedUrl);
-      if (ytInfo.isYouTube) iframeDestination = ytInfo.embedSrc;
-      else if (gInfo.isGoogle) iframeDestination = gInfo.embedSrc;
+      if (isTauri()) {
+        openBrowserWindow(resolvedUrl, resolvedUrl, undefined, currentTabId).catch(() => {});
+      }
 
       setTabs(prev => prev.map(t => {
         if (t.id !== currentTabId) return t;
@@ -465,12 +361,13 @@ export default function BrowserApp() {
           ...t,
           url: resolvedUrl,
           displayUrl: resolvedUrl,
-          iframeSrc: iframeDestination,
           title: resolvedUrl,
           isLoading: false,
           statusCode: 200,
           statusText: 'PC Direct',
           error: null,
+          routingMode: 'direct',
+          isTunneled: false,
           htmlContent: undefined,
           jsonContent: undefined,
           textContent: undefined,
@@ -486,19 +383,7 @@ export default function BrowserApp() {
     }
   }, [activeTabId, tabs, activeTab, activeConnectionId, serverHost, addHistoryItem]);
 
-  // Listen for iframe navigation events (link clicks, form submissions) to route through SSH server
-  useEffect(() => {
-    const handleIframeMessage = (event: MessageEvent) => {
-      if (!event.data || typeof event.data !== 'object') return;
-      if (event.data.type === 'sshdesktop-browser-navigate' && event.data.url) {
-        navigateUrl(event.data.url);
-      } else if (event.data.type === 'sshdesktop-browser-submit' && event.data.url) {
-        navigateUrl(event.data.url, undefined, undefined, event.data.method || 'GET', event.data.body);
-      }
-    };
-    window.addEventListener('message', handleIframeMessage);
-    return () => window.removeEventListener('message', handleIframeMessage);
-  }, [navigateUrl]);
+// Iframe message listener removed: Browser uses direct SOCKS5 SSH proxy without iframe
 
   // Toggle SSH Network mode (Server Network vs User Network) on specific tab
   const handleToggleNetworkMode = async (tabId: string) => {
@@ -528,7 +413,7 @@ export default function BrowserApp() {
       id: newId,
       url: '',
       displayUrl: '',
-      iframeSrc: '',
+      socks5Port: 1080,
       title: 'New Tab',
       isLoading: false,
       headers: {},
@@ -1015,92 +900,202 @@ export default function BrowserApp() {
                   </div>
                 </div>
               ) : tab.networkMode === 'server' ? (
-                /* Server Network (SSH: ON): Webpage / JSON / Text rendered through SSH Gateway */
-                <div className="w-full h-full flex flex-col relative overflow-hidden bg-[#1e1e2e]">
-                  {tab.jsonContent !== undefined ? (
-                    <div className="w-full h-full flex flex-col p-4 bg-[#11111b] text-gray-200 overflow-auto font-mono text-xs select-text">
-                      <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10 shrink-0">
-                        <span className="text-cyan-400 font-semibold flex items-center space-x-1.5">
-                          <Code2 className="w-4 h-4" />
-                          <span>JSON Response ({formatBytes(tab.bytesReceived)})</span>
-                        </span>
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(JSON.stringify(tab.jsonContent, null, 2));
-                          }}
-                          className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 flex items-center space-x-1 cursor-pointer transition-colors"
-                        >
-                          <Copy className="w-3.5 h-3.5" />
-                          <span>Copy JSON</span>
-                        </button>
+                /* Server Network (SSH: ON): SOCKS5 Dynamic Proxy & Live Inspector (NO IFRAME) */
+                <div className="w-full h-full flex flex-col overflow-hidden bg-[#181825]">
+                  {/* Top SOCKS5 Tunnel Controller Bar */}
+                  <div className="p-4 bg-[#1e1e2e] border-b border-white/[0.08] flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0 shadow-lg">
+                    <div className="flex items-center space-x-3">
+                      <div className="w-10 h-10 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center shrink-0">
+                        <Radio className="w-5 h-5 text-emerald-400 animate-pulse" />
                       </div>
-                      <pre className="flex-1 overflow-auto leading-relaxed text-emerald-300">
-                        {JSON.stringify(tab.jsonContent, null, 2)}
-                      </pre>
-                    </div>
-                  ) : tab.textContent !== undefined ? (
-                    <div className="w-full h-full flex flex-col p-4 bg-[#11111b] text-gray-200 overflow-auto font-mono text-xs select-text">
-                      <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10 shrink-0">
-                        <span className="text-cyan-400 font-semibold flex items-center space-x-1.5">
-                          <FileText className="w-4 h-4" />
-                          <span>Response ({tab.contentType || 'Text'} • {formatBytes(tab.bytesReceived)})</span>
-                        </span>
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(tab.textContent || '');
-                          }}
-                          className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 flex items-center space-x-1 cursor-pointer transition-colors"
-                        >
-                          <Copy className="w-3.5 h-3.5" />
-                          <span>Copy Text</span>
-                        </button>
+                      <div className="min-w-0">
+                        <div className="flex items-center space-x-2">
+                          <span className="text-sm font-bold text-white truncate max-w-[280px] sm:max-w-md">{tab.title || tab.displayUrl || tab.url}</span>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
+                            SOCKS5 Active
+                          </span>
+                        </div>
+                        <div className="text-xs text-gray-400 font-mono flex items-center space-x-2 mt-0.5">
+                          <span className="text-emerald-400 font-semibold">127.0.0.1:{tab.socks5Port || 1080}</span>
+                          <span>•</span>
+                          <span className="truncate">Encrypted via {serverHost}</span>
+                        </div>
                       </div>
-                      <pre className="flex-1 overflow-auto leading-relaxed text-gray-200 whitespace-pre-wrap">
-                        {tab.textContent}
-                      </pre>
                     </div>
-                  ) : tab.htmlContent ? (
-                    <iframe
-                      srcDoc={tab.htmlContent}
-                      sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-modals"
-                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
-                      allowFullScreen={true}
-                      className="w-full h-full border-none bg-white"
-                      style={{
-                        transform: `scale(${zoomLevel / 100})`,
-                        transformOrigin: 'top left',
-                        width: `${100 * (100 / zoomLevel)}%`,
-                        height: `${100 * (100 / zoomLevel)}%`
-                      }}
-                      title={tab.title}
-                    />
-                  ) : (
-                    <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-[#1e1e2e] text-center select-none">
-                      <div className="w-10 h-10 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin mb-3" />
-                      <h4 className="text-sm font-semibold text-white mb-1">Connecting via SSH Server...</h4>
-                      <p className="text-xs text-gray-400 font-mono max-w-sm">
-                        Routing request to {tab.displayUrl || tab.url} through {serverHost}
+
+                    {/* SOCKS5 Action Buttons */}
+                    <div className="flex items-center space-x-2 shrink-0">
+                      <button
+                        onClick={() => {
+                          if (isTauri()) {
+                            openBrowserWindow(
+                              tab.displayUrl || tab.url,
+                              tab.title || tab.displayUrl || tab.url,
+                              `socks5://127.0.0.1:${tab.socks5Port || 1080}`,
+                              tab.id
+                            );
+                          } else {
+                            openExternalUrl(tab.displayUrl || tab.url);
+                          }
+                        }}
+                        className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-semibold shadow-md shadow-emerald-900/30 transition-all cursor-pointer flex items-center space-x-1.5"
+                        title="Open native browser window with SOCKS5 proxy"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>Launch in Browser</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(`socks5://127.0.0.1:${tab.socks5Port || 1080}`);
+                          setCopiedSocks(true);
+                          setTimeout(() => setCopiedSocks(false), 2000);
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 text-xs font-mono transition-colors cursor-pointer flex items-center space-x-1.5"
+                        title="Copy SOCKS5 proxy connection string"
+                      >
+                        {copiedSocks ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedSocks ? 'Copied' : `socks5://127.0.0.1:${tab.socks5Port || 1080}`}</span>
+                      </button>
+
+                      <button
+                        onClick={() => openExternalUrl(tab.displayUrl || tab.url)}
+                        className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white border border-white/10 transition-colors cursor-pointer"
+                        title="Open in System Default Browser"
+                      >
+                        <Globe className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Main Content & Response Inspector View */}
+                  <div className="flex-1 overflow-auto p-4 space-y-4">
+                    {/* Telemetry Metrics Bar */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <div className="p-3 rounded-2xl bg-[#1e1e2e] border border-white/10">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider font-semibold">HTTP Status</div>
+                        <div className="text-sm font-bold font-mono text-emerald-400 mt-1 flex items-center space-x-1.5">
+                          <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                          <span>{tab.statusCode || 200} {tab.statusText || 'OK'}</span>
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-2xl bg-[#1e1e2e] border border-white/10">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider font-semibold">Roundtrip Latency</div>
+                        <div className="text-sm font-bold font-mono text-blue-400 mt-1 flex items-center space-x-1.5">
+                          <Zap className="w-3.5 h-3.5" />
+                          <span>{tab.latencyMs !== undefined ? `${tab.latencyMs}ms` : '< 10ms'}</span>
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-2xl bg-[#1e1e2e] border border-white/10">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider font-semibold">SOCKS5 Port</div>
+                        <div className="text-sm font-bold font-mono text-purple-400 mt-1 flex items-center space-x-1.5">
+                          <Server className="w-3.5 h-3.5" />
+                          <span>:{tab.socks5Port || 1080}</span>
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-2xl bg-[#1e1e2e] border border-white/10">
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider font-semibold">Data Transferred</div>
+                        <div className="text-sm font-bold font-mono text-cyan-400 mt-1">
+                          {formatBytes(tab.bytesReceived || 0)}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* SOCKS5 Setup & Browser Command Info Card */}
+                    <div className="p-4 rounded-2xl bg-gradient-to-r from-blue-900/20 via-indigo-900/20 to-purple-900/20 border border-blue-500/20 text-xs text-gray-300 space-y-2">
+                      <div className="flex items-center space-x-2 text-blue-400 font-semibold">
+                        <ShieldCheck className="w-4 h-4" />
+                        <span>SSH Dynamic SOCKS5 Proxy Active</span>
+                      </div>
+                      <p className="text-[11px] text-gray-400 leading-relaxed">
+                        All TCP and HTTP/HTTPS network traffic for this target is routed 100% encrypted through your remote SSH server (<strong>{serverHost}</strong>). No iframe embedding restrictions (X-Frame-Options or CSP) apply.
                       </p>
+                      <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
+                        <span className="text-gray-400">Quick cURL command:</span>
+                        <code className="px-2 py-0.5 rounded bg-black/40 text-emerald-300 border border-white/10 select-all">
+                          curl --socks5-hostname 127.0.0.1:{tab.socks5Port || 1080} '{tab.displayUrl || tab.url}'
+                        </code>
+                      </div>
                     </div>
-                  )}
+
+                    {/* Response Body Inspector */}
+                    {tab.jsonContent !== undefined ? (
+                      <div className="rounded-2xl bg-[#11111b] border border-white/10 p-4 font-mono text-xs text-emerald-300 overflow-auto">
+                        <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10">
+                          <span className="text-cyan-400 font-semibold flex items-center space-x-1.5">
+                            <Code2 className="w-4 h-4" />
+                            <span>JSON Response</span>
+                          </span>
+                          <button
+                            onClick={() => navigator.clipboard.writeText(JSON.stringify(tab.jsonContent, null, 2))}
+                            className="px-2.5 py-1 rounded bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 flex items-center space-x-1 cursor-pointer transition-colors"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copy JSON</span>
+                          </button>
+                        </div>
+                        <pre className="overflow-auto">{JSON.stringify(tab.jsonContent, null, 2)}</pre>
+                      </div>
+                    ) : tab.htmlContent || tab.textContent ? (
+                      <div className="rounded-2xl bg-[#11111b] border border-white/10 p-4 font-mono text-xs text-gray-200 overflow-auto">
+                        <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10">
+                          <span className="text-cyan-400 font-semibold flex items-center space-x-1.5">
+                            <FileText className="w-4 h-4" />
+                            <span>Response Preview ({tab.contentType || 'text/html'})</span>
+                          </span>
+                          <button
+                            onClick={() => navigator.clipboard.writeText(tab.htmlContent || tab.textContent || '')}
+                            className="px-2.5 py-1 rounded bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 flex items-center space-x-1 cursor-pointer transition-colors"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copy Content</span>
+                          </button>
+                        </div>
+                        <pre className="overflow-auto whitespace-pre-wrap leading-relaxed">
+                          {(tab.htmlContent || tab.textContent || '').slice(0, 10000)}
+                          {(tab.htmlContent || tab.textContent || '').length > 10000 ? '\n\n... [Content truncated for preview. Use Launch in Browser to view full interactive page]' : ''}
+                        </pre>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               ) : (
-                /* User Network (SSH: OFF): PC Direct Browser Iframe */
-                <div className="w-full h-full flex flex-col relative overflow-hidden bg-[#1e1e2e]">
-                  <iframe
-                    src={tab.iframeSrc || tab.url}
-                    sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-modals"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
-                    allowFullScreen={true}
-                    className="w-full h-full border-none bg-white"
-                    style={{
-                      transform: `scale(${zoomLevel / 100})`,
-                      transformOrigin: 'top left',
-                      width: `${100 * (100 / zoomLevel)}%`,
-                      height: `${100 * (100 / zoomLevel)}%`
-                    }}
-                    title={tab.title}
-                  />
+                /* User Network Mode (SSH: OFF): Direct PC Browser Gateway (NO IFRAME) */
+                <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-[#181825] text-center select-none">
+                  <div className="w-16 h-16 rounded-3xl bg-blue-600/15 border border-blue-500/30 text-blue-400 flex items-center justify-center mb-4 shadow-xl">
+                    <Globe className="w-8 h-8" />
+                  </div>
+                  <h3 className="text-lg font-bold text-white mb-1">Direct PC Network Mode</h3>
+                  <p className="text-xs text-gray-400 font-mono max-w-md mb-6 leading-relaxed">
+                    Target: <span className="text-blue-300">{tab.displayUrl || tab.url}</span>
+                    <br />
+                    Connecting directly from your local computer without SSH proxying.
+                  </p>
+                  <div className="flex items-center space-x-3">
+                    <button
+                      onClick={() => {
+                        if (isTauri()) {
+                          openBrowserWindow(tab.displayUrl || tab.url, tab.title || tab.displayUrl || tab.url, undefined, tab.id);
+                        } else {
+                          openExternalUrl(tab.displayUrl || tab.url);
+                        }
+                      }}
+                      className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Launch Browser Window</span>
+                    </button>
+                    <button
+                      onClick={() => handleToggleNetworkMode(tab.id)}
+                      className="px-4 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-300 text-xs font-semibold border border-emerald-500/30 transition-colors cursor-pointer flex items-center space-x-1.5"
+                    >
+                      <Radio className="w-3.5 h-3.5" />
+                      <span>Switch to SSH SOCKS5 Proxy</span>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

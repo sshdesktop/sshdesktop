@@ -6,7 +6,6 @@ export interface BrowserTab {
   id: string;
   url: string;
   displayUrl: string;
-  iframeSrc?: string;
   tunnelPort?: number;
   socks5Port?: number;
   isTunneled?: boolean;

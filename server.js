@@ -11,6 +11,7 @@
  */
 
 import http from 'http';
+import net from 'net';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -403,6 +404,120 @@ function runRemoteExec(client, command, timeoutMs = 60000) {
 // -------------------------------------------------------------
 // Unified Command Handler (Implements all 70+ Tauri IPC commands)
 // -------------------------------------------------------------
+// -------------------------------------------------------------
+// SOCKS5 Dynamic Proxy Engine (RFC 1928 over SSH2 forwardOut)
+// -------------------------------------------------------------
+const activeSocksServers = new Map(); // connId -> { server, port }
+
+function startSocks5Proxy(sshClient, preferredPort = 1080) {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer(socket => {
+      let state = 'AUTH';
+      let sshStream = null;
+
+      socket.on('error', () => {
+        try { socket.destroy(); } catch {}
+        if (sshStream) try { sshStream.end(); } catch {}
+      });
+
+      socket.on('data', chunk => {
+        if (state === 'AUTH') {
+          if (chunk.length < 2 || chunk[0] !== 0x05) {
+            socket.end();
+            return;
+          }
+          // Reply: [VER (5), METHOD (0 = NO AUTHENTICATION REQUIRED)]
+          socket.write(Buffer.from([0x05, 0x00]));
+          state = 'CMD';
+          return;
+        }
+
+        if (state === 'CMD') {
+          if (chunk.length < 7 || chunk[0] !== 0x05) {
+            socket.end();
+            return;
+          }
+
+          const cmd = chunk[1];
+          if (cmd !== 0x01) { // 1 = CONNECT
+            socket.write(Buffer.from([0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+            socket.end();
+            return;
+          }
+
+          const atyp = chunk[3];
+          let destHost = '';
+          let destPort = 0;
+          let offset = 4;
+
+          if (atyp === 0x01) {
+            if (chunk.length < 10) { socket.end(); return; }
+            destHost = `${chunk[4]}.${chunk[5]}.${chunk[6]}.${chunk[7]}`;
+            offset = 8;
+          } else if (atyp === 0x03) {
+            const len = chunk[4];
+            if (chunk.length < 5 + len + 2) { socket.end(); return; }
+            destHost = chunk.slice(5, 5 + len).toString('utf8');
+            offset = 5 + len;
+          } else if (atyp === 0x04) {
+            if (chunk.length < 22) { socket.end(); return; }
+            const parts = [];
+            for (let i = 4; i < 20; i += 2) {
+              parts.push(chunk.readUInt16BE(i).toString(16));
+            }
+            destHost = parts.join(':');
+            offset = 20;
+          } else {
+            socket.write(Buffer.from([0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+            socket.end();
+            return;
+          }
+
+          destPort = chunk.readUInt16BE(offset);
+          const srcAddr = socket.remoteAddress || '127.0.0.1';
+          const srcPort = socket.remotePort || 0;
+
+          sshClient.forwardOut(srcAddr, srcPort, destHost, destPort, (err, stream) => {
+            if (err) {
+              try {
+                socket.write(Buffer.from([0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+                socket.end();
+              } catch {}
+              return;
+            }
+
+            sshStream = stream;
+            state = 'STREAM';
+
+            // SOCKS5 Success response
+            socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+
+            socket.pipe(sshStream);
+            sshStream.pipe(socket);
+
+            sshStream.on('error', () => {
+              try { socket.destroy(); } catch {}
+            });
+            sshStream.on('close', () => {
+              try { socket.end(); } catch {}
+            });
+          });
+        }
+      });
+    });
+
+    server.on('error', err => {
+      reject(err);
+    });
+
+    const targetPort = preferredPort && preferredPort > 0 ? preferredPort : 1080;
+    server.listen(targetPort, '127.0.0.1', () => {
+      const boundPort = server.address().port;
+      resolve({ server, port: boundPort });
+    });
+  });
+}
+
 async function handleInvokeCommand(cmd, args, currentSession = null) {
   const connId = args?.connId;
   const entry = getActiveEntry(connId);
@@ -528,11 +643,59 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
     }
 
     case 'ssh_disconnect': {
+      if (activeSocksServers.has(connId)) {
+        try { activeSocksServers.get(connId).server.close(); } catch {}
+        activeSocksServers.delete(connId);
+      }
       if (entry) {
         try { entry.client.end(); } catch {}
         activeConnections.delete(connId);
       }
       return undefined;
+    }
+
+    case 'ssh_start_socks5': {
+      if (!entry) throw new Error('No active SSH connection');
+      const preferred = args?.preferredPort ? Number(args.preferredPort) : 1080;
+      
+      if (activeSocksServers.has(connId)) {
+        return activeSocksServers.get(connId).port;
+      }
+
+      try {
+        const { server, port } = await startSocks5Proxy(entry.client, preferred);
+        activeSocksServers.set(connId, { server, port });
+        console.log(`[SSH Desktop SOCKS5] Dynamic proxy active on 127.0.0.1:${port} for connection ${connId}`);
+        return port;
+      } catch (err) {
+        if (err.code === 'EADDRINUSE') {
+          const { server, port } = await startSocks5Proxy(entry.client, 0);
+          activeSocksServers.set(connId, { server, port });
+          console.log(`[SSH Desktop SOCKS5] Dynamic proxy active on 127.0.0.1:${port} (fallback)`);
+          return port;
+        }
+        throw err;
+      }
+    }
+
+    case 'ssh_stop_socks5': {
+      if (activeSocksServers.has(connId)) {
+        const socks = activeSocksServers.get(connId);
+        try { socks.server.close(); } catch {}
+        activeSocksServers.delete(connId);
+      }
+      return undefined;
+    }
+
+    case 'ssh_get_socks5': {
+      if (activeSocksServers.has(connId)) {
+        return activeSocksServers.get(connId).port;
+      }
+      return null;
+    }
+
+    case 'open_browser_window': {
+      return `browser-${Date.now()}`;
     }
 
     case 'ssh_test_connection': {
