@@ -17,6 +17,7 @@ import {
   sshStartSocks5,
   sshGetSocks5,
   openBrowserWindow,
+  closeBrowserWindow,
   isTauri
 } from '../../lib/tauri-bridge';
 import DiscoveredServicesBar from './components/DiscoveredServicesBar';
@@ -244,7 +245,20 @@ export default function BrowserApp() {
       try {
         socksPort = await sshStartSocks5(activeConnectionId, 1080);
       } catch (e: any) {
-        console.warn('[BrowserApp] SOCKS5 proxy notice:', e?.message || e);
+        const errorMsg = e?.message || String(e);
+        console.warn('[BrowserApp] SOCKS5 proxy start notice:', errorMsg);
+        setTabs(prev => prev.map(t => {
+          if (t.id !== currentTabId) return t;
+          return {
+            ...t,
+            isLoading: false,
+            statusCode: 502,
+            statusText: 'Proxy Failed',
+            error: `Failed to initialize SSH SOCKS5 proxy: ${errorMsg}. Please ensure your SSH connection is active.`,
+            isTunneled: false,
+          };
+        }));
+        return;
       }
 
       // 2. In Tauri Native runtime, spawn or focus native browser window with SOCKS5 proxy
@@ -375,6 +389,9 @@ export default function BrowserApp() {
   const handleCloseTab = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (tabs.length === 1) return;
+    if (isTauri()) {
+      closeBrowserWindow(id).catch(() => {});
+    }
     const remaining = tabs.filter(t => t.id !== id);
     setTabs(remaining);
     if (activeTabId === id) {
@@ -867,12 +884,20 @@ export default function BrowserApp() {
                     {/* SOCKS5 Action Buttons */}
                     <div className="flex items-center space-x-2 shrink-0">
                       <button
-                        onClick={() => {
+                        onClick={async () => {
                           if (isTauri()) {
+                            let port = tab.socks5Port || 1080;
+                            if (activeConnectionId) {
+                              try {
+                                port = await sshStartSocks5(activeConnectionId, port);
+                              } catch (err) {
+                                console.warn('[BrowserApp] Failed to verify SOCKS5 port:', err);
+                              }
+                            }
                             openBrowserWindow(
                               tab.displayUrl || tab.url,
                               tab.title || tab.displayUrl || tab.url,
-                              `socks5://127.0.0.1:${tab.socks5Port || 1080}`,
+                              `socks5://127.0.0.1:${port}`,
                               tab.id
                             );
                           } else {
