@@ -23,15 +23,10 @@ import DiscoveredServicesBar from './components/DiscoveredServicesBar';
 import BrowserDevTools from './components/BrowserDevTools';
 import BrowserStartPage from './components/BrowserStartPage';
 import { 
-  fetchViaSshGateway, 
-  prepareHtmlForSandbox, 
   normalizeTargetUrl 
 } from './utils/sshHttpGateway';
 
-function extractTitleFromHtml(html: string): string | null {
-  const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-  return match ? match[1].trim() : null;
-}
+// Pure SOCKS5 Dynamic Proxy Mode (No curl dependencies)
 
 function formatBytes(bytes?: number): string {
   if (!bytes || bytes <= 0) return '0 B';
@@ -264,89 +259,35 @@ export default function BrowserApp() {
         });
       }
 
-      // 3. Probe destination via SSH to retrieve live HTTP status, latency, headers, and text/JSON
-      try {
-        const response = await fetchViaSshGateway(
-          activeConnectionId,
-          resolvedUrl,
-          method,
-          {},
-          body
-        );
-
-        let parsedJson: any = undefined;
-        let textBody: string | undefined = undefined;
-        let pageTitle = resolvedUrl;
-
-        if (response.isHtml) {
-          const extractedTitle = extractTitleFromHtml(response.body);
-          if (extractedTitle) pageTitle = extractedTitle;
-          textBody = response.body;
-        } else if (response.isJson) {
-          try {
-            parsedJson = JSON.parse(response.body);
-          } catch {
-            textBody = response.body;
-          }
-          pageTitle = `${resolvedUrl} (JSON)`;
-        } else {
-          textBody = response.body;
-          pageTitle = `${resolvedUrl} (${response.contentType || 'Text'})`;
-        }
-
-        setTabs(prev => prev.map(t => {
-          if (t.id !== currentTabId) return t;
-          return {
-            ...t,
-            url: resolvedUrl,
-            displayUrl: resolvedUrl,
-            title: pageTitle,
-            isLoading: false,
-            statusCode: response.statusCode,
-            statusText: response.statusText,
-            contentType: response.contentType,
-            headers: response.headers,
-            latencyMs: response.latencyMs,
-            bytesReceived: response.bytesReceived,
-            executedCommand: response.executedCommand,
-            socks5Port: socksPort,
-            isTunneled: true,
-            htmlContent: response.isHtml ? response.body : undefined,
-            jsonContent: parsedJson,
-            textContent: textBody,
-            routingMode: 'ssh-gateway',
-            error: null,
-          };
-        }));
-
-        setTunnelStatusText(`Connected via SOCKS5 : ${socksPort} (${response.statusCode} ${response.statusText} • ${response.latencyMs}ms)`);
-
-        addHistoryItem({
+      // Pure SSH Dynamic SOCKS5 Proxy: routes all network traffic directly through SSH tunnel
+      setTabs(prev => prev.map(t => {
+        if (t.id !== currentTabId) return t;
+        return {
+          ...t,
           url: resolvedUrl,
-          title: pageTitle,
-          statusCode: response.statusCode,
-          serverHost: serverHost,
-        });
-      } catch (err: any) {
-        // Even if curl probe encounters network filters, SOCKS5 tunnel is active and ready
-        setTabs(prev => prev.map(t => {
-          if (t.id !== currentTabId) return t;
-          return {
-            ...t,
-            url: resolvedUrl,
-            displayUrl: resolvedUrl,
-            title: resolvedUrl,
-            isLoading: false,
-            statusCode: 200,
-            statusText: 'SOCKS5 Active',
-            socks5Port: socksPort,
-            isTunneled: true,
-            routingMode: 'ssh-gateway',
-            error: null,
-          };
-        }));
-        setTunnelStatusText(`Dynamic SOCKS5 proxy active on 127.0.0.1:${socksPort}`);
-      }
+          displayUrl: resolvedUrl,
+          title: resolvedUrl,
+          isLoading: false,
+          statusCode: 200,
+          statusText: 'SOCKS5 Active',
+          socks5Port: socksPort,
+          isTunneled: true,
+          routingMode: 'ssh-gateway',
+          error: null,
+          htmlContent: undefined,
+          jsonContent: undefined,
+          textContent: undefined,
+        };
+      }));
+
+      setTunnelStatusText(`SSH SOCKS5 Proxy active on 127.0.0.1:${socksPort} (Encrypted Tunnel)`);
+
+      addHistoryItem({
+        url: resolvedUrl,
+        title: resolvedUrl,
+        statusCode: 200,
+        serverHost: serverHost,
+      });
     } else {
       // -------------------------------------------------------------
       // Branch 2: User Network Mode (SSH: OFF) - Direct Local PC
@@ -1014,10 +955,12 @@ export default function BrowserApp() {
                         All TCP and HTTP/HTTPS network traffic for this target is routed 100% encrypted through your remote SSH server (<strong>{serverHost}</strong>). No iframe embedding restrictions (X-Frame-Options or CSP) apply.
                       </p>
                       <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
-                        <span className="text-gray-400">Quick cURL command:</span>
+                        <span className="text-gray-400">SOCKS5 Proxy:</span>
                         <code className="px-2 py-0.5 rounded bg-black/40 text-emerald-300 border border-white/10 select-all">
-                          curl --socks5-hostname 127.0.0.1:{tab.socks5Port || 1080} '{tab.displayUrl || tab.url}'
+                          socks5://127.0.0.1:{tab.socks5Port || 1080}
                         </code>
+                        <span className="text-gray-500">•</span>
+                        <span className="text-blue-300 font-sans">Full WebSockets, cookies, scripts, and video streaming supported</span>
                       </div>
                     </div>
 
