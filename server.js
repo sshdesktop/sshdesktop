@@ -401,6 +401,141 @@ function runRemoteExec(client, command, timeoutMs = 60000) {
   });
 }
 
+// Execute privileged command with automatic sudo elevation (mirrors src-tauri run_cmd_priv)
+async function runRemotePrivExec(entry, command, timeoutMs = 60000) {
+  if (!command || typeof command !== 'string') {
+    return { stdout: '', stderr: '', exit_code: 0, duration_ms: 0 };
+  }
+
+  const trimmedCmd = command.trim();
+  const rawCmd = trimmedCmd.startsWith('sudo ') ? trimmedCmd.slice(5).trim() : trimmedCmd;
+  // Normalize nested sudo in pipes/chains since subshell will be elevated
+  const normalizedCmd = rawCmd
+    .replace(/\|\s*sudo\s+/g, '| ')
+    .replace(/;\s*sudo\s+/g, '; ')
+    .replace(/&&\s*sudo\s+/g, '&& ')
+    .replace(/\|\|\s*sudo\s+/g, '|| ');
+
+  if (!entry || !entry.client) {
+    return await runRemoteExec(null, normalizedCmd, timeoutMs);
+  }
+
+  const username = entry.config?.username || 'root';
+
+  // 1st Condition: Is the user root?
+  if (username === 'root' || (entry.privilege && entry.privilege.is_root)) {
+    return await runRemoteExec(entry.client, normalizedCmd, timeoutMs);
+  }
+
+  // 2nd Condition: Passwordless Sudo (sudo -n)
+  const escapedRaw = normalizedCmd.replace(/'/g, "'\\''");
+  const sudoNCmd = `sudo -n -- sh -c '${escapedRaw}' 2>&1`;
+  const nRes = await runRemoteExec(entry.client, sudoNCmd, timeoutMs);
+
+  if (nRes.exit_code === 0) {
+    return nRes;
+  }
+
+  // 3rd Condition: Evaluate why sudo -n failed
+  const lowerOut = (nRes.stdout + '\n' + nRes.stderr).toLowerCase();
+
+  // 3A. User is NOT in the sudoers file
+  if (
+    lowerOut.includes('not in the sudoers file') ||
+    lowerOut.includes('is not allowed to execute') ||
+    lowerOut.includes('not in sudoers')
+  ) {
+    if (entry.privilege) {
+      entry.privilege.has_sudo = false;
+      entry.privilege.sudo_type = 'none';
+    }
+    const msg = `Permission Denied: User '${username}' does not have administrator (sudo) privileges on this server.\n${(nRes.stdout || nRes.stderr).trim()}`;
+    return {
+      stdout: '',
+      stderr: msg,
+      exit_code: nRes.exit_code || 126,
+      duration_ms: nRes.duration_ms
+    };
+  }
+
+  // 3B. /usr/bin/sudo SUID permission broken on server
+  if (lowerOut.includes('effective uid is not 0') || lowerOut.includes('nosuid')) {
+    const msg = `Server Permission Error: /usr/bin/sudo has lost its setuid root permissions on the server.\nFix on your server by running as root:\n  chown root:root /usr/bin/sudo && chmod 4755 /usr/bin/sudo\nOr connect in SSH Desktop as 'root' using your PEM key.`;
+    return {
+      stdout: '',
+      stderr: msg,
+      exit_code: nRes.exit_code || 1,
+      duration_ms: nRes.duration_ms
+    };
+  }
+
+  // 3C. User requires password for sudo (sudo -S)
+  const pwd = entry.config?.password;
+  if (pwd && typeof pwd === 'string' && pwd.length > 0) {
+    const escapedPwd = pwd.replace(/'/g, "'\\''");
+    const sudoSCmd = `printf '%s\\n' '${escapedPwd}' | sudo -S -p '' -- sh -c '${escapedRaw}' 2>&1`;
+    const sRes = await runRemoteExec(entry.client, sudoSCmd, timeoutMs);
+
+    if (sRes.exit_code === 0) {
+      return sRes;
+    }
+
+    const sLower = (sRes.stdout + '\n' + sRes.stderr).toLowerCase();
+    if (sLower.includes('effective uid is not 0') || sLower.includes('nosuid')) {
+      const msg = `Server Permission Error: /usr/bin/sudo has lost its setuid root permissions on the server.\nFix on your server by running as root:\n  chown root:root /usr/bin/sudo && chmod 4755 /usr/bin/sudo\nOr connect in SSH Desktop as 'root' using your PEM key.`;
+      return {
+        stdout: '',
+        stderr: msg,
+        exit_code: sRes.exit_code || 1,
+        duration_ms: sRes.duration_ms
+      };
+    }
+
+    if (sLower.includes('not in the sudoers file') || sLower.includes('is not allowed to execute')) {
+      if (entry.privilege) {
+        entry.privilege.has_sudo = false;
+        entry.privilege.sudo_type = 'none';
+      }
+      const msg = `Permission Denied: User '${username}' does not have administrator (sudo) privileges on this server.\n${(sRes.stdout || sRes.stderr).trim()}`;
+      return {
+        stdout: '',
+        stderr: msg,
+        exit_code: sRes.exit_code || 1,
+        duration_ms: sRes.duration_ms
+      };
+    }
+
+    if (
+      sLower.includes('incorrect password') ||
+      sLower.includes('authentication failure') ||
+      sLower.includes('sorry, try again')
+    ) {
+      const msg = `Authentication Failed: Sudo password for user '${username}' was rejected.\n${(sRes.stdout || sRes.stderr).trim()}`;
+      return {
+        stdout: '',
+        stderr: msg,
+        exit_code: sRes.exit_code || 1,
+        duration_ms: sRes.duration_ms
+      };
+    }
+
+    return sRes;
+  }
+
+  // If user has no password stored and sudo -n required a password
+  if (lowerOut.includes('password is required') || lowerOut.includes('terminal is required')) {
+    const msg = `Permission Denied: Sudo password required for user '${username}', but no password is saved in session.`;
+    return {
+      stdout: '',
+      stderr: msg,
+      exit_code: nRes.exit_code || 1,
+      duration_ms: nRes.duration_ms
+    };
+  }
+
+  return nRes;
+}
+
 // -------------------------------------------------------------
 // Unified Command Handler (Implements all 70+ Tauri IPC commands)
 // -------------------------------------------------------------
@@ -770,18 +905,56 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
       const username = lines[1] || entry?.config?.username || 'root';
       const groups = (lines[2] || '').split(' ').filter(Boolean);
       const detectedHome = lines[3] || (uid === 0 || username === 'root' ? '/root' : `/home/${username}`);
-      const hasSudo = lines[4] === 'SUDO_OK' || uid === 0;
+      const isRoot = uid === 0 || username === 'root';
 
-      return {
+      let hasSudo = isRoot;
+      let sudoType = isRoot ? 'root' : 'none';
+
+      if (isRoot) {
+        hasSudo = true;
+        sudoType = 'root';
+      } else if (lines[4] === 'SUDO_OK') {
+        hasSudo = true;
+        sudoType = 'passwordless';
+      } else {
+        // Test password sudo if session has password
+        const pwd = entry?.config?.password;
+        if (pwd && typeof pwd === 'string' && pwd.length > 0) {
+          const escapedPwd = pwd.replace(/'/g, "'\\''");
+          const testPwdCmd = `printf '%s\\n' '${escapedPwd}' | sudo -S -k -p '' true 2>&1`;
+          const pwdRes = await runRemoteExec(entry.client, testPwdCmd, 8000);
+          if (pwdRes.exit_code === 0) {
+            hasSudo = true;
+            sudoType = 'password';
+          }
+        }
+
+        // If not verified via password test yet, check if member of standard sudo groups
+        if (!hasSudo) {
+          const isSudoMember = groups.some(g => {
+            const lower = g.toLowerCase();
+            return lower === 'sudo' || lower === 'wheel' || lower === 'admin';
+          });
+          if (isSudoMember) {
+            hasSudo = true;
+            sudoType = 'password';
+          }
+        }
+      }
+
+      const info = {
         username,
-        uid,
-        gid: uid,
+        uid: isRoot ? 0 : uid,
+        gid: isRoot ? 0 : uid,
         home_dir: detectedHome,
-        is_root: uid === 0 || username === 'root',
+        is_root: isRoot,
         has_sudo: hasSudo,
-        sudo_type: uid === 0 ? 'root' : (hasSudo ? 'passwordless' : 'password'),
+        sudo_type: sudoType,
         groups
       };
+
+      entry.privilege = info;
+      return info;
     }
 
     // ==========================================
@@ -789,7 +962,27 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
     // ==========================================
     case 'ssh_exec': {
       const { command } = args || {};
-      return await runRemoteExec(entry?.client, command || '');
+      const cmdStr = (command || '').trim();
+      const needsPriv = cmdStr.startsWith('sudo ') || cmdStr.includes(' sudo ') || cmdStr.includes('| sudo ');
+      if (needsPriv && entry) {
+        return await runRemotePrivExec(entry, cmdStr);
+      }
+      const directRes = await runRemoteExec(entry?.client, cmdStr);
+      const isPermDenial = directRes.exit_code !== 0 && (
+        (directRes.stdout + '\n' + directRes.stderr).includes('Interactive authentication required') ||
+        (directRes.stdout + '\n' + directRes.stderr).includes('Permission denied') ||
+        (directRes.stdout + '\n' + directRes.stderr).includes('Access denied') ||
+        (directRes.stdout + '\n' + directRes.stderr).includes('Operation not permitted') ||
+        (directRes.stdout + '\n' + directRes.stderr).includes('must be root') ||
+        (directRes.stdout + '\n' + directRes.stderr).includes('You need to be root')
+      );
+      if (isPermDenial && entry) {
+        const privRes = await runRemotePrivExec(entry, cmdStr);
+        if (privRes.exit_code === 0 || privRes.stdout.trim().length > 0) {
+          return privRes;
+        }
+      }
+      return directRes;
     }
 
     // ==========================================
@@ -1068,13 +1261,13 @@ echo "===END==="
     case 'process_kill': {
       if (!entry) return;
       const sig = args?.signal || 9;
-      await runRemoteExec(entry.client, `kill -${sig} ${args?.pid}`);
+      await runRemotePrivExec(entry, `kill -${sig} ${args?.pid}`);
       return;
     }
 
     case 'process_renice': {
       if (!entry) return;
-      await runRemoteExec(entry.client, `renice ${args?.priority || 0} -p ${args?.pid}`);
+      await runRemotePrivExec(entry, `renice ${args?.priority || 0} -p ${args?.pid}`);
       return;
     }
 
@@ -1125,7 +1318,7 @@ echo "===END==="
       if (!entry) return '';
       const { action, name, serviceName } = args || {};
       const target = name || serviceName;
-      const res = await runRemoteExec(entry.client, `systemctl ${action} "${target}" 2>&1`);
+      const res = await runRemotePrivExec(entry, `systemctl ${action} "${target}" 2>&1`);
       return res.stdout || res.stderr || 'Success';
     }
 
@@ -1240,7 +1433,7 @@ echo "===END==="
     case 'network_kill_port': {
       if (!entry) return '';
       const port = args?.port;
-      const res = await runRemoteExec(entry.client, `fuser -k ${port}/tcp 2>/dev/null || (lsof -i :${port} -t | xargs -r kill -9)`);
+      const res = await runRemotePrivExec(entry, `fuser -k ${port}/tcp 2>/dev/null || (lsof -i :${port} -t | xargs -r kill -9)`);
       return res.stdout || 'Port killed';
     }
 
@@ -1274,7 +1467,7 @@ echo "===END==="
           raw_status: ''
         };
       }
-      const res = await runRemoteExec(entry.client, 'ufw status verbose 2>&1 || firewall-cmd --state 2>&1');
+      const res = await runRemotePrivExec(entry, 'ufw status verbose 2>&1 || firewall-cmd --state 2>&1');
       const out = res.stdout.toLowerCase();
       const isActive = out.includes('status: active') || out.includes('running');
       return {
@@ -1296,7 +1489,7 @@ echo "===END==="
 
     case 'firewall_rules': {
       if (!entry) return [];
-      const res = await runRemoteExec(entry.client, 'ufw status numbered 2>/dev/null || iptables -L -n --line-numbers 2>/dev/null');
+      const res = await runRemotePrivExec(entry, 'ufw status numbered 2>/dev/null || iptables -L -n --line-numbers 2>/dev/null');
       const rules = [];
       for (const line of res.stdout.split('\n')) {
         const m = line.match(/^\[\s*(\d+)\]\s+(\S+)\s+(ALLOW|DENY|REJECT|LIMIT)\s+(IN|OUT)?\s*(.*)$/i);
@@ -1321,26 +1514,26 @@ echo "===END==="
       const port = args?.port || args?.to_port;
       const proto = args?.protocol || 'tcp';
       const action = (args?.action || 'allow').toLowerCase();
-      const res = await runRemoteExec(entry.client, `ufw ${action} ${port}/${proto} 2>&1`);
+      const res = await runRemotePrivExec(entry, `ufw ${action} ${port}/${proto} 2>&1`);
       return res.stdout || 'Rule added';
     }
 
     case 'firewall_delete_rule': {
       if (!entry) return '';
-      const res = await runRemoteExec(entry.client, `ufw --force delete ${args?.number} 2>&1`);
+      const res = await runRemotePrivExec(entry, `ufw --force delete ${args?.number} 2>&1`);
       return res.stdout || 'Rule deleted';
     }
 
     case 'firewall_toggle': {
       if (!entry) return '';
       const cmd = args?.enable ? 'ufw --force enable' : 'ufw disable';
-      const res = await runRemoteExec(entry.client, `${cmd} 2>&1`);
+      const res = await runRemotePrivExec(entry, `${cmd} 2>&1`);
       return res.stdout || 'Firewall toggled';
     }
 
     case 'firewall_reload': {
       if (!entry) return '';
-      const res = await runRemoteExec(entry.client, 'ufw reload 2>&1 || firewall-cmd --reload 2>&1');
+      const res = await runRemotePrivExec(entry, 'ufw reload 2>&1 || firewall-cmd --reload 2>&1');
       return res.stdout || 'Reloaded';
     }
 
@@ -1403,19 +1596,19 @@ echo "===END==="
 
     case 'package_install': {
       if (!entry) return '';
-      const res = await runRemoteExec(entry.client, `DEBIAN_FRONTEND=noninteractive apt-get install -y "${args?.name}" 2>&1`, 120000);
+      const res = await runRemotePrivExec(entry, `DEBIAN_FRONTEND=noninteractive apt-get install -y "${args?.name}" 2>&1`, 120000);
       return res.stdout || res.stderr;
     }
 
     case 'package_remove': {
       if (!entry) return '';
-      const res = await runRemoteExec(entry.client, `DEBIAN_FRONTEND=noninteractive apt-get remove -y "${args?.name}" 2>&1`, 60000);
+      const res = await runRemotePrivExec(entry, `DEBIAN_FRONTEND=noninteractive apt-get remove -y "${args?.name}" 2>&1`, 60000);
       return res.stdout || res.stderr;
     }
 
     case 'package_update': {
       if (!entry) return '';
-      const res = await runRemoteExec(entry.client, 'apt-get update -y 2>&1', 120000);
+      const res = await runRemotePrivExec(entry, 'apt-get update -y 2>&1', 120000);
       return res.stdout || res.stderr;
     }
 
@@ -1444,7 +1637,7 @@ echo "===END==="
     // ==========================================
     case 'user_list': {
       if (!entry) return [];
-      const res = await runRemoteExec(entry.client, "getent passwd 2>/dev/null; echo '---GROUPS---'; getent group 2>/dev/null; echo '---SHADOW---'; cat /etc/shadow 2>/dev/null || true");
+      const res = await runRemotePrivExec(entry, "getent passwd 2>/dev/null; echo '---GROUPS---'; getent group 2>/dev/null; echo '---SHADOW---'; cat /etc/shadow 2>/dev/null || true");
       const [passwdSec, rest] = res.stdout.split('---GROUPS---');
       const [groupSec, shadowSec] = (rest || '').split('---SHADOW---');
 
@@ -1498,17 +1691,17 @@ echo "===END==="
       if (!entry) return;
       const { username, password, shell, groups } = args || {};
       const sh = shell || '/bin/bash';
-      await runRemoteExec(entry.client, `useradd -m -s "${sh}" "${username}"`);
-      if (password) await runRemoteExec(entry.client, `echo "${username}:${password}" | chpasswd`);
+      await runRemotePrivExec(entry, `useradd -m -s "${sh}" "${username}"`);
+      if (password) await runRemotePrivExec(entry, `echo "${username}:${password}" | chpasswd`);
       if (Array.isArray(groups) && groups.length > 0) {
-        await runRemoteExec(entry.client, `usermod -aG "${groups.join(',')}" "${username}"`);
+        await runRemotePrivExec(entry, `usermod -aG "${groups.join(',')}" "${username}"`);
       }
       return;
     }
 
     case 'user_set_password': {
       if (!entry) return;
-      await runRemoteExec(entry.client, `echo "${args?.username}:${args?.password}" | chpasswd`);
+      await runRemotePrivExec(entry, `echo "${args?.username}:${args?.password}" | chpasswd`);
       return;
     }
 
@@ -1516,9 +1709,9 @@ echo "===END==="
       if (!entry) return;
       const { username, grant } = args || {};
       if (grant) {
-        await runRemoteExec(entry.client, `usermod -aG sudo "${username}" 2>/dev/null || usermod -aG wheel "${username}" 2>/dev/null`);
+        await runRemotePrivExec(entry, `usermod -aG sudo "${username}" 2>/dev/null || usermod -aG wheel "${username}" 2>/dev/null`);
       } else {
-        await runRemoteExec(entry.client, `gpasswd -d "${username}" sudo 2>/dev/null || gpasswd -d "${username}" wheel 2>/dev/null`);
+        await runRemotePrivExec(entry, `gpasswd -d "${username}" sudo 2>/dev/null || gpasswd -d "${username}" wheel 2>/dev/null`);
       }
       return;
     }
@@ -1526,19 +1719,19 @@ echo "===END==="
     case 'user_delete': {
       if (!entry) return;
       const rm = args?.removeHome ? '-r' : '';
-      await runRemoteExec(entry.client, `userdel ${rm} "${args?.username}"`);
+      await runRemotePrivExec(entry, `userdel ${rm} "${args?.username}"`);
       return;
     }
 
     case 'user_lock': {
       if (!entry) return;
-      await runRemoteExec(entry.client, `usermod -L "${args?.username}"`);
+      await runRemotePrivExec(entry, `usermod -L "${args?.username}"`);
       return;
     }
 
     case 'user_unlock': {
       if (!entry) return;
-      await runRemoteExec(entry.client, `usermod -U "${args?.username}"`);
+      await runRemotePrivExec(entry, `usermod -U "${args?.username}"`);
       return;
     }
 
@@ -1561,13 +1754,13 @@ echo "===END==="
 
     case 'group_add': {
       if (!entry) return;
-      await runRemoteExec(entry.client, `groupadd "${args?.name}"`);
+      await runRemotePrivExec(entry, `groupadd "${args?.name}"`);
       return;
     }
 
     case 'group_delete': {
       if (!entry) return;
-      await runRemoteExec(entry.client, `groupdel "${args?.name}"`);
+      await runRemotePrivExec(entry, `groupdel "${args?.name}"`);
       return;
     }
 
@@ -1653,20 +1846,29 @@ echo "===END==="
 
     case 'docker_action': {
       if (!entry) return '';
-      const res = await runRemoteExec(entry.client, `docker ${args?.action} "${args?.containerId}" 2>&1`);
+      let res = await runRemoteExec(entry.client, `docker ${args?.action} "${args?.containerId}" 2>&1`);
+      if (res.exit_code !== 0 && (res.stdout + res.stderr).toLowerCase().includes('permission denied')) {
+        res = await runRemotePrivExec(entry, `docker ${args?.action} "${args?.containerId}" 2>&1`);
+      }
       return res.stdout || res.stderr || 'Action executed';
     }
 
     case 'docker_logs': {
       if (!entry) return '';
       const lines = args?.lines || 100;
-      const res = await runRemoteExec(entry.client, `docker logs --tail ${lines} "${args?.containerId}" 2>&1`);
+      let res = await runRemoteExec(entry.client, `docker logs --tail ${lines} "${args?.containerId}" 2>&1`);
+      if (res.exit_code !== 0 && (res.stdout + res.stderr).toLowerCase().includes('permission denied')) {
+        res = await runRemotePrivExec(entry, `docker logs --tail ${lines} "${args?.containerId}" 2>&1`);
+      }
       return res.stdout || res.stderr;
     }
 
     case 'docker_images': {
       if (!entry) return [];
-      const res = await runRemoteExec(entry.client, "docker images --format '{{json .}}' 2>/dev/null");
+      let res = await runRemoteExec(entry.client, "docker images --format '{{json .}}' 2>/dev/null");
+      if (!res.stdout.trim()) {
+        res = await runRemotePrivExec(entry, "docker images --format '{{json .}}' 2>/dev/null");
+      }
       const list = [];
       for (const line of res.stdout.split('\n')) {
         const trimmed = line.trim();
@@ -1687,13 +1889,19 @@ echo "===END==="
 
     case 'docker_exec': {
       if (!entry) return '';
-      const res = await runRemoteExec(entry.client, `docker exec "${args?.containerId}" ${args?.command} 2>&1`);
+      let res = await runRemoteExec(entry.client, `docker exec "${args?.containerId}" ${args?.command} 2>&1`);
+      if (res.exit_code !== 0 && (res.stdout + res.stderr).toLowerCase().includes('permission denied')) {
+        res = await runRemotePrivExec(entry, `docker exec "${args?.containerId}" ${args?.command} 2>&1`);
+      }
       return res.stdout || res.stderr;
     }
 
     case 'docker_stats': {
       if (!entry) return [];
-      const res = await runRemoteExec(entry.client, "docker stats --no-stream --format '{{json .}}' 2>/dev/null");
+      let res = await runRemoteExec(entry.client, "docker stats --no-stream --format '{{json .}}' 2>/dev/null");
+      if (!res.stdout.trim()) {
+        res = await runRemotePrivExec(entry, "docker stats --no-stream --format '{{json .}}' 2>/dev/null");
+      }
       const list = [];
       for (const line of res.stdout.split('\n')) {
         const trimmed = line.trim();
@@ -1705,7 +1913,10 @@ echo "===END==="
 
     case 'docker_image_remove': {
       if (!entry) return '';
-      const res = await runRemoteExec(entry.client, `docker rmi "${args?.imageId}" 2>&1`);
+      let res = await runRemoteExec(entry.client, `docker rmi "${args?.imageId}" 2>&1`);
+      if (res.exit_code !== 0 && (res.stdout + res.stderr).toLowerCase().includes('permission denied')) {
+        res = await runRemotePrivExec(entry, `docker rmi "${args?.imageId}" 2>&1`);
+      }
       return res.stdout || res.stderr;
     }
 
@@ -1743,7 +1954,7 @@ echo "===END==="
 
     case 'disk_smart': {
       if (!entry) return '';
-      const res = await runRemoteExec(entry.client, `smartctl -a "${args?.device}" 2>&1`);
+      const res = await runRemotePrivExec(entry, `smartctl -a "${args?.device}" 2>&1`);
       return res.stdout || res.stderr;
     }
 
@@ -1756,7 +1967,7 @@ echo "===END==="
     case 'disk_mount': {
       if (!entry) return '';
       const opt = args?.options ? `-o ${args.options}` : '';
-      const res = await runRemoteExec(entry.client, `mount ${opt} "${args?.device}" "${args?.mountPoint}" 2>&1`);
+      const res = await runRemotePrivExec(entry, `mount ${opt} "${args?.device}" "${args?.mountPoint}" 2>&1`);
       return res.stdout || 'Mounted';
     }
 
@@ -1764,7 +1975,7 @@ echo "===END==="
       if (!entry) return '';
       const f = args?.force ? '-f' : '';
       const l = args?.lazy ? '-l' : '';
-      const res = await runRemoteExec(entry.client, `umount ${f} ${l} "${args?.target}" 2>&1`);
+      const res = await runRemotePrivExec(entry, `umount ${f} ${l} "${args?.target}" 2>&1`);
       return res.stdout || 'Unmounted';
     }
 
@@ -1917,13 +2128,29 @@ echo "===END==="
         fs.writeFileSync(args?.path, args?.content || '', 'utf8');
         return true;
       }
-      let sftp = entry.sftp || await getSftp(entry.client);
-      return new Promise((resolve, reject) => {
-        const stream = sftp.createWriteStream(args?.path, { flags: 'w' });
-        stream.on('close', () => resolve());
-        stream.on('error', err => reject(err));
-        stream.end(args?.content || '', 'utf8');
-      });
+      try {
+        let sftp = entry.sftp || await getSftp(entry.client);
+        await new Promise((resolve, reject) => {
+          const stream = sftp.createWriteStream(args?.path, { flags: 'w' });
+          stream.on('close', () => resolve());
+          stream.on('error', err => reject(err));
+          stream.end(args?.content || '', 'utf8');
+        });
+        return true;
+      } catch (err) {
+        // Fallback with elevated privilege: write to /tmp first, then sudo mv
+        const b64 = Buffer.from(args?.content || '', 'utf8').toString('base64');
+        const tmpFile = `/tmp/.cd_up_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+        const tmpRes = await runRemoteExec(entry.client, `echo "${b64}" | base64 -d > "${tmpFile}"`);
+        if (tmpRes.exit_code === 0) {
+          const mvRes = await runRemotePrivExec(entry, `mv -f "${tmpFile}" "${args?.path}" && chmod 644 "${args?.path}"`);
+          if (mvRes.exit_code === 0) {
+            return true;
+          }
+          await runRemoteExec(entry.client, `rm -f "${tmpFile}"`);
+        }
+        throw err;
+      }
     }
 
     case 'sftp_write_file': {
@@ -1932,44 +2159,75 @@ echo "===END==="
         fs.writeFileSync(args?.path, buf);
         return true;
       }
-      let sftp = entry.sftp || await getSftp(entry.client);
-      return new Promise((resolve, reject) => {
-        const stream = sftp.createWriteStream(args?.path, { flags: 'w' });
-        stream.on('close', () => resolve());
-        stream.on('error', err => reject(err));
-        stream.end(buf);
-      });
+      try {
+        let sftp = entry.sftp || await getSftp(entry.client);
+        await new Promise((resolve, reject) => {
+          const stream = sftp.createWriteStream(args?.path, { flags: 'w' });
+          stream.on('close', () => resolve());
+          stream.on('error', err => reject(err));
+          stream.end(buf);
+        });
+        return true;
+      } catch (err) {
+        // Fallback with elevated privilege: write to /tmp first, then sudo mv
+        const b64 = buf.toString('base64');
+        const tmpFile = `/tmp/.cd_up_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+        const tmpRes = await runRemoteExec(entry.client, `echo "${b64}" | base64 -d > "${tmpFile}"`);
+        if (tmpRes.exit_code === 0) {
+          const mvRes = await runRemotePrivExec(entry, `mv -f "${tmpFile}" "${args?.path}" && chmod 644 "${args?.path}"`);
+          if (mvRes.exit_code === 0) {
+            return true;
+          }
+          await runRemoteExec(entry.client, `rm -f "${tmpFile}"`);
+        }
+        throw err;
+      }
     }
 
     case 'sftp_mkdir': {
       if (!entry) return;
-      await runRemoteExec(entry.client, `mkdir -p "${args?.path}"`);
+      const res = await runRemoteExec(entry.client, `mkdir -p "${args?.path}" 2>&1`);
+      if (res.exit_code !== 0) {
+        await runRemotePrivExec(entry, `mkdir -p "${args?.path}"`);
+      }
       return;
     }
 
     case 'sftp_delete': {
       if (!entry) return;
-      await runRemoteExec(entry.client, `rm -rf "${args?.path}"`);
+      const res = await runRemoteExec(entry.client, `rm -rf "${args?.path}" 2>&1`);
+      if (res.exit_code !== 0) {
+        await runRemotePrivExec(entry, `rm -rf "${args?.path}"`);
+      }
       return;
     }
 
     case 'sftp_rename': {
       if (!entry) return;
-      await runRemoteExec(entry.client, `mv "${args?.oldPath}" "${args?.newPath}"`);
+      const res = await runRemoteExec(entry.client, `mv "${args?.oldPath}" "${args?.newPath}" 2>&1`);
+      if (res.exit_code !== 0) {
+        await runRemotePrivExec(entry, `mv "${args?.oldPath}" "${args?.newPath}"`);
+      }
       return;
     }
 
     case 'sftp_chmod': {
       if (!entry) return;
       const octal = (args?.mode & 0o777).toString(8);
-      await runRemoteExec(entry.client, `chmod ${octal} "${args?.path}"`);
+      const res = await runRemoteExec(entry.client, `chmod ${octal} "${args?.path}" 2>&1`);
+      if (res.exit_code !== 0) {
+        await runRemotePrivExec(entry, `chmod ${octal} "${args?.path}"`);
+      }
       return;
     }
 
     case 'sftp_chown': {
       if (!entry) return;
       const ownership = args?.group ? `${args.owner}:${args.group}` : args.owner;
-      await runRemoteExec(entry.client, `chown ${ownership} "${args?.path}"`);
+      const res = await runRemoteExec(entry.client, `chown ${ownership} "${args?.path}" 2>&1`);
+      if (res.exit_code !== 0) {
+        await runRemotePrivExec(entry, `chown ${ownership} "${args?.path}"`);
+      }
       return;
     }
 

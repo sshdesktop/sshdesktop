@@ -788,6 +788,18 @@ pub async fn ssh_get_user_privilege(
         }
     }
 
+    // 7. If not verified via password test yet, check if user belongs to standard sudo/wheel/admin groups
+    if !has_sudo {
+        let is_in_sudo_group = groups.iter().any(|g| {
+            let lower = g.to_lowercase();
+            lower == "sudo" || lower == "wheel" || lower == "admin"
+        });
+        if is_in_sudo_group {
+            has_sudo = true;
+            sudo_type = "password".to_string();
+        }
+    }
+
     let info = UserPrivilegeInfo {
         username,
         uid,
