@@ -33,13 +33,15 @@ import { ChmodModal, ChownModal } from './modals/PermissionsModal';
 import { 
   NewFolderModal, NewFileModal, RenameModal, ScriptOutputModal, PermissionAlertModal 
 } from './modals/ItemActionModals';
+import { useUserPrivilege } from '../../lib/permissions';
 
 export const FileManager: React.FC = () => {
   const { activeConnectionId, connections } = useConnectionStore();
   const activeConnId = activeConnectionId || 'default';
   const activeConn = connections.find(c => c.id === activeConnectionId);
-  const currentUsername = activeConn?.username || 'root';
-  const userHome = currentUsername === 'root' ? '/root' : `/home/${currentUsername}`;
+  const { username: privUser, homeDir: privHome } = useUserPrivilege();
+  const currentUsername = privUser || activeConn?.username || 'root';
+  const userHome = privHome || (currentUsername === 'root' ? '/root' : `/home/${currentUsername}`);
 
   // Multi-tab Finder State
   const [tabs, setTabs] = useState<FinderTab[]>([

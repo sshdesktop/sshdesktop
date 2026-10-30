@@ -39,8 +39,11 @@ export default function Desktop() {
   const { activeConnectionId, connections } = useConnectionStore();
   const activeServer = connections.find(c => c.id === activeConnectionId);
   const { username, homeDir: userHome, hasSudo, isRoot } = useUserPrivilege();
-  const effectiveLoginUser = username || activeServer?.username || 'root';
-  const effectiveUserHome = userHome || (effectiveLoginUser === 'root' ? '/root' : `/home/${effectiveLoginUser}`);
+
+  const serverConfigUser = activeServer?.username;
+  const isPrivilegeStale = Boolean(serverConfigUser && username && username !== serverConfigUser);
+  const effectiveLoginUser = (!isPrivilegeStale && username) || serverConfigUser || 'root';
+  const effectiveUserHome = (!isPrivilegeStale && userHome) || (effectiveLoginUser === 'root' ? '/root' : `/home/${effectiveLoginUser}`);
 
   const { wallpaper, theme, updateSettings, desktopIconSize } = useSettingsStore();
   const { openApp } = useWindowManager();
@@ -108,10 +111,11 @@ export default function Desktop() {
     currentY: number;
   } | null>(null);
 
-  // Icon Positions on Desktop (persisted locally and in ~/.sshdesktop/icon_positions.json)
+  // Icon Positions on Desktop (persisted locally per-user and in ~/.sshdesktop/icon_positions.json)
   const [iconPositions, setIconPositions] = useState<Record<string, { x: number; y: number }>>(() => {
     try {
       return JSON.parse(
+        localStorage.getItem(`sshdesktop_icon_positions_${effectiveLoginUser}`) ||
         localStorage.getItem('sshdesktop_desktop_icon_positions') ||
         localStorage.getItem('clouddesk_desktop_icon_positions') ||
         '{}'
@@ -142,11 +146,9 @@ export default function Desktop() {
     }
     try {
       const desktopDir = `${effectiveUserHome}/Desktop`;
-      let entries = await sftpListDir(activeConnectionId, desktopDir).catch(async () => {
-        // If Desktop doesn't exist yet, create it and retry
-        await sftpMkdir(activeConnectionId, desktopDir).catch(() => {});
-        return await sftpListDir(activeConnectionId, desktopDir).catch(() => []);
-      });
+      // Ensure Desktop directory exists for this user: /home/<user>/Desktop
+      await sftpMkdir(activeConnectionId, desktopDir).catch(() => {});
+      let entries = await sftpListDir(activeConnectionId, desktopDir).catch(() => []);
 
       if (Array.isArray(entries)) {
         // Exclude hidden files / dotfiles (.*) like .cache, .bashrc from Desktop
@@ -173,7 +175,7 @@ export default function Desktop() {
           }
           if (changed) {
             try {
-              localStorage.setItem('sshdesktop_desktop_icon_positions', JSON.stringify(next));
+              localStorage.setItem(`sshdesktop_icon_positions_${effectiveLoginUser}`, JSON.stringify(next));
               sftpWriteTextFile(activeConnectionId, `${effectiveUserHome}/.sshdesktop/icon_positions.json`, JSON.stringify(next, null, 2)).catch(() => {});
             } catch {}
             return next;
@@ -184,7 +186,7 @@ export default function Desktop() {
     } catch {
       setDesktopFolderItems([]);
     }
-  }, [activeConnectionId, effectiveUserHome]);
+  }, [activeConnectionId, effectiveUserHome, effectiveLoginUser]);
 
   // Initialize server directories & auto-restore application settings on login: ~/.sshdesktop, ~/Desktop, ~/Downloads, ~/Documents
   useEffect(() => {
@@ -341,14 +343,14 @@ export default function Desktop() {
       const clampedY = Math.max(40, Math.min(window.innerHeight - cfg.h - 110, y));
       const next = { ...prev, [id]: { x: clampedX, y: clampedY } };
       try {
-        localStorage.setItem('sshdesktop_desktop_icon_positions', JSON.stringify(next));
+        localStorage.setItem(`sshdesktop_icon_positions_${effectiveLoginUser}`, JSON.stringify(next));
         if (activeConnectionId) {
           sftpWriteTextFile(activeConnectionId, `${effectiveUserHome}/.sshdesktop/icon_positions.json`, JSON.stringify(next, null, 2)).catch(() => {});
         }
       } catch {}
       return next;
     });
-  }, [activeConnectionId, effectiveUserHome, desktopIconSize]);
+  }, [activeConnectionId, effectiveUserHome, effectiveLoginUser, desktopIconSize]);
 
   // Freeform pointer drag for desktop icons
   useEffect(() => {

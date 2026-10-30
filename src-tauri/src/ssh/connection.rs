@@ -63,13 +63,31 @@ lazy_static::lazy_static! {
 
 pub fn get_cached_user_privilege(conn_id: &str) -> Option<UserPrivilegeInfo> {
     let map = USER_PRIVILEGE_CACHE.lock();
-    map.get(conn_id).cloned().or_else(|| map.get("default").cloned())
+    map.get(conn_id).cloned()
+}
+
+pub fn get_cached_user_privilege_for_user(conn_id: &str, expected_user: &str) -> Option<UserPrivilegeInfo> {
+    let map = USER_PRIVILEGE_CACHE.lock();
+    if let Some(cached) = map.get(conn_id) {
+        if cached.username == expected_user {
+            return Some(cached.clone());
+        }
+    }
+    None
 }
 
 pub fn set_cached_user_privilege(conn_id: &str, info: UserPrivilegeInfo) {
     let mut map = USER_PRIVILEGE_CACHE.lock();
     map.insert(conn_id.to_string(), info.clone());
-    map.insert("default".to_string(), info);
+    if conn_id == "default" {
+        map.insert("default".to_string(), info);
+    }
+}
+
+pub fn invalidate_user_privilege_cache(conn_id: &str) {
+    let mut map = USER_PRIVILEGE_CACHE.lock();
+    map.remove(conn_id);
+    map.remove("default");
 }
 
 pub fn get_plink_path() -> &'static str {
@@ -196,6 +214,7 @@ pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
 pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: ConnectionConfig) -> Result<String, String> {
     let id = config.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     config.id = Some(id.clone());
+    invalidate_user_privilege_cache(&id);
     log::info!("SSH Desktop: Establishing SSH connection [{}] for {} ({}:{})", id, config.name, config.host, config.port);
 
     // Ensure the key file is available on disk for CLI utilities (scp, ssh, plink)
@@ -681,18 +700,18 @@ pub async fn ssh_get_user_privilege(
     state: tauri::State<'_, AppState>,
     conn_id: String,
 ) -> Result<UserPrivilegeInfo, String> {
-    // 1. Check cache first
-    if let Some(cached) = get_cached_user_privilege(&conn_id) {
-        return Ok(cached);
-    }
-
-    // 2. Resolve connection
+    // 1. Resolve connection first
     let conn = match resolve_connection(&state, &conn_id) {
         Some(c) => c,
         None => return Err(format!("No active SSH connection found for '{}'.", conn_id)),
     };
 
     let configured_user = conn.config.username.clone();
+
+    // 2. Check cache only for this specific conn_id AND matching configured username
+    if let Some(cached) = get_cached_user_privilege_for_user(&conn_id, &configured_user) {
+        return Ok(cached);
+    }
 
     // 3. Fast identity probe via basic shell commands (runs as unprivileged user)
     // Output:

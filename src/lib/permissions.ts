@@ -13,12 +13,16 @@ export function useUserPrivilege(connectionIdOverride?: string) {
     : null;
 
   const fallbackUser = activeServer?.username || 'root';
-  const username = serverPriv?.username || fallbackUser;
-  const isRoot = serverPriv?.is_root ?? (username === 'root');
-  const hasSudo = serverPriv?.has_sudo ?? isRoot;
-  const sudoType = serverPriv?.sudo_type || (isRoot ? 'root' : 'none');
-  const homeDir = serverPriv?.home_dir || (username === 'root' ? '/root' : `/home/${username}`);
-  const uid = serverPriv?.uid ?? (username === 'root' ? 0 : 1000);
+  // Guard against stale cache: If serverPriv username doesn't match active server config username, invalidate it
+  const isStale = Boolean(serverPriv && activeServer?.username && serverPriv.username !== activeServer.username);
+  const effectivePriv = isStale ? null : serverPriv;
+
+  const username = effectivePriv?.username || fallbackUser;
+  const isRoot = effectivePriv?.is_root ?? (username === 'root');
+  const hasSudo = effectivePriv?.has_sudo ?? isRoot;
+  const sudoType = effectivePriv?.sudo_type || (isRoot ? 'root' : 'none');
+  const homeDir = effectivePriv?.home_dir || (username === 'root' ? '/root' : `/home/${username}`);
+  const uid = effectivePriv?.uid ?? (username === 'root' ? 0 : 1000);
 
   const refreshPrivilege = useCallback(async () => {
     if (effectiveConnId) {

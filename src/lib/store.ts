@@ -160,10 +160,12 @@ export const useConnectionStore = create<ConnectionState>()(
           set({ activeConnectionId: null, userPrivilege: null });
           return;
         }
+        const target = get().connections.find(c => c.id === id);
         const cachedPriv = get().userPrivileges[id] || null;
+        const validPriv = (cachedPriv && target && cachedPriv.username === target.username) ? cachedPriv : null;
         set({
           activeConnectionId: id,
-          userPrivilege: cachedPriv,
+          userPrivilege: validPriv,
           isDisconnected: false,
           disconnectReason: null,
           disconnectedServerId: null,
@@ -254,6 +256,12 @@ export const useConnectionStore = create<ConnectionState>()(
         // Only mark connected when backend verification succeeds
         const newMap = new Map(get().connectedServers);
         newMap.set(id, { id, name: target.name || target.host, host: target.host, status: 'connected' });
+
+        // Invalidate stale user privilege cache for this server id
+        set(state => ({
+          userPrivileges: { ...state.userPrivileges, [id]: undefined as any },
+          userPrivilege: state.activeConnectionId === id ? null : state.userPrivilege,
+        }));
 
         // Resolve user privilege immediately for this specific server
         const priv = await get().fetchUserPrivilege(id).catch(() => null);
