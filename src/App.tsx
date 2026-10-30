@@ -11,6 +11,25 @@ export default function App() {
   const [isAuthenticated, setIsAuthenticated] = React.useState<boolean>(() => {
     return isTauriNative || isWebAuthenticated();
   });
+
+  // Automatically enforce 1-hour session timeout & session expiration events
+  useEffect(() => {
+    const handleSessionExpired = () => {
+      setIsAuthenticated(false);
+    };
+    window.addEventListener('sshdesktop-session-expired', handleSessionExpired);
+
+    const interval = setInterval(() => {
+      if (!isTauriNative && !isWebAuthenticated()) {
+        setIsAuthenticated(false);
+      }
+    }, 15000);
+
+    return () => {
+      window.removeEventListener('sshdesktop-session-expired', handleSessionExpired);
+      clearInterval(interval);
+    };
+  }, [isTauriNative]);
   const activeConnectionId = useConnectionStore((state) => state.activeConnectionId);
   const theme = useSettingsStore((state) => state.theme);
   const launchingAppId = useWindowStore((state) => state.launchingAppId);

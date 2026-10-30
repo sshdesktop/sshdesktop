@@ -6,6 +6,45 @@ export function isTauri(): boolean {
   return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 }
 
+export const AUTH_STORAGE_KEY = 'sshdesktop_web_auth_session';
+export const LEGACY_AUTH_STORAGE_KEY = 'clouddesk_web_auth_session';
+
+export interface StoredSession {
+  token?: string;
+  username?: string;
+  loginAt?: number;
+  expiresAt?: number;
+}
+
+export function getStoredSession(): StoredSession | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = sessionStorage.getItem(AUTH_STORAGE_KEY) || 
+                localStorage.getItem(AUTH_STORAGE_KEY) ||
+                sessionStorage.getItem(LEGACY_AUTH_STORAGE_KEY) || 
+                localStorage.getItem(LEGACY_AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.expiresAt && Date.now() >= parsed.expiresAt) {
+      clearStoredSession();
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function clearStoredSession(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.removeItem(AUTH_STORAGE_KEY);
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+    sessionStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
+  } catch {}
+}
+
 export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {}, fallback: T): Promise<T> {
   if (isTauri()) {
     try {
@@ -60,13 +99,31 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
 
   // Web / Node.js Backend Mode (e.g. running via node server.js on port 2222 or web preview)
   try {
+    const session = getStoredSession();
+    const token = session?.token || '';
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) {
+      headers['X-Session-Token'] = token;
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
     const res = await fetch('/api/invoke', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ cmd, args }),
+      headers,
+      body: JSON.stringify({ cmd, args, sessionToken: token }),
     });
+
+    if (res.status === 401) {
+      clearStoredSession();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('sshdesktop-session-expired', {
+          detail: { reason: 'Your session has expired (1 hour limit). Please sign in again.' }
+        }));
+      }
+      throw new Error('Session expired (1 hour limit). Please sign in again.');
+    }
 
     if (res.ok) {
       const data = await res.json();
@@ -104,7 +161,9 @@ function setupWebTerminalSocket(termId: string, connId: string, cols: number, ro
   if (typeof window === 'undefined') return;
   try {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/terminal?termId=${encodeURIComponent(termId)}&connId=${encodeURIComponent(connId)}&cols=${cols}&rows=${rows}`;
+    const session = getStoredSession();
+    const tokenParam = session?.token ? `&token=${encodeURIComponent(session.token)}` : '';
+    const wsUrl = `${protocol}//${window.location.host}/ws/terminal?termId=${encodeURIComponent(termId)}&connId=${encodeURIComponent(connId)}&cols=${cols}&rows=${rows}${tokenParam}`;
     const ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {
@@ -1473,29 +1532,36 @@ export async function apiSendRequest(req: ApiRequestPayload): Promise<ApiRespons
   });
 }
 
-// ----------------- Web Auth & Server Security -----------------
+// ----------------- Web Auth & Server Security (1-Hour Expiration) -----------------
 export interface AuthStatusResponse {
   is_configured: boolean;
   is_authenticated: boolean;
   must_change_password: boolean;
   username: string;
   storage_path: string;
+  expires_in_seconds?: number;
+  session_duration_seconds?: number;
+  session_expired?: boolean;
 }
 
 export interface AuthActionResult {
   success: boolean;
   must_change_password: boolean;
   username: string;
+  token?: string;
+  expires_at?: number;
+  expires_in_seconds?: number;
   message?: string;
 }
 
 export async function authGetStatus(): Promise<AuthStatusResponse> {
-  return safeInvoke<AuthStatusResponse>('auth_get_status', {}, {
+  const session = getStoredSession();
+  return safeInvoke<AuthStatusResponse>('auth_get_status', { token: session?.token }, {
     is_configured: false,
     is_authenticated: false,
     must_change_password: false,
     username: 'admin',
-    storage_path: '/etc/sshdesktop/auth.json',
+    storage_path: '/var/lib/sshdesktop/auth.json',
   });
 }
 
@@ -1522,7 +1588,9 @@ export async function authChangeCredentials(currentPassword: string, newUsername
 }
 
 export async function authLogout(): Promise<boolean> {
-  return safeInvoke<boolean>('auth_logout', {}, true);
+  const session = getStoredSession();
+  clearStoredSession();
+  return safeInvoke<boolean>('auth_logout', { token: session?.token }, true);
 }
 
 // ----------------- Browser Reverse Proxy -----------------
