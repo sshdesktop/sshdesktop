@@ -483,11 +483,28 @@ export default function SshSessionTerminal({
 
       {/* Terminal Viewport */}
       <div 
-        ref={containerRef} 
-        className="flex-1 w-full h-full p-2 overflow-hidden terminal-app" 
+        className="flex-1 w-full h-full relative overflow-hidden terminal-app"
+        style={{ backgroundColor: (THEMES[terminalTheme] || THEMES.catppuccin).background }}
         onClick={() => termRef.current?.focus()}
         onContextMenu={handleContextMenu}
-      />
+      >
+        <div 
+          ref={containerRef} 
+          className="w-full h-full"
+          style={{
+            position: 'absolute',
+            top: '4px',
+            bottom: '4px',
+            left: '6px',
+            right: '6px',
+            width: 'calc(100% - 12px)',
+            height: 'calc(100% - 8px)',
+            padding: 0,
+            margin: 0,
+            overflow: 'hidden',
+          }}
+        />
+      </div>
 
       {/* Floating Terminal Context Menu */}
       {contextMenu && (
