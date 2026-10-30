@@ -27,7 +27,17 @@ async fn open_browser_window(
     window_id: Option<String>,
 ) -> Result<String, String> {
     use tauri::Manager;
-    let window_label = window_id.unwrap_or_else(|| format!("browser-{}", uuid::Uuid::new_v4()));
+    let is_proxy = proxy_url.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+    let raw_id = window_id.unwrap_or_else(|| format!("tab-{}", uuid::Uuid::new_v4()));
+    let clean_id: String = raw_id.chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' }).collect();
+    let window_label = format!("browser-{}-{}", if is_proxy { "proxy" } else { "direct" }, clean_id);
+    let opposite_label = format!("browser-{}-{}", if is_proxy { "direct" } else { "proxy" }, clean_id);
+
+    // If an opposite mode window is currently open for this tab (e.g. toggled between SSH: ON and SSH: OFF), close it
+    if let Some(old_win) = app.get_webview_window(&opposite_label) {
+        let _ = old_win.close();
+    }
+
     let parsed_url = url::Url::parse(&url).map_err(|e| format!("Invalid URL: {}", e))?;
 
     if let Some(existing) = app.get_webview_window(&window_label) {
@@ -42,17 +52,43 @@ async fn open_browser_window(
         &window_label,
         tauri::WebviewUrl::External(parsed_url),
     )
-    .title(title.unwrap_or_else(|| "SSH Desktop Browser".to_string()))
+    .title(title.unwrap_or_else(|| {
+        if is_proxy {
+            "SSH Desktop Browser (SSH SOCKS5 Encrypted)".to_string()
+        } else {
+            "SSH Desktop Browser (Direct PC)".to_string()
+        }
+    }))
     .inner_size(1280.0, 800.0)
     .center();
 
-    if let Some(proxy_str) = proxy_url {
-        if let Ok(proxy) = url::Url::parse(&proxy_str) {
+    if let Some(ref proxy_str) = proxy_url {
+        if let Ok(proxy) = url::Url::parse(proxy_str) {
             builder = builder.proxy_url(proxy);
         }
     }
 
-    builder.build().map_err(|e| format!("Failed to create browser window: {}", e))?;
+    // Isolate User Data Folder for native browser windows.
+    // On Windows (WebView2), windows with custom command line / proxy settings MUST NOT share the default UDF
+    // with the main window, otherwise WebView2 crashes or immediately aborts the secondary window.
+    if let Ok(local_data) = app.path().app_local_data_dir() {
+        let profile_dir = if is_proxy {
+            local_data.join("browser_profiles").join(format!("proxy-{}", clean_id))
+        } else {
+            local_data.join("browser_profiles").join(format!("direct-{}", clean_id))
+        };
+        let _ = std::fs::create_dir_all(&profile_dir);
+        builder = builder.data_directory(profile_dir);
+    }
+
+    let win = builder.build().map_err(|e| {
+        log::error!("Failed to build browser window ({}): {}", window_label, e);
+        format!("Failed to create browser window: {}", e)
+    })?;
+
+    let _ = win.show();
+    let _ = win.set_focus();
+    log::info!("SSH Desktop Browser window opened successfully: label={}, proxy={:?}", window_label, proxy_url);
     Ok(window_label)
 }
 
@@ -62,7 +98,12 @@ async fn close_browser_window(
     window_id: String,
 ) -> Result<(), String> {
     use tauri::Manager;
+    let clean_id: String = window_id.chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' }).collect();
     if let Some(existing) = app.get_webview_window(&window_id) {
+        let _ = existing.close();
+    } else if let Some(existing) = app.get_webview_window(&format!("browser-proxy-{}", clean_id)) {
+        let _ = existing.close();
+    } else if let Some(existing) = app.get_webview_window(&format!("browser-direct-{}", clean_id)) {
         let _ = existing.close();
     }
     Ok(())
@@ -74,7 +115,14 @@ async fn focus_browser_window(
     window_id: String,
 ) -> Result<(), String> {
     use tauri::Manager;
+    let clean_id: String = window_id.chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' }).collect();
     if let Some(existing) = app.get_webview_window(&window_id) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+    } else if let Some(existing) = app.get_webview_window(&format!("browser-proxy-{}", clean_id)) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+    } else if let Some(existing) = app.get_webview_window(&format!("browser-direct-{}", clean_id)) {
         let _ = existing.show();
         let _ = existing.set_focus();
     }
