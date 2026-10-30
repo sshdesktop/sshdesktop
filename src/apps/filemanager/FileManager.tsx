@@ -88,6 +88,49 @@ export const FileManager: React.FC = () => {
   // Sidebar Resizability State
   const [sidebarWidth, setSidebarWidth] = useState<number>(220);
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const userManuallyToggledSidebarRef = useRef(false);
+
+  // Responsive Container Tracking & Status Bar Refs
+  const rootContainerRef = useRef<HTMLDivElement | null>(null);
+  const [containerWidth, setContainerWidth] = useState<number>(800);
+  const bottomBreadcrumbsRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!rootContainerRef.current) return;
+    const ro = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 0) {
+          setContainerWidth(entry.contentRect.width);
+        }
+      }
+    });
+    ro.observe(rootContainerRef.current);
+    return () => ro.disconnect();
+  }, []);
+
+  // Auto-collapse sidebar if window is opened/resized very small (< 520px) and user hasn't manually toggled it
+  useEffect(() => {
+    if (!userManuallyToggledSidebarRef.current && containerWidth > 0) {
+      if (containerWidth < 520 && isSidebarOpen) {
+        setIsSidebarOpen(false);
+      } else if (containerWidth >= 640 && !isSidebarOpen) {
+        setIsSidebarOpen(true);
+      }
+    }
+  }, [containerWidth, isSidebarOpen]);
+
+  const handleToggleSidebar = useCallback(() => {
+    userManuallyToggledSidebarRef.current = true;
+    setIsSidebarOpen(prev => !prev);
+  }, []);
+
+  // Auto-scroll bottom breadcrumbs to the right so active directory is always visible
+  useEffect(() => {
+    if (bottomBreadcrumbsRef.current) {
+      bottomBreadcrumbsRef.current.scrollLeft = bottomBreadcrumbsRef.current.scrollWidth;
+    }
+  }, [currentPath]);
 
   // Dragging State
   const [draggedItem, setDraggedItem] = useState<string | null>(null);
@@ -1449,17 +1492,86 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
   };
 
 
+  // Synchronized Navigation Actions Ref to avoid stale closures in window event listener
+  const navActionsRef = useRef({ goBack, goForward, goUp, historyIndex, currentPath, handleToggleSidebar });
+  useEffect(() => {
+    navActionsRef.current = { goBack, goForward, goUp, historyIndex, currentPath, handleToggleSidebar };
+  });
+
   // Keyboard Shortcuts Listener (<kbd>Ctrl</kbd> + <kbd>Space</kbd> for Quick Look)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
+      const activeEl = document.activeElement as HTMLElement | null;
+      const isInputFocused = 
+        ['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName) ||
+        ['INPUT', 'TEXTAREA'].includes(activeEl?.tagName || '') ||
+        (e.target as HTMLElement)?.isContentEditable ||
+        activeEl?.isContentEditable;
+
+      if (isInputFocused) {
         if (e.key === 'Escape') {
           (e.target as HTMLElement).blur();
+          activeEl?.blur();
         }
         return;
       }
 
       const isMacMeta = e.metaKey || e.ctrlKey;
+
+      const isAnyModalOpen = 
+        showNewFolder || 
+        showNewFile || 
+        showRenameModal || 
+        showChmodModal || 
+        showChownModal || 
+        showGetInfo || 
+        liveArchiveModal.isOpen || 
+        showLiveDeleteModal || 
+        packageInstallerFile || 
+        scriptModal || 
+        permissionAlert ||
+        quickLookFile;
+
+      // 1. Backspace Key Navigation: Go Back in History (or Go Up if at Root of History)
+      if (e.key === 'Backspace' && !isMacMeta && !e.altKey && !e.shiftKey) {
+        if (isAnyModalOpen) return;
+        e.preventDefault();
+        const { goBack: doBack, goUp: doUp, historyIndex: hIdx, currentPath: cPath } = navActionsRef.current;
+        if (hIdx > 0) {
+          doBack();
+        } else if (cPath !== '/') {
+          doUp();
+        }
+        return;
+      }
+
+      // 2. Alt+Left or Cmd+[ Navigation: Go Back
+      if (!isAnyModalOpen && ((e.altKey && e.key === 'ArrowLeft') || (isMacMeta && e.key === '['))) {
+        e.preventDefault();
+        navActionsRef.current.goBack();
+        return;
+      }
+
+      // 3. Alt+Right or Cmd+] Navigation: Go Forward
+      if (!isAnyModalOpen && ((e.altKey && e.key === 'ArrowRight') || (isMacMeta && e.key === ']'))) {
+        e.preventDefault();
+        navActionsRef.current.goForward();
+        return;
+      }
+
+      // 4. Alt+Up or Cmd+Up Navigation: Go Up to Enclosing Folder
+      if (!isAnyModalOpen && ((e.altKey && e.key === 'ArrowUp') || (isMacMeta && e.key === 'ArrowUp'))) {
+        e.preventDefault();
+        navActionsRef.current.goUp();
+        return;
+      }
+
+      // 5. Ctrl+B / Cmd+B to Toggle Sidebar
+      if (!isAnyModalOpen && isMacMeta && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        navActionsRef.current.handleToggleSidebar();
+        return;
+      }
 
       if (isMacMeta && e.key.toLowerCase() === 'c') {
         e.preventDefault();
@@ -1653,6 +1765,7 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
 
   return (
     <div 
+      ref={rootContainerRef}
       className="flex h-full bg-[#181825] text-[#cdd6f4] select-none overflow-hidden relative"
       onDragOver={(e) => {
         e.preventDefault();
@@ -1684,35 +1797,39 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
         onChange={handleLocalFileUpload}
       />
 
-      {/* Finder Sidebar */}
-      <FinderSidebar
-        sidebarWidth={sidebarWidth}
-        currentPath={currentPath}
-        userHome={userHome}
-        dropTargetDir={dropTargetDir}
-        setDropTargetDir={setDropTargetDir}
-        draggedItem={draggedItem}
-        draggedItems={draggedItems}
-        favorites={favorites}
-        addFavorite={addFavorite}
-        removeFavorite={removeFavorite}
-        navigateTo={navigateTo}
-        handleSpecialFolderNavigate={navigateTo}
-        handleMoveToSidebarDir={handleMoveToSidebarDir}
-        setIsResizingSidebar={setIsResizingSidebar}
-      />
+      {/* Finder Sidebar (Collapsible in small windows to give full space to path & files) */}
+      {isSidebarOpen && (
+        <>
+          <FinderSidebar
+            sidebarWidth={Math.min(sidebarWidth, Math.max(140, containerWidth - 200))}
+            currentPath={currentPath}
+            userHome={userHome}
+            dropTargetDir={dropTargetDir}
+            setDropTargetDir={setDropTargetDir}
+            draggedItem={draggedItem}
+            draggedItems={draggedItems}
+            favorites={favorites}
+            addFavorite={addFavorite}
+            removeFavorite={removeFavorite}
+            navigateTo={navigateTo}
+            handleSpecialFolderNavigate={navigateTo}
+            handleMoveToSidebarDir={handleMoveToSidebarDir}
+            setIsResizingSidebar={setIsResizingSidebar}
+          />
 
-      {/* Sidebar Resizer Handle */}
-      <div 
-        onMouseDown={(e) => {
-          e.preventDefault();
-          setIsResizingSidebar(true);
-        }}
-        className="w-1 cursor-col-resize hover:bg-blue-500/60 active:bg-blue-500 transition-colors z-20 shrink-0 bg-white/[0.05] relative group"
-        title="Drag to resize sidebar"
-      >
-        <div className="absolute inset-y-0 -left-1 -right-1" />
-      </div>
+          {/* Sidebar Resizer Handle */}
+          <div 
+            onMouseDown={(e) => {
+              e.preventDefault();
+              setIsResizingSidebar(true);
+            }}
+            className="w-1 cursor-col-resize hover:bg-blue-500/60 active:bg-blue-500 transition-colors z-20 shrink-0 bg-white/[0.05] relative group"
+            title="Drag to resize sidebar"
+          >
+            <div className="absolute inset-y-0 -left-1 -right-1" />
+          </div>
+        </>
+      )}
 
       {/* Main Workspace Area */}
       <div className="flex-1 flex flex-col min-w-0 bg-[#181825]">
@@ -1805,6 +1922,9 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
           onOpenTerminalHere={handleOpenTerminalHere}
           onDownloadFile={handleDownloadFile}
           navigateTo={navigateTo}
+          containerWidth={containerWidth}
+          isSidebarOpen={isSidebarOpen}
+          onToggleSidebar={handleToggleSidebar}
         />
 
         {/* Views Canvas */}
@@ -1972,8 +2092,11 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
         </div>
 
         {/* Status Bar & Path Breadcrumbs */}
-        <div className="h-7 bg-[#11111a] border-t border-white/[0.08] px-3 flex items-center justify-between text-xs text-gray-400 shrink-0 select-none">
-          <div className="flex items-center space-x-1 overflow-x-auto text-[11px] font-medium text-gray-300 scrollbar-none">
+        <div className="h-7 bg-[#11111a] border-t border-white/[0.08] px-2.5 sm:px-3 flex items-center justify-between text-xs text-gray-400 shrink-0 select-none">
+          <div 
+            ref={bottomBreadcrumbsRef}
+            className="flex items-center space-x-1 overflow-x-auto text-[11px] font-medium text-gray-300 scrollbar-none min-w-0 flex-1 mr-2"
+          >
             <span 
               onClick={() => navigateTo('/')}
               className={`cursor-pointer flex items-center space-x-1 px-1.5 py-0.5 rounded transition-colors shrink-0 ${
@@ -1994,57 +2117,64 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
                   <ChevronRight className="w-3 h-3 text-gray-600 shrink-0" />
                   <span 
                     onClick={() => navigateTo(full)}
-                    className={`cursor-pointer px-1.5 py-0.5 rounded transition-colors truncate max-w-[140px] flex items-center space-x-1 ${
+                    className={`cursor-pointer px-1.5 py-0.5 rounded transition-colors flex items-center space-x-1 ${
                       isLast 
-                        ? 'bg-blue-600/35 text-white font-semibold border border-blue-400/40 shadow-sm' 
-                        : 'hover:text-white hover:bg-white/10'
+                        ? 'bg-blue-600/35 text-white font-semibold border border-blue-400/40 shadow-sm shrink-0 max-w-[150px] truncate' 
+                        : 'hover:text-white hover:bg-white/10 max-w-[100px] truncate shrink'
                     }`}
                     title={full}
                   >
                     {isLast && <Folder className="w-2.5 h-2.5 text-blue-400 shrink-0" />}
-                    <span>{part}</span>
+                    <span className="truncate">{part}</span>
                   </span>
                 </React.Fragment>
               );
             })}
           </div>
 
-          {/* Alphabet Quick-Jump Strip (Click any letter to select matching file/folder) */}
-          <div className="hidden lg:flex items-center space-x-0.5 px-2 py-0.5 bg-black/30 rounded-lg border border-white/5 mx-2 overflow-x-auto scrollbar-none">
-            {['A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z','#'].map(char => {
-              const hasFiles = availableLetters.has(char);
-              return (
-                <button
-                  key={char}
-                  onClick={(e) => { e.stopPropagation(); handleLetterJump(char); }}
-                  disabled={!hasFiles}
-                  className={`w-3.5 h-4 text-[9px] font-bold rounded flex items-center justify-center transition-all ${
-                    hasFiles
-                      ? 'text-gray-300 hover:text-white hover:bg-blue-600 hover:scale-110 active:scale-95 cursor-pointer'
-                      : 'text-gray-600 opacity-20 cursor-default'
-                  }`}
-                  title={hasFiles ? `Click to jump to '${char}'` : `No items starting with '${char}'`}
-                >
-                  {char}
-                </button>
-              );
-            })}
-          </div>
+          {/* Alphabet Quick-Jump Strip (Shown only when window is spacious >= 850px) */}
+          {containerWidth >= 850 && (
+            <div className="flex items-center space-x-0.5 px-2 py-0.5 bg-black/30 rounded-lg border border-white/5 mx-2 overflow-x-auto scrollbar-none">
+              {['A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z','#'].map(char => {
+                const hasFiles = availableLetters.has(char);
+                return (
+                  <button
+                    key={char}
+                    onClick={(e) => { e.stopPropagation(); handleLetterJump(char); }}
+                    disabled={!hasFiles}
+                    className={`w-3.5 h-4 text-[9px] font-bold rounded flex items-center justify-center transition-all ${
+                      hasFiles
+                        ? 'text-gray-300 hover:text-white hover:bg-blue-600 hover:scale-110 active:scale-95 cursor-pointer'
+                        : 'text-gray-600 opacity-20 cursor-default'
+                    }`}
+                    title={hasFiles ? `Click to jump to '${char}'` : `No items starting with '${char}'`}
+                  >
+                    {char}
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
-          <div className="text-[11px] text-gray-400 flex items-center space-x-3 shrink-0 pl-2">
-            <span>
+          <div className="text-[11px] text-gray-400 flex items-center space-x-2 shrink-0 pl-2">
+            <span className="shrink-0">
               {selectedFiles.size > 0 
                 ? `${selectedFiles.size} of ${activeDisplayFiles.length} selected`
                 : `${activeDisplayFiles.length} item${activeDisplayFiles.length !== 1 ? 's' : ''}`}
             </span>
-            <span className="text-gray-600">·</span>
-            <span className="flex items-center space-x-1 text-emerald-400 font-medium">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              <span className="text-[10px]">SFTP Ready</span>
-            </span>
 
-            {view === 'icons' && (
-              <div className="flex items-center space-x-1.5 pl-2 border-l border-white/10">
+            {containerWidth >= 520 && (
+              <>
+                <span className="text-gray-600">·</span>
+                <span className="flex items-center space-x-1 text-emerald-400 font-medium shrink-0">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  <span className="text-[10px]">SFTP Ready</span>
+                </span>
+              </>
+            )}
+
+            {view === 'icons' && containerWidth >= 640 && (
+              <div className="flex items-center space-x-1.5 pl-2 border-l border-white/10 shrink-0">
                 <Grid className="w-2.5 h-2.5 text-gray-500" />
                 <input
                   type="range"
