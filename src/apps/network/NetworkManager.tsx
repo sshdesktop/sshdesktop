@@ -11,6 +11,7 @@ import {
 } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
+import { formatBytes } from '../../lib/utils';
 
 // Subcomponents and Modals
 import NetworkContextMenu, { ContextMenuTarget } from './components/NetworkContextMenu';
@@ -38,11 +39,13 @@ interface InterfaceItem {
   ipv4: string;
   ipv6: string;
   mac: string;
-  state: 'UP' | 'DOWN';
+  state: string;
+  mtu: number;
   rx: string;
   tx: string;
   rxBytes?: number;
   txBytes?: number;
+  publicIp?: string;
 }
 
 export default function NetworkManager() {
@@ -50,6 +53,7 @@ export default function NetworkManager() {
   const [ports, setPorts] = useState<ListeningPort[]>([]);
   const [conns, setConns] = useState<ActiveConn[]>([]);
   const [interfaces, setInterfaces] = useState<InterfaceItem[]>([]);
+  const [publicIp, setPublicIp] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
   
@@ -82,6 +86,8 @@ export default function NetworkManager() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: ContextMenuTarget } | null>(null);
 
   const activeConnId = useConnectionStore(s => s.activeConnectionId) || 'default';
+  const connections = useConnectionStore(s => s.connections);
+  const activeServer = connections.find(c => c.id === activeConnId);
   const { openApp } = useWindowManager();
   const { runTerminalCommand } = useEditorStore();
 
@@ -124,16 +130,25 @@ export default function NetworkManager() {
       }
 
       if (ifList && Array.isArray(ifList)) {
+        const foundPub = ifList.find((i: any) => i.public_ip)?.public_ip || '';
+        if (foundPub) {
+          setPublicIp(foundPub);
+        } else if (activeServer?.host && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(activeServer.host) && !activeServer.host.startsWith('127.') && !activeServer.host.startsWith('10.') && !activeServer.host.startsWith('192.168.')) {
+          setPublicIp(activeServer.host);
+        }
+
         setInterfaces(ifList.map((i: any) => ({
           name: i.name,
-          ipv4: i.ip || '—',
-          ipv6: 'fe80::/64',
-          mac: i.mac || '—',
-          state: 'UP',
-          rx: `${((i.rx_bytes || 0) / (1024 * 1024)).toFixed(1)} MB`,
-          tx: `${((i.tx_bytes || 0) / (1024 * 1024)).toFixed(1)} MB`,
+          ipv4: i.ipv4 || i.ip || '—',
+          ipv6: i.ipv6 && i.ipv6 !== 'fe80::/64' ? i.ipv6 : (i.ipv6 || '—'),
+          mac: i.mac || (i.name === 'lo' ? '00:00:00:00:00:00' : '—'),
+          state: i.state || (i.name === 'lo' ? 'UP' : 'UNKNOWN'),
+          mtu: i.mtu || (i.name === 'lo' ? 65536 : 1500),
+          rx: formatBytes(i.rx_bytes || 0),
+          tx: formatBytes(i.tx_bytes || 0),
           rxBytes: i.rx_bytes || 0,
           txBytes: i.tx_bytes || 0,
+          publicIp: foundPub || '',
         })));
       } else {
         setInterfaces([]);
@@ -143,7 +158,21 @@ export default function NetworkManager() {
     } finally {
       setLoading(false);
     }
-  }, [activeConnId]);
+  }, [activeConnId, activeServer]);
+
+  // Background public IP resolution if still empty
+  useEffect(() => {
+    if (!publicIp && activeConnId) {
+      sshExec(activeConnId, 'curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --connect-timeout 2 https://ifconfig.me 2>/dev/null || curl -4s --connect-timeout 2 https://icanhazip.com 2>/dev/null')
+        .then(res => {
+          const ip = (res.stdout || '').trim();
+          if (ip && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) {
+            setPublicIp(ip);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [activeConnId, publicIp]);
 
   useEffect(() => {
     loadNetworkData();
@@ -402,6 +431,52 @@ export default function NetworkManager() {
         {/* 2. INTERFACES TAB */}
         {tab === 'interfaces' && (
           <div className="flex-1 overflow-y-auto p-4 scrollbar-thin">
+            {/* Server Public IP & Internet Gateway Card */}
+            <div className="mb-4 p-4 rounded-2xl bg-gradient-to-r from-blue-900/30 via-indigo-900/20 to-purple-900/30 border border-blue-500/30 shadow-lg flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center space-x-3.5">
+                <div className="w-11 h-11 rounded-2xl bg-blue-500/20 border border-blue-400/30 flex items-center justify-center text-blue-400 shadow-inner">
+                  <Globe className="w-6 h-6 animate-pulse" />
+                </div>
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs uppercase tracking-wider font-bold text-gray-300">Server Public IP</span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center space-x-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                      <span>Public Gateway</span>
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-2 mt-0.5">
+                    <span className="font-mono font-black text-xl text-white tracking-wide">
+                      {publicIp || (loading ? 'Resolving Public IP...' : 'Auto-resolving...')}
+                    </span>
+                    {publicIp && (
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(publicIp);
+                          showToast('Public IP copied to clipboard!');
+                        }}
+                        title="Copy Public IP"
+                        className="p-1 rounded-lg bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white transition-colors"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-3 text-xs font-mono">
+                <div className="px-3 py-1.5 rounded-xl bg-black/30 border border-white/10 text-gray-300">
+                  <span className="text-gray-500 mr-2 text-[10px] uppercase font-sans">SSH Host:</span>
+                  <span className="text-blue-300 font-semibold">{activeServer?.host || '—'}</span>
+                </div>
+                <div className="px-3 py-1.5 rounded-xl bg-black/30 border border-white/10 text-gray-300">
+                  <span className="text-gray-500 mr-2 text-[10px] uppercase font-sans">Port:</span>
+                  <span className="text-purple-300 font-semibold">{activeServer?.port || 22}</span>
+                </div>
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {interfaces.length === 0 ? (
                 <div className="col-span-2 text-center py-16 text-gray-500 text-xs">
@@ -411,6 +486,7 @@ export default function NetworkManager() {
                 interfaces.map(iface => {
                   const isLoopback = iface.name === 'lo';
                   const isSelected = selectedIface === iface.name;
+                  const isUp = iface.state.toUpperCase() === 'UP';
 
                   return (
                     <div 
@@ -441,35 +517,71 @@ export default function NetworkManager() {
                             {isLoopback ? <Radio className="w-5 h-5" /> : <NetworkIcon className="w-5 h-5" />}
                           </div>
                           <div>
-                            <div className="font-mono font-bold text-sm text-white">{iface.name}</div>
-                            <div className="text-[10px] text-gray-400">{isLoopback ? 'Local Loopback' : 'Physical Network Adapter'}</div>
+                            <div className="font-mono font-bold text-sm text-white flex items-center space-x-2">
+                              <span>{iface.name}</span>
+                              {publicIp && iface.ipv4 && iface.ipv4.includes(publicIp) && (
+                                <span className="px-1.5 py-0.5 rounded text-[9px] bg-blue-500/20 text-blue-300 border border-blue-400/30">
+                                  Public WAN
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-gray-400">
+                              {isLoopback ? 'Local Loopback Interface' : 'Network Adapter'}
+                            </div>
                           </div>
                         </div>
 
-                        <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold flex items-center space-x-1.5 bg-emerald-500/15 border border-emerald-500/30 text-emerald-400">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                          <span>Connected</span>
+                        <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold flex items-center space-x-1.5 border ${
+                          isUp 
+                            ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+                            : 'bg-gray-500/15 border-gray-500/30 text-gray-400'
+                        }`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${isUp ? 'bg-emerald-400 animate-pulse' : 'bg-gray-500'}`} />
+                          <span>{isUp ? 'Connected' : iface.state}</span>
                         </span>
                       </div>
 
                       <div className="grid grid-cols-2 gap-3 text-xs font-mono bg-[#11111b] p-3 rounded-xl border border-white/[0.05]">
                         <div>
                           <span className="text-gray-500 block text-[10px] uppercase font-bold tracking-wider">IPv4 Address</span>
-                          <span className="text-white font-semibold">{iface.ipv4}</span>
+                          <span className="text-white font-semibold flex items-center space-x-1">
+                            <span>{iface.ipv4}</span>
+                            {iface.ipv4 !== '—' && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  navigator.clipboard.writeText(iface.ipv4.split('/')[0]);
+                                  showToast(`Copied ${iface.ipv4.split('/')[0]}`);
+                                }}
+                                className="opacity-60 hover:opacity-100 p-0.5"
+                                title="Copy IPv4"
+                              >
+                                <Copy className="w-2.5 h-2.5" />
+                              </button>
+                            )}
+                          </span>
                         </div>
                         <div>
                           <span className="text-gray-500 block text-[10px] uppercase font-bold tracking-wider">MAC Address</span>
-                          <span className="text-gray-400 truncate block">{iface.mac}</span>
+                          <span className="text-gray-300 truncate block">{iface.mac}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-500 block text-[10px] uppercase font-bold tracking-wider">IPv6 Address</span>
+                          <span className="text-gray-400 truncate block text-[11px]">{iface.ipv6}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-500 block text-[10px] uppercase font-bold tracking-wider">MTU</span>
+                          <span className="text-gray-400 block">{iface.mtu || 1500} Bytes</span>
                         </div>
                       </div>
 
                       <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between text-xs text-gray-400">
                         <div className="flex items-center space-x-3 font-mono text-[11px]">
-                          <span className="flex items-center space-x-1 text-emerald-400">
+                          <span className="flex items-center space-x-1 text-emerald-400" title="Received Bytes">
                             <span>↓</span>
                             <span>{iface.rx}</span>
                           </span>
-                          <span className="flex items-center space-x-1 text-blue-400">
+                          <span className="flex items-center space-x-1 text-blue-400" title="Transmitted Bytes">
                             <span>↑</span>
                             <span>{iface.tx}</span>
                           </span>
