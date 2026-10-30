@@ -11,6 +11,7 @@
  */
 
 import http from 'http';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -24,10 +25,45 @@ import { EMBEDDED_FILES } from './embedded-dist.js';
 const currentFile = typeof __filename !== 'undefined' ? __filename : (typeof process !== 'undefined' && process.argv ? process.argv[1] : process.cwd());
 const currentDir = typeof __dirname !== 'undefined' ? __dirname : (currentFile ? path.dirname(currentFile) : process.cwd());
 
+const VERSION = '2.4.0';
+
+// Instant CLI Argument Checks (--version, -v, --help, -h)
+// Prevents standalone SEA binaries from starting long-running server during verification
+const cliArgs = process.argv.slice(2);
+if (cliArgs.includes('--version') || cliArgs.includes('-v')) {
+  console.log(`sshdesktop ${VERSION}`);
+  process.exit(0);
+}
+if (cliArgs.includes('--help') || cliArgs.includes('-h')) {
+  console.log(`
+SSH Desktop - All-in-One Standalone Web Server & Remote SSH Engine
+Version: ${VERSION}
+Usage: sshdesktop [options]
+
+Options:
+  -v, --version         Show version number (${VERSION})
+  -h, --help            Show this help manual
+  --port <port>         Frontend web desktop port (default: 2222)
+  --backend-port <port> Backend SSH2 API port (default: 2020)
+  --host <host>         Bind host address (default: 0.0.0.0)
+  --data-dir <path>     Directory for secure local storage
+`);
+  process.exit(0);
+}
+
+function getCliArg(flag) {
+  const idx = cliArgs.indexOf(flag);
+  if (idx !== -1 && idx + 1 < cliArgs.length) return cliArgs[idx + 1];
+  const prefix = flag + '=';
+  const eq = cliArgs.find(a => a.startsWith(prefix));
+  if (eq) return eq.slice(prefix.length);
+  return null;
+}
+
 // Port Configuration per requirements: Frontend on 2222, Backend on 2020
-const FRONTEND_PORT = parseInt(process.env.FRONTEND_PORT || process.env.PORT || '2222', 10);
-const BACKEND_PORT = parseInt(process.env.BACKEND_PORT || '2020', 10);
-const HOST = process.env.HOST || '0.0.0.0';
+const FRONTEND_PORT = parseInt(getCliArg('--port') || process.env.FRONTEND_PORT || process.env.PORT || '2222', 10);
+const BACKEND_PORT = parseInt(getCliArg('--backend-port') || process.env.BACKEND_PORT || '2020', 10);
+const HOST = getCliArg('--host') || process.env.HOST || '0.0.0.0';
 
 // Locate dist directory (supports raw development, external override, and packaged binary layouts)
 let DIST_DIR = path.join(currentDir, 'dist');
@@ -43,20 +79,62 @@ if (!fs.existsSync(DIST_DIR)) {
   }
 }
 
-// User persistent storage (~/.sshdesktop or ./data)
-const USER_HOME = os.homedir() || '/root';
-const DATA_DIR = path.join(USER_HOME, '.sshdesktop');
+// Safe & Secure Persistent Storage Resolution (Owner-only: 0700)
+function resolveSafeDataDir() {
+  const cliDir = getCliArg('--data-dir');
+  if (cliDir) return path.resolve(cliDir);
+
+  if (process.env.SSHDESKTOP_DATA_DIR) {
+    return path.resolve(process.env.SSHDESKTOP_DATA_DIR);
+  }
+
+  const platform = os.platform();
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
+  if (platform === 'linux') {
+    if (isRoot) {
+      try {
+        const varLib = '/var/lib/sshdesktop';
+        if (!fs.existsSync(varLib)) fs.mkdirSync(varLib, { recursive: true, mode: 0o700 });
+        return varLib;
+      } catch {}
+    }
+    // Standard Linux user: XDG Base Directory specification (~/.local/share/sshdesktop)
+    // Prevents storing credentials in world-readable /home root
+    const xdgData = process.env.XDG_DATA_HOME || path.join(os.homedir() || '/root', '.local', 'share');
+    return path.join(xdgData, 'sshdesktop');
+  }
+
+  if (platform === 'win32') {
+    const localApp = process.env.LOCALAPPDATA || (process.env.APPDATA ? path.join(process.env.APPDATA, '..', 'Local') : null);
+    if (localApp) {
+      return path.join(localApp, 'sshdesktop');
+    }
+  }
+
+  if (platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'sshdesktop');
+  }
+
+  return path.join(os.homedir() || '.', '.sshdesktop');
+}
+
+const DATA_DIR = resolveSafeDataDir();
 try {
   if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
   }
+  try {
+    fs.chmodSync(DATA_DIR, 0o700);
+  } catch {}
 } catch (e) {
-  console.warn('Notice: Could not create ~/.sshdesktop, using local fallback ./data:', e.message);
+  console.warn('Notice: Could not create secure data directory, using local fallback:', e.message);
 }
 
 const CONNECTIONS_FILE = path.join(DATA_DIR, 'connections.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
+const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 
 // MIME types dictionary
 const MIME_TYPES = {
@@ -110,14 +188,120 @@ function readJsonSafe(filePath, fallback = {}) {
 function writeJsonSafe(filePath, data) {
   try {
     const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      try { fs.chmodSync(dir, 0o700); } catch {}
+    }
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
+    try { fs.chmodSync(filePath, 0o600); } catch {}
     return true;
   } catch (err) {
     console.warn(`Failed writing JSON to ${filePath}:`, err.message);
     return false;
   }
 }
+
+// -------------------------------------------------------------
+// 1-Hour Session Management Engine (Website Security)
+// -------------------------------------------------------------
+const SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour session expiration (3600 seconds)
+const activeSessions = new Map(); // token -> { token, username, createdAt, expiresAt }
+
+function loadSessions() {
+  try {
+    const saved = readJsonSafe(SESSIONS_FILE, {});
+    const now = Date.now();
+    for (const [token, sess] of Object.entries(saved)) {
+      if (sess && sess.expiresAt && sess.expiresAt > now) {
+        activeSessions.set(token, sess);
+      }
+    }
+  } catch {}
+}
+loadSessions();
+
+function persistSessions() {
+  const obj = {};
+  const now = Date.now();
+  for (const [token, sess] of activeSessions.entries()) {
+    if (sess.expiresAt > now) {
+      obj[token] = sess;
+    }
+  }
+  writeJsonSafe(SESSIONS_FILE, obj);
+}
+
+function createSession(username) {
+  const token = 'sshsess_' + crypto.randomBytes(32).toString('hex');
+  const now = Date.now();
+  const session = {
+    token,
+    username,
+    createdAt: now,
+    expiresAt: now + SESSION_TTL_MS,
+  };
+  activeSessions.set(token, session);
+  persistSessions();
+  return session;
+}
+
+function getSession(token) {
+  if (!token || typeof token !== 'string') return null;
+  const session = activeSessions.get(token);
+  if (!session) return null;
+  if (Date.now() >= session.expiresAt) {
+    activeSessions.delete(token);
+    persistSessions();
+    return null;
+  }
+  return session;
+}
+
+function destroySession(token) {
+  if (token && activeSessions.has(token)) {
+    activeSessions.delete(token);
+    persistSessions();
+    return true;
+  }
+  return false;
+}
+
+function extractSessionToken(req, payload) {
+  const hToken = req?.headers?.['x-session-token'];
+  if (hToken) return String(hToken).trim();
+
+  const authHeader = req?.headers?.['authorization'];
+  if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
+    return authHeader.substring(7).trim();
+  }
+
+  if (payload?.sessionToken) return String(payload.sessionToken).trim();
+  if (payload?.token) return String(payload.token).trim();
+  if (payload?.args?.sessionToken) return String(payload.args.sessionToken).trim();
+  if (payload?.args?.token) return String(payload.args.token).trim();
+
+  if (req?.url) {
+    try {
+      const u = new URL(req.url, 'http://localhost');
+      const qToken = u.searchParams.get('token');
+      if (qToken) return qToken.trim();
+    } catch {}
+  }
+  return null;
+}
+
+// Background session pruner (every 60 seconds)
+setInterval(() => {
+  const now = Date.now();
+  let changed = false;
+  for (const [token, sess] of activeSessions.entries()) {
+    if (!sess || sess.expiresAt <= now) {
+      activeSessions.delete(token);
+      changed = true;
+    }
+  }
+  if (changed) persistSessions();
+}, 60 * 1000).unref?.();
 
 // Helper: Format bytes to human readable
 function formatBytes(bytes) {
@@ -219,25 +403,32 @@ function runRemoteExec(client, command, timeoutMs = 60000) {
 // -------------------------------------------------------------
 // Unified Command Handler (Implements all 70+ Tauri IPC commands)
 // -------------------------------------------------------------
-async function handleInvokeCommand(cmd, args) {
+async function handleInvokeCommand(cmd, args, currentSession = null) {
   const connId = args?.connId;
   const entry = getActiveEntry(connId);
 
   switch (cmd) {
     // ==========================================
-    // 1. Web Authentication & Session
+    // 1. Web Authentication & Session (1-Hour Expiration)
     // ==========================================
     case 'auth_get_status': {
+      const token = extractSessionToken(null, { args });
+      const session = currentSession || (token ? getSession(token) : null);
       const auth = readJsonSafe(AUTH_FILE, {
         username: 'admin',
         must_change_password: false
       });
+      const isAuthenticated = Boolean(session);
+      const expiresIn = session ? Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000)) : 0;
       return {
         is_configured: true,
-        is_authenticated: true,
+        is_authenticated: isAuthenticated,
+        session_expired: !isAuthenticated && Boolean(token),
+        expires_in_seconds: expiresIn,
+        session_duration_seconds: Math.floor(SESSION_TTL_MS / 1000),
         must_change_password: !!auth.must_change_password,
-        username: auth.username || 'admin',
-        storage_path: AUTH_FILE
+        username: session ? session.username : (auth.username || 'admin'),
+        storage_path: DATA_DIR
       };
     }
 
@@ -249,8 +440,12 @@ async function handleInvokeCommand(cmd, args) {
       const validPass = auth.password || 'sshdesktop';
 
       if (inputUser === validUser && (password === validPass || password === 'admin' || password === 'sshdesktop')) {
+        const session = createSession(auth.username || 'admin');
         return {
           success: true,
+          token: session.token,
+          expires_at: session.expiresAt,
+          expires_in_seconds: Math.floor(SESSION_TTL_MS / 1000),
           must_change_password: !!auth.must_change_password,
           username: auth.username || 'admin'
         };
@@ -272,6 +467,9 @@ async function handleInvokeCommand(cmd, args) {
     }
 
     case 'auth_logout': {
+      const token = extractSessionToken(null, { args });
+      if (token) destroySession(token);
+      if (currentSession?.token) destroySession(currentSession.token);
       return true;
     }
 
@@ -1859,7 +2057,7 @@ const backendServer = http.createServer(async (req, res) => {
     return;
   }
 
-  // Unified Web IPC Invoke Endpoint
+  // Unified Web IPC Invoke Endpoint with 1-Hour Session Expiration Security
   if (req.url === '/api/invoke' && req.method === 'POST') {
     let rawBody = '';
     req.on('data', chunk => { rawBody += chunk; });
@@ -1867,7 +2065,23 @@ const backendServer = http.createServer(async (req, res) => {
       try {
         const payload = JSON.parse(rawBody || '{}');
         const { cmd, args } = payload;
-        const result = await handleInvokeCommand(cmd, args);
+        const token = extractSessionToken(req, payload);
+        const session = getSession(token);
+
+        // Public auth commands do not require an active session
+        const isPublicAuthCmd = cmd === 'auth_login' || cmd === 'auth_get_status';
+
+        if (!isPublicAuthCmd && !session) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: 'Session expired or unauthorized. Please sign in again (1 hour session limit).',
+            session_expired: true,
+            code: 'SESSION_EXPIRED'
+          }));
+          return;
+        }
+
+        const result = await handleInvokeCommand(cmd, args, session);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ result }));
       } catch (err) {
@@ -1887,6 +2101,13 @@ const wss = new WebSocketServer({ noServer: true });
 
 function handleWsConnection(ws, req) {
   const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const token = urlObj.searchParams.get('token') || req.headers['x-session-token'];
+  const session = getSession(token);
+  if (!session) {
+    ws.close(1008, 'Session expired or unauthorized (1 hour limit)');
+    return;
+  }
+
   const termId = urlObj.searchParams.get('termId');
   const connId = urlObj.searchParams.get('connId');
   const cols = parseInt(urlObj.searchParams.get('cols') || '80', 10);
@@ -2075,8 +2296,8 @@ backendServer.listen(BACKEND_PORT, HOST, () => {
     console.log(`🌐 Frontend UI:     http://${HOST}:${FRONTEND_PORT} (Web Desktop)`);
     console.log(`⚡ Backend API:     http://${HOST}:${BACKEND_PORT} (SSH2 Engine & PTY)`);
     console.log(`📟 WebSocket PTY:   ws://${HOST}:${FRONTEND_PORT}/ws/terminal & ws://${HOST}:${BACKEND_PORT}/ws/terminal`);
-    console.log(`🔒 Authentication:  admin / sshdesktop`);
-    console.log(`💾 Local Storage:   ${DATA_DIR}`);
+    console.log(`🔒 Authentication:  admin / sshdesktop (1 Hour Session Expiration)`);
+    console.log(`💾 Local Storage:   ${DATA_DIR} (Protected: 0700 - Owner Only)`);
     console.log('================================================================\n');
   });
 });
