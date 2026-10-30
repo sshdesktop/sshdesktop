@@ -6,7 +6,8 @@ import '@xterm/xterm/css/xterm.css';
 import { 
   Plus, X, Terminal as TerminalIcon, Trash2, ChevronDown, Server, 
   ExternalLink, ShieldAlert, Activity, RefreshCw, Copy, CornerDownLeft,
-  ZoomIn, ZoomOut, Clipboard, RotateCcw, Check, Sparkles, Palette
+  ZoomIn, ZoomOut, Clipboard, RotateCcw, Check, Sparkles, Palette,
+  PanelBottomClose
 } from 'lucide-react';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
@@ -231,6 +232,47 @@ export default function TerminalApp() {
     return saved ? parseInt(saved, 10) : 16; // default 16px for comfortable margin
   });
   const [showMarginMenu, setShowMarginMenu] = useState(false);
+
+  // Terminal Status Bar Footer visibility & persistence
+  const [showFooter, setShowFooter] = useState<boolean>(() => {
+    const saved = localStorage.getItem('sshdesktop_terminal_show_footer');
+    return saved !== null ? saved === 'true' : true;
+  });
+
+  const terminalViewportRef = useRef<HTMLDivElement | null>(null);
+  const [viewportDims, setViewportDims] = useState<{ width: number; height: number }>({ width: 800, height: 600 });
+
+  // Adaptive padding: automatically clamp on short/small windows so the prompt has maximum rows
+  const isCompactHeight = viewportDims.height > 0 && viewportDims.height < 320;
+  const effectivePadding = isCompactHeight ? Math.min(padding, 4) : padding;
+
+  const fitActiveTerminal = useCallback(() => {
+    const inst = tabInstances.current.get(activeTab);
+    if (inst && !inst.disposed) {
+      try {
+        inst.fitAddon.fit();
+      } catch {}
+    }
+  }, [activeTab]);
+
+  // Viewport resize observer to detect window resizing (drag handles, maximize, restore)
+  useEffect(() => {
+    if (!terminalViewportRef.current) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect) {
+          const { width, height } = entry.contentRect;
+          setViewportDims({ width, height });
+        }
+      }
+      requestAnimationFrame(() => {
+        fitActiveTerminal();
+      });
+    });
+
+    ro.observe(terminalViewportRef.current);
+    return () => ro.disconnect();
+  }, [fitActiveTerminal]);
 
   const updateTheme = useCallback((newThemeId: string) => {
     setThemeId(newThemeId);
@@ -521,6 +563,17 @@ export default function TerminalApp() {
         }
         return false;
       }
+      if (e.ctrlKey && (e.key === 'b' || e.key === 'B')) {
+        if (e.type === 'keydown') {
+          setShowFooter(prev => {
+            const next = !prev;
+            localStorage.setItem('sshdesktop_terminal_show_footer', next.toString());
+            return next;
+          });
+          setTimeout(fitActiveTerminal, 50);
+        }
+        return false;
+      }
       return true;
     });
 
@@ -529,9 +582,23 @@ export default function TerminalApp() {
       fitAddon,
       disposed: false,
       cleanup: () => {
+        isDisposed = true;
+        ro.disconnect();
         el.removeEventListener('wheel', handleWheel, { capture: true });
       },
     };
+    let isDisposed = false;
+    const ro = new ResizeObserver(() => {
+      requestAnimationFrame(() => {
+        if (!isDisposed && el.clientWidth > 0 && el.clientHeight > 0) {
+          try {
+            fitAddon.fit();
+          } catch {}
+        }
+      });
+    });
+    ro.observe(el);
+
     tabInstances.current.set(tabId, instance);
 
     // Forward raw user keystrokes directly to PuTTY/plink PTY stream
@@ -590,6 +657,8 @@ export default function TerminalApp() {
     return () => window.removeEventListener('resize', handleResize);
   }, [activeTab]);
 
+
+
   // Fit and focus on tab change
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -601,6 +670,8 @@ export default function TerminalApp() {
     }, 40);
     return () => clearTimeout(timer);
   }, [activeTab]);
+
+
 
   // Execute external commands or directory requests sent to Terminal (e.g. Finder "Open Terminal Here")
   const pendingTerminalCommand = useEditorStore(s => s.pendingTerminalCommand);
@@ -923,7 +994,7 @@ export default function TerminalApp() {
         <div className="flex items-center space-x-1.5 pb-1 shrink-0">
           <button
             onClick={() => sendQuickCommand('sudo su -')}
-            className="px-2.5 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/20 rounded-lg text-xs font-mono flex items-center space-x-1 transition-colors"
+            className="hidden sm:flex px-2.5 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/20 rounded-lg text-xs font-mono items-center space-x-1 transition-colors"
             title="Switch to Root Shell (sudo su -)"
           >
             <ShieldAlert className="w-3.5 h-3.5" />
@@ -932,7 +1003,7 @@ export default function TerminalApp() {
 
           <button
             onClick={() => sendQuickCommand('top')}
-            className="px-2.5 py-1 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/20 rounded-lg text-xs font-mono flex items-center space-x-1 transition-colors"
+            className="hidden md:flex px-2.5 py-1 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/20 rounded-lg text-xs font-mono items-center space-x-1 transition-colors"
             title="Interactive Live Process Monitor (top)"
           >
             <Activity className="w-3.5 h-3.5" />
@@ -941,7 +1012,7 @@ export default function TerminalApp() {
 
           <button
             onClick={() => sendQuickCommand("alias ls='ls --color=auto' grep='grep --color=auto' ll='ls -la --color=auto' 2>/dev/null; export TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1; echo -e '\\033[1;32m✓ Full 256-Color & TrueColor Activated!\\033[0m'")}
-            className="px-2.5 py-1 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/25 rounded-lg text-xs font-mono flex items-center space-x-1 transition-colors cursor-pointer"
+            className="hidden lg:flex px-2.5 py-1 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/25 rounded-lg text-xs font-mono items-center space-x-1 transition-colors cursor-pointer"
             title="Enable full 256-color, truecolor, and colorful ls/grep command outputs in remote shell"
           >
             <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
@@ -955,6 +1026,24 @@ export default function TerminalApp() {
           >
             <ExternalLink className="w-3.5 h-3.5" />
             <span>PuTTY</span>
+          </button>
+
+          {/* Toggle Status Bar / Footer */}
+          <button
+            onClick={() => {
+              const next = !showFooter;
+              setShowFooter(next);
+              localStorage.setItem('sshdesktop_terminal_show_footer', next.toString());
+              setTimeout(fitActiveTerminal, 50);
+            }}
+            className={`p-1.5 rounded-lg text-xs transition-colors cursor-pointer ${
+              showFooter 
+                ? 'text-blue-400 bg-white/10 hover:bg-white/15' 
+                : 'text-gray-400 hover:text-white hover:bg-white/10'
+            }`}
+            title={showFooter ? "Hide Status Bar Footer (Ctrl+B / Click)" : "Show Status Bar Footer (Ctrl+B / Click)"}
+          >
+            <PanelBottomClose className="w-3.5 h-3.5" />
           </button>
 
           <button
@@ -974,6 +1063,7 @@ export default function TerminalApp() {
 
       {/* Terminal Viewports Container - Each tab keeps its DOM alive! */}
       <div 
+        ref={terminalViewportRef}
         className="flex-1 relative overflow-hidden terminal-app"
         style={{ backgroundColor: currentTheme.background }}
         onContextMenu={handleContextMenu}
@@ -983,161 +1073,204 @@ export default function TerminalApp() {
           if (showServerMenu) setShowServerMenu(false);
         }}
       >
-        {tabs.map(tab => (
-          <div
-            key={tab.id}
-            ref={el => {
-              if (el) {
-                containersRef.current.set(tab.id, el);
-                setupTabInstance(tab.id, el);
-              }
-            }}
-            className="absolute inset-0"
-            style={{ 
-              display: activeTab === tab.id ? 'block' : 'none',
-              padding: `${padding}px`,
-              backgroundColor: currentTheme.background
-            }}
-          />
-        ))}
+        {tabs.map(tab => {
+          const isActive = activeTab === tab.id;
+          return (
+            <div
+              key={tab.id}
+              className="absolute inset-0 select-text"
+              style={{ 
+                display: isActive ? 'block' : 'none',
+                backgroundColor: currentTheme.background,
+              }}
+              onClick={() => {
+                tabInstances.current.get(tab.id)?.term.focus();
+              }}
+            >
+              <div
+                ref={el => {
+                  if (el) {
+                    containersRef.current.set(tab.id, el);
+                    setupTabInstance(tab.id, el);
+                  }
+                }}
+                className="w-full h-full"
+                style={{ 
+                  position: 'absolute',
+                  top: `${effectivePadding}px`,
+                  bottom: `${effectivePadding}px`,
+                  left: `${effectivePadding}px`,
+                  right: `${effectivePadding}px`,
+                  width: `calc(100% - ${effectivePadding * 2}px)`,
+                  height: `calc(100% - ${effectivePadding * 2}px)`,
+                  padding: 0,
+                  margin: 0,
+                  overflow: 'hidden',
+                  backgroundColor: currentTheme.background,
+                }}
+              />
+            </div>
+          );
+        })}
       </div>
 
-      {/* Terminal Status Bar */}
-      <div className="h-6 bg-[#0f0f18] border-t border-white/[0.08] px-3 flex items-center justify-between text-[11px] font-mono text-gray-400 shrink-0 relative select-none">
-        <div className="flex items-center space-x-3">
-          <span className="flex items-center space-x-1.5 text-emerald-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span>PuTTY-Grade Raw PTY</span>
-          </span>
-          <span className="text-cyan-400 font-semibold flex items-center space-x-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-            <span>256color / TrueColor</span>
-          </span>
-          <span>UTF-8</span>
-          <span className="text-gray-500">Session: {activeTab}</span>
-        </div>
-        <div className="flex items-center space-x-2">
-          {/* Theme Selector Popover */}
-          <div className="relative">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowThemeMenu(!showThemeMenu);
-                setShowMarginMenu(false);
-              }}
-              className="flex items-center space-x-1.5 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] rounded px-2 py-0.5 text-gray-300 transition-colors cursor-pointer"
-              title="Change Terminal Color Theme"
-            >
-              <span className="w-2 h-2 rounded-full" style={{ backgroundColor: currentTheme.dotColor }} />
-              <span className="text-[10px]">{currentTheme.name}</span>
-              <ChevronDown className="w-2.5 h-2.5 text-gray-400" />
-            </button>
+      {/* Terminal Status Bar (Footer) */}
+      {showFooter && (
+        <div className="h-6 min-h-[24px] max-h-[24px] bg-[#0f0f18] border-t border-white/[0.08] px-2.5 flex items-center justify-between text-[11px] font-mono text-gray-400 shrink-0 relative select-none overflow-hidden whitespace-nowrap z-10">
+          <div className="flex items-center space-x-2.5 overflow-hidden whitespace-nowrap shrink min-w-0">
+            <span className="flex items-center space-x-1.5 text-emerald-400 shrink-0" title="PuTTY-Grade Raw PTY Engine">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+              <span className="hidden sm:inline">PuTTY Raw PTY</span>
+            </span>
+            <span className="text-cyan-400 font-semibold hidden md:flex items-center space-x-1 shrink-0" title="Full TrueColor / 256color support">
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 shrink-0" />
+              <span>TrueColor</span>
+            </span>
+            <span className="hidden lg:inline text-gray-500 shrink-0">UTF-8</span>
+            <span className="text-gray-500 hidden xl:inline shrink-0">Session: {activeTab}</span>
+          </div>
 
-            {showThemeMenu && (
-              <div 
-                className="absolute right-0 bottom-7 bg-[#1e1e2e] border border-white/15 rounded-xl shadow-2xl py-1 z-50 text-xs w-48 font-sans"
-                onClick={e => e.stopPropagation()}
+          <div className="flex items-center space-x-1.5 shrink-0 ml-auto">
+            {/* Theme Selector Popover */}
+            <div className="relative">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowThemeMenu(!showThemeMenu);
+                  setShowMarginMenu(false);
+                }}
+                className="flex items-center space-x-1 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] rounded px-1.5 py-0.5 text-gray-300 transition-colors cursor-pointer text-[10px]"
+                title="Change Terminal Color Theme"
               >
-                <div className="px-3 py-1 text-[10px] uppercase font-bold text-gray-400 tracking-wider">
-                  Color Themes
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: currentTheme.dotColor }} />
+                <span className="hidden sm:inline truncate max-w-[80px]">{currentTheme.name}</span>
+                <ChevronDown className="w-2.5 h-2.5 text-gray-400 shrink-0" />
+              </button>
+
+              {showThemeMenu && (
+                <div 
+                  className="absolute right-0 bottom-7 bg-[#1e1e2e] border border-white/15 rounded-xl shadow-2xl py-1 z-50 text-xs w-48 font-sans"
+                  onClick={e => e.stopPropagation()}
+                >
+                  <div className="px-3 py-1 text-[10px] uppercase font-bold text-gray-400 tracking-wider">
+                    Color Themes
+                  </div>
+                  {TERMINAL_THEMES.map(t => (
+                    <button
+                      key={t.id}
+                      onClick={() => {
+                        updateTheme(t.id);
+                        setShowThemeMenu(false);
+                      }}
+                      className={`w-full text-left px-3 py-1.5 hover:bg-blue-600/30 hover:text-white cursor-pointer flex items-center justify-between transition-colors ${
+                        themeId === t.id ? 'text-blue-400 font-semibold bg-white/[0.05]' : 'text-gray-300'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-2">
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: t.dotColor }} />
+                        <span className="text-xs">{t.name}</span>
+                      </div>
+                      {themeId === t.id && <Check className="w-3.5 h-3.5 text-blue-400" />}
+                    </button>
+                  ))}
                 </div>
-                {TERMINAL_THEMES.map(t => (
-                  <button
-                    key={t.id}
-                    onClick={() => {
-                      updateTheme(t.id);
-                      setShowThemeMenu(false);
-                    }}
-                    className={`w-full text-left px-3 py-1.5 hover:bg-blue-600/30 hover:text-white cursor-pointer flex items-center justify-between transition-colors ${
-                      themeId === t.id ? 'text-blue-400 font-semibold bg-white/[0.05]' : 'text-gray-300'
-                    }`}
-                  >
-                    <div className="flex items-center space-x-2">
-                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: t.dotColor }} />
-                      <span className="text-xs">{t.name}</span>
-                    </div>
-                    {themeId === t.id && <Check className="w-3.5 h-3.5 text-blue-400" />}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+              )}
+            </div>
 
-          {/* Margin / Padding Selector Popover */}
-          <div className="relative">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowMarginMenu(!showMarginMenu);
-                setShowThemeMenu(false);
-              }}
-              className="flex items-center space-x-1 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] rounded px-2 py-0.5 text-gray-300 transition-colors cursor-pointer"
-              title="Terminal 4-Side Margins (Padding)"
-            >
-              <span className="text-[10px]">Margin: {padding}px</span>
-              <ChevronDown className="w-2.5 h-2.5 text-gray-400" />
-            </button>
-
-            {showMarginMenu && (
-              <div 
-                className="absolute right-0 bottom-7 bg-[#1e1e2e] border border-white/15 rounded-xl shadow-2xl py-1 z-50 text-xs w-44 font-sans"
-                onClick={e => e.stopPropagation()}
+            {/* Margin / Padding Selector Popover */}
+            <div className="relative">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowMarginMenu(!showMarginMenu);
+                  setShowThemeMenu(false);
+                }}
+                className="flex items-center space-x-1 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] rounded px-1.5 py-0.5 text-gray-300 transition-colors cursor-pointer text-[10px]"
+                title="Terminal 4-Side Margins (Padding)"
               >
-                <div className="px-3 py-1 text-[10px] uppercase font-bold text-gray-400 tracking-wider">
-                  4-Side Margin
-                </div>
-                {[
-                  { label: 'Comfortable (16px)', val: 16 },
-                  { label: 'Spacious (20px)', val: 20 },
-                  { label: 'Balanced (12px)', val: 12 },
-                  { label: 'Compact (8px)', val: 8 },
-                ].map(opt => (
-                  <button
-                    key={opt.val}
-                    onClick={() => {
-                      updatePadding(opt.val);
-                      setShowMarginMenu(false);
-                    }}
-                    className={`w-full text-left px-3 py-1.5 hover:bg-blue-600/30 hover:text-white cursor-pointer flex items-center justify-between transition-colors ${
-                      padding === opt.val ? 'text-blue-400 font-semibold bg-white/[0.05]' : 'text-gray-300'
-                    }`}
-                  >
-                    <span>{opt.label}</span>
-                    {padding === opt.val && <Check className="w-3.5 h-3.5 text-blue-400" />}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+                <span>Margin: {padding}px</span>
+                <ChevronDown className="w-2.5 h-2.5 text-gray-400 shrink-0" />
+              </button>
 
-          {/* Font Zoom Indicator & Controls */}
-          <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded px-1.5 py-0.5 space-x-1 text-gray-300">
+              {showMarginMenu && (
+                <div 
+                  className="absolute right-0 bottom-7 bg-[#1e1e2e] border border-white/15 rounded-xl shadow-2xl py-1 z-50 text-xs w-44 font-sans"
+                  onClick={e => e.stopPropagation()}
+                >
+                  <div className="px-3 py-1 text-[10px] uppercase font-bold text-gray-400 tracking-wider">
+                    4-Side Margin
+                  </div>
+                  {[
+                    { label: 'Comfortable (16px)', val: 16 },
+                    { label: 'Spacious (20px)', val: 20 },
+                    { label: 'Balanced (12px)', val: 12 },
+                    { label: 'Compact (8px)', val: 8 },
+                    { label: 'Ultra-Compact (4px)', val: 4 },
+                    { label: 'Zero Margin (0px)', val: 0 },
+                  ].map(opt => (
+                    <button
+                      key={opt.val}
+                      onClick={() => {
+                        updatePadding(opt.val);
+                        setShowMarginMenu(false);
+                      }}
+                      className={`w-full text-left px-3 py-1.5 hover:bg-blue-600/30 hover:text-white cursor-pointer flex items-center justify-between transition-colors ${
+                        padding === opt.val ? 'text-blue-400 font-semibold bg-white/[0.05]' : 'text-gray-300'
+                      }`}
+                    >
+                      <span>{opt.label}</span>
+                      {padding === opt.val && <Check className="w-3.5 h-3.5 text-blue-400" />}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Font Zoom Indicator & Controls */}
+            <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded px-1 py-0.5 space-x-0.5 text-gray-300">
+              <button
+                onClick={() => updateZoom(fontSizeRef.current - 1)}
+                className="hover:text-white transition-colors cursor-pointer p-0.5"
+                title="Zoom out (Ctrl + - or Ctrl + Scroll Down)"
+              >
+                <ZoomOut className="w-3 h-3 text-gray-400 hover:text-white" />
+              </button>
+              <button
+                onClick={() => updateZoom(14)}
+                className="hover:text-blue-400 transition-colors cursor-pointer text-[10px] font-mono px-1 hover:bg-white/[0.06] rounded"
+                title="Reset zoom to 100% / 14px (Ctrl + 0 or Click)"
+              >
+                {fontSize}px
+              </button>
+              <button
+                onClick={() => updateZoom(fontSizeRef.current + 1)}
+                className="hover:text-white transition-colors cursor-pointer p-0.5"
+                title="Zoom in (Ctrl + + or Ctrl + Scroll Up)"
+              >
+                <ZoomIn className="w-3 h-3 text-blue-400 hover:text-blue-300" />
+              </button>
+            </div>
+
+            <span className="hidden md:inline truncate max-w-[120px] text-[10px]">
+              {activeServer?.username || 'root'}@{activeServer?.host || 'server'}
+            </span>
+            <span className="hidden lg:inline text-[10px] text-gray-500">/bin/bash</span>
+
+            {/* Close footer button */}
             <button
-              onClick={() => updateZoom(fontSizeRef.current - 1)}
-              className="hover:text-white transition-colors cursor-pointer p-0.5"
-              title="Zoom out (Ctrl + - or Ctrl + Scroll Down)"
+              onClick={() => {
+                setShowFooter(false);
+                localStorage.setItem('sshdesktop_terminal_show_footer', 'false');
+                setTimeout(fitActiveTerminal, 50);
+              }}
+              className="p-0.5 hover:text-white hover:bg-white/10 rounded transition-colors text-gray-400 cursor-pointer"
+              title="Hide Status Bar / Footer (Ctrl+B to restore)"
             >
-              <ZoomOut className="w-3 h-3 text-gray-400 hover:text-white" />
-            </button>
-            <button
-              onClick={() => updateZoom(14)}
-              className="hover:text-blue-400 transition-colors cursor-pointer text-[10px] font-mono px-1 hover:bg-white/[0.06] rounded"
-              title="Reset zoom to 100% / 14px (Ctrl + 0 or Click)"
-            >
-              {fontSize}px ({Math.round((fontSize / 14) * 100)}%)
-            </button>
-            <button
-              onClick={() => updateZoom(fontSizeRef.current + 1)}
-              className="hover:text-white transition-colors cursor-pointer p-0.5"
-              title="Zoom in (Ctrl + + or Ctrl + Scroll Up)"
-            >
-              <ZoomIn className="w-3 h-3 text-blue-400 hover:text-blue-300" />
+              <X className="w-3 h-3" />
             </button>
           </div>
-          <span>{activeServer?.username || 'root'}@{activeServer?.host || 'server'}</span>
-          <span>/bin/bash</span>
         </div>
-      </div>
+      )}
 
       {/* Floating Terminal Context Menu */}
       {contextMenu && (
@@ -1198,6 +1331,23 @@ export default function TerminalApp() {
           >
             <RotateCcw className="w-3.5 h-3.5 text-cyan-400" />
             <span>Reset & Redraw</span>
+          </button>
+
+          <button
+            onClick={() => {
+              const next = !showFooter;
+              setShowFooter(next);
+              localStorage.setItem('sshdesktop_terminal_show_footer', next.toString());
+              setTimeout(fitActiveTerminal, 50);
+              setContextMenu(null);
+            }}
+            className="w-full px-3 py-1.5 hover:bg-blue-600 hover:text-white flex items-center justify-between text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center space-x-2">
+              <PanelBottomClose className="w-3.5 h-3.5 text-blue-400" />
+              <span>{showFooter ? 'Hide Status Footer' : 'Show Status Footer'}</span>
+            </div>
+            <span className="text-[10px] text-gray-400 font-mono">Ctrl+B</span>
           </button>
 
           <div className="my-1 border-t border-white/10 mx-2" />
