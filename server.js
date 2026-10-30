@@ -1187,37 +1187,130 @@ echo "===END==="
 
     case 'system_get_network': {
       if (!entry) return [];
-      const res = await runRemoteExec(entry.client, "ip -o addr show 2>/dev/null; echo '---NETDEV---'; cat /proc/net/dev 2>/dev/null", 8000);
-      const [ipSection, devSection] = res.stdout.split('---NETDEV---');
-      const ipMap = {};
+      const probeScript = `
+ip -o link show 2>/dev/null
+echo '---ADDR---'
+ip -o addr show 2>/dev/null
+echo '---NETDEV---'
+cat /proc/net/dev 2>/dev/null
+echo '---PUBLIC_IP---'
+curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --connect-timeout 2 https://ifconfig.me 2>/dev/null || curl -4s --connect-timeout 2 https://icanhazip.com 2>/dev/null || echo ''
+`;
+      const res = await runRemoteExec(entry.client, probeScript, 8000);
+      const parts = res.stdout.split(/---(?:ADDR|NETDEV|PUBLIC_IP)---/);
+      const linkSection = parts[0] || '';
+      const addrSection = parts[1] || '';
+      const devSection = parts[2] || '';
+      let detectedPublicIp = (parts[3] || '').trim().split('\n')[0].trim();
 
-      if (ipSection) {
-        for (const line of ipSection.split('\n')) {
-          const t = line.trim().split(/\s+/);
-          if (t.length >= 4 && (t[2] === 'inet' || t[2] === 'inet6')) {
-            const iface = t[1].replace(':', '');
-            const ip = t[3].split('/')[0];
-            ipMap[iface] = ip;
+      // If remote curl didn't return public IP, check if host is an external IP
+      if (!detectedPublicIp && entry.config?.host) {
+        const host = String(entry.config.host).trim();
+        if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) && !host.startsWith('127.') && !host.startsWith('10.') && !host.startsWith('192.168.')) {
+          detectedPublicIp = host;
+        }
+      }
+
+      // 1. Parse link info (MAC, State, MTU)
+      const linkMap = {};
+      for (const line of linkSection.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const nameMatch = trimmed.match(/^\d+:\s+([^:@\s]+)/);
+        if (!nameMatch) continue;
+        const iface = nameMatch[1];
+
+        // Real MAC address
+        let mac = '—';
+        const macMatch = trimmed.match(/link\/(?:ether|loopback|ieee802\.11)\s+([0-9a-fA-F:]{17})/);
+        if (macMatch) {
+          mac = macMatch[1].toUpperCase();
+        }
+
+        // Real State
+        let state = 'UNKNOWN';
+        const stateMatch = trimmed.match(/\sstate\s+([A-Z_]+)/);
+        if (stateMatch) {
+          state = stateMatch[1];
+        } else if (trimmed.includes('<UP') || trimmed.includes(',UP,') || trimmed.includes(',UP>')) {
+          state = 'UP';
+        }
+
+        // Real MTU
+        let mtu = 1500;
+        const mtuMatch = trimmed.match(/\smtu\s+(\d+)/);
+        if (mtuMatch) mtu = parseInt(mtuMatch[1], 10);
+
+        linkMap[iface] = { mac, state, mtu };
+      }
+
+      // 2. Parse IPv4 and IPv6 addresses
+      const ipv4Map = {};
+      const ipv6Map = {};
+      for (const line of addrSection.split('\n')) {
+        const t = line.trim().split(/\s+/);
+        if (t.length >= 4) {
+          const iface = (t[1] || '').replace(':', '');
+          const proto = t[2];
+          const cidr = t[3];
+          if (proto === 'inet' && !ipv4Map[iface]) {
+            ipv4Map[iface] = cidr;
+          } else if (proto === 'inet6' && (!ipv6Map[iface] || ipv6Map[iface].startsWith('fe80::'))) {
+            ipv6Map[iface] = cidr;
           }
         }
       }
 
+      // 3. Parse /proc/net/dev for RX and TX bytes
       const ifaces = [];
+      const seen = new Set();
+
       if (devSection) {
         for (const line of devSection.split('\n')) {
           if (!line.includes(':')) continue;
           const [namePart, dataPart] = line.split(':');
           const name = namePart.trim();
+          seen.add(name);
           const d = dataPart.trim().split(/\s+/);
+          const linkInfo = linkMap[name] || {};
+          const ipv4Cidr = ipv4Map[name] || (name === 'lo' ? '127.0.0.1/8' : '—');
+          const ipv4Only = ipv4Cidr.split('/')[0];
+          const ipv6 = ipv6Map[name] || (name === 'lo' ? '::1/128' : '—');
+
           ifaces.push({
             name,
-            ip: ipMap[name] || '127.0.0.1',
-            mac: '00:00:00:00:00:00',
+            ip: ipv4Only,
+            ipv4: ipv4Cidr,
+            ipv6,
+            mac: linkInfo.mac || (name === 'lo' ? '00:00:00:00:00:00' : '—'),
+            state: linkInfo.state || (name === 'lo' ? 'UP' : 'UNKNOWN'),
+            mtu: linkInfo.mtu || (name === 'lo' ? 65536 : 1500),
             rx_bytes: parseInt(d[0], 10) || 0,
-            tx_bytes: parseInt(d[8], 10) || 0
+            tx_bytes: parseInt(d[8], 10) || 0,
+            public_ip: detectedPublicIp || ''
           });
         }
       }
+
+      // Include any link devices that had no netdev line
+      for (const [name, linkInfo] of Object.entries(linkMap)) {
+        if (!seen.has(name)) {
+          const ipv4Cidr = ipv4Map[name] || '—';
+          ifaces.push({
+            name,
+            ip: ipv4Cidr.split('/')[0],
+            ipv4: ipv4Cidr,
+            ipv6: ipv6Map[name] || '—',
+            mac: linkInfo.mac || '—',
+            state: linkInfo.state || 'UNKNOWN',
+            mtu: linkInfo.mtu || 1500,
+            rx_bytes: 0,
+            tx_bytes: 0,
+            public_ip: detectedPublicIp || ''
+          });
+        }
+      }
+
       return ifaces;
     }
 
@@ -1977,6 +2070,98 @@ echo "===END==="
       const l = args?.lazy ? '-l' : '';
       const res = await runRemotePrivExec(entry, `umount ${f} ${l} "${args?.target}" 2>&1`);
       return res.stdout || 'Unmounted';
+    }
+
+    case 'disk_remount': {
+      if (!entry) return '';
+      const opts = args?.options || 'defaults';
+      const mp = args?.mountPoint || '';
+      const res = await runRemotePrivExec(entry, `mount -o remount,${opts} "${mp}" 2>&1`);
+      return res.stdout || 'Remounted';
+    }
+
+    case 'disk_get_fstab': {
+      if (!entry) return [];
+      const res = await runRemoteExec(entry.client, 'cat /etc/fstab 2>/dev/null');
+      const entries = [];
+      for (const line of res.stdout.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const parts = trimmed.split(/\s+/);
+        if (parts.length >= 4) {
+          entries.push({
+            spec: parts[0],
+            file: parts[1],
+            vfstype: parts[2],
+            mntops: parts[3],
+            freq: parseInt(parts[4], 10) || 0,
+            passno: parseInt(parts[5], 10) || 0,
+          });
+        }
+      }
+      return entries;
+    }
+
+    case 'disk_create_label': {
+      if (!entry) return '';
+      const { device, labelType = 'gpt' } = args || {};
+      const res = await runRemotePrivExec(entry, `parted -s "${device}" mklabel ${labelType} 2>&1`);
+      return res.stdout || 'Label created';
+    }
+
+    case 'disk_create_partition': {
+      if (!entry) return '';
+      const { device, partType = 'primary', start = '1MiB', end = '100%' } = args || {};
+      const res = await runRemotePrivExec(entry, `parted -s "${device}" mkpart ${partType} ${start} ${end} 2>&1`);
+      return res.stdout || 'Partition created';
+    }
+
+    case 'disk_delete_partition': {
+      if (!entry) return '';
+      const { device, partNumber } = args || {};
+      const res = await runRemotePrivExec(entry, `parted -s "${device}" rm ${partNumber} 2>&1`);
+      return res.stdout || 'Partition deleted';
+    }
+
+    case 'disk_resize_partition': {
+      if (!entry) return '';
+      const { device, partNumber, newEnd = '100%' } = args || {};
+      const res = await runRemotePrivExec(entry, `parted -s "${device}" resizepart ${partNumber} ${newEnd} 2>&1`);
+      return res.stdout || 'Partition resized';
+    }
+
+    case 'disk_set_partition_flag': {
+      if (!entry) return '';
+      const { device, partNumber, flag, stateOn } = args || {};
+      const stateStr = stateOn ? 'on' : 'off';
+      const res = await runRemotePrivExec(entry, `parted -s "${device}" set ${partNumber} ${flag} ${stateStr} 2>&1`);
+      return res.stdout || 'Flag updated';
+    }
+
+    case 'disk_format_filesystem': {
+      if (!entry) return '';
+      const { device, fstype = 'ext4', label, quick } = args || {};
+      const lblOpt = label ? `-L "${label}"` : '';
+      const qOpt = quick ? '-F' : '';
+      const res = await runRemotePrivExec(entry, `mkfs -t ${fstype} ${lblOpt} ${qOpt} "${device}" 2>&1`);
+      return res.stdout || 'Formatted';
+    }
+
+    case 'disk_set_label': {
+      if (!entry) return '';
+      const { device, fstype, label } = args || {};
+      let cmd = `e2label "${device}" "${label}" 2>&1`;
+      if (fstype === 'xfs') cmd = `xfs_admin -L "${label}" "${device}" 2>&1`;
+      const res = await runRemotePrivExec(entry, cmd);
+      return res.stdout || 'Label set';
+    }
+
+    case 'disk_check_filesystem': {
+      if (!entry) return '';
+      const { device, repair } = args || {};
+      const opt = repair ? '-y' : '-n';
+      const res = await runRemotePrivExec(entry, `fsck ${opt} "${device}" 2>&1`);
+      return res.stdout || res.stderr || 'Check completed';
     }
 
     case 'disk_get_swap_info': {

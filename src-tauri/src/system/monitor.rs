@@ -418,23 +418,40 @@ pub async fn system_get_network(
     state: tauri::State<'_, AppState>,
     conn_id: String,
 ) -> Result<Vec<NetworkInterface>, String> {
-    // Use both /proc/net/dev (bytes) and ip addr (IPs/MACs) for complete data
-    let cmd = "ip -o addr show 2>/dev/null; echo '---NETDEV---'; cat /proc/net/dev";
+    // Use ip link (MAC), ip addr (IPs), and /proc/net/dev (bytes)
+    let cmd = "ip -o link show 2>/dev/null; echo '---ADDR---'; ip -o addr show 2>/dev/null; echo '---NETDEV---'; cat /proc/net/dev 2>/dev/null";
     let (stdout, code) = run_cmd(&state, &conn_id, cmd).await;
 
     if code == -1 && stdout.is_empty() {
         return Err("No active SSH connection.".into());
     }
 
-    // Parse ip addr output for IPs and MACs
-    // Format: index: name  inet/inet6 addr/prefix  ...
+    let mut iface_mac: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut iface_ip: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     let parts = stdout.split("---NETDEV---").collect::<Vec<_>>();
-    let ip_section = parts.get(0).copied().unwrap_or("");
+    let link_and_addr = parts.get(0).copied().unwrap_or("");
     let dev_section = parts.get(1).copied().unwrap_or("");
 
-    for line in ip_section.lines() {
+    let subparts = link_and_addr.split("---ADDR---").collect::<Vec<_>>();
+    let link_section = subparts.get(0).copied().unwrap_or("");
+    let addr_section = subparts.get(1).copied().unwrap_or("");
+
+    for line in link_section.lines() {
+        let trimmed = line.trim();
+        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+        if tokens.len() >= 2 {
+            let iface = tokens[1].trim_end_matches(':').to_string();
+            if let Some(pos) = trimmed.find("link/ether ") {
+                let mac_part = &trimmed[pos + 11..];
+                if let Some(mac) = mac_part.split_whitespace().next() {
+                    iface_mac.insert(iface, mac.to_uppercase());
+                }
+            }
+        }
+    }
+
+    for line in addr_section.lines() {
         let tokens: Vec<&str> = line.split_whitespace().collect();
         // Format: "2: eth0    inet 10.0.0.1/24 ..."
         if tokens.len() >= 4 && (tokens[2] == "inet" || tokens[2] == "inet6") {
@@ -455,11 +472,12 @@ pub async fn system_get_network(
             // TX bytes are at column 9 (index 9) in /proc/net/dev
             let tx_bytes: u64 = parts[9].parse().unwrap_or(0);
             let ip = iface_ip.get(&name).cloned().unwrap_or_else(|| "—".to_string());
+            let mac = iface_mac.get(&name).cloned().unwrap_or_else(|| "—".to_string());
 
             list.push(NetworkInterface {
                 name,
                 ip,
-                mac: "—".into(),
+                mac,
                 rx_bytes,
                 tx_bytes,
             });
