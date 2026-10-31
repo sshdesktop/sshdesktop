@@ -3399,39 +3399,175 @@ done
 }
 
 // -------------------------------------------------------------
+// BROWSER GATEWAY SESSION REGISTRY & STATEFUL MAPPING
+// Maps short, stable URLs (/s/:sessionId/*) to remote SSH sessions
+// and upstream destinations (e.g. Jenkins at 8080, Grafana at 3000)
+// with isolated in-memory cookie jars.
+// -------------------------------------------------------------
+const browserSessionRegistry = new Map();
+
+function getOrCreateBrowserSession(connId, proto, host, port) {
+  connId = connId || 'default';
+  proto = (proto || 'http').toLowerCase();
+  port = Number(port) || (proto === 'https' ? 443 : 80);
+  const cleanHost = (host || '127.0.0.1').toLowerCase().trim();
+  const key = `${connId}:${proto}:${cleanHost}:${port}`;
+
+  for (const sess of browserSessionRegistry.values()) {
+    if (sess.key === key) {
+      sess.lastActiveAt = Date.now();
+      return sess;
+    }
+  }
+
+  const connShort = connId.replace(/^server-/, 's').slice(0, 8);
+  const hostShort = cleanHost.replace(/[^a-z0-9]/gi, '').slice(0, 12);
+  const hash = crypto.createHash('md5').update(key).digest('hex').slice(0, 6);
+  const sessionId = `${connShort}_${hostShort}_${port}_${hash}`;
+
+  const session = {
+    id: sessionId,
+    key,
+    connId,
+    proto,
+    host: cleanHost,
+    port,
+    cookies: new Map(), // Isolated per-upstream-target cookie jar
+    createdAt: Date.now(),
+    lastActiveAt: Date.now()
+  };
+
+  browserSessionRegistry.set(sessionId, session);
+  return session;
+}
+
+function resolveSessionFromRequest(reqUrl) {
+  if (typeof reqUrl !== 'string') return null;
+
+  // 1. Stable short route: /s/:sessionId/*
+  if (reqUrl.startsWith('/s/')) {
+    const afterS = reqUrl.slice('/s/'.length);
+    const slashIdx = afterS.indexOf('/');
+    const sessionId = slashIdx === -1 ? afterS.split('?')[0] : afterS.slice(0, slashIdx);
+    const rest = slashIdx === -1 ? '/' : afterS.slice(slashIdx);
+    const sess = browserSessionRegistry.get(sessionId);
+    if (sess) {
+      sess.lastActiveAt = Date.now();
+      return { session: sess, targetPath: rest, isSessionRoute: true };
+    }
+  }
+
+  // 2. Legacy gateway route: /api/browser/gateway/:connId/:proto/:hostPart/*
+  if (reqUrl.startsWith('/api/browser/gateway/')) {
+    const rawPrefix = '/api/browser/gateway/';
+    const subPath = reqUrl.slice(rawPrefix.length);
+    const slash1 = subPath.indexOf('/');
+    if (slash1 !== -1) {
+      const connId = decodeURIComponent(subPath.slice(0, slash1));
+      const afterConn = subPath.slice(slash1 + 1);
+      const slash2 = afterConn.indexOf('/');
+      const proto = (slash2 === -1 ? afterConn : afterConn.slice(0, slash2)).toLowerCase();
+      const afterProto = slash2 === -1 ? '' : afterConn.slice(slash2 + 1);
+      const slash3 = afterProto.indexOf('/');
+      const hostPart = slash3 === -1 ? afterProto : afterProto.slice(0, slash3);
+      let targetPath = slash3 === -1 ? '/' : afterProto.slice(slash3);
+
+      let host = hostPart;
+      let port = proto === 'https' ? 443 : 80;
+      if (hostPart.includes(':')) {
+        const split = hostPart.split(':');
+        host = split[0];
+        port = parseInt(split[1], 10) || port;
+      } else {
+        const portMatch = targetPath.match(/^\/(\d{1,5})(\/.*)?$/);
+        if (portMatch) {
+          port = parseInt(portMatch[1], 10);
+          targetPath = portMatch[2] || '/';
+        }
+      }
+      const sess = getOrCreateBrowserSession(connId, proto, host, port);
+      return { session: sess, targetPath, isSessionRoute: false };
+    }
+  }
+
+  return null;
+}
+
+function updateSessionCookies(session, setCookieHeaders) {
+  if (!session || !session.cookies || !setCookieHeaders) return;
+  const list = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+  for (const raw of list) {
+    if (typeof raw !== 'string') continue;
+    const parts = raw.split(';');
+    const firstPart = parts[0].trim();
+    const eqIdx = firstPart.indexOf('=');
+    if (eqIdx === -1) continue;
+    const name = firstPart.slice(0, eqIdx).trim();
+    const value = firstPart.slice(eqIdx + 1).trim();
+
+    let isExpired = false;
+    for (let i = 1; i < parts.length; i++) {
+      const attr = parts[i].trim().toLowerCase();
+      if (attr === 'max-age=0' || attr.startsWith('max-age=-')) {
+        isExpired = true;
+        break;
+      }
+      if (attr.startsWith('expires=')) {
+        const expDate = new Date(parts[i].trim().slice('expires='.length));
+        if (!isNaN(expDate.getTime()) && expDate.getTime() <= Date.now()) {
+          isExpired = true;
+          break;
+        }
+      }
+    }
+
+    if (isExpired || value === '') {
+      session.cookies.delete(name);
+    } else {
+      session.cookies.set(name, value);
+    }
+  }
+}
+
+function buildUpstreamCookieHeader(session, clientCookieHeader) {
+  if (!session || !session.cookies) return undefined;
+  const merged = new Map(session.cookies);
+  if (clientCookieHeader) {
+    const pairs = clientCookieHeader.split(';');
+    for (const p of pairs) {
+      const eqIdx = p.indexOf('=');
+      if (eqIdx === -1) continue;
+      const k = p.slice(0, eqIdx).trim();
+      const v = p.slice(eqIdx + 1).trim();
+      if (k === '__ssh_session' || k === '__ssh_browser_gw') continue;
+      if (!merged.has(k)) {
+        merged.set(k, v);
+      }
+    }
+  }
+  if (merged.size === 0) return undefined;
+  const cookieStrings = [];
+  for (const [k, v] of merged.entries()) {
+    cookieStrings.push(`${k}=${v}`);
+  }
+  return cookieStrings.join('; ');
+}
+
+// -------------------------------------------------------------
 // BROWSER GATEWAY & REVERSE PROXY HANDLER (Web Mode Support)
 // Proxies HTTP and HTTPS requests from PC browser clients through
 // the remote SSH server so users can reach server localhost,
 // internal services, and private IPs seamlessly.
 // -------------------------------------------------------------
 function handleBrowserGatewayUpgrade(req, socket, head) {
-  const rawPrefix = '/api/browser/gateway/';
-  const subPath = req.url.slice(rawPrefix.length);
-  const slash1 = subPath.indexOf('/');
-  if (slash1 === -1) { try { socket.destroy(); } catch {} return; }
-
-  const connId = decodeURIComponent(subPath.slice(0, slash1));
-  const afterConn = subPath.slice(slash1 + 1);
-  const slash2 = afterConn.indexOf('/');
-  const proto = (slash2 === -1 ? afterConn : afterConn.slice(0, slash2)).toLowerCase();
-  const afterProto = slash2 === -1 ? '' : afterConn.slice(slash2 + 1);
-  const slash3 = afterProto.indexOf('/');
-  const hostPart = slash3 === -1 ? afterProto : afterProto.slice(0, slash3);
-  let targetPath = slash3 === -1 ? '/' : afterProto.slice(slash3);
-
-  let host = hostPart;
-  let port = proto === 'https' ? 443 : 80;
-  if (hostPart.includes(':')) {
-    const split = hostPart.split(':');
-    host = split[0];
-    port = parseInt(split[1], 10) || port;
-  } else {
-    const portMatch = targetPath.match(/^\/(\d{1,5})(\/.*)?$/);
-    if (portMatch) {
-      port = parseInt(portMatch[1], 10);
-      targetPath = portMatch[2] || '/';
-    }
+  const resolved = resolveSessionFromRequest(req.url);
+  if (!resolved) {
+    try { socket.destroy(); } catch {}
+    return;
   }
+
+  const { session, targetPath } = resolved;
+  const { connId, proto, host, port } = session;
 
   let entry = null;
   if (connId && connId !== 'default' && connId !== 'local' && activeConnections.has(connId)) {
@@ -3473,10 +3609,27 @@ function handleBrowserGatewayUpgrade(req, socket, head) {
       return;
     }
 
-    let rawHeaders = `${req.method} ${targetPath} HTTP/1.1\r\nHost: ${host}:${port}\r\n`;
+    const isDefaultPort = (proto === 'http' && Number(port) === 80) || (proto === 'https' && Number(port) === 443);
+    const hostHeader = isDefaultPort ? host : `${host}:${port}`;
+
+    let rawHeaders = `${req.method} ${targetPath} HTTP/1.1\r\nHost: ${hostHeader}\r\n`;
     for (const [k, v] of Object.entries(req.headers)) {
-      if (['host'].includes(k.toLowerCase())) continue;
+      const lower = k.toLowerCase();
+      if (lower === 'host') continue;
+      if (lower === 'cookie') {
+        const upstreamCookies = buildUpstreamCookieHeader(session, v);
+        if (upstreamCookies) {
+          rawHeaders += `cookie: ${upstreamCookies}\r\n`;
+        }
+        continue;
+      }
       rawHeaders += `${k}: ${v}\r\n`;
+    }
+    if (!req.headers.cookie) {
+      const upstreamCookies = buildUpstreamCookieHeader(session, null);
+      if (upstreamCookies) {
+        rawHeaders += `cookie: ${upstreamCookies}\r\n`;
+      }
     }
     rawHeaders += '\r\n';
 
@@ -3512,8 +3665,13 @@ function handleBrowserGatewayRequest(req, res) {
       const proto = parsed.protocol.replace(':', '');
       const port = parsed.port || (proto === 'https' ? '443' : '80');
       const pathAndQuery = (parsed.pathname || '/') + (parsed.search || '');
-      const redirectDest = `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${parsed.hostname}:${port}${pathAndQuery}`;
-      res.writeHead(302, { 'Location': redirectDest, 'Access-Control-Allow-Origin': '*' });
+      const session = getOrCreateBrowserSession(connId, proto, parsed.hostname, port);
+      const redirectDest = `/s/${encodeURIComponent(session.id)}${pathAndQuery}`;
+      res.writeHead(302, {
+        'Location': redirectDest,
+        'Access-Control-Allow-Origin': '*',
+        'Set-Cookie': `__ssh_session=${encodeURIComponent(session.id)}; Path=/; SameSite=Lax`
+      });
       res.end();
       return;
     } catch (err) {
@@ -3523,44 +3681,32 @@ function handleBrowserGatewayRequest(req, res) {
     }
   }
 
-  // 2. Gateway path routing: /api/browser/gateway/:connId/:proto/:hostPart/...
-  const rawPrefix = '/api/browser/gateway/';
-  const subPath = req.url.slice(rawPrefix.length);
-  const slash1 = subPath.indexOf('/');
-  if (slash1 === -1) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Invalid gateway URL format' }));
+  // 2. Gateway route resolution: /s/:sessionId/* or legacy /api/browser/gateway/:connId/:proto/:hostPart/*
+  const resolved = resolveSessionFromRequest(req.url);
+  if (!resolved) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Gateway route or active session not found' }));
     return;
   }
 
-  const connId = decodeURIComponent(subPath.slice(0, slash1));
-  const afterConn = subPath.slice(slash1 + 1);
-  const slash2 = afterConn.indexOf('/');
-  const proto = (slash2 === -1 ? afterConn : afterConn.slice(0, slash2)).toLowerCase();
-  if (proto !== 'http' && proto !== 'https') {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: `Invalid gateway protocol '${proto}'. Must be http or https.` }));
-    return;
-  }
+  const { session, targetPath: resolvedTargetPath, isSessionRoute } = resolved;
+  let targetPath = resolvedTargetPath;
+  const { connId, proto, host, port } = session;
 
-  const afterProto = slash2 === -1 ? '' : afterConn.slice(slash2 + 1);
-  const slash3 = afterProto.indexOf('/');
-  const hostPart = slash3 === -1 ? afterProto : afterProto.slice(0, slash3);
-  const rawRest = slash3 === -1 ? '/' : afterProto.slice(slash3);
-
-  let host = hostPart;
-  let port = proto === 'https' ? 443 : 80;
-  let targetPath = rawRest;
-
-  if (hostPart.includes(':')) {
-    const split = hostPart.split(':');
-    host = split[0];
-    port = parseInt(split[1], 10) || port;
-  } else {
-    const portMatch = rawRest.match(/^\/(\d{1,5})(\/.*)?$/);
-    if (portMatch) {
-      port = parseInt(portMatch[1], 10);
-      targetPath = portMatch[2] || '/';
+  // If request arrived via legacy /api/browser/gateway/... on an HTML navigation,
+  // 302 redirect cleanly to the short, stable /s/:sessionId/ route!
+  if (!isSessionRoute) {
+    const isHtmlNav = req.method === 'GET' &&
+                      (req.headers.accept || '').includes('text/html') &&
+                      !req.headers['x-requested-with'];
+    if (isHtmlNav) {
+      res.writeHead(302, {
+        'Location': `/s/${encodeURIComponent(session.id)}${targetPath}`,
+        'Access-Control-Allow-Origin': '*',
+        'Set-Cookie': `__ssh_session=${encodeURIComponent(session.id)}; Path=/; SameSite=Lax`
+      });
+      res.end();
+      return;
     }
   }
 
@@ -3573,7 +3719,7 @@ function handleBrowserGatewayRequest(req, res) {
 
   const isHttps = proto === 'https';
   const httpModule = isHttps ? https : http;
-  const gatewayBase = `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${host}:${port}`;
+  const gatewayBase = `/s/${encodeURIComponent(session.id)}`;
 
   const isPrivateHost = host === 'localhost' || host === '127.0.0.1' ||
     host.startsWith('10.') || host.startsWith('192.168.') ||
@@ -3592,6 +3738,14 @@ function handleBrowserGatewayRequest(req, res) {
   const isDefaultPort = (proto === 'http' && Number(port) === 80) || (proto === 'https' && Number(port) === 443);
   headersToSend['host'] = isDefaultPort ? host : `${host}:${port}`;
 
+  // Upstream Cookie Injection: Provide isolated cookies for this session
+  const upstreamCookies = buildUpstreamCookieHeader(session, req.headers.cookie);
+  if (upstreamCookies) {
+    headersToSend['cookie'] = upstreamCookies;
+  } else {
+    delete headersToSend['cookie'];
+  }
+
   if (isPrivateHost) {
     // CSRF & Reverse Proxy Headers for internal/private services (Jenkins, Grafana, Portainer, etc.)
     headersToSend['origin'] = `${proto}://${host}:${port}`;
@@ -3609,7 +3763,7 @@ function handleBrowserGatewayRequest(req, res) {
       delete headersToSend['origin'];
     }
 
-    if (req.headers.referer && req.headers.referer.includes('/api/browser/gateway/')) {
+    if (req.headers.referer && (req.headers.referer.includes('/s/') || req.headers.referer.includes('/api/browser/gateway/'))) {
       headersToSend['referer'] = `${proto}://${isDefaultPort ? host : `${host}:${port}`}${targetPath}`;
     }
 
@@ -3631,6 +3785,7 @@ function handleBrowserGatewayRequest(req, res) {
     headersToSend['sec-fetch-user'] = '?1';
     headersToSend['upgrade-insecure-requests'] = '1';
   }
+
 
   // Decompression: Support gzip, deflate, and br (Brotli)
   headersToSend['accept-encoding'] = 'gzip, deflate, br, identity';
@@ -3701,8 +3856,14 @@ function handleBrowserGatewayRequest(req, res) {
     outHeaders['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH';
     outHeaders['access-control-allow-headers'] = '*';
 
-    // Cookie Management: Preserve session cookies, strip Domain & Secure restrictions on HTTP
-    // and attach __ssh_browser_gw tracking cookie
+    // Cookie Management: Update isolated in-memory cookie jar for this upstream target
+    if (outHeaders['set-cookie']) {
+      updateSessionCookies(session, outHeaders['set-cookie']);
+    }
+
+    // Prepare client-facing cookies: strip Domain & Secure restrictions on HTTP,
+    // and attach __ssh_session and __ssh_browser_gw tracking cookies
+    const sessionCookie = `__ssh_session=${encodeURIComponent(session.id)}; Path=/; SameSite=Lax`;
     const gatewayCookie = `__ssh_browser_gw=${encodeURIComponent(gatewayBase)}; Path=/; SameSite=Lax`;
     let cookieList = [];
     if (outHeaders['set-cookie']) {
@@ -3715,6 +3876,7 @@ function handleBrowserGatewayRequest(req, res) {
         return clean;
       });
     }
+    cookieList.push(sessionCookie);
     cookieList.push(gatewayCookie);
     outHeaders['set-cookie'] = cookieList;
 
@@ -3729,7 +3891,8 @@ function handleBrowserGatewayRequest(req, res) {
           const locUrl = new URL(loc);
           const locProto = locUrl.protocol.replace(':', '');
           const locPort = locUrl.port || (locProto === 'https' ? 443 : 80);
-          return `/api/browser/gateway/${encodeURIComponent(connId)}/${locProto}/${locUrl.hostname}:${locPort}${locUrl.pathname}${locUrl.search}${locUrl.hash || ''}`;
+          const targetSession = getOrCreateBrowserSession(connId, locProto, locUrl.hostname, locPort);
+          return `/s/${encodeURIComponent(targetSession.id)}${locUrl.pathname}${locUrl.search}${locUrl.hash || ''}`;
         } catch {
           return loc;
         }
@@ -3740,7 +3903,7 @@ function handleBrowserGatewayRequest(req, res) {
       // Relative path without leading slash (e.g. 'login', './login', '../login')
       try {
         const resolved = new URL(loc, `${proto}://${host}:${port}${targetPath}`);
-        return `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${host}:${port}${resolved.pathname}${resolved.search}${resolved.hash || ''}`;
+        return `${gatewayBase}${resolved.pathname}${resolved.search}${resolved.hash || ''}`;
       } catch {
         return `${gatewayBase}/${loc}`;
       }
@@ -3825,23 +3988,23 @@ function handleBrowserGatewayRequest(req, res) {
           const baseTag = `<base href="${gatewayBase}${dirPath || '/'}" />\n`;
 
           // 1. Rewrite root-relative href="/..." (links, navigation, stylesheets, icons)
-          bodyText = bodyText.replace(/(href\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+          bodyText = bodyText.replace(/(href\s*=\s*["'])\/(?!\/|s\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
 
           // 2. Rewrite root-relative src="/..." (scripts, images, media, iframes)
-          bodyText = bodyText.replace(/(src\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+          bodyText = bodyText.replace(/(src\s*=\s*["'])\/(?!\/|s\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
 
           // 3. Rewrite root-relative action="/..." (form submit for login, settings, POST)
-          bodyText = bodyText.replace(/(action\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+          bodyText = bodyText.replace(/(action\s*=\s*["'])\/(?!\/|s\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
 
           // 4. Handle forms with empty action="" or NO action attribute: submit to current gateway URL
           bodyText = bodyText.replace(/(action\s*=\s*["'])\s*["']/gi, `$1${gatewayBase}${targetPath}"`);
           bodyText = bodyText.replace(/<form\b(?![^>]*\baction\b)([^>]*)>/gi, `<form action="${gatewayBase}${targetPath}"$1>`);
 
           // 5. Rewrite CSS url(/...)
-          bodyText = bodyText.replace(/(url\(\s*["']?)\/(?!\/|api\/browser\/gateway\/)([^"')]+["']?\))/gi, `$1${gatewayBase}/$2`);
+          bodyText = bodyText.replace(/(url\(\s*["']?)\/(?!\/|s\/|api\/browser\/gateway\/)([^"')]+["']?\))/gi, `$1${gatewayBase}/$2`);
 
           // 6. Rewrite data-url, data-href, data-src
-          bodyText = bodyText.replace(/(data-(?:url|href|src)\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+          bodyText = bodyText.replace(/(data-(?:url|href|src)\s*=\s*["'])\/(?!\/|s\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
 
           // 7. Calculate Target Origin & reCAPTCHA / Captcha bypass parameters
           const targetOriginWithPort = `${proto}://${host}:${port}`;
@@ -3932,14 +4095,14 @@ function handleBrowserGatewayRequest(req, res) {
     if (u.startsWith('#') || u.startsWith('javascript:') || u.startsWith('mailto:') || u.startsWith('tel:') || u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('about:')) {
       return u;
     }
-    if (u.startsWith(GW) || u.startsWith('/api/browser/gateway/')) {
+    if (u.startsWith(GW) || u.startsWith('/s/') || u.startsWith('/api/browser/gateway/')) {
       return u;
     }
     // Handle current server origin (e.g. http://localhost:2222 or http://localhost:2222/...)
     var gwOrigin = window.location.origin;
     if (u.startsWith(gwOrigin)) {
       var afterGwOrigin = u.slice(gwOrigin.length);
-      if (afterGwOrigin.startsWith(GW) || afterGwOrigin.startsWith('/api/browser/gateway/')) {
+      if (afterGwOrigin.startsWith(GW) || afterGwOrigin.startsWith('/s/') || afterGwOrigin.startsWith('/api/browser/gateway/')) {
         return u;
       }
       return GW + (afterGwOrigin.startsWith('/') ? afterGwOrigin : '/' + afterGwOrigin);
@@ -3947,7 +4110,7 @@ function handleBrowserGatewayRequest(req, res) {
     // Handle protocol-relative for current host (e.g. //localhost:2222/...)
     if (u.startsWith('//' + window.location.host)) {
       var afterHost = u.slice(('//' + window.location.host).length);
-      if (afterHost.startsWith(GW) || afterHost.startsWith('/api/browser/gateway/')) {
+      if (afterHost.startsWith(GW) || afterHost.startsWith('/s/') || afterHost.startsWith('/api/browser/gateway/')) {
         return u;
       }
       return GW + (afterHost.startsWith('/') ? afterHost : '/' + afterHost);
@@ -3976,7 +4139,7 @@ function handleBrowserGatewayRequest(req, res) {
     try {
       var resolved = new URL(u, window.location.href);
       if (resolved.origin === gwOrigin) {
-        if (!resolved.pathname.startsWith(GW) && !resolved.pathname.startsWith('/api/browser/gateway/')) {
+        if (!resolved.pathname.startsWith(GW) && !resolved.pathname.startsWith('/s/') && !resolved.pathname.startsWith('/api/browser/gateway/')) {
           return GW + resolved.pathname + resolved.search + resolved.hash;
         }
         return resolved.pathname + resolved.search + resolved.hash;
@@ -4273,7 +4436,7 @@ function handleBrowserGatewayRequest(req, res) {
           var wsTargetProto = wsParsed.protocol === 'wss:' ? 'https' : 'http';
           var wsTargetPort = wsParsed.port || (wsTargetProto === 'https' ? '443' : '80');
           var localWsScheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-          url = localWsScheme + '//' + window.location.host + '/api/browser/gateway/' + encodeURIComponent("${encodeURIComponent(connId)}") + '/' + wsTargetProto + '/' + wsParsed.hostname + ':' + wsTargetPort + (wsParsed.pathname || '/') + wsParsed.search;
+          url = localWsScheme + '//' + window.location.host + GW + (wsParsed.pathname || '/') + wsParsed.search;
         } catch(e) {}
       }
       return protocols ? new _OrigWS(url, protocols) : new _OrigWS(url);
@@ -4298,8 +4461,8 @@ function handleBrowserGatewayRequest(req, res) {
             }
           }
         } else if (isCss) {
-          bodyText = bodyText.replace(/(url\(\s*["']?)\/(?!\/|api\/browser\/gateway\/)([^"')]+["']?\))/gi, `$1${gatewayBase}/$2`);
-          bodyText = bodyText.replace(/(@import\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+          bodyText = bodyText.replace(/(url\(\s*["']?)\/(?!\/|s\/|api\/browser\/gateway\/)([^"')]+["']?\))/gi, `$1${gatewayBase}/$2`);
+          bodyText = bodyText.replace(/(@import\s*["'])\/(?!\/|s\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
         }
 
         const outBuffer = Buffer.from(bodyText, 'utf8');
@@ -4366,7 +4529,7 @@ const backendServer = http.createServer({ maxHeaderSize: 1048576 }, async (req, 
   }
 
   // Browser Gateway & Reverse Proxy (routes Web Mode traffic via remote SSH server)
-  if (req.url.startsWith('/api/browser/gateway/') || req.url.startsWith('/api/browser/proxy')) {
+  if (req.url.startsWith('/s/') || req.url.startsWith('/api/browser/gateway/') || req.url.startsWith('/api/browser/proxy')) {
     handleBrowserGatewayRequest(req, res);
     return;
   }
@@ -4486,7 +4649,7 @@ backendServer.on('upgrade', (req, socket, head) => {
     wss.handleUpgrade(req, socket, head, ws => {
       handleWsConnection(ws, req);
     });
-  } else if (req.url.startsWith('/api/browser/gateway/')) {
+  } else if (req.url.startsWith('/s/') || req.url.startsWith('/api/browser/gateway/')) {
     handleBrowserGatewayUpgrade(req, socket, head);
   } else {
     socket.destroy();
@@ -4507,8 +4670,8 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
     return;
   }
 
-  // Transparent reverse-proxy: Any /api/* request from port 2222 is forwarded to backend on 2020
-  if (req.url.startsWith('/api/')) {
+  // Transparent reverse-proxy: Any /api/* or /s/* request from port 2222 is forwarded to backend on 2020
+  if (req.url.startsWith('/api/') || req.url.startsWith('/s/')) {
     const proxyReq = http.request({
       host: '127.0.0.1',
       port: BACKEND_PORT,
@@ -4539,21 +4702,39 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
 
   // 1. Resolve Gateway context from Cookie or Referer
   let savedGw = null;
-  if (req.headers.cookie && req.headers.cookie.includes('__ssh_browser_gw=')) {
+  if (req.headers.cookie && req.headers.cookie.includes('__ssh_session=')) {
+    const m = req.headers.cookie.match(/__ssh_session=([^;]+)/);
+    if (m) {
+      try {
+        const sessId = decodeURIComponent(m[1].trim());
+        if (browserSessionRegistry.has(sessId)) {
+          savedGw = `/s/${sessId}`;
+        }
+      } catch {}
+    }
+  }
+  if (!savedGw && req.headers.cookie && req.headers.cookie.includes('__ssh_browser_gw=')) {
     const m = req.headers.cookie.match(/__ssh_browser_gw=([^;]+)/);
     if (m) {
       try { savedGw = decodeURIComponent(m[1].trim()); } catch {}
     }
   }
-  if (!savedGw && req.headers.referer && req.headers.referer.includes('/api/browser/gateway/')) {
-    const refMatch = req.headers.referer.match(/(\/api\/browser\/gateway\/[^/]+\/https?\/[^/]+)/);
-    if (refMatch) {
-      savedGw = refMatch[1];
+  if (!savedGw && req.headers.referer) {
+    if (req.headers.referer.includes('/s/')) {
+      const refMatch = req.headers.referer.match(/\/s\/([^/?#]+)/);
+      if (refMatch) {
+        savedGw = `/s/${refMatch[1]}`;
+      }
+    } else if (req.headers.referer.includes('/api/browser/gateway/')) {
+      const refMatch = req.headers.referer.match(/(\/api\/browser\/gateway\/[^/]+\/https?\/[^/]+)/);
+      if (refMatch) {
+        savedGw = refMatch[1];
+      }
     }
   }
 
   // 2. Detect if this request originated from within an active Gateway session
-  const isFromGatewayReferer = Boolean(req.headers.referer && req.headers.referer.includes('/api/browser/gateway/'));
+  const isFromGatewayReferer = Boolean(req.headers.referer && (req.headers.referer.includes('/s/') || req.headers.referer.includes('/api/browser/gateway/')));
   const isIframeGateway = Boolean(savedGw && req.headers['sec-fetch-dest'] === 'iframe');
   const isGatewayRequest = Boolean(savedGw && (isFromGatewayReferer || isIframeGateway));
 
@@ -4692,13 +4873,31 @@ frontendServer.on('upgrade', (req, socket, head) => {
     wss.handleUpgrade(req, socket, head, ws => {
       handleWsConnection(ws, req);
     });
-  } else if (req.url.startsWith('/api/browser/gateway/')) {
+  } else if (req.url.startsWith('/s/') || req.url.startsWith('/api/browser/gateway/')) {
     handleBrowserGatewayUpgrade(req, socket, head);
   } else {
     let savedGw = null;
-    if (req.headers.cookie && req.headers.cookie.includes('__ssh_browser_gw=')) {
+    if (req.headers.cookie && req.headers.cookie.includes('__ssh_session=')) {
+      const m = req.headers.cookie.match(/__ssh_session=([^;]+)/);
+      if (m) {
+        try {
+          const sessId = decodeURIComponent(m[1].trim());
+          if (browserSessionRegistry.has(sessId)) savedGw = `/s/${sessId}`;
+        } catch {}
+      }
+    }
+    if (!savedGw && req.headers.cookie && req.headers.cookie.includes('__ssh_browser_gw=')) {
       const m = req.headers.cookie.match(/__ssh_browser_gw=([^;]+)/);
       if (m) try { savedGw = decodeURIComponent(m[1].trim()); } catch {}
+    }
+    if (!savedGw && req.headers.referer) {
+      if (req.headers.referer.includes('/s/')) {
+        const refMatch = req.headers.referer.match(/\/s\/([^/?#]+)/);
+        if (refMatch) savedGw = `/s/${refMatch[1]}`;
+      } else if (req.headers.referer.includes('/api/browser/gateway/')) {
+        const refMatch = req.headers.referer.match(/(\/api\/browser\/gateway\/[^/]+\/https?\/[^/]+)/);
+        if (refMatch) savedGw = refMatch[1];
+      }
     }
     if (savedGw) {
       req.url = `${savedGw}${req.url.startsWith('/') ? req.url : '/' + req.url}`;
