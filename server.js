@@ -3401,6 +3401,80 @@ done
 // the remote SSH server so users can reach server localhost,
 // internal services, and private IPs seamlessly.
 // -------------------------------------------------------------
+function handleBrowserGatewayUpgrade(req, socket, head) {
+  const rawPrefix = '/api/browser/gateway/';
+  const subPath = req.url.slice(rawPrefix.length);
+  const slash1 = subPath.indexOf('/');
+  if (slash1 === -1) { try { socket.destroy(); } catch {} return; }
+
+  const connId = decodeURIComponent(subPath.slice(0, slash1));
+  const afterConn = subPath.slice(slash1 + 1);
+  const slash2 = afterConn.indexOf('/');
+  const proto = (slash2 === -1 ? afterConn : afterConn.slice(0, slash2)).toLowerCase();
+  const afterProto = slash2 === -1 ? '' : afterConn.slice(slash2 + 1);
+  const slash3 = afterProto.indexOf('/');
+  const hostPart = slash3 === -1 ? afterProto : afterProto.slice(0, slash3);
+  let targetPath = slash3 === -1 ? '/' : afterProto.slice(slash3);
+
+  let host = hostPart;
+  let port = proto === 'https' ? 443 : 80;
+  if (hostPart.includes(':')) {
+    const split = hostPart.split(':');
+    host = split[0];
+    port = parseInt(split[1], 10) || port;
+  } else {
+    const portMatch = targetPath.match(/^\/(\d{1,5})(\/.*)?$/);
+    if (portMatch) {
+      port = parseInt(portMatch[1], 10);
+      targetPath = portMatch[2] || '/';
+    }
+  }
+
+  let entry = null;
+  if (connId && connId !== 'default' && connId !== 'local' && activeConnections.has(connId)) {
+    entry = activeConnections.get(connId);
+  } else if (activeConnections.size > 0) {
+    entry = activeConnections.values().next().value;
+  }
+
+  const connectTarget = (cb) => {
+    if (entry && entry.client) {
+      const destHost = host === 'localhost' ? '127.0.0.1' : host;
+      entry.client.forwardOut('127.0.0.1', 0, destHost, port, cb);
+    } else {
+      const netSocket = net.connect(port, host, () => cb(null, netSocket));
+      netSocket.on('error', e => cb(e));
+    }
+  };
+
+  connectTarget((err, targetStream) => {
+    if (err) {
+      try { socket.destroy(); } catch {}
+      return;
+    }
+
+    let rawHeaders = `${req.method} ${targetPath} HTTP/1.1\r\nHost: ${host}:${port}\r\n`;
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (['host'].includes(k.toLowerCase())) continue;
+      rawHeaders += `${k}: ${v}\r\n`;
+    }
+    rawHeaders += '\r\n';
+
+    targetStream.write(rawHeaders);
+    if (head && head.length > 0) {
+      targetStream.write(head);
+    }
+
+    socket.pipe(targetStream);
+    targetStream.pipe(socket);
+
+    socket.on('error', () => { try { targetStream.destroy(); } catch {} });
+    targetStream.on('error', () => { try { socket.destroy(); } catch {} });
+    socket.on('close', () => { try { targetStream.end(); } catch {} });
+    targetStream.on('close', () => { try { socket.end(); } catch {} });
+  });
+}
+
 function handleBrowserGatewayRequest(req, res) {
   // 1. Query-based proxy redirect: /api/browser/proxy?url=...
   if (req.url.startsWith('/api/browser/proxy')) {
@@ -3532,6 +3606,8 @@ function handleBrowserGatewayRequest(req, res) {
     };
   }
 
+  const gatewayBase = `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${host}:${port}`;
+
   const clientReq = httpModule.request(requestOptions, (targetRes) => {
     const outHeaders = { ...targetRes.headers };
 
@@ -3543,10 +3619,28 @@ function handleBrowserGatewayRequest(req, res) {
     outHeaders['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH';
     outHeaders['access-control-allow-headers'] = '*';
 
+    // Cookie Management: Preserve session cookies, strip Domain & Secure restrictions on HTTP
+    // and attach __ssh_browser_gw tracking cookie
+    const gatewayCookie = `__ssh_browser_gw=${encodeURIComponent(gatewayBase)}; Path=/; SameSite=Lax`;
+    let cookieList = [];
+    if (outHeaders['set-cookie']) {
+      const rawCookies = Array.isArray(outHeaders['set-cookie']) ? outHeaders['set-cookie'] : [outHeaders['set-cookie']];
+      cookieList = rawCookies.map(c => {
+        let clean = c.replace(/;\s*Domain=[^;]+/gi, '');
+        if (!req.socket.encrypted && req.headers['x-forwarded-proto'] !== 'https') {
+          clean = clean.replace(/;\s*Secure/gi, '');
+        }
+        return clean;
+      });
+    }
+    cookieList.push(gatewayCookie);
+    outHeaders['set-cookie'] = cookieList;
+
+    // Handle HTTP Redirects (Location header: 301, 302, 303, 307, 308)
     if (outHeaders['location']) {
       let loc = outHeaders['location'];
       if (loc.startsWith('/')) {
-        outHeaders['location'] = `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${host}:${port}${loc}`;
+        outHeaders['location'] = `${gatewayBase}${loc}`;
       } else if (loc.startsWith('http://') || loc.startsWith('https://')) {
         try {
           const locUrl = new URL(loc);
@@ -3562,35 +3656,116 @@ function handleBrowserGatewayRequest(req, res) {
 
     const contentType = (outHeaders['content-type'] || '').toLowerCase();
     const isHtml = contentType.includes('text/html');
+    const isCss = contentType.includes('text/css');
 
     if (isHtml) {
       const chunks = [];
       targetRes.on('data', c => chunks.push(c));
       targetRes.on('end', () => {
         let rawHtml = Buffer.concat(chunks).toString('utf8');
-        const gatewayBase = `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${host}:${port}`;
         const dirPath = targetPath.endsWith('/') ? targetPath : targetPath.substring(0, targetPath.lastIndexOf('/') + 1);
         const baseTag = `<base href="${gatewayBase}${dirPath || '/'}" />\n`;
+
+        // 1. Rewrite root-relative href="/..." (links, navigation, stylesheets, icons)
+        rawHtml = rawHtml.replace(/(href\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+
+        // 2. Rewrite root-relative src="/..." (scripts, images, media, iframes)
+        rawHtml = rawHtml.replace(/(src\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+
+        // 3. Rewrite root-relative action="/..." (form submit for login, settings, POST)
+        rawHtml = rawHtml.replace(/(action\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+
+        // 4. Rewrite CSS url(/...)
+        rawHtml = rawHtml.replace(/(url\(\s*["']?)\/(?!\/|api\/browser\/gateway\/)([^"')]+["']?\))/gi, `$1${gatewayBase}/$2`);
+
+        // 5. Rewrite data-url, data-href, data-src
+        rawHtml = rawHtml.replace(/(data-(?:url|href|src)\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
 
         const interceptScript = `
 <script>
 (function() {
   var GW = "${gatewayBase}";
-  var origFetch = window.fetch;
-  if (origFetch) {
+
+  // 1. Intercept window.fetch (supports GET, POST, PUT, DELETE, PATCH, etc.)
+  if (window.fetch) {
+    var _fetch = window.fetch;
     window.fetch = function(input, init) {
-      if (typeof input === 'string' && input.startsWith('/') && !input.startsWith('/api/browser/gateway/')) {
-        input = GW + input;
+      if (typeof input === 'string') {
+        if (input.startsWith('/') && !input.startsWith('//') && !input.startsWith('/api/browser/gateway/')) {
+          input = GW + input;
+        }
+      } else if (input && typeof input === 'object' && input.url) {
+        if (input.url.startsWith('/') && !input.url.startsWith('//') && !input.url.startsWith('/api/browser/gateway/')) {
+          input = new Request(GW + input.url, input);
+        }
       }
-      return origFetch.apply(this, arguments);
+      return _fetch.call(this, input, init);
     };
   }
-  var origOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method, url) {
-    if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('/api/browser/gateway/')) {
-      arguments[1] = GW + url;
+
+  // 2. Intercept XMLHttpRequest (supports GET, POST, PUT, DELETE, PATCH, etc.)
+  if (window.XMLHttpRequest) {
+    var _open = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
+      if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/api/browser/gateway/')) {
+        url = GW + url;
+      }
+      return _open.call(this, method, url, async !== false, user, password);
+    };
+  }
+
+  // 3. Intercept history.pushState & replaceState (for Grafana / SPAs)
+  if (window.history) {
+    var _pushState = window.history.pushState;
+    window.history.pushState = function(state, title, url) {
+      if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/api/browser/gateway/')) {
+        url = GW + url;
+      }
+      return _pushState.call(this, state, title, url);
+    };
+    var _replaceState = window.history.replaceState;
+    window.history.replaceState = function(state, title, url) {
+      if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/api/browser/gateway/')) {
+        url = GW + url;
+      }
+      return _replaceState.call(this, state, title, url);
+    };
+  }
+
+  // 4. Capture-phase Link Click Interceptor
+  document.addEventListener('click', function(e) {
+    var t = e.target;
+    while (t && t.tagName !== 'A' && t !== document.body) {
+      t = t.parentElement;
     }
-    return origOpen.apply(this, arguments);
+    if (t && t.tagName === 'A') {
+      var href = t.getAttribute('href');
+      if (href && href.startsWith('/') && !href.startsWith('//') && !href.startsWith('/api/browser/gateway/')) {
+        t.setAttribute('href', GW + href);
+      }
+    }
+  }, true);
+
+  // 5. Capture-phase Form Submit Interceptor
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (form && form.tagName === 'FORM') {
+      var action = form.getAttribute('action');
+      if (action && action.startsWith('/') && !action.startsWith('//') && !action.startsWith('/api/browser/gateway/')) {
+        form.setAttribute('action', GW + action);
+      } else if (!action) {
+        form.setAttribute('action', window.location.pathname + window.location.search);
+      }
+    }
+  }, true);
+
+  // 6. Intercept window.open
+  var _winOpen = window.open;
+  window.open = function(url, target, features) {
+    if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/api/browser/gateway/')) {
+      url = GW + url;
+    }
+    return _winOpen.call(this, url, target, features);
   };
 })();
 </script>
@@ -3599,10 +3774,29 @@ function handleBrowserGatewayRequest(req, res) {
         if (headIdx !== -1) {
           rawHtml = rawHtml.slice(0, headIdx + 6) + baseTag + interceptScript + rawHtml.slice(headIdx + 6);
         } else {
-          rawHtml = baseTag + interceptScript + rawHtml;
+          const htmlIdx = rawHtml.toLowerCase().indexOf('<html>');
+          if (htmlIdx !== -1) {
+            rawHtml = rawHtml.slice(0, htmlIdx + 6) + '<head>' + baseTag + interceptScript + '</head>' + rawHtml.slice(htmlIdx + 6);
+          } else {
+            rawHtml = baseTag + interceptScript + rawHtml;
+          }
         }
 
         const outBuffer = Buffer.from(rawHtml, 'utf8');
+        delete outHeaders['transfer-encoding'];
+        outHeaders['content-length'] = outBuffer.length;
+        delete outHeaders['content-encoding'];
+        res.writeHead(targetRes.statusCode, outHeaders);
+        res.end(outBuffer);
+      });
+    } else if (isCss) {
+      const chunks = [];
+      targetRes.on('data', c => chunks.push(c));
+      targetRes.on('end', () => {
+        let rawCss = Buffer.concat(chunks).toString('utf8');
+        rawCss = rawCss.replace(/(url\(\s*["']?)\/(?!\/|api\/browser\/gateway\/)([^"')]+["']?\))/gi, `$1${gatewayBase}/$2`);
+        rawCss = rawCss.replace(/(@import\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+        const outBuffer = Buffer.from(rawCss, 'utf8');
         delete outHeaders['transfer-encoding'];
         outHeaders['content-length'] = outBuffer.length;
         delete outHeaders['content-encoding'];
@@ -3644,7 +3838,7 @@ function handleBrowserGatewayRequest(req, res) {
     }
   });
 
-  if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
     req.pipe(clientReq);
   } else {
     clientReq.end();
@@ -3786,6 +3980,8 @@ backendServer.on('upgrade', (req, socket, head) => {
     wss.handleUpgrade(req, socket, head, ws => {
       handleWsConnection(ws, req);
     });
+  } else if (req.url.startsWith('/api/browser/gateway/')) {
+    handleBrowserGatewayUpgrade(req, socket, head);
   } else {
     socket.destroy();
   }
@@ -3863,31 +4059,59 @@ const frontendServer = http.createServer((req, res) => {
     return;
   }
 
-  // 2.5 Referer-based subresource forwarding for Web Mode browser gateway
-  // If an asset was not found in frontend dist, and the request Referer was from a proxied gateway page,
-  // transparently forward the subresource (e.g. /static/bundle.js, /css/app.css, /img/logo.png) to backend gateway
-  if (req.headers.referer && req.headers.referer.includes('/api/browser/gateway/')) {
+  // 2.5 Resolve Gateway context from Cookie or Referer
+  let savedGw = null;
+  if (req.headers.cookie && req.headers.cookie.includes('__ssh_browser_gw=')) {
+    const m = req.headers.cookie.match(/__ssh_browser_gw=([^;]+)/);
+    if (m) {
+      try { savedGw = decodeURIComponent(m[1].trim()); } catch {}
+    }
+  }
+  if (!savedGw && req.headers.referer && req.headers.referer.includes('/api/browser/gateway/')) {
     const refMatch = req.headers.referer.match(/(\/api\/browser\/gateway\/[^/]+\/https?\/[^/]+)/);
     if (refMatch) {
-      const gatewayPrefix = refMatch[1];
-      const forwardedPath = `${gatewayPrefix}${req.url.startsWith('/') ? req.url : '/' + req.url}`;
-      const proxyReq = http.request({
-        host: '127.0.0.1',
-        port: BACKEND_PORT,
-        path: forwardedPath,
-        method: req.method,
-        headers: { ...req.headers, host: `127.0.0.1:${BACKEND_PORT}` }
-      }, proxyRes => {
-        res.writeHead(proxyRes.statusCode, proxyRes.headers);
-        proxyRes.pipe(res);
+      savedGw = refMatch[1];
+    }
+  }
+
+  // If a gateway context is active and this request is NOT for the root UI of SSH Desktop:
+  if (savedGw && req.url !== '/' && req.url !== '/index.html') {
+    const forwardedPath = `${savedGw}${req.url.startsWith('/') ? req.url : '/' + req.url}`;
+
+    // For HTML navigation (e.g. user clicked <a href="/login.html"> and browser navigated to http://localhost:2222/login.html):
+    // 302 Redirect so the browser address bar cleanly updates to the full gateway path!
+    const isHtmlNav = req.method === 'GET' &&
+                      (req.headers.accept || '').includes('text/html') &&
+                      !req.headers['x-requested-with'];
+
+    if (isHtmlNav) {
+      res.writeHead(302, {
+        'Location': forwardedPath,
+        'Cache-Control': 'no-cache',
+        'Set-Cookie': `__ssh_browser_gw=${encodeURIComponent(savedGw)}; Path=/; SameSite=Lax`
       });
-      proxyReq.on('error', () => {
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
-        res.end('Resource not found');
-      });
-      req.pipe(proxyReq);
+      res.end();
       return;
     }
+
+    // For POST, PUT, DELETE, PATCH, API calls, and subresources:
+    // Transparently forward request to backendServer on port 2020!
+    const proxyReq = http.request({
+      host: '127.0.0.1',
+      port: BACKEND_PORT,
+      path: forwardedPath,
+      method: req.method,
+      headers: { ...req.headers, host: `127.0.0.1:${BACKEND_PORT}` }
+    }, proxyRes => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+    });
+    proxyReq.on('error', err => {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Gateway forwarding failed: ${err.message}` }));
+    });
+    req.pipe(proxyReq);
+    return;
   }
 
   // 3. SPA Fallback: non-asset routes (or HTML routes) serve index.html
@@ -3938,8 +4162,20 @@ frontendServer.on('upgrade', (req, socket, head) => {
     wss.handleUpgrade(req, socket, head, ws => {
       handleWsConnection(ws, req);
     });
+  } else if (req.url.startsWith('/api/browser/gateway/')) {
+    handleBrowserGatewayUpgrade(req, socket, head);
   } else {
-    socket.destroy();
+    let savedGw = null;
+    if (req.headers.cookie && req.headers.cookie.includes('__ssh_browser_gw=')) {
+      const m = req.headers.cookie.match(/__ssh_browser_gw=([^;]+)/);
+      if (m) try { savedGw = decodeURIComponent(m[1].trim()); } catch {}
+    }
+    if (savedGw) {
+      req.url = `${savedGw}${req.url.startsWith('/') ? req.url : '/' + req.url}`;
+      handleBrowserGatewayUpgrade(req, socket, head);
+    } else {
+      socket.destroy();
+    }
   }
 });
 
