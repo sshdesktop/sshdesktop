@@ -964,7 +964,7 @@ export default function BrowserApp() {
                         key={`${tab.id}-${tab.url}`}
                         src={getProxiedBrowserUrl(tab.url, activeConnectionId)}
                         className="w-full h-full border-none bg-white"
-                        sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
+                        sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
                         title={tab.title || tab.url}
                       />
                     </div>
