@@ -138,8 +138,14 @@ const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const KEYS_DIR = path.join(DATA_DIR, 'keys');
 try {
-  if (!fs.existsSync(KEYS_DIR)) {
-    fs.mkdirSync(KEYS_DIR, { recursive: true, mode: 0o700 });
+  if (fs.existsSync(KEYS_DIR)) {
+    // Purge any stored private keys on disk - User keys must be strictly in-memory only
+    const staleFiles = fs.readdirSync(KEYS_DIR);
+    for (const sf of staleFiles) {
+      if (sf.endsWith('.pem') || sf.endsWith('.ppk') || sf.endsWith('.key')) {
+        try { fs.unlinkSync(path.join(KEYS_DIR, sf)); } catch {}
+      }
+    }
   }
 } catch {}
 
@@ -549,6 +555,21 @@ async function runRemotePrivExec(entry, command, timeoutMs = 60000) {
 // SOCKS5 Dynamic Proxy Engine (RFC 1928 over SSH2 forwardOut)
 // -------------------------------------------------------------
 const activeSocksServers = new Map(); // connId -> { server, port }
+const activeTunnels = new Map(); // tunnelId -> { server, info: { tunnel_id, conn_id, local_port, remote_host, remote_port, created_at } }
+
+// Helper to accurately detect target Linux distribution package manager
+async function detectPkgManager(client) {
+  if (!client) return 'apt';
+  try {
+    const res = await runRemoteExec(client, "command -v apt-get dpkg dnf yum pacman 2>/dev/null | head -n 1", 5000);
+    const out = (res.stdout || '').trim().toLowerCase();
+    if (out.includes('apt') || out.includes('dpkg')) return 'apt';
+    if (out.includes('dnf')) return 'dnf';
+    if (out.includes('yum')) return 'yum';
+    if (out.includes('pacman')) return 'pacman';
+  } catch {}
+  return 'apt';
+}
 
 function startSocks5Proxy(sshClient, preferredPort = 1080) {
   return new Promise((resolve, reject) => {
@@ -733,11 +754,15 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
     // 2. SSH Connection Management
     // ==========================================
 function buildSshClientConfig(config, targetId) {
+  const host = String(config.host || '').trim();
+  const port = parseInt(config.port || 22, 10);
+  const username = String(config.username || 'root').trim();
+
   const connectConfig = {
-    host: config.host,
-    port: parseInt(config.port || 22, 10),
-    username: config.username || 'root',
-    readyTimeout: 20000,
+    host,
+    port,
+    username,
+    readyTimeout: 30000,
     keepaliveInterval: 10000,
     tryKeyboard: true,
     algorithms: {
@@ -774,53 +799,57 @@ function buildSshClientConfig(config, targetId) {
         'rsa-sha2-256',
         'ssh-rsa',
         'ssh-dss'
+      ],
+      hmac: [
+        'hmac-sha2-256',
+        'hmac-sha2-512',
+        'hmac-sha1',
+        'hmac-sha2-256-etm@openssh.com',
+        'hmac-sha2-512-etm@openssh.com',
+        'hmac-sha1-etm@openssh.com'
       ]
     }
   };
 
+  const rawAuth = String(config.auth_method || config.authMethod || config.auth_type || '').toLowerCase().trim();
   const rawKey = config.private_key || config.private_key_path || config.privateKeyPath || config.key_path || config.keyPath;
-  if (rawKey && typeof rawKey === 'string' && rawKey.trim()) {
-    const trimmed = rawKey.trim();
-    if (trimmed.includes('PRIVATE KEY') || trimmed.includes('PuTTY-User-Key-File') || trimmed.includes('\n')) {
-      connectConfig.privateKey = trimmed;
-      try {
-        const ext = trimmed.includes('PuTTY-User-Key-File') ? 'ppk' : 'pem';
-        const cachedPath = path.join(KEYS_DIR, `${targetId || 'default'}.${ext}`);
-        fs.writeFileSync(cachedPath, trimmed, { mode: 0o600 });
-      } catch {}
-    } else if (fs.existsSync(trimmed)) {
-      try {
-        connectConfig.privateKey = fs.readFileSync(trimmed);
-      } catch (e) {
-        console.warn(`[SSH Desktop] Failed to read private key from ${trimmed}:`, e.message);
-      }
-    } else {
-      const inKeys = path.join(KEYS_DIR, trimmed);
-      const baseInKeys = path.join(KEYS_DIR, path.basename(trimmed));
-      const idKey = path.join(KEYS_DIR, `${targetId || 'default'}.pem`);
-      if (fs.existsSync(inKeys)) {
-        connectConfig.privateKey = fs.readFileSync(inKeys);
-      } else if (fs.existsSync(baseInKeys)) {
-        connectConfig.privateKey = fs.readFileSync(baseInKeys);
-      } else if (fs.existsSync(idKey)) {
-        connectConfig.privateKey = fs.readFileSync(idKey);
+
+  const isPassword = rawAuth === 'password' || (!rawAuth && config.password && (!rawKey || !String(rawKey).includes('PRIVATE KEY')));
+
+  if (isPassword) {
+    // STRICT PASSWORD AUTHENTICATION: Never attach privateKey
+    connectConfig.password = String(config.password || '');
+    connectConfig.tryKeyboard = true;
+  } else {
+    // STRICT KEY AUTHENTICATION (PEM Only, In-Memory)
+    if (rawKey && typeof rawKey === 'string' && rawKey.trim()) {
+      const trimmed = rawKey.trim();
+      if (trimmed.includes('PRIVATE KEY') || trimmed.includes('\n')) {
+        // Pure in-memory PEM string - DO NOT write to disk
+        connectConfig.privateKey = Buffer.from(trimmed, 'utf8');
+      } else if (fs.existsSync(trimmed)) {
+        // Existing local file on disk (native desktop mode)
+        try {
+          connectConfig.privateKey = fs.readFileSync(trimmed);
+        } catch (e) {
+          console.warn(`[SSH Desktop] Failed to read private key from ${trimmed}:`, e.message);
+        }
       }
     }
 
     if (config.passphrase) {
-      connectConfig.passphrase = config.passphrase;
+      connectConfig.passphrase = String(config.passphrase);
     }
-  }
-
-  if (config.password) {
-    connectConfig.password = config.password;
+    if (config.password) {
+      connectConfig.password = String(config.password);
+      connectConfig.tryKeyboard = true;
+    }
   }
 
   return connectConfig;
 }
 
-
-    case 'ssh_connect': {
+case 'ssh_connect': {
       const { config } = args || {};
       if (!config) throw new Error('Missing SSH connection config');
       const targetId = config.id || `conn-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
@@ -867,6 +896,12 @@ function buildSshClientConfig(config, targetId) {
         try { activeSocksServers.get(connId).server.close(); } catch {}
         activeSocksServers.delete(connId);
       }
+      for (const [tid, t] of activeTunnels.entries()) {
+        if (t.info.conn_id === connId) {
+          try { t.server.close(); } catch {}
+          activeTunnels.delete(tid);
+        }
+      }
       if (entry) {
         try { entry.client.end(); } catch {}
         activeConnections.delete(connId);
@@ -907,6 +942,71 @@ function buildSshClientConfig(config, targetId) {
       return undefined;
     }
 
+    case 'ssh_start_tunnel': {
+      if (!entry || !entry.client) throw new Error('No active SSH connection');
+      const localPort = parseInt(args?.local_port || args?.localPort || 0, 10);
+      const remotePort = parseInt(args?.remote_port || args?.remotePort || 0, 10);
+      const remoteHost = args?.remote_host || args?.remoteHost || '127.0.0.1';
+      const tunnelType = String(args?.tunnel_type || args?.tunnelType || 'local').toLowerCase();
+
+      if (tunnelType === 'dynamic' || tunnelType === 'socks' || tunnelType === 'socks5') {
+        return await handleInvokeCommand('ssh_start_socks5', { preferredPort: localPort || 1080 }, session);
+      }
+
+      const tunnelId = `tun-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const server = net.createServer((socket) => {
+        socket.on('error', () => { try { socket.destroy(); } catch {} });
+        entry.client.forwardOut('127.0.0.1', socket.remotePort || 0, remoteHost, remotePort, (err, stream) => {
+          if (err) {
+            try { socket.destroy(); } catch {}
+            return;
+          }
+          stream.on('error', () => { try { socket.destroy(); } catch {} });
+          socket.pipe(stream).pipe(socket);
+        });
+      });
+
+      return new Promise((resolve, reject) => {
+        server.on('error', (err) => reject(err));
+        server.listen(localPort, '127.0.0.1', () => {
+          const assignedPort = server.address().port;
+          activeTunnels.set(tunnelId, {
+            server,
+            info: {
+              tunnel_id: tunnelId,
+              conn_id: connId,
+              local_port: assignedPort,
+              remote_host: remoteHost,
+              remote_port: remotePort,
+              created_at: Date.now()
+            }
+          });
+          resolve(assignedPort);
+        });
+      });
+    }
+
+    case 'ssh_stop_tunnel': {
+      const tid = args?.tunnel_id || args?.tunnelId;
+      if (tid && activeTunnels.has(tid)) {
+        try { activeTunnels.get(tid).server.close(); } catch {}
+        activeTunnels.delete(tid);
+      }
+      return true;
+    }
+
+    case 'ssh_list_tunnels': {
+      const list = [];
+      for (const t of activeTunnels.values()) {
+        list.push(t.info);
+      }
+      return list;
+    }
+
+    case 'send_desktop_notification': {
+      return true;
+    }
+
     case 'ssh_get_socks5': {
       if (activeSocksServers.has(connId)) {
         return activeSocksServers.get(connId).port;
@@ -916,6 +1016,15 @@ function buildSshClientConfig(config, targetId) {
 
     case 'open_browser_window': {
       return `browser-${Date.now()}`;
+    }
+
+    case 'close_browser_window':
+    case 'focus_browser_window': {
+      return true;
+    }
+
+    case 'ssh_launch_putty': {
+      return false;
     }
 
     case 'ssh_test_connection': {
@@ -1708,55 +1817,166 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     }
 
     // ==========================================
-    // 10. Package Manager
+    // 10. Package Manager & Advanced Firewall
     // ==========================================
+    case 'firewall_add_rule_advanced': {
+      if (!entry) return '';
+      const payload = args?.payload || args || {};
+      const port = payload.port || payload.to_port;
+      const proto = payload.protocol || 'tcp';
+      const action = (payload.action || 'allow').toLowerCase();
+      const res = await runRemotePrivExec(entry, `ufw ${action} ${port}/${proto} 2>&1 || firewall-cmd --permanent --add-port=${port}/${proto} 2>&1`);
+      return res.stdout || 'Rule added';
+    }
+
+    case 'firewall_delete_rule_advanced': {
+      if (!entry) return '';
+      const ruleNum = args?.rule_number || args?.ruleNumber;
+      const port = args?.port;
+      const proto = args?.protocol || 'tcp';
+      let cmd = ruleNum ? `ufw --force delete ${ruleNum} 2>&1` : `ufw delete allow ${port}/${proto} 2>&1`;
+      if (port) cmd += ` || firewall-cmd --permanent --remove-port=${port}/${proto} 2>&1`;
+      const res = await runRemotePrivExec(entry, cmd);
+      return res.stdout || 'Rule deleted';
+    }
+
+    case 'firewall_install': {
+      if (!entry) return '';
+      const pm = await detectPkgManager(entry.client);
+      const tool = (args?.tool || 'ufw').toLowerCase();
+      let cmd = 'apt-get update && apt-get install -y ufw';
+      if (pm === 'dnf') cmd = tool.includes('firewalld') ? 'dnf install -y firewalld' : 'dnf install -y ufw || dnf install -y iptables-services';
+      else if (pm === 'yum') cmd = tool.includes('firewalld') ? 'yum install -y firewalld' : 'yum install -y ufw';
+      else if (pm === 'pacman') cmd = 'pacman -Sy --noconfirm ufw iptables';
+      const res = await runRemotePrivExec(entry, `${cmd} 2>&1`, 120000);
+      return res.stdout || 'Installed';
+    }
+
+    case 'firewall_set_default_policy': {
+      if (!entry) return '';
+      const dir = (args?.direction || 'incoming').toLowerCase();
+      const pol = (args?.policy || 'deny').toLowerCase();
+      const res = await runRemotePrivExec(entry, `ufw default ${pol} ${dir} 2>&1`);
+      return res.stdout || 'Policy set';
+    }
+
+    case 'firewall_reset': {
+      if (!entry) return '';
+      const res = await runRemotePrivExec(entry, 'echo y | ufw reset 2>&1');
+      return res.stdout || 'Reset';
+    }
+
     case 'package_detect_manager': {
-      if (!entry) return 'apt';
-      const res = await runRemoteExec(
-        entry.client,
-        "if command -v apt-get >/dev/null 2>&1; then echo 'apt'; elif command -v dnf >/dev/null 2>&1; then echo 'dnf'; elif command -v yum >/dev/null 2>&1; then echo 'yum'; elif command -v pacman >/dev/null 2>&1; then echo 'pacman'; else echo 'apt'; fi"
-      );
-      return res.stdout.trim().toLowerCase() || 'apt';
+      if (!entry || !entry.client) return 'apt';
+      return await detectPkgManager(entry.client);
     }
 
     case 'package_list': {
       if (!entry) return [];
-      const res = await runRemoteExec(
-        entry.client,
-        "dpkg-query -W -f='${Package}\\t${Version}\\t${Installed-Size}\\t${Architecture}\\t${binary:Summary}\\n' 2>/dev/null | head -n 250",
-        15000
-      );
-      const list = [];
-      for (const line of res.stdout.split('\n')) {
-        const [name, version, size, arch, description] = line.split('\t');
-        if (name && version) {
-          list.push({
-            name,
-            version,
-            size: formatBytes((parseInt(size, 10) || 0) * 1024),
-            arch: arch || 'x86_64',
-            description: description || '',
-            status: 'installed'
-          });
+      const pm = await detectPkgManager(entry.client);
+      if (pm === 'dnf' || pm === 'yum') {
+        const res = await runRemoteExec(
+          entry.client,
+          "rpm -qa --queryformat '%{NAME}\t%{VERSION}-%{RELEASE}\t%{SIZE}\t%{ARCH}\t%{SUMMARY}\n' 2>/dev/null | head -n 250",
+          20000
+        );
+        const list = [];
+        for (const line of res.stdout.split('\n')) {
+          const parts = line.split('\t');
+          if (parts.length >= 2 && parts[0].trim()) {
+            list.push({
+              name: parts[0].trim(),
+              version: parts[1].trim(),
+              size: formatBytes(parseInt(parts[2], 10) || 0),
+              arch: parts[3] ? parts[3].trim() : 'x86_64',
+              description: parts[4] ? parts[4].trim() : parts[0].trim(),
+              status: 'installed'
+            });
+          }
         }
+        return list;
+      } else if (pm === 'pacman') {
+        const res = await runRemoteExec(
+          entry.client,
+          `pacman -Q 2>/dev/null | awk '{print $1"\\t"$2"\\t0\\tall\\tpacman package"}' | head -n 250`,
+          15000
+        );
+        const list = [];
+        for (const line of res.stdout.split('\n')) {
+          const parts = line.split('\t');
+          if (parts.length >= 2 && parts[0].trim()) {
+            list.push({
+              name: parts[0].trim(),
+              version: parts[1].trim(),
+              size: '—',
+              arch: 'all',
+              description: 'pacman package',
+              status: 'installed'
+            });
+          }
+        }
+        return list;
+      } else {
+        const queryFmt = "dpkg-query -W -f='" + String.fromCharCode(36) + "{Package}\t" + String.fromCharCode(36) + "{Version}\t" + String.fromCharCode(36) + "{Installed-Size}\t" + String.fromCharCode(36) + "{Architecture}\t" + String.fromCharCode(36) + "{binary:Summary}\n' 2>/dev/null | head -n 250";
+        const res = await runRemoteExec(
+          entry.client,
+          queryFmt,
+          15000
+        );
+        const list = [];
+        for (const line of res.stdout.split('\n')) {
+          const [name, version, size, arch, description] = line.split('\t');
+          if (name && version) {
+            list.push({
+              name: name.trim(),
+              version: version.trim(),
+              size: formatBytes((parseInt(size, 10) || 0) * 1024),
+              arch: (arch || 'x86_64').trim(),
+              description: (description || '').trim(),
+              status: 'installed'
+            });
+          }
+        }
+        return list;
       }
-      return list;
     }
 
     case 'package_search': {
       if (!entry) return [];
-      const q = args?.query || '';
-      const res = await runRemoteExec(entry.client, `apt-cache search "${q}" 2>/dev/null | head -n 60`);
+      const q = (args?.query || '').replace(/[^a-zA-Z0-9._-]/g, '');
+      if (!q) return [];
+      const pm = await detectPkgManager(entry.client);
+      let res;
+      if (pm === 'dnf') {
+        res = await runRemoteExec(entry.client, `dnf search "${q}" 2>/dev/null | grep -v '^=\\|^Last' | head -n 60`, 20000);
+      } else if (pm === 'yum') {
+        res = await runRemoteExec(entry.client, `yum search "${q}" 2>/dev/null | head -n 60`, 20000);
+      } else if (pm === 'pacman') {
+        res = await runRemoteExec(entry.client, `pacman -Ss "${q}" 2>/dev/null | head -n 60`, 20000);
+      } else {
+        res = await runRemoteExec(entry.client, `apt-cache search "${q}" 2>/dev/null | head -n 60`, 15000);
+      }
+
       const list = [];
       for (const line of res.stdout.split('\n')) {
-        const parts = line.split(' - ');
-        if (parts.length >= 2) {
+        if (line.includes(' - ')) {
+          const parts = line.split(' - ');
           list.push({
             name: parts[0].trim(),
             version: 'latest',
             size: '—',
             arch: 'any',
             description: parts.slice(1).join(' - ').trim(),
+            status: 'available'
+          });
+        } else if (line.includes(':')) {
+          const parts = line.split(':');
+          list.push({
+            name: parts[0].trim().replace(/\.(noarch|x86_64)$/, ''),
+            version: 'latest',
+            size: '—',
+            arch: 'any',
+            description: parts.slice(1).join(':').trim(),
             status: 'available'
           });
         }
@@ -1766,24 +1986,77 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'package_install': {
       if (!entry) return '';
-      const res = await runRemotePrivExec(entry, `DEBIAN_FRONTEND=noninteractive apt-get install -y "${args?.name}" 2>&1`, 120000);
+      const pm = await detectPkgManager(entry.client);
+      const pkg = args?.name;
+      if (!pkg || typeof pkg !== 'string') throw new Error('Invalid package name');
+      const safePkg = pkg.replace(/'/g, "'\\''");
+
+      let cmd = '';
+      if (pm === 'dnf') cmd = `dnf install -y '${safePkg}' 2>&1`;
+      else if (pm === 'yum') cmd = `yum install -y '${safePkg}' 2>&1`;
+      else if (pm === 'pacman') cmd = `pacman -S --noconfirm '${safePkg}' 2>&1`;
+      else cmd = `DEBIAN_FRONTEND=noninteractive apt-get install -y '${safePkg}' 2>&1`;
+
+      const res = await runRemotePrivExec(entry, cmd, 180000);
+      if (res.exit_code !== 0 && !res.stdout.includes('Complete!') && !res.stdout.includes('already installed')) {
+        throw new Error(res.stderr || res.stdout || `Failed to install package '${pkg}'`);
+      }
       return res.stdout || res.stderr;
     }
 
     case 'package_remove': {
       if (!entry) return '';
-      const res = await runRemotePrivExec(entry, `DEBIAN_FRONTEND=noninteractive apt-get remove -y "${args?.name}" 2>&1`, 60000);
+      const pm = await detectPkgManager(entry.client);
+      const pkg = args?.name;
+      if (!pkg || typeof pkg !== 'string') throw new Error('Invalid package name');
+      const safePkg = pkg.replace(/'/g, "'\\''");
+
+      let cmd = '';
+      if (pm === 'dnf') cmd = `dnf remove -y '${safePkg}' 2>&1`;
+      else if (pm === 'yum') cmd = `yum remove -y '${safePkg}' 2>&1`;
+      else if (pm === 'pacman') cmd = `pacman -R --noconfirm '${safePkg}' 2>&1`;
+      else cmd = `DEBIAN_FRONTEND=noninteractive apt-get remove -y '${safePkg}' 2>&1`;
+
+      const res = await runRemotePrivExec(entry, cmd, 120000);
+      if (res.exit_code !== 0) {
+        throw new Error(res.stderr || res.stdout || `Failed to remove package '${pkg}'`);
+      }
       return res.stdout || res.stderr;
     }
 
     case 'package_update': {
       if (!entry) return '';
-      const res = await runRemotePrivExec(entry, 'apt-get update -y 2>&1', 120000);
-      return res.stdout || res.stderr;
+      const pm = await detectPkgManager(entry.client);
+      let cmd = 'apt-get update -y 2>&1';
+      if (pm === 'dnf') cmd = 'dnf check-update 2>&1';
+      else if (pm === 'yum') cmd = 'yum check-update 2>&1';
+      else if (pm === 'pacman') cmd = 'pacman -Sy 2>&1';
+
+      const res = await runRemotePrivExec(entry, cmd, 180000);
+      return res.stdout || res.stderr || 'Repository caches updated.';
     }
 
     case 'package_upgradable': {
       if (!entry) return [];
+      const pm = await detectPkgManager(entry.client);
+      if (pm === 'dnf' || pm === 'yum') {
+        const res = await runRemoteExec(entry.client, 'dnf check-update -q 2>/dev/null | head -n 100');
+        const list = [];
+        for (const line of res.stdout.split('\n')) {
+          const parts = line.trim().split(/\s+/);
+          if (parts.length >= 2 && !parts[0].startsWith('=')) {
+            list.push({
+              name: parts[0].split('.')[0],
+              version: parts[1],
+              size: '—',
+              arch: 'any',
+              description: 'Upgradable package',
+              status: 'upgradable'
+            });
+          }
+        }
+        return list;
+      }
       const res = await runRemoteExec(entry.client, 'apt list --upgradable 2>/dev/null | head -n 100');
       const list = [];
       for (const line of res.stdout.split('\n').slice(1)) {
@@ -1802,7 +2075,6 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       return list;
     }
 
-    // ==========================================
     // 11. User & Group Management
     // ==========================================
     case 'user_list': {
@@ -1897,6 +2169,28 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       if (!entry) return;
       await runRemotePrivExec(entry, `usermod -L "${args?.username}"`);
       return;
+    }
+
+    case 'user_modify': {
+      if (!entry) return;
+      const { username, shell, home } = args || {};
+      if (shell) await runRemotePrivExec(entry, `usermod -s "${shell}" "${username}"`);
+      if (home) await runRemotePrivExec(entry, `usermod -d "${home}" -m "${username}"`);
+      return true;
+    }
+
+    case 'group_add_user': {
+      if (!entry) return;
+      const { group, username } = args || {};
+      await runRemotePrivExec(entry, `usermod -aG "${group}" "${username}"`);
+      return true;
+    }
+
+    case 'group_remove_user': {
+      if (!entry) return;
+      const { group, username } = args || {};
+      await runRemotePrivExec(entry, `gpasswd -d "${username}" "${group}"`);
+      return true;
     }
 
     case 'user_unlock': {
@@ -2290,6 +2584,48 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       return { mount_point: '/tmp', filesystem: 'tmpfs', is_tmpfs: true, total_bytes: 0, used_bytes: 0, avail_bytes: 0, size_formatted: '0 B', used_formatted: '0 B', avail_formatted: '0 B', percent: 0 };
     }
 
+    case 'disk_manage_swap': {
+      if (!entry) throw new Error('No active SSH connection');
+      const act = String(args?.action || '').trim().toLowerCase();
+      const targetMb = parseInt(args?.size_mb ?? args?.sizeMb ?? 2048, 10);
+
+      let script = '';
+      if (act === 'disable') {
+        script = 'swapoff -a 2>/dev/null || true\necho "Swap successfully disabled."';
+      } else if (act === 'enable') {
+        script = 'if [ -f /swapfile ]; then swapon /swapfile 2>/dev/null || swapon -a; else swapon -a; fi\necho "Swap successfully enabled."';
+      } else if (act === 'set_size') {
+        if (targetMb === 0) {
+          script = 'swapoff -a 2>/dev/null || true\nrm -f /swapfile\nsed -i \'\\#/swapfile#d\' /etc/fstab 2>/dev/null || true\necho "Swapfile successfully removed."';
+        } else {
+          script = `set -e\nTARGET_MB=${targetMb}\nswapoff -a 2>/dev/null || true\nif ! fallocate -l "${TARGET_MB}M" /swapfile 2>/dev/null; then\n  dd if=/dev/zero of=/swapfile bs=1M count="$TARGET_MB" status=none\nfi\nchmod 600 /swapfile\nmkswap /swapfile\nswapon /swapfile\nif ! grep -qs '/swapfile' /etc/fstab; then\n  printf '\\n/swapfile none swap sw 0 0\\n' >> /etc/fstab\nfi\necho "Successfully configured swap space to ${TARGET_MB} MB (/swapfile active)."`;
+        }
+      } else {
+        throw new Error(`Unknown swap action '${act}'`);
+      }
+
+      const res = await runRemotePrivExec(entry, script, 90000);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Swap management failed');
+      return res.stdout.trim();
+    }
+
+    case 'disk_manage_tmp': {
+      if (!entry) throw new Error('No active SSH connection');
+      const size = String(args?.size || '').trim().toUpperCase();
+      if (!size) throw new Error("Size cannot be empty (e.g. '2G', '4G')");
+      const persist = Boolean(args?.persist);
+
+      let script = `set -e\nSIZE="${size}"\nif findmnt -n -o FSTYPE /tmp 2>/dev/null | grep -qi "tmpfs"; then\n  mount -o remount,size="$SIZE" /tmp\nelse\n  mount -t tmpfs -o size="$SIZE",mode=1777 tmpfs /tmp\nfi\n`;
+      if (persist) {
+        script += `if grep -qs '[[:space:]]/tmp[[:space:]]' /etc/fstab; then\n  sed -i "s|.*[[:space:]]/tmp[[:space:]].*|tmpfs /tmp tmpfs defaults,noatime,mode=1777,size=$SIZE 0 0|" /etc/fstab\nelse\n  printf "\\ntmpfs /tmp tmpfs defaults,noatime,mode=1777,size=$SIZE 0 0\\n" >> /etc/fstab\nfi\n`;
+      }
+      script += `echo "Successfully configured /tmp space to $SIZE"`;
+
+      const res = await runRemotePrivExec(entry, script, 30000);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Tmp space configuration failed');
+      return res.stdout.trim();
+    }
+
     // ==========================================
     // 15. SFTP File Suite
     // ==========================================
@@ -2510,6 +2846,70 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       });
     }
 
+    case 'sftp_create_zip_pure': {
+      if (!entry) throw new Error('No active SSH connection');
+      const baseDir = args?.base_dir || args?.baseDir || '/';
+      const items = Array.isArray(args?.items) ? args.items : [];
+      const outputFilename = args?.output_filename || args?.outputFilename || 'archive.zip';
+      if (items.length === 0) throw new Error('No items selected to archive');
+
+      const cleanDir = (!baseDir || baseDir === '/') ? '/' : baseDir.replace(/\/+$/, '');
+      const escapedDir = cleanDir.replace(/'/g, "'\\''");
+      const escapedOut = outputFilename.replace(/'/g, "'\\''");
+      const escapedItems = items.map(it => `'${String(it).replace(/'/g, "'\\''")}'`).join(' ');
+
+      const lower = outputFilename.toLowerCase();
+      let cmd = '';
+      if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+        cmd = `cd '${escapedDir}' && tar -czvf '${escapedOut}' ${escapedItems}`;
+      } else if (lower.endsWith('.tar.bz2')) {
+        cmd = `cd '${escapedDir}' && tar -cjvf '${escapedOut}' ${escapedItems}`;
+      } else if (lower.endsWith('.tar.xz')) {
+        cmd = `cd '${escapedDir}' && tar -cJvf '${escapedOut}' ${escapedItems}`;
+      } else if (lower.endsWith('.tar')) {
+        cmd = `cd '${escapedDir}' && tar -cvf '${escapedOut}' ${escapedItems}`;
+      } else if (lower.endsWith('.zip')) {
+        cmd = `cd '${escapedDir}' && (command -v zip >/dev/null 2>&1 && zip -r '${escapedOut}' ${escapedItems} || python3 -m zipfile -c '${escapedOut}' ${escapedItems})`;
+      } else {
+        cmd = `cd '${escapedDir}' && tar -czvf '${escapedOut}' ${escapedItems}`;
+      }
+
+      const res = await runRemotePrivExec(entry, cmd, 120000);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Archive creation failed');
+      return `${cleanDir}/${outputFilename}`;
+    }
+
+    case 'sftp_extract_archive_pure': {
+      if (!entry) throw new Error('No active SSH connection');
+      const archivePath = args?.archive_path || args?.archivePath || '';
+      const destDir = args?.dest_dir || args?.destDir || '/';
+      if (!archivePath) throw new Error('Missing archive path');
+
+      const cleanDest = (!destDir || destDir === '/') ? '/' : destDir.replace(/\/+$/, '');
+      const escapedArch = archivePath.replace(/'/g, "'\\''");
+      const escapedDest = cleanDest.replace(/'/g, "'\\''");
+      const lower = archivePath.toLowerCase();
+
+      let cmd = '';
+      if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+        cmd = `mkdir -p '${escapedDest}' && tar -xzvf '${escapedArch}' -C '${escapedDest}'`;
+      } else if (lower.endsWith('.tar.bz2')) {
+        cmd = `mkdir -p '${escapedDest}' && tar -xjvf '${escapedArch}' -C '${escapedDest}'`;
+      } else if (lower.endsWith('.tar.xz')) {
+        cmd = `mkdir -p '${escapedDest}' && tar -xJvf '${escapedArch}' -C '${escapedDest}'`;
+      } else if (lower.endsWith('.tar')) {
+        cmd = `mkdir -p '${escapedDest}' && tar -xvf '${escapedArch}' -C '${escapedDest}'`;
+      } else if (lower.endsWith('.zip')) {
+        cmd = `mkdir -p '${escapedDest}' && (command -v unzip >/dev/null 2>&1 && unzip -o '${escapedArch}' -d '${escapedDest}' || python3 -m zipfile -e '${escapedArch}' '${escapedDest}')`;
+      } else {
+        cmd = `mkdir -p '${escapedDest}' && tar -xvf '${escapedArch}' -C '${escapedDest}'`;
+      }
+
+      const res = await runRemotePrivExec(entry, cmd, 120000);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Archive extraction failed');
+      return cleanDest;
+    }
+
     case 'sftp_folder_size': {
       if (!entry) return '—';
       const res = await runRemoteExec(entry.client, `du -sh "${args?.path}" 2>/dev/null | cut -f1`);
@@ -2628,21 +3028,27 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     }
 
     case 'store_upload_key': {
-      const { filename, content } = args || {};
-      if (!content) throw new Error('Key content is required');
-      const safeName = (filename || `key-${Date.now()}.pem`).replace(/[^a-zA-Z0-9._-]/g, '_');
-      const targetPath = path.join(KEYS_DIR, safeName);
-      fs.writeFileSync(targetPath, content, { mode: 0o600 });
-      return targetPath;
+      // Zero disk writes: Private keys are kept strictly in-memory
+      return { success: true, message: 'Private keys are stored in-memory only' };
     }
 
     case 'store_save_connection': {
       const { connection } = args || {};
       if (!connection) return;
       const list = readJsonSafe(CONNECTIONS_FILE, []);
-      const idx = list.findIndex(c => c.id === connection.id);
-      if (idx >= 0) list[idx] = connection;
-      else list.push(connection);
+      // Sanitize connection object: Strip private keys completely so they NEVER persist to server disk
+      const sanitized = { ...connection };
+      delete sanitized.private_key;
+      delete sanitized.privateKey;
+      if (sanitized.privateKeyPath && (sanitized.privateKeyPath.includes('-----BEGIN') || sanitized.privateKeyPath.includes('\n'))) {
+        delete sanitized.privateKeyPath;
+      }
+      if (sanitized.private_key_path && (sanitized.private_key_path.includes('-----BEGIN') || sanitized.private_key_path.includes('\n'))) {
+        delete sanitized.private_key_path;
+      }
+      const idx = list.findIndex(c => c.id === sanitized.id);
+      if (idx >= 0) list[idx] = sanitized;
+      else list.push(sanitized);
       writeJsonSafe(CONNECTIONS_FILE, list);
       return;
     }
@@ -2665,10 +3071,274 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     // ==========================================
     // 18. API Studio & HTTP Client
     // ==========================================
+    case 'network_interfaces': {
+      return await handleInvokeCommand('system_get_network', args, session);
+    }
+
+    case 'browser_proxy_fetch': {
+      const url = args?.url;
+      if (!url) throw new Error('Missing URL');
+      try {
+        const resp = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          }
+        });
+        const status = resp.status;
+        const final_url = resp.url || url;
+        const contentType = resp.headers.get('content-type') || 'text/html';
+        let body = await resp.text();
+
+        if (contentType.includes('text/html')) {
+          const baseTag = `<base href="${final_url}" />\n`;
+          const headIdx = body.toLowerCase().indexOf('<head>');
+          if (headIdx !== -1) {
+            body = body.slice(0, headIdx + 6) + baseTag + body.slice(headIdx + 6);
+          } else {
+            const htmlIdx = body.toLowerCase().indexOf('<html>');
+            if (htmlIdx !== -1) {
+              body = body.slice(0, htmlIdx + 6) + `<head>${baseTag}</head>` + body.slice(htmlIdx + 6);
+            } else {
+              body = baseTag + body;
+            }
+          }
+        }
+
+        return {
+          status,
+          content_type: contentType,
+          body,
+          final_url
+        };
+      } catch (err) {
+        return {
+          status: 500,
+          content_type: 'text/html',
+          body: `<html><body><h3>Proxy request to '${url}' failed: ${err.message}</h3></body></html>`,
+          final_url: url
+        };
+      }
+    }
+
+    case 'network_bandwidth_stats': {
+      if (!entry || !entry.client) {
+        return {
+          interfaces: [],
+          total_rx_bytes: 0,
+          total_tx_bytes: 0,
+          total_rx_speed_bps: 0,
+          total_tx_speed_bps: 0,
+          total_rx_packets: 0,
+          total_tx_packets: 0,
+          timestamp: Date.now()
+        };
+      }
+      const probeScript = `
+D1=$(cat /proc/net/dev 2>/dev/null)
+sleep 0.4
+D2=$(cat /proc/net/dev 2>/dev/null)
+echo "===DEV1==="
+echo "$D1"
+echo "===DEV2==="
+echo "$D2"
+echo "===ADDR==="
+ip -o addr show 2>/dev/null || ifconfig 2>/dev/null || true
+echo "===SYSNET==="
+for iface in /sys/class/net/*; do
+  [ -d "$iface" ] || continue
+  bn=$(basename "$iface")
+  oper=$(cat "$iface/operstate" 2>/dev/null || echo "unknown")
+  mtu=$(cat "$iface/mtu" 2>/dev/null || echo "0")
+  spd=$(cat "$iface/speed" 2>/dev/null || echo "0")
+  mac=$(cat "$iface/address" 2>/dev/null || echo "-")
+  echo "$bn|$oper|$mtu|$spd|$mac"
+done
+`;
+      const res = await runRemoteExec(entry.client, probeScript, 10000);
+      const out = res.stdout;
+      const dev1Raw = (out.split('===DEV1===')[1] || '').split('===DEV2===')[0] || '';
+      const dev2Raw = (out.split('===DEV2===')[1] || '').split('===ADDR===')[0] || '';
+      const addrRaw = (out.split('===ADDR===')[1] || '').split('===SYSNET===')[0] || '';
+      const sysRaw = out.split('===SYSNET===')[1] || '';
+
+      const ifaceIps = {};
+      for (const line of addrRaw.split('\n')) {
+        const tokens = line.trim().split(/\s+/);
+        if (tokens.length >= 4 && (tokens[2] === 'inet' || tokens[2] === 'inet6')) {
+          const iface = tokens[1].replace(/:$/, '');
+          const ip = tokens[3].split('/')[0];
+          if (!ifaceIps[iface]) ifaceIps[iface] = ip;
+        }
+      }
+
+      const ifaceSys = {};
+      for (const line of sysRaw.split('\n')) {
+        const parts = line.split('|');
+        if (parts.length >= 5) {
+          const bn = parts[0].trim();
+          ifaceSys[bn] = {
+            operstate: parts[1].trim(),
+            mtu: parseInt(parts[2], 10) || 0,
+            speed_mbit: parseInt(parts[3], 10) || 0,
+            mac: parts[4].trim()
+          };
+        }
+      }
+
+      const dev1Bytes = {};
+      for (const line of dev1Raw.split('\n')) {
+        const p = line.trim().split(/\s+/);
+        if (p.length >= 10 && p[0].includes(':')) {
+          const name = p[0].replace(/:$/, '');
+          const rx = parseInt(p[1], 10) || 0;
+          const tx = parseInt(p[9], 10) || 0;
+          dev1Bytes[name] = { rx, tx };
+        }
+      }
+
+      const interfaces = [];
+      let totalRxBytes = 0;
+      let totalTxBytes = 0;
+      let totalRxSpeed = 0;
+      let totalTxSpeed = 0;
+      let totalRxPackets = 0;
+      let totalTxPackets = 0;
+
+      for (const line of dev2Raw.split('\n')) {
+        const p = line.trim().split(/\s+/);
+        if (p.length >= 10 && p[0].includes(':')) {
+          const name = p[0].replace(/:$/, '');
+          const rxBytes = parseInt(p[1], 10) || 0;
+          const rxPackets = parseInt(p[2], 10) || 0;
+          const rxErrors = parseInt(p[3], 10) || 0;
+          const rxDrops = parseInt(p[4], 10) || 0;
+
+          const txBytes = parseInt(p[9], 10) || 0;
+          const txPackets = parseInt(p[10], 10) || 0;
+          const txErrors = parseInt(p[11], 10) || 0;
+          const txDrops = parseInt(p[12], 10) || 0;
+
+          const prev = dev1Bytes[name] || { rx: rxBytes, tx: txBytes };
+          const rxSpeedBps = Math.max(0, (rxBytes - prev.rx) / 0.4);
+          const txSpeedBps = Math.max(0, (txBytes - prev.tx) / 0.4);
+
+          const sys = ifaceSys[name] || {};
+          const isUp = (sys.operstate || '').toLowerCase() === 'up';
+
+          totalRxBytes += rxBytes;
+          totalTxBytes += txBytes;
+          totalRxSpeed += rxSpeedBps;
+          totalTxSpeed += txSpeedBps;
+          totalRxPackets += rxPackets;
+          totalTxPackets += txPackets;
+
+          interfaces.push({
+            name,
+            ip: ifaceIps[name] || '-',
+            mac: sys.mac || '-',
+            is_up: isUp,
+            operstate: sys.operstate || 'unknown',
+            mtu: sys.mtu || 1500,
+            speed_mbit: sys.speed_mbit || 0,
+            rx_bytes: rxBytes,
+            tx_bytes: txBytes,
+            rx_packets: rxPackets,
+            tx_packets: txPackets,
+            rx_errors: rxErrors,
+            tx_errors: txErrors,
+            rx_drops: rxDrops,
+            tx_drops: txDrops,
+            rx_speed_bps: rxSpeedBps,
+            tx_speed_bps: txSpeedBps
+          });
+        }
+      }
+
+      return {
+        interfaces,
+        total_rx_bytes: totalRxBytes,
+        total_tx_bytes: totalTxBytes,
+        total_rx_speed_bps: totalRxSpeed,
+        total_tx_speed_bps: totalTxSpeed,
+        total_rx_packets: totalRxPackets,
+        total_tx_packets: totalTxPackets,
+        timestamp: Date.now()
+      };
+    }
+
     case 'api_send_request': {
       const { req } = args || {};
       if (!req || !req.url) throw new Error('Missing URL');
       const startTime = Date.now();
+
+      // Route through SSH when requested and SSH session is available
+      if (req.use_ssh_tunnel && entry && entry.client) {
+        try {
+          const method = (req.method || 'GET').toUpperCase();
+          const targetUrl = req.url;
+          let curlCmd = `curl -s -S -i -X ${method} "${targetUrl.replace(/"/g, '\\"')}"`;
+          if (Array.isArray(req.headers)) {
+            for (const h of req.headers) {
+              if (h.enabled && h.key) {
+                curlCmd += ` -H "${h.key.replace(/"/g, '\\"')}: ${String(h.value).replace(/"/g, '\\"')}"`;
+              }
+            }
+          }
+          if (req.body_type && req.body_type !== 'none' && req.raw_body) {
+            const b64 = Buffer.from(req.raw_body).toString('base64');
+            curlCmd = `echo "${b64}" | base64 -d | ${curlCmd} --data-binary @-`;
+          }
+
+          const res = await runRemoteExec(entry.client, curlCmd, 30000);
+          if (res.exit_code === 0 || res.stdout.includes('HTTP/')) {
+            const rawOut = res.stdout;
+            const headerEnd = rawOut.indexOf('\r\n\r\n') !== -1 ? rawOut.indexOf('\r\n\r\n') : rawOut.indexOf('\n\n');
+            let headerPart = '';
+            let bodyPart = rawOut;
+            if (headerEnd !== -1) {
+              headerPart = rawOut.slice(0, headerEnd);
+              bodyPart = rawOut.slice(headerEnd + (rawOut.indexOf('\r\n\r\n') !== -1 ? 4 : 2));
+            }
+
+            const headerLines = headerPart.split(/\r?\n/);
+            const statusLine = headerLines[0] || 'HTTP/1.1 200 OK';
+            const statusMatch = statusLine.match(/HTTP\/\S+\s+(\d+)\s*(.*)/i);
+            const status = statusMatch ? parseInt(statusMatch[1], 10) : 200;
+            const statusText = statusMatch ? statusMatch[2] : 'OK';
+
+            const resHeaders = {};
+            for (let i = 1; i < headerLines.length; i++) {
+              const colonIdx = headerLines[i].indexOf(':');
+              if (colonIdx > 0) {
+                const k = headerLines[i].slice(0, colonIdx).trim().toLowerCase();
+                const v = headerLines[i].slice(colonIdx + 1).trim();
+                resHeaders[k] = v;
+              }
+            }
+
+            let isJson = false;
+            try { JSON.parse(bodyPart); isJson = true; } catch {}
+
+            return {
+              status,
+              status_text: statusText,
+              headers: resHeaders,
+              body: bodyPart,
+              is_json: isJson,
+              is_binary: false,
+              size_bytes: Buffer.byteLength(bodyPart, 'utf8'),
+              duration_ms: Date.now() - startTime,
+              tunnel_used: true,
+              tunneled_target: `${entry.config?.name || entry.config?.host || 'server'} (via SSH remote curl)`,
+              effective_url: targetUrl
+            };
+          }
+        } catch (sshErr) {
+          console.warn('[SSH Desktop] Remote SSH curl execution failed, falling back to direct fetch:', sshErr.message);
+        }
+      }
+
+      // Direct HTTP fetch execution
       try {
         const fetchHeaders = {};
         if (Array.isArray(req.headers)) {

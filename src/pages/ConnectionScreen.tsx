@@ -328,16 +328,15 @@ export default function ConnectionScreen() {
   const handleSelectKeyFile = async () => {
     const selectedPath = await pickKeyFile();
     if (selectedPath) {
-      const fileName = selectedPath.split(/[\\/]/).pop() || selectedPath;
+      const isContent = selectedPath.includes('-----BEGIN') || selectedPath.includes('\n');
+      const fileName = isContent ? 'Uploaded Private Key (.pem)' : (selectedPath.split(/[\\/]/).pop() || selectedPath);
       setPrivateKeyPath(selectedPath);
       setUploadedKey({
         name: fileName,
-        size: 'Local Key File',
+        size: isContent ? `${selectedPath.length} bytes (In Memory)` : 'Local Key File',
         type: 'OpenSSH Private Key (.pem)',
         content: selectedPath,
       });
-    } else {
-      keyFileInputRef.current?.click();
     }
   };
 
@@ -359,6 +358,10 @@ export default function ConnectionScreen() {
 
   // Handle uploaded SSH key files (drag & drop or input fallback)
   const handleKeyFileUpload = (file: File) => {
+    if (!file.name.toLowerCase().endsWith('.pem')) {
+      alert('Only .pem private key files are supported. Please select a valid .pem key.');
+      return;
+    }
     const nativePath = (file as any).path;
     if (nativePath) {
       setPrivateKeyPath(nativePath);

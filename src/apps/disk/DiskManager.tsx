@@ -274,7 +274,7 @@ export default function DiskManager() {
     setCleanupActionRunning(action);
     try {
       if (action === 'apt-clean') {
-        await sshExec(activeConnId, 'sudo apt-get clean && sudo apt-get autoremove -y');
+        await sshExec(activeConnId, 'sudo (command -v dnf >/dev/null 2>&1 && dnf clean all || (command -v yum >/dev/null 2>&1 && yum clean all) || (command -v apt-get >/dev/null 2>&1 && apt-get clean && apt-get autoremove -y))');
         showToast('APT package cache cleaned successfully!');
       } else if (action === 'docker-prune') {
         await sshExec(activeConnId, 'docker system prune -f 2>/dev/null || echo "Done"');
