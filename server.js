@@ -3596,6 +3596,13 @@ function handleBrowserGatewayRequest(req, res) {
   // Ask for uncompressed if possible, but we also handle gzip/deflate/br decompression below
   headersToSend['accept-encoding'] = 'gzip, deflate, identity';
 
+  // Automatic fix for reCAPTCHA/Captcha proxy requests containing localhost co= parameter
+  if (targetPath.includes('co=') && (targetPath.includes('/recaptcha/') || targetPath.includes('google.com/recaptcha'))) {
+    const targetOriginWithPort = `${proto}://${host}:${port}`;
+    const targetCoBase64 = Buffer.from(targetOriginWithPort).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '.');
+    targetPath = targetPath.replace(/([?&]co=)(?:aHR0cDovL2xvY2FsaG9zd|aHR0cDovLzEyNy4w)[^&#]*/gi, `$1${targetCoBase64}`);
+  }
+
   const requestOptions = {
     hostname: host,
     port: port,
@@ -3751,10 +3758,24 @@ function handleBrowserGatewayRequest(req, res) {
           // 6. Rewrite data-url, data-href, data-src
           bodyText = bodyText.replace(/(data-(?:url|href|src)\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
 
+          // 7. Calculate Target Origin & reCAPTCHA / Captcha bypass parameters
+          const targetOriginWithPort = `${proto}://${host}:${port}`;
+          const targetCoBase64 = Buffer.from(targetOriginWithPort)
+            .toString('base64')
+            .replace(/\+/g, '-')
+            .replace(/\//g, '_')
+            .replace(/=/g, '.');
+
+          // Rewrite static / server-rendered reCAPTCHA co= parameters in HTML
+          bodyText = bodyText.replace(/((?:https?:)?\/\/[^"']*(?:recaptcha|google\.com\/recaptcha|recaptcha\.net)[^"']*co=)[^&"'\s]+/gi, '$1' + targetCoBase64);
+
           const interceptScript = `
 <script>
 (function() {
   var GW = "${gatewayBase}";
+  var TARGET_CO = "${targetCoBase64}";
+  var TARGET_ORIGIN = "${proto}://${host}:${port}";
+  var TARGET_HOST = "${host}";
   var ORIGINS = [
     "${proto}://${host}:${port}",
     "${proto}://${host}",
@@ -3766,6 +3787,29 @@ function handleBrowserGatewayRequest(req, res) {
     "//localhost:${port}",
     "//127.0.0.1:${port}"
   ];
+
+  function fixCaptchaUrl(url) {
+    if (typeof url !== 'string' || !url) return url;
+    // 1. Google reCAPTCHA (v2, v3, enterprise): Resolves "Localhost is not in the list of supported domains for this site key"
+    if (url.indexOf('recaptcha') !== -1 || url.indexOf('google.com/recaptcha') !== -1 || url.indexOf('recaptcha.net') !== -1) {
+      if (url.indexOf('co=') !== -1) {
+        url = url.replace(/([?&]co=)[^&#]+/g, '$1' + encodeURIComponent(TARGET_CO));
+      }
+    }
+    // 2. hCaptcha
+    if (url.indexOf('hcaptcha.com') !== -1) {
+      if (url.indexOf('host=') !== -1) {
+        url = url.replace(/([?&]host=)[^&#]+/g, '$1' + encodeURIComponent(TARGET_HOST));
+      }
+    }
+    // 3. Cloudflare Turnstile
+    if (url.indexOf('challenges.cloudflare.com') !== -1) {
+      if (url.indexOf('origin=') !== -1) {
+        url = url.replace(/([?&]origin=)[^&#]+/g, '$1' + encodeURIComponent(TARGET_ORIGIN));
+      }
+    }
+    return url;
+  }
 
   function rewriteUrl(u) {
     if (typeof u !== 'string' || !u) return u;
@@ -3781,14 +3825,95 @@ function handleBrowserGatewayRequest(req, res) {
     return u;
   }
 
+  // 0. Intercept HTMLIFrameElement.prototype.src setter (catches reCAPTCHA dynamically generated anchor & bframe iframes)
+  if (window.HTMLIFrameElement) {
+    var iframeSrcDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
+    if (iframeSrcDesc && iframeSrcDesc.set) {
+      var _origIframeSrcSet = iframeSrcDesc.set;
+      Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
+        get: function() {
+          return iframeSrcDesc.get.call(this);
+        },
+        set: function(val) {
+          val = fixCaptchaUrl(val);
+          return _origIframeSrcSet.call(this, val);
+        },
+        configurable: true,
+        enumerable: true
+      });
+    }
+  }
+
+  // Intercept Element.prototype.setAttribute for src
+  var _origSetAttr = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function(name, val) {
+    if (typeof name === 'string' && name.toLowerCase() === 'src' && typeof val === 'string') {
+      val = fixCaptchaUrl(val);
+    }
+    return _origSetAttr.call(this, name, val);
+  };
+
+  // MutationObserver for any added iframes
+  if (window.MutationObserver) {
+    var _obs = new MutationObserver(function(mutations) {
+      for (var i = 0; i < mutations.length; i++) {
+        var added = mutations[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+          var node = added[j];
+          if (node && node.nodeType === 1) {
+            if (node.tagName === 'IFRAME') {
+              var s = node.getAttribute('src');
+              if (s) {
+                var f = fixCaptchaUrl(s);
+                if (f !== s) node.setAttribute('src', f);
+              }
+            } else if (node.querySelectorAll) {
+              var ifrs = node.querySelectorAll('iframe');
+              for (var k = 0; k < ifrs.length; k++) {
+                var isrc = ifrs[k].getAttribute('src');
+                if (isrc) {
+                  var ifixed = fixCaptchaUrl(isrc);
+                  if (ifixed !== isrc) ifrs[k].setAttribute('src', ifixed);
+                }
+              }
+            }
+          }
+        }
+      }
+    });
+    _obs.observe(document.documentElement || document, { childList: true, subtree: true });
+  }
+
+  // Intercept Window.prototype.postMessage to prevent targetOrigin mismatch errors between captcha and page
+  if (window.Window && Window.prototype && Window.prototype.postMessage) {
+    var _origWinPostMessage = Window.prototype.postMessage;
+    Window.prototype.postMessage = function(message, targetOrigin, transfer) {
+      if (targetOrigin && targetOrigin !== '*' && (targetOrigin.indexOf('localhost') !== -1 || targetOrigin.indexOf('127.0.0.1') !== -1 || targetOrigin.indexOf(TARGET_HOST) !== -1)) {
+        targetOrigin = '*';
+      }
+      return _origWinPostMessage.call(this, message, targetOrigin, transfer);
+    };
+  }
+
+  // Document domain spoofing
+  try {
+    Object.defineProperty(document, 'domain', {
+      get: function() { return TARGET_HOST; },
+      set: function() {},
+      configurable: true
+    });
+  } catch(e) {}
+
   // 1. Intercept window.fetch (supports GET, POST, PUT, DELETE, PATCH, etc.)
   if (window.fetch) {
     var _fetch = window.fetch;
     window.fetch = function(input, init) {
       if (typeof input === 'string') {
+        input = fixCaptchaUrl(input);
         input = rewriteUrl(input);
       } else if (input && typeof input === 'object' && input.url) {
-        var newUrl = rewriteUrl(input.url);
+        var newUrl = fixCaptchaUrl(input.url);
+        newUrl = rewriteUrl(newUrl);
         if (newUrl !== input.url) {
           input = new Request(newUrl, input);
         }
@@ -3801,6 +3926,7 @@ function handleBrowserGatewayRequest(req, res) {
   if (window.XMLHttpRequest) {
     var _open = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
+      url = fixCaptchaUrl(url);
       url = rewriteUrl(url);
       return _open.call(this, method, url, async !== false, user, password);
     };
