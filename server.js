@@ -3587,7 +3587,8 @@ function handleBrowserGatewayRequest(req, res) {
     }
     headersToSend[k] = v;
   }
-  headersToSend['host'] = `${host}:${port}`;
+  const isDefaultPort = (proto === 'http' && Number(port) === 80) || (proto === 'https' && Number(port) === 443);
+  headersToSend['host'] = isDefaultPort ? host : `${host}:${port}`;
 
   if (isPrivateHost) {
     // CSRF & Reverse Proxy Headers for internal/private services (Jenkins, Grafana, Portainer, etc.)
@@ -3607,7 +3608,7 @@ function handleBrowserGatewayRequest(req, res) {
     }
 
     if (req.headers.referer && req.headers.referer.includes('/api/browser/gateway/')) {
-      headersToSend['referer'] = `${proto}://${host}${targetPath}`;
+      headersToSend['referer'] = `${proto}://${isDefaultPort ? host : `${host}:${port}`}${targetPath}`;
     }
 
     if (!headersToSend['user-agent'] || headersToSend['user-agent'].includes('Node') || headersToSend['user-agent'].includes('curl')) {
@@ -3887,16 +3888,65 @@ function handleBrowserGatewayRequest(req, res) {
   }
 
   function rewriteUrl(u) {
-    if (typeof u !== 'string' || !u) return u;
-    if (u.startsWith(GW) || u.startsWith('/api/browser/gateway/')) return u;
+    if (u === undefined || u === null) return u;
+    if (typeof u !== 'string') {
+      try { u = String(u); } catch(e) { return u; }
+    }
+    u = u.trim();
+    if (!u || u === '/') return GW + '/';
+    if (u.startsWith('#') || u.startsWith('javascript:') || u.startsWith('mailto:') || u.startsWith('tel:') || u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('about:')) {
+      return u;
+    }
+    if (u.startsWith(GW) || u.startsWith('/api/browser/gateway/')) {
+      return u;
+    }
+    // Handle current server origin (e.g. http://localhost:2222 or http://localhost:2222/...)
+    var gwOrigin = window.location.origin;
+    if (u.startsWith(gwOrigin)) {
+      var afterGwOrigin = u.slice(gwOrigin.length);
+      if (afterGwOrigin.startsWith(GW) || afterGwOrigin.startsWith('/api/browser/gateway/')) {
+        return u;
+      }
+      return GW + (afterGwOrigin.startsWith('/') ? afterGwOrigin : '/' + afterGwOrigin);
+    }
+    // Handle protocol-relative for current host (e.g. //localhost:2222/...)
+    if (u.startsWith('//' + window.location.host)) {
+      var afterHost = u.slice(('//' + window.location.host).length);
+      if (afterHost.startsWith(GW) || afterHost.startsWith('/api/browser/gateway/')) {
+        return u;
+      }
+      return GW + (afterHost.startsWith('/') ? afterHost : '/' + afterHost);
+    }
+    // Handle target origins (e.g. https://www.youtube.com:443, https://www.youtube.com, etc.)
     for (var i = 0; i < ORIGINS.length; i++) {
       if (u.startsWith(ORIGINS[i])) {
-        return GW + u.slice(ORIGINS[i].length);
+        var rest = u.slice(ORIGINS[i].length);
+        return GW + (rest.startsWith('/') ? rest : (rest ? '/' + rest : '/'));
       }
     }
+    // Handle absolute external HTTP/HTTPS URLs (e.g. redirecting to accounts.google.com or auth provider)
+    if (u.startsWith('http://') || u.startsWith('https://')) {
+      try {
+        var parsed = new URL(u);
+        var pProto = parsed.protocol.replace(':', '');
+        var pPort = parsed.port || (pProto === 'https' ? '443' : '80');
+        return '/api/browser/gateway/' + encodeURIComponent("${encodeURIComponent(connId)}") + '/' + pProto + '/' + parsed.hostname + ':' + pPort + (parsed.pathname || '/') + parsed.search + (parsed.hash || '');
+      } catch(e) {}
+    }
+    // Handle root-relative paths (e.g. /watch?v=..., /login, /assets/...)
     if (u.startsWith('/') && !u.startsWith('//')) {
       return GW + u;
     }
+    // Handle relative paths without leading slash (e.g. 'watch?v=...', './watch', '../api')
+    try {
+      var resolved = new URL(u, window.location.href);
+      if (resolved.origin === gwOrigin) {
+        if (!resolved.pathname.startsWith(GW) && !resolved.pathname.startsWith('/api/browser/gateway/')) {
+          return GW + resolved.pathname + resolved.search + resolved.hash;
+        }
+        return resolved.pathname + resolved.search + resolved.hash;
+      }
+    } catch(e) {}
     return u;
   }
 
@@ -3906,34 +3956,97 @@ function handleBrowserGatewayRequest(req, res) {
     Object.defineProperty(window, 'parent', { get: function() { return window; }, configurable: true });
   } catch (e) {}
 
-  // Intercept Location.prototype.replace & Location.prototype.assign to keep JS navigations inside gateway
+  // Intercept Location.prototype.replace & Location.prototype.assign if configurable
   if (window.Location && Location.prototype) {
-    var _origLocReplace = Location.prototype.replace;
-    if (_origLocReplace) {
-      Location.prototype.replace = function(url) {
-        return _origLocReplace.call(this, rewriteUrl(url));
-      };
-    }
-    var _origLocAssign = Location.prototype.assign;
-    if (_origLocAssign) {
-      Location.prototype.assign = function(url) {
-        return _origLocAssign.call(this, rewriteUrl(url));
-      };
-    }
+    try {
+      var _origLocReplace = Location.prototype.replace;
+      if (_origLocReplace) {
+        Location.prototype.replace = function(url) {
+          return _origLocReplace.call(this, rewriteUrl(url));
+        };
+      }
+      var _origLocAssign = Location.prototype.assign;
+      if (_origLocAssign) {
+        Location.prototype.assign = function(url) {
+          return _origLocAssign.call(this, rewriteUrl(url));
+        };
+      }
+    } catch(e) {}
   }
 
-  // Intercept HTMLIFrameElement.prototype.src setter (catches reCAPTCHA dynamically generated anchor & bframe iframes)
+  // Intercept History.prototype & window.history pushState / replaceState (SPAs, YouTube Kevlar, Grafana)
+  function patchHistoryObj(obj) {
+    if (!obj || obj._gwPatched) return;
+    try {
+      obj._gwPatched = true;
+      var _origPush = obj.pushState;
+      if (_origPush) {
+        obj.pushState = function(state, title, url) {
+          if (url !== undefined && url !== null) url = rewriteUrl(url);
+          return _origPush.call(this, state, title, url);
+        };
+      }
+      var _origReplace = obj.replaceState;
+      if (_origReplace) {
+        obj.replaceState = function(state, title, url) {
+          if (url !== undefined && url !== null) url = rewriteUrl(url);
+          return _origReplace.call(this, state, title, url);
+        };
+      }
+    } catch(e) {}
+  }
+
+  if (window.History && History.prototype) patchHistoryObj(History.prototype);
+  if (window.history) patchHistoryObj(window.history);
+
+  // Intercept HTMLIFrameElement.prototype (catches reCAPTCHA & SPF hidden history iframes)
   if (window.HTMLIFrameElement) {
     var iframeSrcDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
     if (iframeSrcDesc && iframeSrcDesc.set) {
       var _origIframeSrcSet = iframeSrcDesc.set;
       Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
-        get: function() {
-          return iframeSrcDesc.get.call(this);
-        },
+        get: function() { return iframeSrcDesc.get.call(this); },
         set: function(val) {
           val = fixCaptchaUrl(val);
           return _origIframeSrcSet.call(this, val);
+        },
+        configurable: true,
+        enumerable: true
+      });
+    }
+
+    var cwDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+    if (cwDesc && cwDesc.get) {
+      var _origCwGet = cwDesc.get;
+      Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+        get: function() {
+          var cw = _origCwGet.call(this);
+          if (cw) {
+            try {
+              if (cw.History && cw.History.prototype) patchHistoryObj(cw.History.prototype);
+              if (cw.history) patchHistoryObj(cw.history);
+            } catch(e) {}
+          }
+          return cw;
+        },
+        configurable: true,
+        enumerable: true
+      });
+    }
+
+    var cdDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentDocument');
+    if (cdDesc && cdDesc.get) {
+      var _origCdGet = cdDesc.get;
+      Object.defineProperty(HTMLIFrameElement.prototype, 'contentDocument', {
+        get: function() {
+          var cd = _origCdGet.call(this);
+          if (cd && cd.defaultView) {
+            try {
+              if (cd.defaultView.History && cd.defaultView.History.prototype) patchHistoryObj(cd.defaultView.History.prototype);
+              if (cd.defaultView.history) patchHistoryObj(cd.defaultView.history);
+            } catch(e) {}
+          }
+          return cd;
         },
         configurable: true,
         enumerable: true
@@ -3964,6 +4077,12 @@ function handleBrowserGatewayRequest(req, res) {
                 var f = fixCaptchaUrl(s);
                 if (f !== s) node.setAttribute('src', f);
               }
+              try {
+                if (node.contentWindow) {
+                  if (node.contentWindow.History) patchHistoryObj(node.contentWindow.History.prototype);
+                  if (node.contentWindow.history) patchHistoryObj(node.contentWindow.history);
+                }
+              } catch(e) {}
             } else if (node.querySelectorAll) {
               var ifrs = node.querySelectorAll('iframe');
               for (var k = 0; k < ifrs.length; k++) {
@@ -3972,6 +4091,12 @@ function handleBrowserGatewayRequest(req, res) {
                   var ifixed = fixCaptchaUrl(isrc);
                   if (ifixed !== isrc) ifrs[k].setAttribute('src', ifixed);
                 }
+                try {
+                  if (ifrs[k].contentWindow) {
+                    if (ifrs[k].contentWindow.History) patchHistoryObj(ifrs[k].contentWindow.History.prototype);
+                    if (ifrs[k].contentWindow.history) patchHistoryObj(ifrs[k].contentWindow.history);
+                  }
+                } catch(e) {}
               }
             }
           }
@@ -4029,21 +4154,7 @@ function handleBrowserGatewayRequest(req, res) {
     };
   }
 
-  // 3. Intercept window.history.pushState & replaceState (for Grafana / SPAs)
-  if (window.history) {
-    var _pushState = window.history.pushState;
-    window.history.pushState = function(state, title, url) {
-      url = rewriteUrl(url);
-      return _pushState.call(this, state, title, url);
-    };
-    var _replaceState = window.history.replaceState;
-    window.history.replaceState = function(state, title, url) {
-      url = rewriteUrl(url);
-      return _replaceState.call(this, state, title, url);
-    };
-  }
-
-  // 4. Intercept HTMLFormElement.prototype.submit (catches programmatic submit())
+  // 3. Intercept HTMLFormElement.prototype.submit (catches programmatic submit())
   if (window.HTMLFormElement) {
     var _formSubmit = HTMLFormElement.prototype.submit;
     HTMLFormElement.prototype.submit = function() {
@@ -4057,11 +4168,22 @@ function handleBrowserGatewayRequest(req, res) {
     };
   }
 
-  // 5. Global capture click listener for all <a> tags
+  // 4. Global capture click listener for all <a> tags (including Shadow DOM)
   document.addEventListener('click', function(e) {
-    var t = e.target;
-    while (t && t.tagName !== 'A' && t !== document.body) {
-      t = t.parentElement;
+    var path = e.composedPath ? e.composedPath() : [];
+    var t = null;
+    for (var i = 0; i < path.length; i++) {
+      if (path[i] && path[i].tagName === 'A') {
+        t = path[i];
+        break;
+      }
+    }
+    if (!t) {
+      var cur = e.target;
+      while (cur && cur.tagName !== 'A' && cur !== document.body) {
+        cur = cur.parentElement;
+      }
+      if (cur && cur.tagName === 'A') t = cur;
     }
     if (t && t.tagName === 'A') {
       var href = t.getAttribute('href');
@@ -4071,10 +4193,13 @@ function handleBrowserGatewayRequest(req, res) {
           t.setAttribute('href', rw);
         }
       }
+      if (t.target === '_top' || t.target === '_parent') {
+        t.target = '_self';
+      }
     }
   }, true);
 
-  // 6. Global capture submit listener for all <form> elements
+  // 5. Global capture submit listener for all <form> elements
   document.addEventListener('submit', function(e) {
     var form = e.target;
     if (form && form.tagName === 'FORM') {
@@ -4087,12 +4212,39 @@ function handleBrowserGatewayRequest(req, res) {
     }
   }, true);
 
-  // 7. Intercept window.open
+  // 6. Intercept window.open
   var _winOpen = window.open;
   window.open = function(url, target, features) {
     url = rewriteUrl(url);
     return _winOpen.call(this, url, target, features);
   };
+
+  // 7. Intercept navigator.sendBeacon
+  if (navigator.sendBeacon) {
+    var _sendBeacon = navigator.sendBeacon;
+    navigator.sendBeacon = function(url, data) {
+      if (typeof url === 'string') url = rewriteUrl(url);
+      return _sendBeacon.call(this, url, data);
+    };
+  }
+
+  // 8. Intercept WebSocket
+  if (window.WebSocket) {
+    var _OrigWS = window.WebSocket;
+    window.WebSocket = function(url, protocols) {
+      if (typeof url === 'string' && (url.startsWith('ws://') || url.startsWith('wss://'))) {
+        try {
+          var wsParsed = new URL(url);
+          var wsTargetProto = wsParsed.protocol === 'wss:' ? 'https' : 'http';
+          var wsTargetPort = wsParsed.port || (wsTargetProto === 'https' ? '443' : '80');
+          var localWsScheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+          url = localWsScheme + '//' + window.location.host + '/api/browser/gateway/' + encodeURIComponent("${encodeURIComponent(connId)}") + '/' + wsTargetProto + '/' + wsParsed.hostname + ':' + wsTargetPort + (wsParsed.pathname || '/') + wsParsed.search;
+        } catch(e) {}
+      }
+      return protocols ? new _OrigWS(url, protocols) : new _OrigWS(url);
+    };
+    window.WebSocket.prototype = _OrigWS.prototype;
+  }
 })();
 </script>
 `;
@@ -4339,45 +4491,9 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
     return;
   }
 
-  // Serve static assets from DIST_DIR (disk) or EMBEDDED_FILES (in-memory bundle)
   let reqPath = decodeURI(req.url.split('?')[0]);
-  if (reqPath === '/') reqPath = '/index.html';
 
-  let filePath = path.join(DIST_DIR, reqPath);
-
-  // 1. Check disk file first
-  if (fs.existsSync(filePath)) {
-    try {
-      const stats = fs.statSync(filePath);
-      if (stats.isFile()) {
-        const ext = path.extname(filePath).toLowerCase();
-        const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-        res.writeHead(200, {
-          'Content-Type': contentType,
-          'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000'
-        });
-        fs.createReadStream(filePath).pipe(res);
-        return;
-      }
-    } catch {}
-  }
-
-  // 2. Check embedded in-memory assets (for standalone single binary execution)
-  if (typeof EMBEDDED_FILES !== 'undefined' && EMBEDDED_FILES && EMBEDDED_FILES[reqPath]) {
-    const asset = EMBEDDED_FILES[reqPath];
-    res.writeHead(200, {
-      'Content-Type': asset.type,
-      'Cache-Control': reqPath === '/index.html' ? 'no-cache' : 'public, max-age=31536000'
-    });
-    if (asset.isBase64) {
-      res.end(Buffer.from(asset.b64, 'base64'));
-    } else {
-      res.end(asset.text);
-    }
-    return;
-  }
-
-  // 2.5 Resolve Gateway context from Cookie or Referer
+  // 1. Resolve Gateway context from Cookie or Referer
   let savedGw = null;
   if (req.headers.cookie && req.headers.cookie.includes('__ssh_browser_gw=')) {
     const m = req.headers.cookie.match(/__ssh_browser_gw=([^;]+)/);
@@ -4392,12 +4508,64 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
     }
   }
 
-  // If a gateway context is active and this request is NOT for the root UI of SSH Desktop:
-  if (savedGw && req.url !== '/' && req.url !== '/index.html') {
-    const forwardedPath = `${savedGw}${req.url.startsWith('/') ? req.url : '/' + req.url}`;
+  // 2. Detect if this request originated from within an active Gateway session
+  const isFromGatewayReferer = Boolean(req.headers.referer && req.headers.referer.includes('/api/browser/gateway/'));
+  const isIframeGateway = Boolean(savedGw && req.headers['sec-fetch-dest'] === 'iframe');
+  const isGatewayRequest = Boolean(savedGw && (isFromGatewayReferer || isIframeGateway));
 
-    // For HTML navigation (e.g. user clicked <a href="/login.html"> and browser navigated to http://localhost:2222/login.html):
-    // 302 Redirect so the browser address bar cleanly updates to the full gateway path!
+  // If the request is for the root path ('/' or '/index.html') from inside the gateway,
+  // DO NOT serve SSH Desktop dashboard! Redirect cleanly back to the gateway root!
+  if ((reqPath === '/' || reqPath === '/index.html') && isGatewayRequest) {
+    const forwardedPath = `${savedGw}/`;
+    res.writeHead(302, {
+      'Location': forwardedPath,
+      'Cache-Control': 'no-cache',
+      'Set-Cookie': `__ssh_browser_gw=${encodeURIComponent(savedGw)}; Path=/; SameSite=Lax`
+    });
+    res.end();
+    return;
+  }
+
+  // 3. Serve SSH Desktop's own static assets (/assets/*, /clouddesk.svg, /sshdesktop.svg, or root '/' when NOT from gateway)
+  const isCoreAsset = reqPath.startsWith('/assets/') || reqPath === '/clouddesk.svg' || reqPath === '/sshdesktop.svg' || reqPath === '/favicon.ico';
+  const isRootDashboard = (reqPath === '/' || reqPath === '/index.html') && !isGatewayRequest;
+
+  if (isCoreAsset || isRootDashboard) {
+    const assetPath = isRootDashboard ? '/index.html' : reqPath;
+    const diskPath = path.join(DIST_DIR, assetPath);
+    if (fs.existsSync(diskPath)) {
+      try {
+        const stats = fs.statSync(diskPath);
+        if (stats.isFile()) {
+          const ext = path.extname(diskPath).toLowerCase();
+          const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+          res.writeHead(200, {
+            'Content-Type': contentType,
+            'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000'
+          });
+          fs.createReadStream(diskPath).pipe(res);
+          return;
+        }
+      } catch {}
+    }
+    if (typeof EMBEDDED_FILES !== 'undefined' && EMBEDDED_FILES && EMBEDDED_FILES[assetPath]) {
+      const asset = EMBEDDED_FILES[assetPath];
+      res.writeHead(200, {
+        'Content-Type': asset.type,
+        'Cache-Control': assetPath === '/index.html' ? 'no-cache' : 'public, max-age=31536000'
+      });
+      if (asset.isBase64) {
+        res.end(Buffer.from(asset.b64, 'base64'));
+      } else {
+        res.end(asset.text);
+      }
+      return;
+    }
+  }
+
+  // 4. Any other non-core path requested when a gateway context is present (e.g. /watch, /login, /s/desktop/..., /logout, /generate_204)
+  if (savedGw) {
+    const forwardedPath = `${savedGw}${req.url.startsWith('/') ? req.url : '/' + req.url}`;
     const isHtmlNav = req.method === 'GET' &&
                       (req.headers.accept || '').includes('text/html') &&
                       !req.headers['x-requested-with'];
@@ -4412,8 +4580,7 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
       return;
     }
 
-    // For POST, PUT, DELETE, PATCH, API calls, and subresources:
-    // Transparently forward request to backendServer on port 2020!
+    // Transparent proxy to backendServer on port 2020
     const proxyReq = http.request({
       host: '127.0.0.1',
       port: BACKEND_PORT,
@@ -4433,7 +4600,7 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
     return;
   }
 
-  // 3. SPA Fallback: non-asset routes (or HTML routes) serve index.html
+  // 5. SPA Fallback: non-asset routes (or HTML routes) serve index.html (when no gateway context active)
   const isDirectAsset = reqPath.includes('.') && !reqPath.endsWith('.html');
   if (!isDirectAsset) {
     const diskIndex = path.join(DIST_DIR, 'index.html');
