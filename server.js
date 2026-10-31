@@ -3573,28 +3573,64 @@ function handleBrowserGatewayRequest(req, res) {
   const httpModule = isHttps ? https : http;
   const gatewayBase = `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${host}:${port}`;
 
+  const isPrivateHost = host === 'localhost' || host === '127.0.0.1' ||
+    host.startsWith('10.') || host.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    host.endsWith('.local') || host.endsWith('.internal');
+
   const headersToSend = {};
   for (const [k, v] of Object.entries(req.headers)) {
     const lower = k.toLowerCase();
-    if (['connection', 'upgrade', 'keep-alive', 'transfer-encoding', 'host'].includes(lower)) {
+    if (['connection', 'upgrade', 'keep-alive', 'transfer-encoding', 'host',
+         'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port', 'x-forwarded-prefix'].includes(lower)) {
       continue;
     }
     headersToSend[k] = v;
   }
   headersToSend['host'] = `${host}:${port}`;
 
-  // CSRF & Reverse Proxy Headers for production tools (Jenkins, Grafana, Portainer, Spring Boot, etc.)
-  // Target expects Origin & Referer to match its host, avoiding 403 Forbidden CSRF rejections
-  headersToSend['origin'] = `${proto}://${host}:${port}`;
-  headersToSend['referer'] = `${proto}://${host}:${port}${targetPath}`;
-  headersToSend['x-forwarded-host'] = req.headers.host || `${host}:${port}`;
-  headersToSend['x-forwarded-proto'] = proto;
-  headersToSend['x-forwarded-port'] = String(port);
-  headersToSend['x-forwarded-prefix'] = gatewayBase;
-  headersToSend['x-forwarded-for'] = req.socket.remoteAddress || '127.0.0.1';
+  if (isPrivateHost) {
+    // CSRF & Reverse Proxy Headers for internal/private services (Jenkins, Grafana, Portainer, etc.)
+    headersToSend['origin'] = `${proto}://${host}:${port}`;
+    headersToSend['referer'] = `${proto}://${host}:${port}${targetPath}`;
+    headersToSend['x-forwarded-host'] = req.headers.host || `${host}:${port}`;
+    headersToSend['x-forwarded-proto'] = proto;
+    headersToSend['x-forwarded-port'] = String(port);
+    headersToSend['x-forwarded-prefix'] = gatewayBase;
+    headersToSend['x-forwarded-for'] = req.socket.remoteAddress || '127.0.0.1';
+  } else {
+    // Public Web Requests: Send authentic Chrome browser headers to prevent Cloudflare/WAF bot-detection & Captcha challenges
+    if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) {
+      headersToSend['origin'] = `${proto}://${host}`;
+    } else {
+      delete headersToSend['origin'];
+    }
 
-  // Ask for uncompressed if possible, but we also handle gzip/deflate/br decompression below
-  headersToSend['accept-encoding'] = 'gzip, deflate, identity';
+    if (req.headers.referer && req.headers.referer.includes('/api/browser/gateway/')) {
+      headersToSend['referer'] = `${proto}://${host}${targetPath}`;
+    }
+
+    if (!headersToSend['user-agent'] || headersToSend['user-agent'].includes('Node') || headersToSend['user-agent'].includes('curl')) {
+      headersToSend['user-agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+    }
+    if (!headersToSend['accept']) {
+      headersToSend['accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7';
+    }
+    if (!headersToSend['accept-language']) {
+      headersToSend['accept-language'] = 'en-US,en;q=0.9';
+    }
+    headersToSend['sec-ch-ua'] = '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"';
+    headersToSend['sec-ch-ua-mobile'] = '?0';
+    headersToSend['sec-ch-ua-platform'] = '"Windows"';
+    headersToSend['sec-fetch-dest'] = req.headers['sec-fetch-dest'] || 'document';
+    headersToSend['sec-fetch-mode'] = req.headers['sec-fetch-mode'] || 'navigate';
+    headersToSend['sec-fetch-site'] = req.headers['sec-fetch-site'] || 'none';
+    headersToSend['sec-fetch-user'] = '?1';
+    headersToSend['upgrade-insecure-requests'] = '1';
+  }
+
+  // Decompression: Support gzip, deflate, and br (Brotli)
+  headersToSend['accept-encoding'] = 'gzip, deflate, br, identity';
 
   // Automatic fix for reCAPTCHA/Captcha proxy requests containing localhost co= parameter
   if (targetPath.includes('co=') && (targetPath.includes('/recaptcha/') || targetPath.includes('google.com/recaptcha'))) {
@@ -3672,22 +3708,47 @@ function handleBrowserGatewayRequest(req, res) {
     cookieList.push(gatewayCookie);
     outHeaders['set-cookie'] = cookieList;
 
-    // Handle HTTP Redirects (Location header: 301, 302, 303, 307, 308)
-    if (outHeaders['location']) {
-      let loc = outHeaders['location'];
-      if (loc.startsWith('/')) {
-        outHeaders['location'] = `${gatewayBase}${loc}`;
-      } else if (loc.startsWith('http://') || loc.startsWith('https://')) {
+    function rewriteLocationUrl(loc) {
+      if (typeof loc !== 'string' || !loc) return loc;
+      loc = loc.trim();
+      if (loc.startsWith('//')) {
+        loc = `${proto}:${loc}`;
+      }
+      if (loc.startsWith('http://') || loc.startsWith('https://')) {
         try {
           const locUrl = new URL(loc);
           const locProto = locUrl.protocol.replace(':', '');
           const locPort = locUrl.port || (locProto === 'https' ? 443 : 80);
-          outHeaders['location'] = `/api/browser/gateway/${encodeURIComponent(connId)}/${locProto}/${locUrl.hostname}:${locPort}${locUrl.pathname}${locUrl.search}`;
-        } catch {}
+          return `/api/browser/gateway/${encodeURIComponent(connId)}/${locProto}/${locUrl.hostname}:${locPort}${locUrl.pathname}${locUrl.search}${locUrl.hash || ''}`;
+        } catch {
+          return loc;
+        }
       }
+      if (loc.startsWith('/')) {
+        return `${gatewayBase}${loc}`;
+      }
+      // Relative path without leading slash (e.g. 'login', './login', '../login')
+      try {
+        const resolved = new URL(loc, `${proto}://${host}:${port}${targetPath}`);
+        return `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${host}:${port}${resolved.pathname}${resolved.search}${resolved.hash || ''}`;
+      } catch {
+        return `${gatewayBase}/${loc}`;
+      }
+    }
+
+    // Handle HTTP Redirects (Location header: 301, 302, 303, 307, 308)
+    if (outHeaders['location']) {
+      outHeaders['location'] = rewriteLocationUrl(outHeaders['location']);
       res.writeHead(targetRes.statusCode, outHeaders);
       targetRes.pipe(res);
       return;
+    }
+
+    if (outHeaders['refresh']) {
+      outHeaders['refresh'] = outHeaders['refresh'].replace(/(url\s*=\s*)(.+)$/i, (match, prefix, rUrl) => {
+        const cleanUrl = rUrl.trim().replace(/^['"]|['"]$/g, '');
+        return `${prefix}${rewriteLocationUrl(cleanUrl)}`;
+      });
     }
 
     const contentType = (outHeaders['content-type'] || '').toLowerCase();
@@ -3735,7 +3796,21 @@ function handleBrowserGatewayRequest(req, res) {
           bodyText = bodyText.replace(new RegExp(`url\\(["']?${escaped}/?`, 'gi'), `url("${gatewayBase}/`);
         }
 
+        for (const orig of targetOrigins) {
+          // Also rewrite target origins in JavaScript string literals (e.g. window.location = "https://localhost.com/login")
+          const escaped = orig.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+          bodyText = bodyText.replace(new RegExp(`(["'])${escaped}/?`, 'gi'), `$1${gatewayBase}/`);
+        }
+
         if (isHtml) {
+          // Remove existing <base> tag so our injected gateway base tag is authoritative
+          bodyText = bodyText.replace(/<base\b[^>]*>/gi, '');
+
+          // Rewrite <meta http-equiv="refresh" content="...url=...">
+          bodyText = bodyText.replace(/(<meta\b[^>]*http-equiv\s*=\s*["']refresh["'][^>]*content\s*=\s*["'][^"']*url\s*=\s*)([^"'\s>]+)(["'][^>]*>)/gi, (match, before, rUrl, after) => {
+            return `${before}${rewriteLocationUrl(rUrl)}${after}`;
+          });
+
           const dirPath = targetPath.endsWith('/') ? targetPath : targetPath.substring(0, targetPath.lastIndexOf('/') + 1);
           const baseTag = `<base href="${gatewayBase}${dirPath || '/'}" />\n`;
 
@@ -3825,7 +3900,29 @@ function handleBrowserGatewayRequest(req, res) {
     return u;
   }
 
-  // 0. Intercept HTMLIFrameElement.prototype.src setter (catches reCAPTCHA dynamically generated anchor & bframe iframes)
+  // Prevent frame-busting (e.g. if (top !== self) top.location = "https://localhost.com/login")
+  try {
+    Object.defineProperty(window, 'top', { get: function() { return window; }, configurable: true });
+    Object.defineProperty(window, 'parent', { get: function() { return window; }, configurable: true });
+  } catch (e) {}
+
+  // Intercept Location.prototype.replace & Location.prototype.assign to keep JS navigations inside gateway
+  if (window.Location && Location.prototype) {
+    var _origLocReplace = Location.prototype.replace;
+    if (_origLocReplace) {
+      Location.prototype.replace = function(url) {
+        return _origLocReplace.call(this, rewriteUrl(url));
+      };
+    }
+    var _origLocAssign = Location.prototype.assign;
+    if (_origLocAssign) {
+      Location.prototype.assign = function(url) {
+        return _origLocAssign.call(this, rewriteUrl(url));
+      };
+    }
+  }
+
+  // Intercept HTMLIFrameElement.prototype.src setter (catches reCAPTCHA dynamically generated anchor & bframe iframes)
   if (window.HTMLIFrameElement) {
     var iframeSrcDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
     if (iframeSrcDesc && iframeSrcDesc.set) {
