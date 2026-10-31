@@ -14,6 +14,7 @@ import {
   sftpWriteTextFile, 
   sftpMkdir,
   openExternalUrl,
+  getProxiedBrowserUrl,
   sshStartSocks5,
   sshGetSocks5,
   openBrowserWindow,
@@ -287,6 +288,7 @@ export default function BrowserApp() {
           socks5Port: socksPort,
           isTunneled: true,
           routingMode: 'ssh-gateway',
+          viewMode: t.viewMode || 'interactive',
           error: null,
           htmlContent: undefined,
           jsonContent: undefined,
@@ -322,6 +324,7 @@ export default function BrowserApp() {
           statusText: 'PC Direct',
           error: null,
           routingMode: 'direct',
+          viewMode: t.viewMode || 'interactive',
           isTunneled: false,
           htmlContent: undefined,
           jsonContent: undefined,
@@ -723,7 +726,7 @@ export default function BrowserApp() {
           {/* Open in Desktop PC Browser */}
           {Boolean(activeTab.displayUrl || activeTab.url) && (
             <button
-              onClick={() => openExternalUrl(activeTab.displayUrl || activeTab.url)}
+              onClick={() => openExternalUrl(activeTab.displayUrl || activeTab.url, activeConnectionId, activeTab.networkMode === 'server')}
               className="p-1 rounded-lg ml-1 text-gray-400 hover:text-blue-300 hover:bg-white/10 transition-colors cursor-pointer flex items-center space-x-1"
               title="Open in your default external PC browser (Chrome/Edge/Firefox)"
             >
@@ -835,7 +838,7 @@ export default function BrowserApp() {
                       <span>Retry Request</span>
                     </button>
                     <button
-                      onClick={() => openExternalUrl(tab.displayUrl || tab.url)}
+                      onClick={() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, tab.networkMode === 'server')}
                       className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white text-xs font-semibold border border-white/10 transition-colors cursor-pointer flex items-center space-x-1.5"
                     >
                       <ExternalLink className="w-3.5 h-3.5" />
@@ -881,8 +884,28 @@ export default function BrowserApp() {
                       </div>
                     </div>
 
-                    {/* SOCKS5 Action Buttons */}
+                    {/* SOCKS5 Action Buttons & View Mode Toggle */}
                     <div className="flex items-center space-x-2 shrink-0">
+                      <div className="flex items-center bg-black/40 p-0.5 rounded-xl border border-white/10 shrink-0">
+                        <button
+                          onClick={() => setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, viewMode: 'interactive' } : t))}
+                          className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer flex items-center space-x-1 ${
+                            tab.viewMode !== 'telemetry' ? 'bg-emerald-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'
+                          }`}
+                        >
+                          <Globe className="w-3.5 h-3.5" />
+                          <span className="hidden sm:inline">Live Webview</span>
+                        </button>
+                        <button
+                          onClick={() => setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, viewMode: 'telemetry' } : t))}
+                          className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer flex items-center space-x-1 ${
+                            tab.viewMode === 'telemetry' ? 'bg-emerald-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'
+                          }`}
+                        >
+                          <Activity className="w-3.5 h-3.5" />
+                          <span className="hidden sm:inline">Telemetry</span>
+                        </button>
+                      </div>
                       <button
                         onClick={async () => {
                           if (isTauri()) {
@@ -901,7 +924,7 @@ export default function BrowserApp() {
                               tab.id
                             );
                           } else {
-                            openExternalUrl(tab.displayUrl || tab.url);
+                            openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, true);
                           }
                         }}
                         className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-semibold shadow-md shadow-emerald-900/30 transition-all cursor-pointer flex items-center space-x-1.5"
@@ -925,16 +948,27 @@ export default function BrowserApp() {
                       </button>
 
                       <button
-                        onClick={() => openExternalUrl(tab.displayUrl || tab.url)}
+                        onClick={() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, true)}
                         className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white border border-white/10 transition-colors cursor-pointer"
-                        title="Open in System Default Browser"
+                        title="Open in System Default Browser via SSH Gateway"
                       >
                         <Globe className="w-3.5 h-3.5" />
                       </button>
                     </div>
                   </div>
 
-                  {/* Main Content & Response Inspector View */}
+                  {/* Main Content: Live Webview OR Response Inspector */}
+                  {tab.viewMode !== 'telemetry' ? (
+                    <div className="flex-1 w-full h-full relative bg-white overflow-hidden">
+                      <iframe
+                        key={`${tab.id}-${tab.url}`}
+                        src={getProxiedBrowserUrl(tab.url, activeConnectionId)}
+                        className="w-full h-full border-none bg-white"
+                        sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
+                        title={tab.title || tab.url}
+                      />
+                    </div>
+                  ) : (
                   <div className="flex-1 overflow-auto p-4 space-y-4">
                     {/* Telemetry Metrics Bar */}
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -1029,6 +1063,7 @@ export default function BrowserApp() {
                       </div>
                     ) : null}
                   </div>
+                  )}
                 </div>
               ) : (
                 /* User Network Mode (SSH: OFF): Direct PC Browser Gateway (NO IFRAME) */
@@ -1048,7 +1083,7 @@ export default function BrowserApp() {
                         if (isTauri()) {
                           openBrowserWindow(tab.displayUrl || tab.url, tab.title || tab.displayUrl || tab.url, undefined, tab.id);
                         } else {
-                          openExternalUrl(tab.displayUrl || tab.url);
+                          openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, false);
                         }
                       }}
                       className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
@@ -1119,7 +1154,7 @@ export default function BrowserApp() {
 
           {Boolean(activeTab.displayUrl || activeTab.url) && (
             <button
-              onClick={() => openExternalUrl(activeTab.displayUrl || activeTab.url)}
+              onClick={() => openExternalUrl(activeTab.displayUrl || activeTab.url, activeConnectionId, activeTab.networkMode === 'server')}
               className="flex items-center space-x-1 text-blue-400 hover:text-blue-300 transition-colors cursor-pointer ml-1"
               title="Open current page in your PC desktop browser (Chrome/Edge)"
             >
