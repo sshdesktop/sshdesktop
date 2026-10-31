@@ -11,6 +11,8 @@
  */
 
 import http from 'http';
+import https from 'https';
+import tls from 'tls';
 import net from 'net';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -3394,16 +3396,278 @@ done
 }
 
 // -------------------------------------------------------------
+// BROWSER GATEWAY & REVERSE PROXY HANDLER (Web Mode Support)
+// Proxies HTTP and HTTPS requests from PC browser clients through
+// the remote SSH server so users can reach server localhost,
+// internal services, and private IPs seamlessly.
+// -------------------------------------------------------------
+function handleBrowserGatewayRequest(req, res) {
+  // 1. Query-based proxy redirect: /api/browser/proxy?url=...
+  if (req.url.startsWith('/api/browser/proxy')) {
+    const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const targetUrl = urlObj.searchParams.get('url');
+    const connId = urlObj.searchParams.get('connId') || 'default';
+    if (!targetUrl) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing ?url parameter in proxy request' }));
+      return;
+    }
+    try {
+      const fullUrl = targetUrl.startsWith('http://') || targetUrl.startsWith('https://') ? targetUrl : `http://${targetUrl}`;
+      const parsed = new URL(fullUrl);
+      const proto = parsed.protocol.replace(':', '');
+      const port = parsed.port || (proto === 'https' ? '443' : '80');
+      const pathAndQuery = (parsed.pathname || '/') + (parsed.search || '');
+      const redirectDest = `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${parsed.hostname}:${port}${pathAndQuery}`;
+      res.writeHead(302, { 'Location': redirectDest, 'Access-Control-Allow-Origin': '*' });
+      res.end();
+      return;
+    } catch (err) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Invalid URL '${targetUrl}': ${err.message}` }));
+      return;
+    }
+  }
+
+  // 2. Gateway path routing: /api/browser/gateway/:connId/:proto/:hostPart/...
+  const rawPrefix = '/api/browser/gateway/';
+  const subPath = req.url.slice(rawPrefix.length);
+  const slash1 = subPath.indexOf('/');
+  if (slash1 === -1) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid gateway URL format' }));
+    return;
+  }
+
+  const connId = decodeURIComponent(subPath.slice(0, slash1));
+  const afterConn = subPath.slice(slash1 + 1);
+  const slash2 = afterConn.indexOf('/');
+  const proto = (slash2 === -1 ? afterConn : afterConn.slice(0, slash2)).toLowerCase();
+  if (proto !== 'http' && proto !== 'https') {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `Invalid gateway protocol '${proto}'. Must be http or https.` }));
+    return;
+  }
+
+  const afterProto = slash2 === -1 ? '' : afterConn.slice(slash2 + 1);
+  const slash3 = afterProto.indexOf('/');
+  const hostPart = slash3 === -1 ? afterProto : afterProto.slice(0, slash3);
+  const rawRest = slash3 === -1 ? '/' : afterProto.slice(slash3);
+
+  let host = hostPart;
+  let port = proto === 'https' ? 443 : 80;
+  let targetPath = rawRest;
+
+  if (hostPart.includes(':')) {
+    const split = hostPart.split(':');
+    host = split[0];
+    port = parseInt(split[1], 10) || port;
+  } else {
+    const portMatch = rawRest.match(/^\/(\d{1,5})(\/.*)?$/);
+    if (portMatch) {
+      port = parseInt(portMatch[1], 10);
+      targetPath = portMatch[2] || '/';
+    }
+  }
+
+  let entry = null;
+  if (connId && connId !== 'default' && connId !== 'local' && activeConnections.has(connId)) {
+    entry = activeConnections.get(connId);
+  } else if (activeConnections.size > 0) {
+    entry = activeConnections.values().next().value;
+  }
+
+  const isHttps = proto === 'https';
+  const httpModule = isHttps ? https : http;
+
+  const headersToSend = {};
+  for (const [k, v] of Object.entries(req.headers)) {
+    const lower = k.toLowerCase();
+    if (['connection', 'upgrade', 'keep-alive', 'transfer-encoding', 'host'].includes(lower)) {
+      continue;
+    }
+    headersToSend[k] = v;
+  }
+  headersToSend['host'] = `${host}:${port}`;
+  delete headersToSend['accept-encoding'];
+  headersToSend['accept-encoding'] = 'identity';
+
+  const requestOptions = {
+    hostname: host,
+    port: port,
+    path: targetPath,
+    method: req.method,
+    headers: headersToSend,
+    rejectUnauthorized: false,
+  };
+
+  if (entry && entry.client) {
+    requestOptions.createConnection = (options, callback) => {
+      const destHost = options.hostname === 'localhost' ? '127.0.0.1' : options.hostname;
+      entry.client.forwardOut('127.0.0.1', 0, destHost, Number(options.port), (err, stream) => {
+        if (err) return callback(err);
+        if (isHttps) {
+          const tlsSocket = tls.connect({
+            socket: stream,
+            servername: options.hostname,
+            rejectUnauthorized: false
+          }, () => callback(null, tlsSocket));
+          tlsSocket.on('error', (tlsErr) => callback(tlsErr));
+        } else {
+          callback(null, stream);
+        }
+      });
+    };
+  } else if (isHttps) {
+    requestOptions.createConnection = (options, callback) => {
+      const netSocket = net.connect(options.port, options.hostname, () => {
+        const tlsSocket = tls.connect({
+          socket: netSocket,
+          servername: options.hostname,
+          rejectUnauthorized: false
+        }, () => callback(null, tlsSocket));
+        tlsSocket.on('error', (tlsErr) => callback(tlsErr));
+      });
+      netSocket.on('error', (netErr) => callback(netErr));
+    };
+  }
+
+  const clientReq = httpModule.request(requestOptions, (targetRes) => {
+    const outHeaders = { ...targetRes.headers };
+
+    delete outHeaders['x-frame-options'];
+    delete outHeaders['content-security-policy'];
+    delete outHeaders['content-security-policy-report-only'];
+
+    outHeaders['access-control-allow-origin'] = '*';
+    outHeaders['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH';
+    outHeaders['access-control-allow-headers'] = '*';
+
+    if (outHeaders['location']) {
+      let loc = outHeaders['location'];
+      if (loc.startsWith('/')) {
+        outHeaders['location'] = `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${host}:${port}${loc}`;
+      } else if (loc.startsWith('http://') || loc.startsWith('https://')) {
+        try {
+          const locUrl = new URL(loc);
+          const locProto = locUrl.protocol.replace(':', '');
+          const locPort = locUrl.port || (locProto === 'https' ? 443 : 80);
+          outHeaders['location'] = `/api/browser/gateway/${encodeURIComponent(connId)}/${locProto}/${locUrl.hostname}:${locPort}${locUrl.pathname}${locUrl.search}`;
+        } catch {}
+      }
+      res.writeHead(targetRes.statusCode, outHeaders);
+      targetRes.pipe(res);
+      return;
+    }
+
+    const contentType = (outHeaders['content-type'] || '').toLowerCase();
+    const isHtml = contentType.includes('text/html');
+
+    if (isHtml) {
+      const chunks = [];
+      targetRes.on('data', c => chunks.push(c));
+      targetRes.on('end', () => {
+        let rawHtml = Buffer.concat(chunks).toString('utf8');
+        const gatewayBase = `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${host}:${port}`;
+        const dirPath = targetPath.endsWith('/') ? targetPath : targetPath.substring(0, targetPath.lastIndexOf('/') + 1);
+        const baseTag = `<base href="${gatewayBase}${dirPath || '/'}" />\n`;
+
+        const interceptScript = `
+<script>
+(function() {
+  var GW = "${gatewayBase}";
+  var origFetch = window.fetch;
+  if (origFetch) {
+    window.fetch = function(input, init) {
+      if (typeof input === 'string' && input.startsWith('/') && !input.startsWith('/api/browser/gateway/')) {
+        input = GW + input;
+      }
+      return origFetch.apply(this, arguments);
+    };
+  }
+  var origOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('/api/browser/gateway/')) {
+      arguments[1] = GW + url;
+    }
+    return origOpen.apply(this, arguments);
+  };
+})();
+</script>
+`;
+        const headIdx = rawHtml.toLowerCase().indexOf('<head>');
+        if (headIdx !== -1) {
+          rawHtml = rawHtml.slice(0, headIdx + 6) + baseTag + interceptScript + rawHtml.slice(headIdx + 6);
+        } else {
+          rawHtml = baseTag + interceptScript + rawHtml;
+        }
+
+        const outBuffer = Buffer.from(rawHtml, 'utf8');
+        delete outHeaders['transfer-encoding'];
+        outHeaders['content-length'] = outBuffer.length;
+        delete outHeaders['content-encoding'];
+        res.writeHead(targetRes.statusCode, outHeaders);
+        res.end(outBuffer);
+      });
+    } else {
+      res.writeHead(targetRes.statusCode, outHeaders);
+      targetRes.pipe(res);
+    }
+  });
+
+  clientReq.on('error', (err) => {
+    console.warn(`[Browser Gateway] Failed to reach ${proto}://${host}:${port}${targetPath}:`, err.message);
+    if (!res.headersSent) {
+      res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Gateway Error</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #11111b; color: #f38ba8; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .card { background: #1e1e2e; padding: 32px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.1); max-width: 520px; text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,0.5); }
+    h2 { color: #f38ba8; margin-top: 0; font-size: 20px; }
+    p { color: #a6adc8; font-size: 13px; line-height: 1.6; }
+    code { background: #181825; padding: 4px 8px; border-radius: 6px; color: #89b4fa; font-family: monospace; font-size: 12px; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>SSH Gateway Connection Failed</h2>
+    <p>Could not connect to target service at <code>${proto}://${host}:${port}${targetPath}</code> via SSH Server.</p>
+    <p><strong>Error:</strong> <code>${err.message}</code></p>
+    <p>Ensure the remote port is actively listening and the SSH connection is open.</p>
+  </div>
+</body>
+</html>`);
+    }
+  });
+
+  if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
+    req.pipe(clientReq);
+  } else {
+    clientReq.end();
+  }
+}
+
+// -------------------------------------------------------------
 // BACKEND SERVER (Listening on Port 2020)
 // -------------------------------------------------------------
 const backendServer = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
+    return;
+  }
+
+  // Browser Gateway & Reverse Proxy (routes Web Mode traffic via remote SSH server)
+  if (req.url.startsWith('/api/browser/gateway/') || req.url.startsWith('/api/browser/proxy')) {
+    handleBrowserGatewayRequest(req, res);
     return;
   }
 
@@ -3597,6 +3861,33 @@ const frontendServer = http.createServer((req, res) => {
       res.end(asset.text);
     }
     return;
+  }
+
+  // 2.5 Referer-based subresource forwarding for Web Mode browser gateway
+  // If an asset was not found in frontend dist, and the request Referer was from a proxied gateway page,
+  // transparently forward the subresource (e.g. /static/bundle.js, /css/app.css, /img/logo.png) to backend gateway
+  if (req.headers.referer && req.headers.referer.includes('/api/browser/gateway/')) {
+    const refMatch = req.headers.referer.match(/(\/api\/browser\/gateway\/[^/]+\/https?\/[^/]+)/);
+    if (refMatch) {
+      const gatewayPrefix = refMatch[1];
+      const forwardedPath = `${gatewayPrefix}${req.url.startsWith('/') ? req.url : '/' + req.url}`;
+      const proxyReq = http.request({
+        host: '127.0.0.1',
+        port: BACKEND_PORT,
+        path: forwardedPath,
+        method: req.method,
+        headers: { ...req.headers, host: `127.0.0.1:${BACKEND_PORT}` }
+      }, proxyRes => {
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(res);
+      });
+      proxyReq.on('error', () => {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Resource not found');
+      });
+      req.pipe(proxyReq);
+      return;
+    }
   }
 
   // 3. SPA Fallback: non-asset routes (or HTML routes) serve index.html

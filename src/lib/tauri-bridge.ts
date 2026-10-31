@@ -1530,7 +1530,32 @@ export async function focusBrowserWindow(windowId: string): Promise<void> {
   return safeInvoke<void>('focus_browser_window', { windowId }, undefined);
 }
 
-export async function openExternalUrl(url: string): Promise<void> {
+/**
+ * Resolves a target URL into a proxied gateway URL when running in Web Mode (!isTauri()).
+ * Routes requests through the remote SSH backend so the user's local PC browser
+ * can reach localhost ports, internal services, and private subnets.
+ */
+export function getProxiedBrowserUrl(url: string, connId?: string | null): string {
+  try {
+    const trimmed = (url || '').trim();
+    if (!trimmed || trimmed === 'about:blank' || trimmed === 'about:newtab') return trimmed;
+    const fullUrl = trimmed.startsWith('http://') || trimmed.startsWith('https://') ? trimmed : `http://${trimmed}`;
+    const parsed = new URL(fullUrl);
+    const proto = parsed.protocol.replace(':', '');
+    const port = parsed.port || (proto === 'https' ? '443' : '80');
+    const targetConn = connId || 'default';
+    const pathAndQuery = (parsed.pathname || '/') + (parsed.search || '') + (parsed.hash || '');
+    return `/api/browser/gateway/${encodeURIComponent(targetConn)}/${proto}/${parsed.hostname}:${port}${pathAndQuery}`;
+  } catch {
+    return url;
+  }
+}
+
+export async function openExternalUrl(
+  url: string,
+  connId?: string | null,
+  forceGateway?: boolean
+): Promise<void> {
   try {
     if (isTauri()) {
       const { open } = await import('@tauri-apps/plugin-shell');
@@ -1540,6 +1565,22 @@ export async function openExternalUrl(url: string): Promise<void> {
   } catch (err) {
     console.warn('openExternalUrl plugin-shell failed:', err);
   }
+
+  // In Web Mode (!isTauri()):
+  // If target URL is localhost, 127.0.0.1, private server IP, or forceGateway is requested:
+  // Route through the server's HTTP gateway so the user's PC browser tab reaches the remote server's service!
+  const isLocalOrPrivate = 
+    url.includes('localhost') || 
+    url.includes('127.0.0.1') || 
+    url.includes('0.0.0.0') ||
+    /^(https?:\/\/)?(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)/.test(url);
+
+  if (forceGateway || isLocalOrPrivate) {
+    const proxiedUrl = getProxiedBrowserUrl(url, connId);
+    window.open(proxiedUrl, '_blank');
+    return;
+  }
+
   window.open(url, '_blank');
 }
 

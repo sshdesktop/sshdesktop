@@ -11,6 +11,7 @@ export interface BrowserTab {
   isTunneled?: boolean;
   networkMode: NetworkMode;
   userBrowserMode?: 'external' | 'embedded' | 'native';
+  viewMode?: 'interactive' | 'telemetry';
   nativeWindowId?: string;
   devToolsOpen?: boolean;
   activeDevToolsPanel?: DevToolsPanel;
