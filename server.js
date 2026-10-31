@@ -14,6 +14,7 @@ import http from 'http';
 import https from 'https';
 import tls from 'tls';
 import net from 'net';
+import zlib from 'zlib';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -3440,10 +3441,27 @@ function handleBrowserGatewayUpgrade(req, socket, head) {
   const connectTarget = (cb) => {
     if (entry && entry.client) {
       const destHost = host === 'localhost' ? '127.0.0.1' : host;
-      entry.client.forwardOut('127.0.0.1', 0, destHost, port, cb);
+      entry.client.forwardOut('127.0.0.1', 0, destHost, port, (err, stream) => {
+        if (err) return cb(err);
+        if (proto === 'https') {
+          const tlsSocket = tls.connect({
+            socket: stream,
+            servername: host,
+            rejectUnauthorized: false
+          }, () => cb(null, tlsSocket));
+          tlsSocket.on('error', e => cb(e));
+        } else {
+          cb(null, stream);
+        }
+      });
     } else {
-      const netSocket = net.connect(port, host, () => cb(null, netSocket));
-      netSocket.on('error', e => cb(e));
+      if (proto === 'https') {
+        const tlsSocket = tls.connect(port, host, { servername: host, rejectUnauthorized: false }, () => cb(null, tlsSocket));
+        tlsSocket.on('error', e => cb(e));
+      } else {
+        const netSocket = net.connect(port, host, () => cb(null, netSocket));
+        netSocket.on('error', e => cb(e));
+      }
     }
   };
 
@@ -3553,6 +3571,7 @@ function handleBrowserGatewayRequest(req, res) {
 
   const isHttps = proto === 'https';
   const httpModule = isHttps ? https : http;
+  const gatewayBase = `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${host}:${port}`;
 
   const headersToSend = {};
   for (const [k, v] of Object.entries(req.headers)) {
@@ -3563,8 +3582,19 @@ function handleBrowserGatewayRequest(req, res) {
     headersToSend[k] = v;
   }
   headersToSend['host'] = `${host}:${port}`;
-  delete headersToSend['accept-encoding'];
-  headersToSend['accept-encoding'] = 'identity';
+
+  // CSRF & Reverse Proxy Headers for production tools (Jenkins, Grafana, Portainer, Spring Boot, etc.)
+  // Target expects Origin & Referer to match its host, avoiding 403 Forbidden CSRF rejections
+  headersToSend['origin'] = `${proto}://${host}:${port}`;
+  headersToSend['referer'] = `${proto}://${host}:${port}${targetPath}`;
+  headersToSend['x-forwarded-host'] = req.headers.host || `${host}:${port}`;
+  headersToSend['x-forwarded-proto'] = proto;
+  headersToSend['x-forwarded-port'] = String(port);
+  headersToSend['x-forwarded-prefix'] = gatewayBase;
+  headersToSend['x-forwarded-for'] = req.socket.remoteAddress || '127.0.0.1';
+
+  // Ask for uncompressed if possible, but we also handle gzip/deflate/br decompression below
+  headersToSend['accept-encoding'] = 'gzip, deflate, identity';
 
   const requestOptions = {
     hostname: host,
@@ -3573,6 +3603,7 @@ function handleBrowserGatewayRequest(req, res) {
     method: req.method,
     headers: headersToSend,
     rejectUnauthorized: false,
+    maxHeaderSize: 1048576, // 1MB header limit to eliminate "Header overflow" on YouTube/Google
   };
 
   if (entry && entry.client) {
@@ -3605,8 +3636,6 @@ function handleBrowserGatewayRequest(req, res) {
       netSocket.on('error', (netErr) => callback(netErr));
     };
   }
-
-  const gatewayBase = `/api/browser/gateway/${encodeURIComponent(connId)}/${proto}/${host}:${port}`;
 
   const clientReq = httpModule.request(requestOptions, (targetRes) => {
     const outHeaders = { ...targetRes.headers };
@@ -3657,46 +3686,111 @@ function handleBrowserGatewayRequest(req, res) {
     const contentType = (outHeaders['content-type'] || '').toLowerCase();
     const isHtml = contentType.includes('text/html');
     const isCss = contentType.includes('text/css');
+    const isJs = contentType.includes('javascript') || contentType.includes('application/x-javascript');
 
-    if (isHtml) {
+    if (isHtml || isCss || isJs) {
       const chunks = [];
       targetRes.on('data', c => chunks.push(c));
       targetRes.on('end', () => {
-        let rawHtml = Buffer.concat(chunks).toString('utf8');
-        const dirPath = targetPath.endsWith('/') ? targetPath : targetPath.substring(0, targetPath.lastIndexOf('/') + 1);
-        const baseTag = `<base href="${gatewayBase}${dirPath || '/'}" />\n`;
+        let buffer = Buffer.concat(chunks);
 
-        // 1. Rewrite root-relative href="/..." (links, navigation, stylesheets, icons)
-        rawHtml = rawHtml.replace(/(href\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+        // Decompress GZIP, Deflate, or Brotli if target server sent compressed payload
+        const enc = (outHeaders['content-encoding'] || '').toLowerCase();
+        if (enc.includes('gzip')) {
+          try { buffer = zlib.gunzipSync(buffer); } catch (e) { console.warn('[Gateway gunzip error]', e.message); }
+        } else if (enc.includes('deflate')) {
+          try { buffer = zlib.inflateSync(buffer); } catch (e) { console.warn('[Gateway inflate error]', e.message); }
+        } else if (enc.includes('br')) {
+          try { buffer = zlib.brotliDecompressSync(buffer); } catch (e) { console.warn('[Gateway brotli error]', e.message); }
+        }
 
-        // 2. Rewrite root-relative src="/..." (scripts, images, media, iframes)
-        rawHtml = rawHtml.replace(/(src\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+        let bodyText = buffer.toString('utf8');
 
-        // 3. Rewrite root-relative action="/..." (form submit for login, settings, POST)
-        rawHtml = rawHtml.replace(/(action\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+        // All variations of target origin that Jenkins, Grafana, WordPress might emit
+        const targetOrigins = [
+          `${proto}://${host}:${port}`,
+          `${proto}://${host}`,
+          `${proto}://localhost:${port}`,
+          `${proto}://localhost`,
+          `${proto}://127.0.0.1:${port}`,
+          `${proto}://127.0.0.1`,
+          `//${host}:${port}`,
+          `//localhost:${port}`,
+          `//127.0.0.1:${port}`
+        ];
 
-        // 4. Rewrite CSS url(/...)
-        rawHtml = rawHtml.replace(/(url\(\s*["']?)\/(?!\/|api\/browser\/gateway\/)([^"')]+["']?\))/gi, `$1${gatewayBase}/$2`);
+        // Replace any absolute references to target origin with gatewayBase
+        for (const orig of targetOrigins) {
+          const escaped = orig.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+          bodyText = bodyText.replace(new RegExp(`href\\s*=\\s*["']${escaped}/?`, 'gi'), `href="${gatewayBase}/`);
+          bodyText = bodyText.replace(new RegExp(`src\\s*=\\s*["']${escaped}/?`, 'gi'), `src="${gatewayBase}/`);
+          bodyText = bodyText.replace(new RegExp(`action\\s*=\\s*["']${escaped}/?`, 'gi'), `action="${gatewayBase}/`);
+          bodyText = bodyText.replace(new RegExp(`url\\(["']?${escaped}/?`, 'gi'), `url("${gatewayBase}/`);
+        }
 
-        // 5. Rewrite data-url, data-href, data-src
-        rawHtml = rawHtml.replace(/(data-(?:url|href|src)\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+        if (isHtml) {
+          const dirPath = targetPath.endsWith('/') ? targetPath : targetPath.substring(0, targetPath.lastIndexOf('/') + 1);
+          const baseTag = `<base href="${gatewayBase}${dirPath || '/'}" />\n`;
 
-        const interceptScript = `
+          // 1. Rewrite root-relative href="/..." (links, navigation, stylesheets, icons)
+          bodyText = bodyText.replace(/(href\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+
+          // 2. Rewrite root-relative src="/..." (scripts, images, media, iframes)
+          bodyText = bodyText.replace(/(src\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+
+          // 3. Rewrite root-relative action="/..." (form submit for login, settings, POST)
+          bodyText = bodyText.replace(/(action\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+
+          // 4. Handle forms with empty action="" or NO action attribute: submit to current gateway URL
+          bodyText = bodyText.replace(/(action\s*=\s*["'])\s*["']/gi, `$1${gatewayBase}${targetPath}"`);
+          bodyText = bodyText.replace(/<form\b(?![^>]*\baction\b)([^>]*)>/gi, `<form action="${gatewayBase}${targetPath}"$1>`);
+
+          // 5. Rewrite CSS url(/...)
+          bodyText = bodyText.replace(/(url\(\s*["']?)\/(?!\/|api\/browser\/gateway\/)([^"')]+["']?\))/gi, `$1${gatewayBase}/$2`);
+
+          // 6. Rewrite data-url, data-href, data-src
+          bodyText = bodyText.replace(/(data-(?:url|href|src)\s*=\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
+
+          const interceptScript = `
 <script>
 (function() {
   var GW = "${gatewayBase}";
+  var ORIGINS = [
+    "${proto}://${host}:${port}",
+    "${proto}://${host}",
+    "${proto}://localhost:${port}",
+    "${proto}://localhost",
+    "${proto}://127.0.0.1:${port}",
+    "${proto}://127.0.0.1",
+    "//${host}:${port}",
+    "//localhost:${port}",
+    "//127.0.0.1:${port}"
+  ];
+
+  function rewriteUrl(u) {
+    if (typeof u !== 'string' || !u) return u;
+    if (u.startsWith(GW) || u.startsWith('/api/browser/gateway/')) return u;
+    for (var i = 0; i < ORIGINS.length; i++) {
+      if (u.startsWith(ORIGINS[i])) {
+        return GW + u.slice(ORIGINS[i].length);
+      }
+    }
+    if (u.startsWith('/') && !u.startsWith('//')) {
+      return GW + u;
+    }
+    return u;
+  }
 
   // 1. Intercept window.fetch (supports GET, POST, PUT, DELETE, PATCH, etc.)
   if (window.fetch) {
     var _fetch = window.fetch;
     window.fetch = function(input, init) {
       if (typeof input === 'string') {
-        if (input.startsWith('/') && !input.startsWith('//') && !input.startsWith('/api/browser/gateway/')) {
-          input = GW + input;
-        }
+        input = rewriteUrl(input);
       } else if (input && typeof input === 'object' && input.url) {
-        if (input.url.startsWith('/') && !input.url.startsWith('//') && !input.url.startsWith('/api/browser/gateway/')) {
-          input = new Request(GW + input.url, input);
+        var newUrl = rewriteUrl(input.url);
+        if (newUrl !== input.url) {
+          input = new Request(newUrl, input);
         }
       }
       return _fetch.call(this, input, init);
@@ -3707,32 +3801,40 @@ function handleBrowserGatewayRequest(req, res) {
   if (window.XMLHttpRequest) {
     var _open = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
-      if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/api/browser/gateway/')) {
-        url = GW + url;
-      }
+      url = rewriteUrl(url);
       return _open.call(this, method, url, async !== false, user, password);
     };
   }
 
-  // 3. Intercept history.pushState & replaceState (for Grafana / SPAs)
+  // 3. Intercept window.history.pushState & replaceState (for Grafana / SPAs)
   if (window.history) {
     var _pushState = window.history.pushState;
     window.history.pushState = function(state, title, url) {
-      if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/api/browser/gateway/')) {
-        url = GW + url;
-      }
+      url = rewriteUrl(url);
       return _pushState.call(this, state, title, url);
     };
     var _replaceState = window.history.replaceState;
     window.history.replaceState = function(state, title, url) {
-      if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/api/browser/gateway/')) {
-        url = GW + url;
-      }
+      url = rewriteUrl(url);
       return _replaceState.call(this, state, title, url);
     };
   }
 
-  // 4. Capture-phase Link Click Interceptor
+  // 4. Intercept HTMLFormElement.prototype.submit (catches programmatic submit())
+  if (window.HTMLFormElement) {
+    var _formSubmit = HTMLFormElement.prototype.submit;
+    HTMLFormElement.prototype.submit = function() {
+      var action = this.getAttribute('action');
+      if (!action) {
+        this.setAttribute('action', window.location.pathname + window.location.search);
+      } else {
+        this.setAttribute('action', rewriteUrl(action));
+      }
+      return _formSubmit.call(this);
+    };
+  }
+
+  // 5. Global capture click listener for all <a> tags
   document.addEventListener('click', function(e) {
     var t = e.target;
     while (t && t.tagName !== 'A' && t !== document.body) {
@@ -3740,66 +3842,58 @@ function handleBrowserGatewayRequest(req, res) {
     }
     if (t && t.tagName === 'A') {
       var href = t.getAttribute('href');
-      if (href && href.startsWith('/') && !href.startsWith('//') && !href.startsWith('/api/browser/gateway/')) {
-        t.setAttribute('href', GW + href);
+      if (href) {
+        var rw = rewriteUrl(href);
+        if (rw !== href) {
+          t.setAttribute('href', rw);
+        }
       }
     }
   }, true);
 
-  // 5. Capture-phase Form Submit Interceptor
+  // 6. Global capture submit listener for all <form> elements
   document.addEventListener('submit', function(e) {
     var form = e.target;
     if (form && form.tagName === 'FORM') {
       var action = form.getAttribute('action');
-      if (action && action.startsWith('/') && !action.startsWith('//') && !action.startsWith('/api/browser/gateway/')) {
-        form.setAttribute('action', GW + action);
-      } else if (!action) {
+      if (!action) {
         form.setAttribute('action', window.location.pathname + window.location.search);
+      } else {
+        form.setAttribute('action', rewriteUrl(action));
       }
     }
   }, true);
 
-  // 6. Intercept window.open
+  // 7. Intercept window.open
   var _winOpen = window.open;
   window.open = function(url, target, features) {
-    if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/api/browser/gateway/')) {
-      url = GW + url;
-    }
+    url = rewriteUrl(url);
     return _winOpen.call(this, url, target, features);
   };
 })();
 </script>
 `;
-        const headIdx = rawHtml.toLowerCase().indexOf('<head>');
-        if (headIdx !== -1) {
-          rawHtml = rawHtml.slice(0, headIdx + 6) + baseTag + interceptScript + rawHtml.slice(headIdx + 6);
-        } else {
-          const htmlIdx = rawHtml.toLowerCase().indexOf('<html>');
-          if (htmlIdx !== -1) {
-            rawHtml = rawHtml.slice(0, htmlIdx + 6) + '<head>' + baseTag + interceptScript + '</head>' + rawHtml.slice(htmlIdx + 6);
+
+          const headIdx = bodyText.toLowerCase().indexOf('<head>');
+          if (headIdx !== -1) {
+            bodyText = bodyText.slice(0, headIdx + 6) + baseTag + interceptScript + bodyText.slice(headIdx + 6);
           } else {
-            rawHtml = baseTag + interceptScript + rawHtml;
+            const htmlIdx = bodyText.toLowerCase().indexOf('<html>');
+            if (htmlIdx !== -1) {
+              bodyText = bodyText.slice(0, htmlIdx + 6) + '<head>' + baseTag + interceptScript + '</head>' + bodyText.slice(htmlIdx + 6);
+            } else {
+              bodyText = baseTag + interceptScript + bodyText;
+            }
           }
+        } else if (isCss) {
+          bodyText = bodyText.replace(/(url\(\s*["']?)\/(?!\/|api\/browser\/gateway\/)([^"')]+["']?\))/gi, `$1${gatewayBase}/$2`);
+          bodyText = bodyText.replace(/(@import\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
         }
 
-        const outBuffer = Buffer.from(rawHtml, 'utf8');
+        const outBuffer = Buffer.from(bodyText, 'utf8');
         delete outHeaders['transfer-encoding'];
-        outHeaders['content-length'] = outBuffer.length;
         delete outHeaders['content-encoding'];
-        res.writeHead(targetRes.statusCode, outHeaders);
-        res.end(outBuffer);
-      });
-    } else if (isCss) {
-      const chunks = [];
-      targetRes.on('data', c => chunks.push(c));
-      targetRes.on('end', () => {
-        let rawCss = Buffer.concat(chunks).toString('utf8');
-        rawCss = rawCss.replace(/(url\(\s*["']?)\/(?!\/|api\/browser\/gateway\/)([^"')]+["']?\))/gi, `$1${gatewayBase}/$2`);
-        rawCss = rawCss.replace(/(@import\s*["'])\/(?!\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
-        const outBuffer = Buffer.from(rawCss, 'utf8');
-        delete outHeaders['transfer-encoding'];
         outHeaders['content-length'] = outBuffer.length;
-        delete outHeaders['content-encoding'];
         res.writeHead(targetRes.statusCode, outHeaders);
         res.end(outBuffer);
       });
@@ -3848,7 +3942,7 @@ function handleBrowserGatewayRequest(req, res) {
 // -------------------------------------------------------------
 // BACKEND SERVER (Listening on Port 2020)
 // -------------------------------------------------------------
-const backendServer = http.createServer(async (req, res) => {
+const backendServer = http.createServer({ maxHeaderSize: 1048576 }, async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
@@ -3990,7 +4084,7 @@ backendServer.on('upgrade', (req, socket, head) => {
 // -------------------------------------------------------------
 // FRONTEND SERVER (Listening on Port 2222)
 // -------------------------------------------------------------
-const frontendServer = http.createServer((req, res) => {
+const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
@@ -4008,7 +4102,8 @@ const frontendServer = http.createServer((req, res) => {
       port: BACKEND_PORT,
       path: req.url,
       method: req.method,
-      headers: { ...req.headers, host: `127.0.0.1:${BACKEND_PORT}` }
+      headers: { ...req.headers, host: `127.0.0.1:${BACKEND_PORT}` },
+      maxHeaderSize: 1048576
     }, proxyRes => {
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
       proxyRes.pipe(res);
@@ -4101,7 +4196,8 @@ const frontendServer = http.createServer((req, res) => {
       port: BACKEND_PORT,
       path: forwardedPath,
       method: req.method,
-      headers: { ...req.headers, host: `127.0.0.1:${BACKEND_PORT}` }
+      headers: { ...req.headers, host: `127.0.0.1:${BACKEND_PORT}` },
+      maxHeaderSize: 1048576
     }, proxyRes => {
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
       proxyRes.pipe(res);
