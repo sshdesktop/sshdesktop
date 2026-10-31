@@ -3094,13 +3094,15 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
         if (contentType.includes('text/html')) {
           const baseTag = `<base href="${final_url}" />\n`;
-          const headIdx = body.toLowerCase().indexOf('<head>');
-          if (headIdx !== -1) {
-            body = body.slice(0, headIdx + 6) + baseTag + body.slice(headIdx + 6);
+          const headMatch = body.match(/<head\b[^>]*>/i);
+          if (headMatch && headMatch.index !== undefined) {
+            const insertIdx = headMatch.index + headMatch[0].length;
+            body = body.slice(0, insertIdx) + `\n${baseTag}` + body.slice(insertIdx);
           } else {
-            const htmlIdx = body.toLowerCase().indexOf('<html>');
-            if (htmlIdx !== -1) {
-              body = body.slice(0, htmlIdx + 6) + `<head>${baseTag}</head>` + body.slice(htmlIdx + 6);
+            const htmlMatch = body.match(/<html\b[^>]*>/i);
+            if (htmlMatch && htmlMatch.index !== undefined) {
+              const insertIdx = htmlMatch.index + htmlMatch[0].length;
+              body = body.slice(0, insertIdx) + `\n<head>${baseTag}</head>` + body.slice(insertIdx);
             } else {
               body = baseTag + body;
             }
@@ -3633,6 +3635,13 @@ function handleBrowserGatewayRequest(req, res) {
   // Decompression: Support gzip, deflate, and br (Brotli)
   headersToSend['accept-encoding'] = 'gzip, deflate, br, identity';
 
+  // Neutralize rogue undefined in gateway targetPath (e.g. Jenkins dialogs or missing rootURL)
+  if (targetPath.startsWith('/undefined/')) {
+    targetPath = '/' + targetPath.slice('/undefined/'.length);
+  } else if (targetPath.includes('/undefined/')) {
+    targetPath = targetPath.replace(/\/undefined\//g, '/');
+  }
+
   // Automatic fix for reCAPTCHA/Captcha proxy requests containing localhost co= parameter
   if (targetPath.includes('co=') && (targetPath.includes('/recaptcha/') || targetPath.includes('google.com/recaptcha'))) {
     const targetOriginWithPort = `${proto}://${host}:${port}`;
@@ -3887,12 +3896,38 @@ function handleBrowserGatewayRequest(req, res) {
     return url;
   }
 
+  // Jenkins & SPA Context Protection: Ensure rootURL and head metadata cannot evaluate to undefined
+  try {
+    if (document.head) {
+      if (!document.head.hasAttribute('data-rooturl')) {
+        document.head.setAttribute('data-rooturl', '');
+      }
+      if (document.head.dataset && document.head.dataset.rooturl === undefined) {
+        document.head.dataset.rooturl = '';
+      }
+    }
+    if (typeof window.rootURL === 'undefined') {
+      window.rootURL = '';
+    }
+    if (typeof window.resURL === 'undefined') {
+      window.resURL = '';
+    }
+  } catch(e) {}
+
   function rewriteUrl(u) {
     if (u === undefined || u === null) return u;
     if (typeof u !== 'string') {
       try { u = String(u); } catch(e) { return u; }
     }
     u = u.trim();
+    // Neutralize rogue undefined in relative URL paths (e.g. undefined/i18n/resourceBundle -> /i18n/resourceBundle)
+    if (u === 'undefined') {
+      u = '/';
+    } else if (u.startsWith('undefined/')) {
+      u = '/' + u.slice('undefined/'.length);
+    } else if (u.includes('/undefined/')) {
+      u = u.replace(/\/undefined\//g, '/');
+    }
     if (!u || u === '/') return GW + '/';
     if (u.startsWith('#') || u.startsWith('javascript:') || u.startsWith('mailto:') || u.startsWith('tel:') || u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('about:')) {
       return u;
@@ -4249,15 +4284,17 @@ function handleBrowserGatewayRequest(req, res) {
 </script>
 `;
 
-          const headIdx = bodyText.toLowerCase().indexOf('<head>');
-          if (headIdx !== -1) {
-            bodyText = bodyText.slice(0, headIdx + 6) + baseTag + interceptScript + bodyText.slice(headIdx + 6);
+          const headMatch = bodyText.match(/<head\b[^>]*>/i);
+          if (headMatch && headMatch.index !== undefined) {
+            const insertIdx = headMatch.index + headMatch[0].length;
+            bodyText = bodyText.slice(0, insertIdx) + '\n' + baseTag + interceptScript + bodyText.slice(insertIdx);
           } else {
-            const htmlIdx = bodyText.toLowerCase().indexOf('<html>');
-            if (htmlIdx !== -1) {
-              bodyText = bodyText.slice(0, htmlIdx + 6) + '<head>' + baseTag + interceptScript + '</head>' + bodyText.slice(htmlIdx + 6);
+            const htmlMatch = bodyText.match(/<html\b[^>]*>/i);
+            if (htmlMatch && htmlMatch.index !== undefined) {
+              const insertIdx = htmlMatch.index + htmlMatch[0].length;
+              bodyText = bodyText.slice(0, insertIdx) + '\n<head>' + baseTag + interceptScript + '</head>' + bodyText.slice(insertIdx);
             } else {
-              bodyText = baseTag + interceptScript + bodyText;
+              bodyText = '<head>' + baseTag + interceptScript + '</head>\n' + bodyText;
             }
           }
         } else if (isCss) {
@@ -4489,6 +4526,13 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
     });
     req.pipe(proxyReq);
     return;
+  }
+
+  // Sanitize rogue undefined in URLs (e.g. from Jenkins or client-side routing bugs)
+  if (req.url.startsWith('/undefined/')) {
+    req.url = '/' + req.url.slice('/undefined/'.length);
+  } else if (req.url.includes('/undefined/')) {
+    req.url = req.url.replace(/\/undefined\//g, '/');
   }
 
   let reqPath = decodeURI(req.url.split('?')[0]);

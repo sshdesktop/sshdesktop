@@ -247,12 +247,18 @@ export function prepareHtmlForSandbox(html: string, currentUrl: string): string 
 
     const baseTag = `<base href="${baseUrl}">\n`;
 
-    if (modifiedHtml.includes('<head>')) {
-      modifiedHtml = modifiedHtml.replace('<head>', `<head>\n${baseTag}${interceptScript}`);
-    } else if (modifiedHtml.includes('<html>')) {
-      modifiedHtml = modifiedHtml.replace('<html>', `<html>\n<head>\n${baseTag}${interceptScript}</head>`);
+    const headMatch = modifiedHtml.match(/<head\b[^>]*>/i);
+    if (headMatch && headMatch.index !== undefined) {
+      const insertIdx = headMatch.index + headMatch[0].length;
+      modifiedHtml = modifiedHtml.slice(0, insertIdx) + `\n${baseTag}${interceptScript}` + modifiedHtml.slice(insertIdx);
     } else {
-      modifiedHtml = `${baseTag}${interceptScript}\n${modifiedHtml}`;
+      const htmlMatch = modifiedHtml.match(/<html\b[^>]*>/i);
+      if (htmlMatch && htmlMatch.index !== undefined) {
+        const insertIdx = htmlMatch.index + htmlMatch[0].length;
+        modifiedHtml = modifiedHtml.slice(0, insertIdx) + `\n<head>\n${baseTag}${interceptScript}</head>` + modifiedHtml.slice(insertIdx);
+      } else {
+        modifiedHtml = `${baseTag}${interceptScript}\n${modifiedHtml}`;
+      }
     }
 
     return modifiedHtml;
