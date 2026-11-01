@@ -487,7 +487,8 @@ export default function TerminalApp() {
 
     const term = new XTerm({
       cursorBlink: true,
-      cursorStyle: 'bar',
+      cursorStyle: 'block',
+      scrollback: 10000,
       fontSize: fontSizeRef.current,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
       theme: themeRef.current,
@@ -500,9 +501,15 @@ export default function TerminalApp() {
     term.loadAddon(new WebLinksAddon());
 
     term.open(el);
+    try {
+      fitAddon.fit();
+    } catch {}
     setTimeout(() => {
       try {
         fitAddon.fit();
+        if (term.cols && term.rows) {
+          terminalResize(tabId, term.rows, term.cols).catch(() => {});
+        }
       } catch {}
     }, 50);
 
@@ -540,6 +547,50 @@ export default function TerminalApp() {
           // For Ctrl+End send \x1b[1;5F, Shift+End send \x1b[1;2F
           const seq = e.ctrlKey ? '\x1b[1;5F' : e.shiftKey ? '\x1b[1;2F' : '\x1b[4~';
           terminalWrite(tabId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // Left Arrow Key: Move cursor backward on command line without overwriting line
+      if (e.key === 'ArrowLeft' || (!e.getModifierState?.('NumLock') && e.code === 'Numpad4')) {
+        if (e.type === 'keydown') {
+          const seq = e.altKey ? '\x1bb' : e.ctrlKey ? '\x1b[1;5D' : e.shiftKey ? '\x1b[1;2D' : '\x1b[D';
+          terminalWrite(tabId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // Right Arrow Key: Move cursor forward on command line
+      if (e.key === 'ArrowRight' || (!e.getModifierState?.('NumLock') && e.code === 'Numpad6')) {
+        if (e.type === 'keydown') {
+          const seq = e.altKey ? '\x1bf' : e.ctrlKey ? '\x1b[1;5C' : e.shiftKey ? '\x1b[1;2C' : '\x1b[C';
+          terminalWrite(tabId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // Up Arrow Key: Command history previous
+      if (e.key === 'ArrowUp' || (!e.getModifierState?.('NumLock') && e.code === 'Numpad8')) {
+        if (e.type === 'keydown') {
+          const seq = e.ctrlKey ? '\x1b[1;5A' : e.shiftKey ? '\x1b[1;2A' : '\x1b[A';
+          terminalWrite(tabId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // Down Arrow Key: Command history next
+      if (e.key === 'ArrowDown' || (!e.getModifierState?.('NumLock') && e.code === 'Numpad2')) {
+        if (e.type === 'keydown') {
+          const seq = e.ctrlKey ? '\x1b[1;5B' : e.shiftKey ? '\x1b[1;2B' : '\x1b[B';
+          terminalWrite(tabId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // Delete Key: Forward delete character
+      if (e.key === 'Delete' || (!e.getModifierState?.('NumLock') && e.code === 'NumpadDecimal')) {
+        if (e.type === 'keydown') {
+          terminalWrite(tabId, Array.from(new TextEncoder().encode('\x1b[3~'))).catch(() => {});
         }
         return false;
       }
@@ -615,11 +666,13 @@ export default function TerminalApp() {
       terminalResize(tabId, rows, cols).catch(() => {});
     });
 
-    // Create backend PTY session
+    // Create backend PTY session with actual fitted dimensions
     const tab = tabs.find(t => t.id === tabId);
     const connId = tab?.connId || activeConnectionId;
+    const initialCols = term.cols && term.cols > 10 ? term.cols : 80;
+    const initialRows = term.rows && term.rows > 5 ? term.rows : 24;
     try {
-      await terminalCreate(connId, term.rows || 24, term.cols || 80, tabId);
+      await terminalCreate(connId, initialRows, initialCols, tabId);
       // Backend PTY is confirmed ready - dispatch queued initial command if present
       const initialCmd = pendingInitialCommandsRef.current.get(tabId);
       if (initialCmd) {
