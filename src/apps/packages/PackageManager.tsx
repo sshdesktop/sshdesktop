@@ -111,7 +111,7 @@ export const CURATED_APPS: CuratedApp[] = [
   { name: 'Neovim', aptPackage: 'neovim', dnfPackage: 'neovim', category: 'Development', description: 'Hyperextensible Vim-based text editor for developers', icon: FileCode, iconBg: 'from-teal-500 to-emerald-700' },
 
   // 🐳 7. Containers & Virtualization
-  { name: 'Docker Engine', aptPackage: 'docker.io', dnfPackage: 'docker-ce', category: 'Containers', description: 'Industry standard containerization platform for apps', icon: Server, iconBg: 'from-blue-500 to-cyan-600' },
+  { name: 'Docker Engine', aptPackage: 'docker.io', dnfPackage: 'docker', category: 'Containers', description: 'Industry standard containerization platform for apps', icon: Server, iconBg: 'from-blue-500 to-cyan-600' },
   { name: 'Docker Compose', aptPackage: 'docker-compose-plugin', dnfPackage: 'docker-compose-plugin', category: 'Containers', description: 'Multi-container Docker orchestration tool', icon: Layers, iconBg: 'from-blue-600 to-indigo-700' },
   { name: 'Podman', aptPackage: 'podman', dnfPackage: 'podman', category: 'Containers', description: 'Daemonless, rootless container engine for OCI containers', icon: Box, iconBg: 'from-purple-600 to-pink-700' },
   { name: 'QEMU / KVM', aptPackage: 'qemu-kvm', dnfPackage: 'qemu-kvm', category: 'Containers', description: 'Hardware virtualization and machine emulator', icon: Cpu, iconBg: 'from-rose-600 to-red-800' },
@@ -245,7 +245,7 @@ export default function PackageManager() {
           name: p.name,
           version: p.version,
           arch: p.arch || 'amd64',
-          size: p.size ? `${(p.size / 1024).toFixed(0)} KB` : '—',
+          size: typeof p.size === 'number' ? `${(p.size / 1024).toFixed(0)} KB` : (p.size || '—'),
           description: p.description || '',
           upgradable: upMap.has(p.name),
           newVersion: upMap.get(p.name)
@@ -273,24 +273,172 @@ export default function PackageManager() {
       // Also match without architecture or prefixes
       const baseName = p.name.split(':')[0].toLowerCase();
       set.add(baseName);
+      // Strip common package suffixes like .x86_64 or -devel
+      const dotName = baseName.split('.')[0];
+      if (dotName) set.add(dotName);
     });
     return set;
   }, [packages]);
 
-  // Helper: Resolve effective package name based on detected Linux package manager (APT vs DNF)
+  // Helper: Resolve effective package name based on detected Linux package manager (APT vs DNF vs PACMAN vs YUM)
   const getPackageName = useCallback((app: CuratedApp): string => {
+    if (pkgManager === 'pacman') {
+      if (app.name === 'MySQL Server' || app.name === 'MariaDB Server') return 'mariadb';
+      if (app.name === 'PostgreSQL') return 'postgresql';
+      if (app.name === 'Docker Engine') return 'docker';
+      if (app.name === 'Docker Compose') return 'docker-compose';
+      if (app.name === 'Apache2 / httpd') return 'apache';
+      if (app.name === 'Redis Server' || app.name === 'redis-tools') return 'redis';
+      if (app.name === 'sqlite3') return 'sqlite';
+      if (app.name === 'AWS CLI') return 'aws-cli';
+      if (app.name === 'OpenJDK Java') return 'jdk-openjdk';
+      if (app.name === 'Go (Golang)') return 'go';
+      if (app.name === 'Rust & Cargo') return 'rust';
+      if (app.name === 'WireGuard') return 'wireguard-tools';
+      if (app.name === 'QEMU / KVM') return 'qemu-base';
+      return app.aptPackage || app.dnfPackage;
+    }
+
     if (pkgManager === 'dnf' || pkgManager === 'yum') {
+      if (app.name === 'MySQL Server') return 'mysql-server';
+      if (app.name === 'MariaDB Server') return 'mariadb-server';
+      if (app.name === 'Docker Engine') return 'docker';
+      if (app.name === 'Apache2 / httpd') return 'httpd';
+      if (app.name === 'Redis Server' || app.name === 'redis-tools') return 'redis';
+      if (app.name === 'sqlite3') return 'sqlite';
+      if (app.name === 'AWS CLI') return 'awscli';
+      if (app.name === 'PostgreSQL') return 'postgresql-server';
+      if (app.name === 'OpenJDK Java') return 'java-17-openjdk-devel';
+      if (app.name === 'WireGuard') return 'wireguard-tools';
+      if (app.name === 'UFW / Firewalld') return 'firewalld';
       return app.dnfPackage || app.aptPackage;
     }
+
+    // Default: APT (Debian/Ubuntu)
+    if (app.name === 'MySQL Server') return 'mysql-server';
+    if (app.name === 'MariaDB Server') return 'mariadb-server';
+    if (app.name === 'Docker Engine') return 'docker.io';
+    if (app.name === 'Apache2 / httpd') return 'apache2';
+    if (app.name === 'Redis Server') return 'redis-server';
+    if (app.name === 'redis-tools') return 'redis-tools';
+    if (app.name === 'sqlite3') return 'sqlite3';
+    if (app.name === 'AWS CLI') return 'awscli';
+    if (app.name === 'PostgreSQL') return 'postgresql';
+    if (app.name === 'OpenJDK Java') return 'default-jdk';
+    if (app.name === 'WireGuard') return 'wireguard';
+    if (app.name === 'UFW / Firewalld') return 'ufw';
     return app.aptPackage || app.dnfPackage;
   }, [pkgManager]);
 
-  // Check if a curated app is installed
+  // Check if a curated app is installed across Linux distributions (AWS Linux, RHEL, CentOS, Debian, Arch, etc.)
   const isAppInstalled = useCallback((app: CuratedApp): boolean => {
     const apt = app.aptPackage.toLowerCase();
     const dnf = app.dnfPackage.toLowerCase();
     const cleanName = app.name.toLowerCase();
-    return installedMap.has(apt) || installedMap.has(dnf) || installedMap.has(cleanName);
+
+    // 1. Direct match by aptPackage, dnfPackage, or full name
+    if (installedMap.has(apt) || installedMap.has(dnf) || installedMap.has(cleanName)) {
+      return true;
+    }
+
+    // 2. Multi-OS Aliases & Distributions (AWS OS / Amazon Linux, RHEL, CentOS, Debian, Arch, etc.)
+    switch (app.name) {
+      case 'MySQL Server':
+      case 'MariaDB Server':
+        return Array.from(installedMap).some(pkg =>
+          pkg === 'mysql-server' ||
+          pkg === 'mariadb-server' ||
+          pkg === 'default-mysql-server' ||
+          pkg === 'mysql-community-server' ||
+          pkg === 'mariadb' ||
+          pkg.startsWith('mariadb-server') ||
+          pkg.startsWith('mysql-server') ||
+          (pkg.startsWith('mariadb') && (pkg.includes('server') || pkg.includes('105') || pkg.includes('106') || pkg.includes('1011')))
+        );
+
+      case 'AWS CLI':
+        return installedMap.has('awscli') || installedMap.has('aws-cli');
+
+      case 'Docker Engine':
+        return (
+          installedMap.has('docker') ||
+          installedMap.has('docker-ce') ||
+          installedMap.has('docker.io') ||
+          installedMap.has('podman-docker')
+        );
+
+      case 'Docker Compose':
+        return (
+          installedMap.has('docker-compose') ||
+          installedMap.has('docker-compose-plugin') ||
+          installedMap.has('docker-cli-compose')
+        );
+
+      case 'PostgreSQL':
+        return Array.from(installedMap).some(pkg =>
+          pkg === 'postgresql' ||
+          pkg.startsWith('postgresql-server') ||
+          pkg.startsWith('postgresql1') ||
+          pkg.startsWith('postgresql9')
+        );
+
+      case 'Apache2 / httpd':
+        return installedMap.has('apache2') || installedMap.has('httpd') || installedMap.has('apache');
+
+      case 'Redis Server':
+        return installedMap.has('redis') || installedMap.has('redis-server');
+
+      case 'redis-tools':
+        return installedMap.has('redis-tools') || installedMap.has('redis');
+
+      case 'sqlite3':
+        return installedMap.has('sqlite3') || installedMap.has('sqlite');
+
+      case 'OpenJDK Java':
+        return Array.from(installedMap).some(pkg =>
+          pkg.startsWith('java-') ||
+          pkg.startsWith('openjdk') ||
+          pkg === 'default-jdk' ||
+          pkg === 'default-jre' ||
+          pkg === 'jdk-openjdk'
+        );
+
+      case 'Node.js & NPM':
+        return installedMap.has('nodejs') || installedMap.has('node');
+
+      case 'Python 3 & PIP':
+        return installedMap.has('python3') || installedMap.has('python');
+
+      case 'Go (Golang)':
+        return installedMap.has('golang') || installedMap.has('golang-go') || installedMap.has('go');
+
+      case 'Rust & Cargo':
+        return installedMap.has('rust') || installedMap.has('rustc');
+
+      case 'PHP & PHP-FPM':
+        return Array.from(installedMap).some(pkg => pkg === 'php' || pkg.startsWith('php8') || pkg.startsWith('php7'));
+
+      case 'UFW / Firewalld':
+        return installedMap.has('ufw') || installedMap.has('firewalld');
+
+      case 'WireGuard':
+        return installedMap.has('wireguard') || installedMap.has('wireguard-tools');
+
+      case 'Certbot (SSL)':
+        return installedMap.has('certbot') || installedMap.has('python3-certbot');
+
+      case 'QEMU / KVM':
+        return installedMap.has('qemu-kvm') || installedMap.has('qemu-base') || installedMap.has('qemu-full') || installedMap.has('qemu');
+
+      case 'bat':
+        return installedMap.has('bat') || installedMap.has('batcat');
+
+      case 'eza / exa':
+        return installedMap.has('eza') || installedMap.has('exa');
+
+      default:
+        return false;
+    }
   }, [installedMap]);
 
   // ────────────────────────────────────────────────────────────────────────────

@@ -13,18 +13,20 @@ pub struct PackageInfo {
 }
 
 /// Detect the package manager available on the remote system.
-/// Returns: "apt" | "dnf" | "yum" | "pacman" | "unknown"
+/// Returns: "apt" | "dnf" | "yum" | "pacman" | "zypper" | "apk" | "unknown"
 async fn detect_pkg_manager(state: &AppState, conn_id: &str) -> String {
     let (out, _) = run_cmd(
         state,
         conn_id,
-        "command -v apt-get dpkg dnf yum pacman 2>/dev/null | head -n 1",
+        "command -v dnf yum apt-get pacman zypper apk 2>/dev/null | head -n 1",
     ).await;
     let out = out.trim().to_lowercase();
+    if out.contains("dnf") { return "dnf".into(); }
+    if out.contains("yum") { return "yum".into(); }
     if out.contains("apt") || out.contains("dpkg") { return "apt".into(); }
-    if out.contains("dnf")  { return "dnf".into(); }
-    if out.contains("yum")  { return "yum".into(); }
     if out.contains("pacman") { return "pacman".into(); }
+    if out.contains("zypper") { return "zypper".into(); }
+    if out.contains("apk") { return "apk".into(); }
     "unknown".into()
 }
 
@@ -41,7 +43,7 @@ pub async fn package_list(
             &conn_id,
             "dpkg-query -W -f='${Package}\t${Version}\t${Installed-Size}\t${Architecture}\t${binary:Summary}\n' 2>/dev/null",
         ).await,
-        "dnf" | "yum" => run_cmd(
+        "dnf" | "yum" | "zypper" => run_cmd(
             &state,
             &conn_id,
             "rpm -qa --queryformat '%{NAME}\t%{VERSION}-%{RELEASE}\t%{SIZE}\t%{ARCH}\t%{SUMMARY}\n' 2>/dev/null",
@@ -51,7 +53,12 @@ pub async fn package_list(
             &conn_id,
             r#"pacman -Q 2>/dev/null | awk '{print $1"\t"$2"\t0\tall\tpacman package"}'"#,
         ).await,
-        _ => return Err("No supported package manager found (apt/dnf/yum/pacman).".into()),
+        "apk" => run_cmd(
+            &state,
+            &conn_id,
+            r#"apk info -v 2>/dev/null | awk -F'-' '{print $1"\t"$2"\t0\tall\talpine package"}'"#,
+        ).await,
+        _ => return Err("No supported package manager found (apt/dnf/yum/pacman/zypper/apk).".into()),
     };
 
     if code == -1 && stdout.is_empty() {
@@ -161,6 +168,344 @@ pub async fn package_search(
     Ok(list)
 }
 
+fn build_install_command(pm: &str, raw_name: &str) -> (String, Option<String>) {
+    let name = raw_name.trim();
+    let lower = name.to_lowercase();
+
+    // 1. MySQL / MariaDB Database Server & Client
+    if lower == "mysql-server" || lower == "mysql" || lower == "mariadb-server" || lower == "mariadb" || lower == "mariadb105-server" || lower == "default-mysql-server" {
+        let install_cmd = match pm {
+            "dnf" => "(dnf install -y mysql-server 2>&1 || dnf install -y mariadb105-server 2>&1 || dnf install -y mariadb-server 2>&1 || dnf install -y mariadb 2>&1 || dnf install -y community-mysql-server 2>&1) && (dnf install -y mysql 2>&1 || dnf install -y mariadb 2>&1 || dnf install -y mariadb105 2>&1 || true)",
+            "yum" => "(yum install -y mysql-server 2>&1 || yum install -y mariadb-server 2>&1 || yum install -y mariadb 2>&1) && (yum install -y mysql 2>&1 || yum install -y mariadb 2>&1 || true)",
+            "pacman" => "(pacman -S --noconfirm mariadb mariadb-clients 2>&1 || pacman -S --noconfirm mariadb 2>&1 || pacman -S --noconfirm mysql 2>&1)",
+            "zypper" => "(zypper --non-interactive in mariadb mariadb-client 2>&1 || zypper --non-interactive in mysql-community-server 2>&1)",
+            "apk" => "(apk add --no-cache mariadb mariadb-client mariadb-server-utils 2>&1 || apk add --no-cache mysql mysql-client 2>&1)",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y default-mysql-server 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server 2>&1) && (DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-client 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y default-mysql-client 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-client 2>&1 || true)",
+        }.to_string();
+
+        let post = "if [ ! -d /var/lib/mysql/mysql ]; then (mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql 2>/dev/null || mysql_install_db --user=mysql --datadir=/var/lib/mysql 2>/dev/null || true); fi; (systemctl enable --now mariadb 2>/dev/null || systemctl enable --now mysqld 2>/dev/null || systemctl enable --now mysql 2>/dev/null || rc-service mariadb start 2>/dev/null || service mariadb start 2>/dev/null || service mysql start 2>/dev/null || service mysqld start 2>/dev/null || true); mysql -e \"CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY ''; GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;\" 2>/dev/null || true; mysql -e \"CREATE USER IF NOT EXISTS 'root'@'localhost' IDENTIFIED BY ''; GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;\" 2>/dev/null || true".to_string();
+        return (install_cmd, Some(post));
+    }
+
+    // 2. PostgreSQL Server & Client
+    if lower == "postgresql" || lower == "postgresql-server" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y postgresql-server postgresql 2>&1 || yum install -y postgresql-server postgresql 2>&1 || dnf install -y postgresql 2>&1 || yum install -y postgresql 2>&1)",
+            "pacman" => "pacman -S --noconfirm postgresql 2>&1",
+            "zypper" => "zypper --non-interactive in postgresql-server postgresql 2>&1",
+            "apk" => "apk add --no-cache postgresql postgresql-contrib 2>&1",
+            _ => "DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib 2>&1",
+        }.to_string();
+
+        let post = "if [ ! -f /var/lib/pgsql/data/PG_VERSION ] && [ ! -f /var/lib/postgresql/data/PG_VERSION ]; then (postgresql-setup --initdb 2>/dev/null || postgresql-setup initdb 2>/dev/null || su - postgres -c \"initdb -D '/var/lib/pgsql/data'\" 2>/dev/null || true); fi; (systemctl enable --now postgresql 2>/dev/null || rc-service postgresql start 2>/dev/null || service postgresql start 2>/dev/null || true)".to_string();
+        return (install_cmd, Some(post));
+    }
+
+    // 3. Docker Engine
+    if lower == "docker" || lower == "docker.io" || lower == "docker-ce" {
+        let install_cmd = match pm {
+            "dnf" => "(dnf install -y docker 2>&1 || dnf install -y docker-ce 2>&1 || dnf install -y podman-docker 2>&1)",
+            "yum" => "(amazon-linux-extras install -y docker 2>/dev/null || yum install -y docker 2>&1 || yum install -y docker-ce 2>&1)",
+            "pacman" => "pacman -S --noconfirm docker 2>&1",
+            "zypper" => "zypper --non-interactive in docker 2>&1",
+            "apk" => "apk add --no-cache docker 2>&1",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce 2>&1)",
+        }.to_string();
+
+        let post = "(systemctl enable --now docker 2>/dev/null || rc-service docker start 2>/dev/null || service docker start 2>/dev/null || true)".to_string();
+        return (install_cmd, Some(post));
+    }
+
+    // 4. Docker Compose
+    if lower == "docker-compose" || lower == "docker-compose-plugin" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y docker-compose-plugin 2>&1 || yum install -y docker-compose-plugin 2>&1 || dnf install -y docker-compose 2>&1 || yum install -y docker-compose 2>&1 || (curl -fsSL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m) -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose 2>&1))",
+            "pacman" => "pacman -S --noconfirm docker-compose 2>&1",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose 2>&1 || (curl -fsSL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m) -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose 2>&1))",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 5. Redis Server & Tools
+    if lower == "redis" || lower == "redis-server" || lower == "redis-tools" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y redis 2>&1 || yum install -y redis 2>&1)",
+            "pacman" => "pacman -S --noconfirm redis 2>&1",
+            "apk" => "apk add --no-cache redis 2>&1",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y redis-server redis-tools 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y redis 2>&1)",
+        }.to_string();
+
+        let post = "(systemctl enable --now redis 2>/dev/null || systemctl enable --now redis-server 2>/dev/null || rc-service redis start 2>/dev/null || service redis start 2>/dev/null || service redis-server start 2>/dev/null || true)".to_string();
+        return (install_cmd, Some(post));
+    }
+
+    // 6. Apache2 / httpd
+    if lower == "apache2" || lower == "httpd" || lower == "apache" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y httpd 2>&1 || yum install -y httpd 2>&1)",
+            "pacman" => "pacman -S --noconfirm apache 2>&1",
+            _ => "DEBIAN_FRONTEND=noninteractive apt-get install -y apache2 2>&1",
+        }.to_string();
+
+        let post = "(systemctl enable --now httpd 2>/dev/null || systemctl enable --now apache2 2>/dev/null || rc-service apache2 start 2>/dev/null || service httpd start 2>/dev/null || service apache2 start 2>/dev/null || true)".to_string();
+        return (install_cmd, Some(post));
+    }
+
+    // 7. Nginx
+    if lower == "nginx" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y nginx 2>&1 || yum install -y nginx 2>&1)",
+            "pacman" => "pacman -S --noconfirm nginx 2>&1",
+            "apk" => "apk add --no-cache nginx 2>&1",
+            _ => "DEBIAN_FRONTEND=noninteractive apt-get install -y nginx 2>&1",
+        }.to_string();
+
+        let post = "(systemctl enable --now nginx 2>/dev/null || rc-service nginx start 2>/dev/null || service nginx start 2>/dev/null || true)".to_string();
+        return (install_cmd, Some(post));
+    }
+
+    // 8. OpenJDK Java
+    if lower.contains("openjdk") || lower.contains("jdk") || lower == "java" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y java-17-openjdk-devel 2>&1 || yum install -y java-17-openjdk-devel 2>&1 || dnf install -y java-21-openjdk-devel 2>&1 || dnf install -y java-11-openjdk-devel 2>&1 || dnf install -y java-17-openjdk 2>&1 || yum install -y java-1.8.0-openjdk-devel 2>&1)",
+            "pacman" => "pacman -S --noconfirm jdk-openjdk 2>&1",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y default-jdk 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y openjdk-17-jdk 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y openjdk-11-jdk 2>&1)",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 9. Node.js & NPM
+    if lower == "nodejs" || lower == "node" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y nodejs npm 2>&1 || yum install -y nodejs npm 2>&1 || dnf install -y nodejs 2>&1 || yum install -y nodejs 2>&1)",
+            "pacman" => "pacman -S --noconfirm nodejs npm 2>&1",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs 2>&1)",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 10. Python 3 & PIP
+    if lower == "python3" || lower == "python" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y python3 python3-pip 2>&1 || yum install -y python3 python3-pip 2>&1 || dnf install -y python3 2>&1)",
+            "pacman" => "pacman -S --noconfirm python python-pip 2>&1",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pip 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y python3 2>&1)",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 11. Go (Golang)
+    if lower == "golang" || lower == "go" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y golang 2>&1 || yum install -y golang 2>&1)",
+            "pacman" => "pacman -S --noconfirm go 2>&1",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y golang 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y golang-go 2>&1)",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 12. Rust & Cargo
+    if lower == "rust" || lower == "rustc" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y rust cargo 2>&1 || yum install -y rust cargo 2>&1 || dnf install -y rust 2>&1)",
+            "pacman" => "pacman -S --noconfirm rust 2>&1",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y rustc cargo 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y rustc 2>&1)",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 13. PHP & PHP-FPM
+    if lower == "php" || lower == "php-fpm" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y php php-fpm php-cli php-mysqlnd 2>&1 || yum install -y php php-fpm 2>&1 || dnf install -y php 2>&1)",
+            "pacman" => "pacman -S --noconfirm php php-fpm 2>&1",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y php php-fpm php-mysql 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y php 2>&1)",
+        }.to_string();
+
+        let post = "(systemctl enable --now php-fpm 2>/dev/null || systemctl enable --now php8.1-fpm 2>/dev/null || systemctl enable --now php8.2-fpm 2>/dev/null || true)".to_string();
+        return (install_cmd, Some(post));
+    }
+
+    // 14. AWS CLI
+    if lower == "awscli" || lower == "aws-cli" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y awscli 2>&1 || yum install -y awscli 2>&1 || dnf install -y aws-cli 2>&1 || (curl -fsSL 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o /tmp/awscliv2.zip && unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --update && rm -rf /tmp/aws /tmp/awscliv2.zip 2>&1))",
+            "pacman" => "(pacman -S --noconfirm aws-cli 2>&1 || pacman -S --noconfirm awscli 2>&1)",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y awscli 2>&1 || (curl -fsSL 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o /tmp/awscliv2.zip && unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --update && rm -rf /tmp/aws /tmp/awscliv2.zip 2>&1))",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 15. kubectl (Kubernetes CLI)
+    if lower == "kubectl" {
+        let install_cmd = match pm {
+            "pacman" => "pacman -S --noconfirm kubectl 2>&1",
+            _ => "((command -v apt-get >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y kubectl 2>&1) || (command -v dnf >/dev/null && dnf install -y kubectl 2>&1) || (curl -fsSL -o /usr/local/bin/kubectl \"https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt 2>/dev/null || echo 'v1.29.0')/bin/linux/amd64/kubectl\" && chmod +x /usr/local/bin/kubectl 2>&1))",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 16. Helm (Kubernetes Package Manager)
+    if lower == "helm" {
+        let install_cmd = match pm {
+            "pacman" => "pacman -S --noconfirm helm 2>&1",
+            _ => "((command -v apt-get >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y helm 2>&1) || (command -v dnf >/dev/null && dnf install -y helm 2>&1) || (curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash 2>&1))",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 17. Terraform
+    if lower == "terraform" {
+        let install_cmd = match pm {
+            "pacman" => "pacman -S --noconfirm terraform 2>&1",
+            _ => "((command -v apt-get >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y terraform 2>&1) || (command -v dnf >/dev/null && dnf install -y terraform 2>&1) || (curl -fsSL https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip -o /tmp/tf.zip && unzip -o /tmp/tf.zip -d /usr/local/bin/ && chmod +x /usr/local/bin/terraform && rm -f /tmp/tf.zip 2>&1))",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 18. k9s
+    if lower == "k9s" {
+        let install_cmd = match pm {
+            "pacman" => "pacman -S --noconfirm k9s 2>&1",
+            _ => "((command -v apt-get >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y k9s 2>&1) || (command -v dnf >/dev/null && dnf install -y k9s 2>&1) || (curl -fsSL https://github.com/derailed/k9s/releases/download/v0.32.4/k9s_Linux_amd64.tar.gz | tar -xz -C /usr/local/bin k9s && chmod +x /usr/local/bin/k9s 2>&1))",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 19. Firewalls: UFW / Firewalld
+    if lower == "ufw" || lower == "firewalld" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y firewalld 2>&1 || yum install -y firewalld 2>&1)",
+            "pacman" => "(pacman -S --noconfirm firewalld 2>&1 || pacman -S --noconfirm ufw 2>&1)",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y ufw 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y firewalld 2>&1)",
+        }.to_string();
+
+        let post = "(systemctl enable --now firewalld 2>/dev/null || systemctl enable --now ufw 2>/dev/null || true)".to_string();
+        return (install_cmd, Some(post));
+    }
+
+    // 20. WireGuard
+    if lower == "wireguard" || lower == "wireguard-tools" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y wireguard-tools 2>&1 || yum install -y wireguard-tools 2>&1)",
+            "pacman" => "pacman -S --noconfirm wireguard-tools 2>&1",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard wireguard-tools 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard 2>&1)",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 21. sqlite3
+    if lower == "sqlite3" || lower == "sqlite" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y sqlite 2>&1 || yum install -y sqlite 2>&1)",
+            "pacman" => "pacman -S --noconfirm sqlite 2>&1",
+            _ => "DEBIAN_FRONTEND=noninteractive apt-get install -y sqlite3 2>&1",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 22. Fail2ban
+    if lower == "fail2ban" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y fail2ban 2>&1 || yum install -y fail2ban 2>&1 || dnf install -y epel-release && dnf install -y fail2ban 2>&1)",
+            "pacman" => "pacman -S --noconfirm fail2ban 2>&1",
+            _ => "DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban 2>&1",
+        }.to_string();
+
+        let post = "(systemctl enable --now fail2ban 2>/dev/null || true)".to_string();
+        return (install_cmd, Some(post));
+    }
+
+    // 23. Memcached
+    if lower == "memcached" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y memcached 2>&1 || yum install -y memcached 2>&1)",
+            "pacman" => "pacman -S --noconfirm memcached 2>&1",
+            _ => "DEBIAN_FRONTEND=noninteractive apt-get install -y memcached 2>&1",
+        }.to_string();
+
+        let post = "(systemctl enable --now memcached 2>/dev/null || true)".to_string();
+        return (install_cmd, Some(post));
+    }
+
+    // 24. HAProxy
+    if lower == "haproxy" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y haproxy 2>&1 || yum install -y haproxy 2>&1)",
+            "pacman" => "pacman -S --noconfirm haproxy 2>&1",
+            _ => "DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy 2>&1",
+        }.to_string();
+
+        let post = "(systemctl enable --now haproxy 2>/dev/null || true)".to_string();
+        return (install_cmd, Some(post));
+    }
+
+    // 25. QEMU / KVM
+    if lower == "qemu-kvm" || lower.starts_with("qemu") {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y qemu-kvm 2>&1 || yum install -y qemu-kvm 2>&1)",
+            "pacman" => "(pacman -S --noconfirm qemu-base 2>&1 || pacman -S --noconfirm qemu-full 2>&1)",
+            _ => "DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-kvm 2>&1",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 26. bat (bat / batcat)
+    if lower == "bat" || lower == "batcat" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y bat 2>&1 || yum install -y bat 2>&1)",
+            "pacman" => "pacman -S --noconfirm bat 2>&1",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y bat 2>&1 && (ln -sf /usr/bin/batcat /usr/local/bin/bat 2>/dev/null || true))",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 27. eza / exa
+    if lower == "eza" || lower == "exa" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y eza 2>&1 || dnf install -y exa 2>&1 || yum install -y exa 2>&1)",
+            "pacman" => "(pacman -S --noconfirm eza 2>&1 || pacman -S --noconfirm exa 2>&1)",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y eza 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y exa 2>&1)",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 28. Certbot
+    if lower == "certbot" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y certbot 2>&1 || yum install -y certbot 2>&1)",
+            "pacman" => "pacman -S --noconfirm certbot 2>&1",
+            _ => "DEBIAN_FRONTEND=noninteractive apt-get install -y certbot 2>&1",
+        }.to_string();
+        return (install_cmd, None);
+    }
+
+    // 29. MongoDB
+    if lower == "mongodb" || lower == "mongodb-org" || lower == "mongod" {
+        let install_cmd = match pm {
+            "dnf" | "yum" => "(dnf install -y mongodb-org 2>&1 || yum install -y mongodb-org 2>&1 || dnf install -y mongodb 2>&1)",
+            "pacman" => "pacman -S --noconfirm mongodb-bin 2>&1 || pacman -S --noconfirm mongodb 2>&1",
+            _ => "(DEBIAN_FRONTEND=noninteractive apt-get install -y mongodb-org 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y mongodb 2>&1)",
+        }.to_string();
+
+        let post = "(systemctl enable --now mongod 2>/dev/null || systemctl enable --now mongodb 2>/dev/null || true)".to_string();
+        return (install_cmd, Some(post));
+    }
+
+    // Generic fallback for any other package name
+    let install_cmd = match pm {
+        "dnf" => format!("dnf install -y '{}' 2>&1", name),
+        "yum" => format!("yum install -y '{}' 2>&1", name),
+        "pacman" => format!("pacman -S --noconfirm '{}' 2>&1", name),
+        "zypper" => format!("zypper --non-interactive in '{}' 2>&1", name),
+        "apk" => format!("apk add --no-cache '{}' 2>&1", name),
+        _ => format!("DEBIAN_FRONTEND=noninteractive apt-get install -y '{}' 2>&1", name),
+    };
+
+    let post = format!("if systemctl list-unit-files '{name}.service' >/dev/null 2>&1; then systemctl enable --now '{name}' 2>/dev/null || true; fi", name = name);
+    (install_cmd, Some(post))
+}
+
 #[tauri::command]
 pub async fn package_install(
     state: tauri::State<'_, AppState>,
@@ -172,19 +517,19 @@ pub async fn package_install(
     }
 
     let pm = detect_pkg_manager(&state, &conn_id).await;
-    let cmd = match pm.as_str() {
-        "apt"    => format!("DEBIAN_FRONTEND=noninteractive apt-get install -y '{}' 2>&1", name),
-        "dnf"    => format!("dnf install -y '{}' 2>&1", name),
-        "yum"    => format!("yum install -y '{}' 2>&1", name),
-        "pacman" => format!("pacman -S --noconfirm '{}' 2>&1", name),
-        _ => return Err("No supported package manager found.".into()),
+    let (install_cmd, post_setup) = build_install_command(&pm, &name);
+
+    let full_cmd = if let Some(post) = post_setup {
+        format!("{} && (systemctl daemon-reload 2>/dev/null || true) && ({})", install_cmd, post)
+    } else {
+        format!("{} && (systemctl daemon-reload 2>/dev/null || true)", install_cmd)
     };
 
-    let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &full_cmd).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 && !stdout.contains("already installed") && !stdout.contains("Nothing to do") && !stdout.contains("Complete!") {
         return Err(format!("Install failed: {}", stdout.trim()));
     }
 
@@ -203,11 +548,40 @@ pub async fn package_remove(
     }
 
     let pm = detect_pkg_manager(&state, &conn_id).await;
+    let lower = name.to_lowercase();
+    let is_mysql = lower == "mysql-server" || lower == "mysql" || lower == "mariadb-server" || lower == "mariadb" || lower == "mariadb105-server";
+
     let cmd = match pm.as_str() {
-        "apt"    => format!("apt-get remove -y '{}' 2>&1", name),
-        "dnf"    => format!("dnf remove -y '{}' 2>&1", name),
-        "yum"    => format!("yum remove -y '{}' 2>&1", name),
-        "pacman" => format!("pacman -R --noconfirm '{}' 2>&1", name),
+        "apt" => {
+            if is_mysql {
+                "DEBIAN_FRONTEND=noninteractive apt-get remove -y mysql-server default-mysql-server mariadb-server 2>&1 && (systemctl daemon-reload 2>/dev/null || true)".to_string()
+            } else {
+                format!("DEBIAN_FRONTEND=noninteractive apt-get remove -y '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name)
+            }
+        },
+        "dnf" => {
+            if is_mysql {
+                "dnf remove -y mysql-server mariadb-server mariadb105-server mariadb 2>&1 && (systemctl daemon-reload 2>/dev/null || true)".to_string()
+            } else {
+                format!("dnf remove -y '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name)
+            }
+        },
+        "yum" => {
+            if is_mysql {
+                "yum remove -y mysql-server mariadb-server mariadb 2>&1 && (systemctl daemon-reload 2>/dev/null || true)".to_string()
+            } else {
+                format!("yum remove -y '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name)
+            }
+        },
+        "pacman" => {
+            if is_mysql {
+                "pacman -R --noconfirm mariadb mariadb-clients mysql 2>&1 && (systemctl daemon-reload 2>/dev/null || true)".to_string()
+            } else {
+                format!("pacman -R --noconfirm '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name)
+            }
+        },
+        "zypper" => format!("zypper --non-interactive rm '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name),
+        "apk" => format!("apk del '{}' 2>&1", name),
         _ => return Err("No supported package manager found.".into()),
     };
 

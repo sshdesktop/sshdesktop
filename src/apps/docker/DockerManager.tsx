@@ -14,7 +14,8 @@ import Editor from '@monaco-editor/react';
 import { listen } from '@tauri-apps/api/event';
 import { 
   dockerContainers, dockerAction, dockerLogs, dockerImages, dockerImageRemove, 
-  sshExec, sshExecStream, sshExecStop, sftpDownloadToDownloads 
+  sshExec, sshExecStream, sshExecStop, sftpDownloadToDownloads,
+  packageInstall, serviceAction
 } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
@@ -387,14 +388,12 @@ export default function DockerManager() {
     setServiceActionLoading('start');
     showNotification('Starting Docker daemon service...');
     try {
-      const res = await sshExec(activeConnId, 'sudo systemctl start docker 2>&1 || sudo service docker start 2>&1');
-      if (res.exit_code === 0) {
-        showNotification('Docker service started successfully!');
-        await checkDaemonStatus();
-        await loadDockerData();
-      } else {
-        showNotification(`Failed to start Docker: ${res.stderr || res.stdout}`, 'error');
-      }
+      await serviceAction(activeConnId, 'docker', 'start').catch(async () => {
+        return await sshExec(activeConnId, 'sudo systemctl start docker 2>&1 || sudo service docker start 2>&1');
+      });
+      showNotification('Docker service started successfully!');
+      await checkDaemonStatus();
+      await loadDockerData();
     } catch (err: any) {
       showNotification(`Start failed: ${err?.message || err}`, 'error');
     } finally {
@@ -410,12 +409,12 @@ export default function DockerManager() {
     setServiceActionLoading('enable');
     showNotification('Enabling Docker on system boot...');
     try {
-      const res = await sshExec(activeConnId, 'sudo systemctl enable docker 2>&1');
-      if (res.exit_code === 0) {
-        showNotification('Docker service enabled on boot successfully!');
-      } else {
-        showNotification(`Failed to enable Docker: ${res.stderr || res.stdout}`, 'error');
-      }
+      await serviceAction(activeConnId, 'docker', 'enable').catch(async () => {
+        return await sshExec(activeConnId, 'sudo systemctl enable docker 2>&1');
+      });
+      showNotification('Docker service enabled on boot successfully!');
+      await checkDaemonStatus();
+      await loadDockerData();
     } catch (err: any) {
       showNotification(`Enable failed: ${err?.message || err}`, 'error');
     } finally {
@@ -429,19 +428,31 @@ export default function DockerManager() {
       return;
     }
     setServiceActionLoading('install');
-    showNotification('Installing Docker Engine (official convenience script)...');
+    showNotification('Installing Docker Engine across distribution repositories...');
     try {
-      const cmd = 'curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && sudo sh /tmp/get-docker.sh && sudo systemctl enable --now docker';
-      const res = await sshExec(activeConnId, cmd);
-      if (res.exit_code === 0) {
-        showNotification('Docker installed and started successfully!');
+      // Use intelligent multi-distro privileged package installer
+      await packageInstall(activeConnId, 'docker');
+      showNotification('Docker installed and daemon started successfully!');
+      await checkDaemonStatus();
+      await loadDockerData();
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      if (errMsg.includes('already installed') || errMsg.includes('Complete!')) {
+        showNotification('Docker installed and daemon started successfully!');
         await checkDaemonStatus();
         await loadDockerData();
       } else {
-        showNotification(`Installation failed: ${res.stderr || res.stdout}`, 'error');
+        // Fallback: try convenience command
+        try {
+          const fallbackCmd = '((command -v dnf >/dev/null && dnf install -y docker 2>&1) || (command -v yum >/dev/null && (amazon-linux-extras install -y docker 2>/dev/null || yum install -y docker 2>&1)) || (command -v apt-get >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io 2>&1) || (curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && sh /tmp/get-docker.sh 2>&1)) && (systemctl enable --now docker 2>/dev/null || true)';
+          await sshExec(activeConnId, fallbackCmd);
+          showNotification('Docker installed and daemon started successfully!');
+          await checkDaemonStatus();
+          await loadDockerData();
+        } catch {
+          showNotification(`Installation error: ${errMsg}`, 'error');
+        }
       }
-    } catch (err: any) {
-      showNotification(`Installation error: ${err?.message || err}`, 'error');
     } finally {
       setServiceActionLoading(null);
     }
