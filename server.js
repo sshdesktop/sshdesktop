@@ -1782,39 +1782,65 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       if (!entry) return [];
       const res = await runRemoteExec(
         entry.client,
-        "systemctl list-units --type=service --all --no-pager --plain 2>/dev/null; echo '---ENABLED---'; systemctl list-unit-files --type=service --no-pager --plain 2>/dev/null",
-        10000
+        "systemctl daemon-reload 2>/dev/null; systemctl list-units --type=service --all --no-pager --plain 2>/dev/null; echo '---FILES---'; systemctl list-unit-files --type=service --all --no-pager --plain 2>/dev/null",
+        15000
       );
-      const [unitsOut, filesOut] = res.stdout.split('---ENABLED---');
-      const enabledMap = {};
+      const [unitsOut, filesOut] = res.stdout.split('---FILES---');
+      const filesMap = new Map();
 
       if (filesOut) {
         for (const l of filesOut.split('\n')) {
           const p = l.trim().split(/\s+/);
           if (p.length >= 2 && p[0].endsWith('.service')) {
-            enabledMap[p[0]] = p[1] === 'enabled' || p[1] === 'static';
+            const isEnabled = p[1] === 'enabled' || p[1] === 'static' || p[1] === 'enabled-runtime';
+            filesMap.set(p[0], { enabled: isEnabled, state: p[1] });
           }
         }
       }
 
       const services = [];
+      const seen = new Set();
+
       if (unitsOut) {
         for (const l of unitsOut.split('\n')) {
           const trimmed = l.trim();
-          if (trimmed.startsWith('LOAD') || trimmed.startsWith('To show') || trimmed.startsWith('Legend:')) continue;
-          const p = trimmed.split(/\s+/);
+          if (!trimmed || trimmed.startsWith('LOAD') || trimmed.startsWith('To show') || trimmed.startsWith('Legend:') || trimmed.startsWith('loaded units listed')) continue;
+          let p = trimmed.split(/\s+/);
+          if (p[0] === '●' || p[0] === '*') {
+            p = p.slice(1);
+          }
           if (p.length >= 4 && p[0].endsWith('.service')) {
+            const name = p[0];
+            seen.add(name);
+            const fileInfo = filesMap.get(name);
             services.push({
-              name: p[0],
+              name,
               load_state: p[1],
               active_state: p[2],
               sub_state: p[3],
-              description: p.length > 4 ? p.slice(4).join(' ') : p[0],
-              enabled: !!enabledMap[p[0]]
+              description: p.length > 4 ? p.slice(4).join(' ') : name,
+              enabled: fileInfo ? fileInfo.enabled : false
             });
           }
         }
       }
+
+      // Add installed unit files that are not yet loaded in systemd memory (e.g. newly installed packages)
+      for (const [name, fileInfo] of filesMap.entries()) {
+        if (!seen.has(name) && !name.includes('@.') && fileInfo.state !== 'alias') {
+          seen.add(name);
+          services.push({
+            name,
+            load_state: 'loaded',
+            active_state: 'inactive',
+            sub_state: 'dead',
+            description: name.replace(/\.service$/, ''),
+            enabled: fileInfo.enabled
+          });
+        }
+      }
+
+      services.sort((a, b) => a.name.localeCompare(b.name));
       return services;
     }
 
@@ -2221,6 +2247,7 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       else if (pm === 'yum') cmd = `yum install -y '${safePkg}' 2>&1`;
       else if (pm === 'pacman') cmd = `pacman -S --noconfirm '${safePkg}' 2>&1`;
       else cmd = `DEBIAN_FRONTEND=noninteractive apt-get install -y '${safePkg}' 2>&1`;
+      cmd += ' && (systemctl daemon-reload 2>/dev/null || true)';
 
       const res = await runRemotePrivExec(entry, cmd, 180000);
       if (res.exit_code !== 0 && !res.stdout.includes('Complete!') && !res.stdout.includes('already installed')) {
@@ -2241,6 +2268,7 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       else if (pm === 'yum') cmd = `yum remove -y '${safePkg}' 2>&1`;
       else if (pm === 'pacman') cmd = `pacman -R --noconfirm '${safePkg}' 2>&1`;
       else cmd = `DEBIAN_FRONTEND=noninteractive apt-get remove -y '${safePkg}' 2>&1`;
+      cmd += ' && (systemctl daemon-reload 2>/dev/null || true)';
 
       const res = await runRemotePrivExec(entry, cmd, 120000);
       if (res.exit_code !== 0) {
