@@ -173,10 +173,10 @@ pub async fn package_install(
 
     let pm = detect_pkg_manager(&state, &conn_id).await;
     let cmd = match pm.as_str() {
-        "apt"    => format!("DEBIAN_FRONTEND=noninteractive apt-get install -y '{}' 2>&1", name),
-        "dnf"    => format!("dnf install -y '{}' 2>&1", name),
-        "yum"    => format!("yum install -y '{}' 2>&1", name),
-        "pacman" => format!("pacman -S --noconfirm '{}' 2>&1", name),
+        "apt"    => format!("DEBIAN_FRONTEND=noninteractive apt-get install -y '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name),
+        "dnf"    => format!("dnf install -y '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name),
+        "yum"    => format!("yum install -y '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name),
+        "pacman" => format!("pacman -S --noconfirm '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name),
         _ => return Err("No supported package manager found.".into()),
     };
 
@@ -204,10 +204,10 @@ pub async fn package_remove(
 
     let pm = detect_pkg_manager(&state, &conn_id).await;
     let cmd = match pm.as_str() {
-        "apt"    => format!("apt-get remove -y '{}' 2>&1", name),
-        "dnf"    => format!("dnf remove -y '{}' 2>&1", name),
-        "yum"    => format!("yum remove -y '{}' 2>&1", name),
-        "pacman" => format!("pacman -R --noconfirm '{}' 2>&1", name),
+        "apt"    => format!("apt-get remove -y '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name),
+        "dnf"    => format!("dnf remove -y '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name),
+        "yum"    => format!("yum remove -y '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name),
+        "pacman" => format!("pacman -R --noconfirm '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name),
         _ => return Err("No supported package manager found.".into()),
     };
 
