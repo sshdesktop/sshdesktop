@@ -383,39 +383,146 @@ jobs:
         with:
           node-version: 22
 
-      - name: Download all installer artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: all-artifacts
+          pattern: sshdesktop-*
 
-      - name: Validate and prepare release assets
+      - name: Collect and validate release installers
         shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+
+          echo "======================================"
+          echo "SSH Desktop Release Validation"
+          echo "======================================"
+
+          # 1. Read application versions
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
-          TAURI_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          TAURI_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version || ''")
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          test "$PACKAGE_VERSION" = "$TAURI_VERSION"
-          test "$PACKAGE_VERSION" = "$TAG_VERSION"
+
+          echo "Package version : $PACKAGE_VERSION"
+          echo "Tauri version   : $TAURI_VERSION"
+          echo "GitHub tag      : $TAG_VERSION"
+
+          # 2. Validate versions with useful errors
+          if [ -z "$PACKAGE_VERSION" ]; then
+            echo "ERROR: package.json version is empty."
+            exit 1
+          fi
+
+          if [ -z "$TAURI_VERSION" ]; then
+            echo "ERROR: Tauri version is empty."
+            echo "Check src-tauri/tauri.conf.json."
+            exit 1
+          fi
+
+          if [ "$PACKAGE_VERSION" != "$TAURI_VERSION" ]; then
+            echo "ERROR: package.json and tauri.conf.json versions do not match."
+            exit 1
+          fi
+
+          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+            echo "ERROR: GitHub tag and application versions do not match."
+            exit 1
+          fi
+
+          echo "Version validation successful."
+
+          # 3. Check downloaded artifacts directory
+          if [ ! -d all-artifacts ]; then
+            echo "ERROR: all-artifacts directory does not exist."
+            echo "Check the Download GitHub Actions Artifacts step."
+            exit 1
+          fi
+
+          echo ""
+          echo "Downloaded artifact files:"
+          find all-artifacts -type f -print
+
+          # 4. Create release directory
+          rm -rf release-files
           mkdir -p release-files
+
+          # 5. Collect only supported installers
           while IFS= read -r -d '' FILE; do
             BASE=$(basename "$FILE")
-            cp "$FILE" "release-files/$BASE"
-          done < <( find all-artifacts -type f \( -iname "*.exe" -o -iname "*.msi" -o -iname "*.deb" -o -iname "*.rpm" -o -iname "*.dmg" \) -print0 )
+            DEST="release-files/$BASE"
+
+            if [ -e "$DEST" ]; then
+              echo "ERROR: Duplicate installer filename: $BASE"
+              echo "Original or duplicate source: $FILE"
+              exit 1
+            fi
+
+            echo "Collecting: $BASE"
+            cp "$FILE" "$DEST"
+          done < <(
+            find all-artifacts -type f \
+              \( \
+                -iname "*.exe" -o \
+                -iname "*.msi" -o \
+                -iname "*.deb" -o \
+                -iname "*.rpm" -o \
+                -iname "*.dmg" \
+              \) -print0
+          )
+
+          # 6. Display collected installers
+          echo ""
+          echo "Collected installers:"
+          find release-files -maxdepth 1 -type f -printf '%f\n' | sort
+
           PACKAGE_COUNT=$(find release-files -maxdepth 1 -type f | wc -l)
+
+          echo ""
+          echo "Expected installers: 14"
+          echo "Actual installers  : $PACKAGE_COUNT"
+
           if [ "$PACKAGE_COUNT" -ne 14 ]; then
-            echo "Expected 14 installers, found $PACKAGE_COUNT"
-            ls -lh release-files
+            echo ""
+            echo "ERROR: Expected 14 installers, found $PACKAGE_COUNT"
+            echo "Installer breakdown:"
+            for EXT in exe msi deb rpm dmg; do
+              COUNT=$(find release-files -maxdepth 1 -type f \
+                -iname "*.$EXT" | wc -l)
+              echo ".$EXT : $COUNT"
+            done
             exit 1
           fi
-          if find release-files -type f \( -iname "*.zip" -o -iname "*.AppImage" \) | grep -q .; then
-            echo "Unexpected ZIP or AppImage found"
+
+          # 7. Reject unwanted formats
+          if find release-files -type f \
+            \( -iname "*.zip" -o -iname "*.AppImage" \) \
+            | grep -q .; then
+            echo "ERROR: Unexpected ZIP or AppImage found."
             exit 1
           fi
+
+          # 8. Verify expected file types
+          for EXT in exe msi deb rpm dmg; do
+            COUNT=$(find release-files -maxdepth 1 -type f \
+              -iname "*.$EXT" | wc -l)
+            if [ "$COUNT" -eq 0 ]; then
+              echo "ERROR: Missing installer type .$EXT"
+              exit 1
+            fi
+          done
+
+          # 9. Generate SHA256 checksums
           cd release-files
-          sha256sum * > SHA256SUMS.txt
-          echo "Final release contents:"
+          sha256sum -- *.exe *.msi *.deb *.rpm *.dmg > SHA256SUMS.txt
+
+          # 10. Final output
+          echo ""
+          echo "======================================"
+          echo "RELEASE CONTENTS"
+          echo "======================================"
           ls -lh
+          echo ""
+          echo "SHA256SUMS.txt generated successfully."
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
