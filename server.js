@@ -818,7 +818,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
       const inputUser = (username || '').trim().toLowerCase();
       const validPass = auth.password || 'sshdesktop';
 
-      if (inputUser === validUser && (password === validPass || password === 'admin' || password === 'sshdesktop')) {
+      if (inputUser === validUser && password === validPass) {
         const session = createSession(auth.username || 'admin');
         return {
           success: true,
@@ -835,7 +835,8 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
     case 'auth_change_credentials': {
       const { currentPassword, newUsername, newPassword } = args || {};
       const auth = readJsonSafe(AUTH_FILE, { username: 'admin', password: 'sshdesktop' });
-      if (currentPassword !== auth.password && currentPassword !== 'admin' && currentPassword !== 'sshdesktop') {
+      const validPass = auth.password || 'sshdesktop';
+      if (currentPassword !== validPass) {
         return { success: false, must_change_password: true, username: newUsername, message: 'Current password incorrect.' };
       }
       auth.username = newUsername || 'admin';
