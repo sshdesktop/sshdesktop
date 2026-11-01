@@ -1,0 +1,406 @@
+name: SSH Desktop Production Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sshdesktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================
+  # DESKTOP INSTALLERS: 10 packages
+  # ============================================================
+  desktop:
+    name: Desktop - ${{ matrix.id }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: windows-x64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+            expected: 2
+          - id: windows-arm64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            bundles: nsis,msi
+            expected: 2
+          - id: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,rpm
+            expected: 2
+          - id: linux-arm64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            bundles: deb,rpm
+            expected: 2
+          - id: macos-x64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: dmg
+            expected: 1
+          - id: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+            bundles: dmg
+            expected: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            wget \
+            file \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            rpm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Validate versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          TAURI_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ "$PACKAGE_VERSION" != "$TAURI_VERSION" ]; then
+            echo "package.json and tauri.conf.json versions differ"
+            exit 1
+          fi
+          echo "Building SSH Desktop $PACKAGE_VERSION"
+
+      - name: Build desktop installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tauri build \
+            --target "${{ matrix.target }}" \
+            --bundles "${{ matrix.bundles }}"
+
+      - name: Collect and validate installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          if [ ! -d "$BUNDLE_DIR" ]; then
+            echo "Missing bundle directory: $BUNDLE_DIR"
+            exit 1
+          fi
+          mkdir -p build-output
+          case "${{ matrix.id }}" in
+            windows-*)
+              PATTERN="*.exe"
+              SECOND_PATTERN="*.msi"
+              ;;
+            linux-*)
+              PATTERN="*.deb"
+              SECOND_PATTERN="*.rpm"
+              ;;
+            macos-*)
+              PATTERN="*.dmg"
+              SECOND_PATTERN=""
+              ;;
+          esac
+          while IFS= read -r -d '' FILE; do
+            BASE=$(basename "$FILE")
+            cp "$FILE" "build-output/sshdesktop-${{ matrix.id }}-${BASE}"
+          done < <( find "$BUNDLE_DIR" -type f \( -iname "$PATTERN" -o -iname "$SECOND_PATTERN" \) -print0 )
+          COUNT=$(find build-output -maxdepth 1 -type f | wc -l)
+          if [ "$COUNT" -ne "${{ matrix.expected }}" ]; then
+            echo "Expected ${{ matrix.expected }} installers, found $COUNT"
+            ls -la build-output
+            exit 1
+          fi
+          ls -lh build-output
+
+      - name: Upload desktop installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: sshdesktop-${{ matrix.id }}
+          path: build-output/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # ============================================================
+  # LINUX SERVER: Build x64 and ARM64 SEA executables
+  # Package each as DEB and RPM.
+  # No Node.js installation required on customer machines.
+  # ============================================================
+  linux-server:
+    name: Linux Server - ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: ubuntu-22.04
+            deb_arch: amd64
+            rpm_arch: x86_64
+            elf_machine: "Advanced Micro Devices X86-64"
+          - arch: arm64
+            os: ubuntu-22.04-arm
+            deb_arch: arm64
+            rpm_arch: aarch64
+            elf_machine: "AArch64"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install Linux packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            binutils \
+            file \
+            ruby \
+            ruby-dev \
+            rpm
+          sudo gem install --no-document fpm
+
+      - name: Build frontend and prepare SEA
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build
+          npm run build:sea-prep
+          test -s dist-server/bundle.cjs
+          test -s dist-server/sea-prep.blob
+
+      - name: Create standalone Linux executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          NODE_BIN="$(command -v node)"
+          BINARY="$PWD/sshdesktop-server"
+          cp "$NODE_BIN" "$BINARY"
+          npx --yes postject@1.0.0-alpha.6 \
+            "$BINARY" \
+            NODE_SEA_BLOB \
+            dist-server/sea-prep.blob \
+            --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+          chmod 0755 "$BINARY"
+          echo "Checking Linux executable architecture..."
+          readelf -h "$BINARY" | grep -F "${{ matrix.elf_machine }}"
+          echo "Checking runtime dependencies..."
+          ldd "$BINARY"
+          if ldd "$BINARY" | grep -q "not found"; then
+            echo "Missing shared library dependency"
+            exit 1
+          fi
+          echo "Checking application version..."
+          "$BINARY" --version
+          echo "Checking application help..."
+          "$BINARY" --help
+
+      - name: Prepare package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          STAGE="$PWD/package-stage"
+          OUTPUT="$PWD/server-output"
+          mkdir -p \
+            "$STAGE/usr/bin" \
+            "$OUTPUT"
+          install -m 0755 \
+            sshdesktop-server \
+            "$STAGE/usr/bin/sshdesktop-server"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+          echo "OUTPUT=$OUTPUT" >> "$GITHUB_ENV"
+
+      - name: Build Debian DEB package
+        shell: bash
+        run: |
+          set -euo pipefail
+          fpm \
+            --input-type dir \
+            --output-type deb \
+            --name sshdesktop-server \
+            --version "$VERSION" \
+            --iteration 1 \
+            --architecture "${{ matrix.deb_arch }}" \
+            --license Apache-2.0 \
+            --maintainer "SSH Desktop Contributors" \
+            --description "SSH Desktop standalone Linux server" \
+            --url "https://github.com/sshdesktop/sshdesktop" \
+            --depends libc6 \
+            --depends libstdc++6 \
+            --depends libgcc-s1 \
+            --package "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.deb" \
+            --chdir "$STAGE" \
+            usr/bin/sshdesktop-server
+          ACTUAL_ARCH=$(dpkg-deb -f \
+            "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.deb" \
+            Architecture)
+          test "$ACTUAL_ARCH" = "${{ matrix.deb_arch }}"
+          dpkg-deb -c \
+            "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.deb"
+
+      - name: Build Fedora and RHEL RPM package
+        shell: bash
+        run: |
+          set -euo pipefail
+          fpm \
+            --input-type dir \
+            --output-type rpm \
+            --name sshdesktop-server \
+            --version "$VERSION" \
+            --iteration 1 \
+            --architecture "${{ matrix.rpm_arch }}" \
+            --license Apache-2.0 \
+            --maintainer "SSH Desktop Contributors" \
+            --description "SSH Desktop standalone Linux server" \
+            --url "https://github.com/sshdesktop/sshdesktop" \
+            --depends glibc \
+            --depends libstdc++ \
+            --depends libgcc \
+            --package "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.rpm" \
+            --chdir "$STAGE" \
+            usr/bin/sshdesktop-server
+          ACTUAL_ARCH=$(rpm -qp \
+            --queryformat '%{ARCH}' \
+            "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.rpm")
+          test "$ACTUAL_ARCH" = "${{ matrix.rpm_arch }}"
+          rpm -qpl \
+            "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.rpm"
+
+      - name: Verify both server packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.deb"
+          test -s "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.rpm"
+          echo "Server installer packages:"
+          ls -lh "$OUTPUT"
+
+      - name: Upload Linux server installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: sshdesktop-server-linux-${{ matrix.arch }}
+          path: server-output/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # ============================================================
+  # RELEASE: 10 DESKTOP + 4 SERVER = 14 INSTALLERS
+  # ============================================================
+  release:
+    name: Publish SSH Desktop Release
+    needs:
+      - desktop
+      - linux-server
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download all installer artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+
+      - name: Validate and prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          TAURI_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          test "$PACKAGE_VERSION" = "$TAURI_VERSION"
+          test "$PACKAGE_VERSION" = "$TAG_VERSION"
+          mkdir -p release-files
+          while IFS= read -r -d '' FILE; do
+            BASE=$(basename "$FILE")
+            cp "$FILE" "release-files/$BASE"
+          done < <( find all-artifacts -type f \( -iname "*.exe" -o -iname "*.msi" -o -iname "*.deb" -o -iname "*.rpm" -o -iname "*.dmg" \) -print0 )
+          PACKAGE_COUNT=$(find release-files -maxdepth 1 -type f | wc -l)
+          if [ "$PACKAGE_COUNT" -ne 14 ]; then
+            echo "Expected 14 installers, found $PACKAGE_COUNT"
+            ls -lh release-files
+            exit 1
+          fi
+          if find release-files -type f \( -iname "*.zip" -o -iname "*.AppImage" \) | grep -q .; then
+            echo "Unexpected ZIP or AppImage found"
+            exit 1
+          fi
+          cd release-files
+          sha256sum * > SHA256SUMS.txt
+          echo "Final release contents:"
+          ls -lh
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: SSH Desktop ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: release-files/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
