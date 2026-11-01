@@ -29,9 +29,33 @@ export interface SpeedTestRecord {
 
 type TestPhase = 'idle' | 'detect' | 'ping' | 'download' | 'upload' | 'completed' | 'error';
 
+function polarToCartesian(cx: number, cy: number, r: number, angleDegrees: number) {
+  const rad = (angleDegrees * Math.PI) / 180;
+  return {
+    x: Number((cx + r * Math.cos(rad)).toFixed(2)),
+    y: Number((cy + r * Math.sin(rad)).toFixed(2))
+  };
+}
+
+function describeArc(cx: number, cy: number, r: number, startAngle: number, endAngle: number) {
+  const start = polarToCartesian(cx, cy, r, startAngle);
+  const end = polarToCartesian(cx, cy, r, endAngle);
+  const largeArcFlag = endAngle - startAngle <= 180 ? 0 : 1;
+  return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArcFlag} 1 ${end.x} ${end.y}`;
+}
+
+function formatTick(val: number): string {
+  if (val >= 1000) {
+    const g = val / 1000;
+    return `${g % 1 === 0 ? g : g.toFixed(1)}G`;
+  }
+  return `${Math.round(val)}`;
+}
+
 export default function SpeedTestDashboard({ connId, onInspectTerminal }: SpeedTestDashboardProps) {
   // Test Engine: 'cdn' (Cloudflare / Multi-CDN) | 'ookla' (speedtest-cli) | 'custom'
   const [engine, setEngine] = useState<'cdn' | 'ookla' | 'custom'>('cdn');
+  const [scaleMode, setScaleMode] = useState<'auto' | '100' | '1000' | '10000'>('auto');
   const [phase, setPhase] = useState<TestPhase>('idle');
   const [currentSpeed, setCurrentSpeed] = useState<number>(0); // live speed in Mbps for gauge
   const [liveLog, setLiveLog] = useState<string[]>([]);
@@ -428,20 +452,28 @@ export default function SpeedTestDashboard({ connId, onInspectTerminal }: SpeedT
   // Speedometer Gauge Calculations
   const isRunning = ['detect', 'ping', 'download', 'upload'].includes(phase);
 
-  // Speed gauge maximum scale (smart scaling 100M, 500M, 1000M, 2500M)
+  // Speed gauge maximum scale (smart scaling up to 10G or manual override)
   const gaugeMax = useMemo(() => {
-    const val = Math.max(currentSpeed, downloadSpeed || 0, uploadSpeed || 0);
+    if (scaleMode === '100') return 100;
+    if (scaleMode === '1000') return 1000;
+    if (scaleMode === '10000') return 10000;
+
+    // Auto-adaptive scale
+    const val = Math.max(
+      currentSpeed,
+      downloadSpeed || 0,
+      uploadSpeed || 0,
+      downloadPeak || 0,
+      uploadPeak || 0
+    );
+    if (val > 5000) return 10000;
+    if (val > 2500) return 5000;
     if (val > 1000) return 2500;
     if (val > 500) return 1000;
     if (val > 100) return 500;
     return 100;
-  }, [currentSpeed, downloadSpeed, uploadSpeed]);
+  }, [scaleMode, currentSpeed, downloadSpeed, uploadSpeed, downloadPeak, uploadPeak]);
 
-  // Calculate needle angle (-135deg to +135deg -> 270deg total sweep)
-  const gaugeAngle = useMemo(() => {
-    const pct = Math.min(1, Math.max(0, currentSpeed / gaugeMax));
-    return -135 + pct * 270;
-  }, [currentSpeed, gaugeMax]);
 
   // Performance Rating Badges
   const performanceBadges = useMemo(() => {
@@ -580,7 +612,7 @@ export default function SpeedTestDashboard({ connId, onInspectTerminal }: SpeedT
       {/* Main Gauge & Metrics Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
         {/* Speedometer Radial Gauge Card (5 cols) */}
-        <div className="lg:col-span-5 bg-[#14141e]/90 border border-white/[0.08] rounded-3xl p-6 flex flex-col items-center justify-center relative shadow-2xl overflow-hidden min-h-[340px]">
+        <div className="lg:col-span-5 bg-[#14141e]/90 border border-white/[0.08] rounded-3xl p-6 flex flex-col items-center justify-between relative shadow-2xl overflow-hidden min-h-[350px]">
           {/* Subtle Ambient Glow */}
           <div 
             className={`absolute w-72 h-72 rounded-full blur-[100px] pointer-events-none transition-all duration-700 opacity-20 ${
@@ -594,101 +626,162 @@ export default function SpeedTestDashboard({ connId, onInspectTerminal }: SpeedT
             }`} 
           />
 
-          {/* SVG Gauge */}
-          <div className="relative w-64 h-56 flex items-center justify-center">
-            <svg viewBox="0 0 240 200" className="w-full h-full overflow-visible">
-              <defs>
-                <linearGradient id="gaugeTrackGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                  <stop offset="0%" stopColor="#3b82f6" />
-                  <stop offset="50%" stopColor="#10b981" />
-                  <stop offset="100%" stopColor="#8b5cf6" />
-                </linearGradient>
-                <filter id="needleGlow" x="-20%" y="-20%" width="140%" height="140%">
-                  <feGaussianBlur stdDeviation="4" result="blur" />
-                  <feComposite in="SourceGraphic" in2="blur" operator="over" />
-                </filter>
-              </defs>
+          {/* Header with Scale Selector */}
+          <div className="w-full flex items-center justify-between z-10 mb-1">
+            <span className="text-xs font-bold uppercase tracking-wider text-gray-400">
+              Live Throughput
+            </span>
+            <div className="flex items-center space-x-1 bg-black/40 border border-white/10 rounded-lg p-0.5 text-[10px] font-mono">
+              {(['auto', '100', '1000', '10000'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setScaleMode(mode)}
+                  className={`px-1.5 py-0.5 rounded transition-colors ${
+                    scaleMode === mode
+                      ? 'bg-blue-600 text-white font-bold'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                  title={mode === 'auto' ? 'Auto-adaptive scale' : `Max ${mode} Mbps`}
+                >
+                  {mode === 'auto' ? 'Auto' : mode === '100' ? '100M' : mode === '1000' ? '1G' : '10G'}
+                </button>
+              ))}
+            </div>
+          </div>
 
-              {/* Background Arc: 270 degrees sweep from -135deg to +135deg */}
-              <circle
-                cx="120"
-                cy="120"
-                r="85"
-                fill="none"
-                stroke="rgba(255,255,255,0.08)"
-                strokeWidth="14"
-                strokeLinecap="round"
-                strokeDasharray="400"
-                strokeDashoffset="100"
-                transform="rotate(135 120 120)"
-              />
+          {/* SVG Radial Gauge */}
+          <div className="relative w-full max-w-[280px] h-[210px] flex items-center justify-center">
+            {(() => {
+              const cx = 140;
+              const cy = 122;
+              const r = 90;
+              const startAngle = 145;
+              const totalSweep = 250;
+              const endAngle = startAngle + totalSweep;
+              const displayVal = currentSpeed > 0 
+                ? currentSpeed 
+                : (phase === 'completed' ? (downloadSpeed || 0) : 0);
+              const pct = Math.min(1, Math.max(0, displayVal / gaugeMax));
+              const currentAngle = startAngle + pct * totalSweep;
+              const bead = polarToCartesian(cx, cy, r, currentAngle);
 
-              {/* Active Colored Arc */}
-              <circle
-                cx="120"
-                cy="120"
-                r="85"
-                fill="none"
-                stroke="url(#gaugeTrackGrad)"
-                strokeWidth="14"
-                strokeLinecap="round"
-                strokeDasharray="400"
-                strokeDashoffset={400 - (Math.min(1, currentSpeed / gaugeMax) * 300)}
-                transform="rotate(135 120 120)"
-                className="transition-all duration-300 ease-out"
-              />
+              return (
+                <svg viewBox="0 0 280 220" className="w-full h-full overflow-visible select-none">
+                  <defs>
+                    <linearGradient id="gaugeSpeedGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+                      <stop offset="0%" stopColor="#3b82f6" />
+                      <stop offset="40%" stopColor="#6366f1" />
+                      <stop offset="70%" stopColor="#8b5cf6" />
+                      <stop offset="100%" stopColor="#a855f7" />
+                    </linearGradient>
+                    <filter id="gaugeGlow" x="-20%" y="-20%" width="140%" height="140%">
+                      <feGaussianBlur stdDeviation="5" result="blur" />
+                      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                    </filter>
+                  </defs>
 
-              {/* Ticks & Labels */}
-              {[0, 0.25, 0.5, 0.75, 1].map((pct, i) => {
-                const angle = -135 + pct * 270;
-                const rad = (angle * Math.PI) / 180;
-                const x1 = 120 + 72 * Math.cos(rad);
-                const y1 = 120 + 72 * Math.sin(rad);
-                const x2 = 120 + 64 * Math.cos(rad);
-                const y2 = 120 + 64 * Math.sin(rad);
-                const val = Math.round(pct * gaugeMax);
-                return (
-                  <g key={i}>
-                    <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="rgba(255,255,255,0.25)" strokeWidth="2" />
+                  {/* Background Track (250 deg sweep) */}
+                  <path
+                    d={describeArc(cx, cy, r, startAngle, endAngle)}
+                    fill="none"
+                    stroke="rgba(255,255,255,0.08)"
+                    strokeWidth="12"
+                    strokeLinecap="round"
+                  />
+
+                  {/* Active Gradient Speed Arc */}
+                  {pct > 0.005 && (
+                    <path
+                      d={describeArc(cx, cy, r, startAngle, currentAngle)}
+                      fill="none"
+                      stroke="url(#gaugeSpeedGrad)"
+                      strokeWidth="12"
+                      strokeLinecap="round"
+                      filter="url(#gaugeGlow)"
+                      className="transition-all duration-300 ease-out"
+                    />
+                  )}
+
+                  {/* Ticks & Labels */}
+                  {[0, 0.25, 0.5, 0.75, 1].map((p, i) => {
+                    const angle = startAngle + p * totalSweep;
+                    const pIn = polarToCartesian(cx, cy, 79, angle);
+                    const pOut = polarToCartesian(cx, cy, 84, angle);
+                    const pTxt = polarToCartesian(cx, cy, 68, angle);
+                    const tickVal = p * gaugeMax;
+
+                    return (
+                      <g key={i}>
+                        <line
+                          x1={pIn.x}
+                          y1={pIn.y}
+                          x2={pOut.x}
+                          y2={pOut.y}
+                          stroke="rgba(255,255,255,0.25)"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                        />
+                        <text
+                          x={pTxt.x}
+                          y={pTxt.y + 3.5}
+                          textAnchor="middle"
+                          fill="rgba(255,255,255,0.5)"
+                          fontSize="9.5"
+                          fontFamily="monospace"
+                          fontWeight="600"
+                        >
+                          {formatTick(tickVal)}
+                        </text>
+                      </g>
+                    );
+                  })}
+
+                  {/* Glowing Leading Bead Indicator */}
+                  {pct > 0.005 && (
+                    <g className="transition-all duration-300 ease-out">
+                      <circle cx={bead.x} cy={bead.y} r="8" fill="#60a5fa" opacity="0.4" filter="url(#gaugeGlow)" />
+                      <circle cx={bead.x} cy={bead.y} r="5" fill="#ffffff" stroke="#3b82f6" strokeWidth="2" />
+                    </g>
+                  )}
+
+                  {/* Center Speed Value (Clean, Crisp, NO Needle Hub Covering Number) */}
+                  <g>
                     <text
-                      x={120 + 52 * Math.cos(rad)}
-                      y={120 + 52 * Math.sin(rad) + 4}
-                      fill="rgba(255,255,255,0.4)"
-                      fontSize="9"
-                      fontFamily="monospace"
+                      x={cx}
+                      y={cy - 2}
                       textAnchor="middle"
+                      className="font-mono font-black text-4xl fill-white tracking-tight"
+                      style={{ filter: 'drop-shadow(0px 2px 8px rgba(0,0,0,0.8))' }}
                     >
-                      {val}
+                      {displayVal.toFixed(1)}
+                    </text>
+                    <text
+                      x={cx}
+                      y={cy + 19}
+                      textAnchor="middle"
+                      className="font-mono font-bold text-xs uppercase tracking-widest fill-blue-400"
+                    >
+                      MBPS
+                    </text>
+                    <text
+                      x={cx}
+                      y={cy + 37}
+                      textAnchor="middle"
+                      className="text-[10px] font-sans font-medium fill-gray-400"
+                    >
+                      {phase === 'download' 
+                        ? 'Testing Download...' 
+                        : phase === 'upload' 
+                        ? 'Testing Upload...' 
+                        : phase === 'completed' 
+                        ? `Peak ${Math.max(downloadPeak || 0, uploadPeak || 0).toFixed(1)} Mbps` 
+                        : 'Ready to Test'}
                     </text>
                   </g>
-                );
-              })}
-
-              {/* Center Needle */}
-              <g transform={`rotate(${gaugeAngle} 120 120)`} className="transition-transform duration-300 ease-out">
-                <line
-                  x1="120"
-                  y1="120"
-                  x2="120"
-                  y2="45"
-                  stroke="#60a5fa"
-                  strokeWidth="3.5"
-                  strokeLinecap="round"
-                  filter="url(#needleGlow)"
-                />
-                <circle cx="120" cy="120" r="8" fill="#3b82f6" stroke="#ffffff" strokeWidth="2" />
-              </g>
-            </svg>
-
-            {/* Numeric Speed Display in Center */}
-            <div className="absolute top-28 flex flex-col items-center pointer-events-none">
-              <span className="text-4xl font-black font-mono tracking-tight text-white drop-shadow-md">
-                {currentSpeed > 0 ? currentSpeed.toFixed(1) : (phase === 'completed' ? (downloadSpeed || 0).toFixed(1) : '0.0')}
-              </span>
-              <span className="text-xs font-bold uppercase tracking-wider text-blue-400">
-                Mbps
-              </span>
-            </div>
+                </svg>
+              );
+            })()}
           </div>
 
           {/* Live Status Pill */}

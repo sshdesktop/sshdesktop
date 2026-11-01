@@ -6,12 +6,12 @@ export interface BrowserTab {
   id: string;
   url: string;
   displayUrl: string;
-  iframeSrc?: string;
   tunnelPort?: number;
   socks5Port?: number;
   isTunneled?: boolean;
   networkMode: NetworkMode;
   userBrowserMode?: 'external' | 'embedded' | 'native';
+  viewMode?: 'interactive' | 'telemetry';
   nativeWindowId?: string;
   devToolsOpen?: boolean;
   activeDevToolsPanel?: DevToolsPanel;
@@ -32,6 +32,7 @@ export interface BrowserTab {
   error?: string | null;
   serverHost?: string;
   bytesReceived?: number;
+  executedCommand?: string;
 }
 
 export interface DiscoveredWebService {
