@@ -154,7 +154,7 @@ export default function DesktopWidgets({
   return (
     <>
       {/* Desktop Widgets Container (Fixed on right side of Desktop canvas) */}
-      <div className="absolute top-12 right-6 z-10 flex flex-col space-y-4 pointer-events-none select-none max-w-xs w-72">
+      <div className="absolute top-12 right-6 z-[2] flex flex-col space-y-4 pointer-events-none select-none max-w-xs w-72">
         {/* 1. Sonoma Analog + Digital Clock Widget */}
         <div className={`desktop-widget pointer-events-auto rounded-3xl p-4 backdrop-blur-2xl border shadow-2xl transition-all duration-300 hover:scale-[1.01] ${
           isLight 

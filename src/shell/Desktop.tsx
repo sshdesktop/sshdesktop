@@ -789,7 +789,7 @@ export default function Desktop() {
       {/* Marquee Drag-Selection Rectangle */}
       {isSelecting && selectionBox && (
         <div 
-          className="fixed pointer-events-none z-30 bg-blue-500/20 border border-blue-400 rounded-sm"
+          className="fixed pointer-events-none z-[4] bg-blue-500/20 border border-blue-400 rounded-sm"
           style={{
             left: `${Math.min(selectionBox.startX, selectionBox.currentX)}px`,
             top: `${Math.min(selectionBox.startY, selectionBox.currentY)}px`,
