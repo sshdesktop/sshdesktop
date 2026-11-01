@@ -201,7 +201,7 @@ export default function SshSessionTerminal({
 
     const term = new XTerm({
       cursorBlink: true,
-      cursorStyle: 'bar',
+      cursorStyle: 'block',
       fontSize: terminalFontSize,
       fontFamily: 'JetBrains Mono, Menlo, Monaco, "Courier New", monospace',
       theme: THEMES[terminalTheme] || THEMES.catppuccin,
@@ -221,6 +221,81 @@ export default function SshSessionTerminal({
     try {
       fitAddon.fit();
     } catch {}
+    setTimeout(() => {
+      try {
+        fitAddon.fit();
+        if (term.cols && term.rows) {
+          terminalResize(session.terminalId, term.rows, term.cols).catch(() => {});
+        }
+      } catch {}
+    }, 50);
+
+    // Keyboard Key Event Handler: Arrow keys, Home, End, Delete
+    term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      // Home Key
+      if (e.key === 'Home' || (!e.getModifierState?.('NumLock') && e.code === 'Numpad7')) {
+        if (e.type === 'keydown') {
+          const seq = e.ctrlKey ? '\x1b[1;5H' : e.shiftKey ? '\x1b[1;2H' : '\x1b[1~';
+          terminalWrite(session.terminalId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // End Key
+      if (e.key === 'End' || (!e.getModifierState?.('NumLock') && e.code === 'Numpad1')) {
+        if (e.type === 'keydown') {
+          const seq = e.ctrlKey ? '\x1b[1;5F' : e.shiftKey ? '\x1b[1;2F' : '\x1b[4~';
+          terminalWrite(session.terminalId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // Left Arrow Key
+      if (e.key === 'ArrowLeft' || (!e.getModifierState?.('NumLock') && e.code === 'Numpad4')) {
+        if (e.type === 'keydown') {
+          const seq = e.altKey ? '\x1bb' : e.ctrlKey ? '\x1b[1;5D' : e.shiftKey ? '\x1b[1;2D' : '\x1b[D';
+          terminalWrite(session.terminalId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // Right Arrow Key
+      if (e.key === 'ArrowRight' || (!e.getModifierState?.('NumLock') && e.code === 'Numpad6')) {
+        if (e.type === 'keydown') {
+          const seq = e.altKey ? '\x1bf' : e.ctrlKey ? '\x1b[1;5C' : e.shiftKey ? '\x1b[1;2C' : '\x1b[C';
+          terminalWrite(session.terminalId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // Up Arrow Key
+      if (e.key === 'ArrowUp' || (!e.getModifierState?.('NumLock') && e.code === 'Numpad8')) {
+        if (e.type === 'keydown') {
+          const seq = e.ctrlKey ? '\x1b[1;5A' : e.shiftKey ? '\x1b[1;2A' : '\x1b[A';
+          terminalWrite(session.terminalId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // Down Arrow Key
+      if (e.key === 'ArrowDown' || (!e.getModifierState?.('NumLock') && e.code === 'Numpad2')) {
+        if (e.type === 'keydown') {
+          const seq = e.ctrlKey ? '\x1b[1;5B' : e.shiftKey ? '\x1b[1;2B' : '\x1b[B';
+          terminalWrite(session.terminalId, Array.from(new TextEncoder().encode(seq))).catch(() => {});
+        }
+        return false;
+      }
+
+      // Delete Key
+      if (e.key === 'Delete' || (!e.getModifierState?.('NumLock') && e.code === 'NumpadDecimal')) {
+        if (e.type === 'keydown') {
+          terminalWrite(session.terminalId, Array.from(new TextEncoder().encode('\x1b[3~'))).catch(() => {});
+        }
+        return false;
+      }
+
+      return true;
+    });
 
     // Send connection greeting & info banner
     term.writeln(`\x1b[1;36m┌──────────────────────────────────────────────────────────────┐\x1b[0m`);
@@ -229,9 +304,9 @@ export default function SshSessionTerminal({
     term.writeln(`\x1b[1;36m│\x1b[0m  Cipher: \x1b[35m${session.cipher || 'chacha20-poly1305@openssh.com'}\x1b[0m            \x1b[1;36m│\x1b[0m`);
     term.writeln(`\x1b[1;36m└──────────────────────────────────────────────────────────────┘\x1b[0m\r\n`);
 
-    // Create backend PTY
-    const cols = term.cols || 80;
-    const rows = term.rows || 24;
+    // Create backend PTY with measured dimensions
+    const cols = term.cols && term.cols > 10 ? term.cols : 80;
+    const rows = term.rows && term.rows > 5 ? term.rows : 24;
     terminalCreate(session.connId, rows, cols, session.terminalId).then(() => {
       if (isDisposedRef.current) return;
       term.writeln(`\x1b[32m✔ Authenticated & Interactive PTY Allocated (${cols}x${rows})\x1b[0m\r\n`);

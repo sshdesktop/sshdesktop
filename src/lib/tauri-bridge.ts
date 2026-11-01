@@ -156,6 +156,7 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
 
 // ----------------- Web Terminal WebSocket Session Cache -----------------
 const webTerminalSockets = new Map<string, WebSocket>();
+const lastKnownTerminalSizes = new Map<string, { rows: number; cols: number }>();
 
 function setupWebTerminalSocket(termId: string, connId: string, cols: number, rows: number) {
   if (typeof window === 'undefined') return;
@@ -164,7 +165,15 @@ function setupWebTerminalSocket(termId: string, connId: string, cols: number, ro
     const session = getStoredSession();
     const tokenParam = session?.token ? `&token=${encodeURIComponent(session.token)}` : '';
     const wsUrl = `${protocol}//${window.location.host}/ws/terminal?termId=${encodeURIComponent(termId)}&connId=${encodeURIComponent(connId)}&cols=${cols}&rows=${rows}${tokenParam}`;
+    lastKnownTerminalSizes.set(termId, { rows, cols });
     const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      const latest = lastKnownTerminalSizes.get(termId) || { rows, cols };
+      try {
+        ws.send(JSON.stringify({ type: 'resize', rows: latest.rows, cols: latest.cols }));
+      } catch {}
+    };
 
     ws.onmessage = (event) => {
       try {
@@ -277,6 +286,7 @@ export async function terminalWrite(terminalId: string, data: number[]): Promise
 }
 
 export async function terminalResize(terminalId: string, rows: number, cols: number): Promise<void> {
+  lastKnownTerminalSizes.set(terminalId, { rows, cols });
   if (!isTauri()) {
     const ws = webTerminalSockets.get(terminalId);
     if (ws && ws.readyState === WebSocket.OPEN) {

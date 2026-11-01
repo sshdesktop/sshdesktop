@@ -185,6 +185,7 @@ const MIME_TYPES = {
 const activeConnections = new Map(); // id -> { client, sftp, config, connectedAt }
 const activeTerminals = new Map();   // termId -> { stream, connId, buffer }
 const activeWsClients = new Map();   // termId -> WebSocket
+const pendingTerminalResizes = new Map(); // termId -> { rows, cols }
 
 // Helper: Safely resolve active SSH connection
 function getActiveEntry(connId) {
@@ -3190,9 +3191,16 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       }
 
       return new Promise((resolve, reject) => {
-        entry.client.shell({ term: 'xterm-256color', rows, cols }, (err, stream) => {
+        const pending = pendingTerminalResizes.get(termId);
+        const actualCols = pending?.cols || cols || 80;
+        const actualRows = pending?.rows || rows || 24;
+
+        entry.client.shell({ term: 'xterm-256color', rows: actualRows, cols: actualCols }, (err, stream) => {
           if (err) return reject(new Error(`Terminal spawn failed: ${err.message}`));
           activeTerminals.set(termId, { stream, connId, buffer: '' });
+          if (pending && typeof stream.setWindow === 'function') {
+            try { stream.setWindow(pending.rows, pending.cols, 0, 0); } catch {}
+          }
 
           stream.on('data', chunk => {
             const text = chunk.toString('utf8');
@@ -3228,9 +3236,14 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'terminal_resize': {
       const { terminalId, rows, cols } = args || {};
+      if (terminalId && rows && cols) {
+        pendingTerminalResizes.set(terminalId, { rows, cols });
+      }
       const session = activeTerminals.get(terminalId);
       if (session && session.stream && typeof session.stream.setWindow === 'function') {
-        session.stream.setWindow(rows || 24, cols || 80, 0, 0);
+        try {
+          session.stream.setWindow(rows || 24, cols || 80, 0, 0);
+        } catch {}
       }
       return undefined;
     }
@@ -4896,7 +4909,14 @@ function handleWsConnection(ws, req) {
     try {
       const parsed = JSON.parse(message.toString());
       if (parsed.type === 'resize') {
-        session.stream.setWindow(parsed.rows || 24, parsed.cols || 80, 0, 0);
+        const r = parsed.rows || 24;
+        const c = parsed.cols || 80;
+        pendingTerminalResizes.set(termId, { rows: r, cols: c });
+        if (session && session.stream && typeof session.stream.setWindow === 'function') {
+          try {
+            session.stream.setWindow(r, c, 0, 0);
+          } catch {}
+        }
         return;
       }
     } catch {}
