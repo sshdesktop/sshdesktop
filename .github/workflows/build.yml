@@ -4,13 +4,19 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   desktop:
@@ -62,19 +68,21 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build Tauri
+      - name: Build Tauri Desktop
         run: npm run tauri build
 
       - name: Collect Built Files Only
         shell: bash
         run: |
           mkdir -p build-output
-          # Collect all compiled desktop binaries and installers (no scripts, no source files)
-          find . -type f \( -name "ssh-desktop.exe" -o -name "ssh-desktop" -o -name "*.msi" -o -name "*.exe" -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.dmg" \) \
-            ! -path "*/node_modules/*" ! -path "*/.git/*" ! -path "*/build-output/*" \
-            ! -path "*/target/release/build/*" ! -path "*/target/release/deps/*" \
-            ! -path "*/src-tauri/target/release/build/*" ! -path "*/src-tauri/target/release/deps/*" \
-            -exec cp {} build-output/ \; 2>/dev/null || true
+          # Collect compiled desktop installers and binaries
+          for dir in src-tauri/target/release/bundle target/release/bundle src-tauri/target/release target/release; do
+            if [ -d "$dir" ]; then
+              find "$dir" -maxdepth 3 -type f \( -name "*.msi" -o -name "*.exe" -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.dmg" -o -name "ssh-desktop" \) \
+                ! -path "*/build/*" ! -path "*/deps/*" ! -path "*/incremental/*" \
+                -exec cp {} build-output/ \; 2>/dev/null || true
+            fi
+          done
           echo "=== Built Files Collected ==="
           ls -la build-output/
 
@@ -86,7 +94,7 @@ jobs:
           if-no-files-found: warn
 
   linux-standalone-binary:
-    name: Build Standalone Linux Executable Binary
+    name: Standalone Linux Server Binary (Node SEA)
     runs-on: ubuntu-22.04
 
     steps:
@@ -108,22 +116,66 @@ jobs:
       - name: Prepare Single Executable Application (SEA) Blob
         run: npm run build:sea-prep
 
-      - name: Build Standalone Linux Binary Executable
+      - name: Build Standalone Linux Server Executable
         shell: bash
         run: |
           set -euo pipefail
           
           # Inject SEA blob into Node runtime to create 100% self-contained standalone binary
-          cp $(command -v node) sshdesktop-linux-x64
-          npx --yes postject sshdesktop-linux-x64 NODE_SEA_BLOB dist-server/sea-prep.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
-          chmod +x sshdesktop-linux-x64
+          cp $(command -v node) sshdesktop-server-linux-x64
+          npx --yes postject sshdesktop-server-linux-x64 NODE_SEA_BLOB dist-server/sea-prep.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+          chmod +x sshdesktop-server-linux-x64
 
           # Test binary execution help / verification
-          ./sshdesktop-linux-x64 --version || true
+          ./sshdesktop-server-linux-x64 --version || true
 
-      - name: Upload Standalone Linux Binary (Direct Built File Only)
+      - name: Upload Standalone Linux Server Binary
         uses: actions/upload-artifact@v4
         with:
-          name: sshdesktop-linux-x64
-          path: sshdesktop-linux-x64
+          name: sshdesktop-server-linux-x64
+          path: sshdesktop-server-linux-x64
           if-no-files-found: error
+
+  release:
+    name: Publish Official GitHub Release
+    needs: [desktop, linux-standalone-binary]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+
+      - name: Prepare and flatten release assets
+        shell: bash
+        run: |
+          mkdir -p release-files
+          # Move all binaries and installers to release-files
+          find all-artifacts -type f \( -name "*.msi" -o -name "*.exe" -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.dmg" -o -name "sshdesktop-server-linux-x64" -o -name "ssh-desktop" \) \
+            -exec cp {} release-files/ \;
+          
+          cd release-files
+          # Generate SHA256 checksums for all release files
+          sha256sum * > SHA256SUMS.txt
+          echo "=== Release Files Ready for Publishing ==="
+          ls -la
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-files/*
+          name: "SSH Desktop ${{ github.ref_name }}"
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

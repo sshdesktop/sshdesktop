@@ -5,15 +5,15 @@ import {
 } from 'lucide-react';
 import SshDesktopLogo from '../components/SshDesktopLogo';
 import { 
-  authGetStatus, authLogin, authChangeCredentials, AuthStatusResponse 
+  authGetStatus, authLogin, authChangeCredentials, AuthStatusResponse,
+  AUTH_STORAGE_KEY, LEGACY_AUTH_STORAGE_KEY
 } from '../lib/tauri-bridge';
 
 interface WebAuthGateProps {
   onAuthenticated: () => void;
 }
 
-const AUTH_STORAGE_KEY = 'sshdesktop_web_auth_session';
-const LEGACY_AUTH_STORAGE_KEY = 'clouddesk_web_auth_session';
+// Shared storage keys imported from tauri-bridge
 
 export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
   const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
@@ -34,6 +34,8 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
   const [changeSuccess, setChangeSuccess] = useState(false);
   const [isChanging, setIsChanging] = useState(false);
 
+  const [sessionExpiredNotice, setSessionExpiredNotice] = useState(false);
+
   useEffect(() => {
     let mounted = true;
     authGetStatus()
@@ -44,10 +46,24 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
           onAuthenticated();
         } else if (status.is_authenticated && status.must_change_password) {
           setShowChangeModal(true);
+        } else if (status.session_expired) {
+          setSessionExpiredNotice(true);
         }
       })
       .catch((err) => console.warn('Web auth status init notice:', err));
-    return () => { mounted = false; };
+
+    const handleSessionExpired = (e: any) => {
+      if (!mounted) return;
+      setError(e?.detail?.reason || 'Your session has expired (1 hour limit). Please sign in again.');
+      setSessionExpiredNotice(true);
+    };
+
+    window.addEventListener('sshdesktop-session-expired', handleSessionExpired);
+
+    return () => { 
+      mounted = false; 
+      window.removeEventListener('sshdesktop-session-expired', handleSessionExpired);
+    };
   }, [onAuthenticated]);
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -58,10 +74,12 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
     try {
       const res = await authLogin(username.trim(), password);
       if (res.success) {
+        const expiresAt = res.expires_at || (Date.now() + 60 * 60 * 1000);
         const payload = JSON.stringify({
           username: res.username,
-          token: 'ssh_token_' + Date.now(),
-          loginAt: Date.now()
+          token: res.token || ('ssh_token_' + Date.now()),
+          loginAt: Date.now(),
+          expiresAt
         });
         if (rememberMe) {
           localStorage.setItem(AUTH_STORAGE_KEY, payload);
@@ -94,7 +112,8 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
         const payload = JSON.stringify({
           username: inputUser,
           token: 'ssh_token_' + Date.now(),
-          loginAt: Date.now()
+          loginAt: Date.now(),
+          expiresAt: Date.now() + 60 * 60 * 1000
         });
         if (rememberMe) {
           localStorage.setItem(AUTH_STORAGE_KEY, payload);
@@ -193,16 +212,37 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
           </p>
         </div>
 
-        {/* Server File Location Badge */}
-        <div className="flex items-center space-x-2 px-3 py-2 rounded-xl bg-white/[0.04] border border-white/10 text-[11px] text-gray-300 font-mono">
-          <HardDrive className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-          <span className="truncate" title={`Stored on server: ${authStatus?.storage_path || '/etc/sshdesktop/auth.json'}`}>
-            {authStatus?.storage_path || '/etc/sshdesktop/auth.json'}
-          </span>
-          <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-400/30 shrink-0">
-            chmod 600
-          </span>
+        {/* Safe Storage & 1-Hour Session Badges */}
+        <div className="space-y-2">
+          <div className="flex items-center space-x-2 px-3 py-2 rounded-xl bg-white/[0.04] border border-white/10 text-[11px] text-gray-300 font-mono">
+            <HardDrive className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+            <span className="truncate" title={`Safe Storage: ${authStatus?.storage_path || 'Owner-Only Local Storage'}`}>
+              {authStatus?.storage_path ? `${authStatus.storage_path}` : 'Protected Local Storage'}
+            </span>
+            <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-400/30 shrink-0">
+              0700 safe
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-[11px] text-indigo-300">
+            <div className="flex items-center space-x-1.5">
+              <ShieldCheck className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+              <span>Web Session Expiration</span>
+            </div>
+            <span className="font-mono text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-200 border border-indigo-400/30">
+              1 Hour Limit
+            </span>
+          </div>
         </div>
+
+        {sessionExpiredNotice && (
+          <div className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200 text-xs flex items-start space-x-2.5 animate-in fade-in">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="leading-relaxed">
+              <strong>Session Expired:</strong> Your 1-hour web desktop session has expired for security. Please sign in again.
+            </div>
+          </div>
+        )}
 
         {/* Default Notice */}
         <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-400/20 text-xs text-blue-200 flex items-start space-x-2.5">
@@ -416,9 +456,20 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
 
 export function isWebAuthenticated(): boolean {
   try {
-    const s1 = sessionStorage.getItem(AUTH_STORAGE_KEY) || sessionStorage.getItem(LEGACY_AUTH_STORAGE_KEY);
-    const s2 = localStorage.getItem(AUTH_STORAGE_KEY) || localStorage.getItem(LEGACY_AUTH_STORAGE_KEY);
-    return Boolean(s1 || s2);
+    const raw = sessionStorage.getItem(AUTH_STORAGE_KEY) || 
+                localStorage.getItem(AUTH_STORAGE_KEY) ||
+                sessionStorage.getItem(LEGACY_AUTH_STORAGE_KEY) || 
+                localStorage.getItem(LEGACY_AUTH_STORAGE_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.expiresAt && Date.now() >= parsed.expiresAt) {
+      sessionStorage.removeItem(AUTH_STORAGE_KEY);
+      localStorage.removeItem(AUTH_STORAGE_KEY);
+      sessionStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
+      localStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
+      return false;
+    }
+    return Boolean(parsed.token || parsed.username);
   } catch {
     return false;
   }

@@ -160,10 +160,12 @@ export const useConnectionStore = create<ConnectionState>()(
           set({ activeConnectionId: null, userPrivilege: null });
           return;
         }
+        const target = get().connections.find(c => c.id === id);
         const cachedPriv = get().userPrivileges[id] || null;
+        const validPriv = (cachedPriv && target && cachedPriv.username === target.username) ? cachedPriv : null;
         set({
           activeConnectionId: id,
-          userPrivilege: cachedPriv,
+          userPrivilege: validPriv,
           isDisconnected: false,
           disconnectReason: null,
           disconnectedServerId: null,
@@ -211,12 +213,12 @@ export const useConnectionStore = create<ConnectionState>()(
           throw new Error('Server IP or hostname is required');
         }
 
-        const effectiveAuth = target.authMethod || target.auth_method || (target.privateKeyPath || target.private_key_path ? 'key' : 'password');
-        const effectiveKey = target.privateKeyPath || target.private_key_path;
+                const effectiveAuth = target.authMethod || target.auth_method || (target.privateKeyPath || target.private_key_path ? 'key' : 'password');
+        const effectiveKey = effectiveAuth === 'key' ? (target.privateKeyPath || target.private_key_path) : undefined;
 
         if (effectiveAuth === 'key') {
           if (!effectiveKey || String(effectiveKey).trim().length === 0) {
-            throw new Error(`Missing SSH Private Key: Profile "${target.name || target.host}" is set to SSH Key authentication, but no private key file was found. Please re-upload or select your key file.`);
+            throw new Error(`Missing SSH Private Key: Profile "${target.name || target.host}" is set to SSH Key authentication, but no private key file was found. Please select or upload your .pem key.`);
           }
         }
 
@@ -228,7 +230,10 @@ export const useConnectionStore = create<ConnectionState>()(
           port: Number(target.port) || 22,
           username: target.username,
           password: target.password,
-          private_key_path: target.privateKeyPath || target.private_key_path,
+          private_key_path: effectiveAuth === 'key' ? effectiveKey : undefined,
+          private_key: effectiveAuth === 'key' ? (target.private_key || effectiveKey) : undefined,
+          auth_method: effectiveAuth,
+          auth_type: effectiveAuth,
           color: target.color,
           group: target.group,
           tags: target.tags || [],
@@ -254,6 +259,12 @@ export const useConnectionStore = create<ConnectionState>()(
         // Only mark connected when backend verification succeeds
         const newMap = new Map(get().connectedServers);
         newMap.set(id, { id, name: target.name || target.host, host: target.host, status: 'connected' });
+
+        // Invalidate stale user privilege cache for this server id
+        set(state => ({
+          userPrivileges: { ...state.userPrivileges, [id]: undefined as any },
+          userPrivilege: state.activeConnectionId === id ? null : state.userPrivilege,
+        }));
 
         // Resolve user privilege immediately for this specific server
         const priv = await get().fetchUserPrivilege(id).catch(() => null);
