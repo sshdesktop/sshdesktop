@@ -47,9 +47,10 @@ Usage: sshdesktop [options]
 Options:
   -v, --version         Show version number (${VERSION})
   -h, --help            Show this help manual
+  --host <host>         Frontend bind address (default: 0.0.0.0)
+  --backend-host <host> Backend bind address (default: 127.0.0.1)
   --port <port>         Frontend web desktop port (default: 2222)
-  --backend-port <port> Backend SSH2 API port (default: 2020)
-  --host <host>         Bind host address (default: 0.0.0.0)
+  --backend-port <port> Backend API port (default: 2020)
   --data-dir <path>     Directory for secure local storage
 `);
   process.exit(0);
@@ -64,10 +65,23 @@ function getCliArg(flag) {
   return null;
 }
 
-// Port Configuration per requirements: Frontend on 2222, Backend on 2020
-const FRONTEND_PORT = parseInt(getCliArg('--port') || process.env.FRONTEND_PORT || process.env.PORT || '2222', 10);
-const BACKEND_PORT = parseInt(getCliArg('--backend-port') || process.env.BACKEND_PORT || '2020', 10);
+// Port Configuration: Frontend on 2222 (public/bind), Backend on 2020 (localhost private)
+const FRONTEND_PORT = parseInt(
+  getCliArg('--port') || process.env.FRONTEND_PORT || process.env.PORT || '2222',
+  10
+);
+
+const BACKEND_PORT = parseInt(
+  getCliArg('--backend-port') || process.env.BACKEND_PORT || '2020',
+  10
+);
+
 const HOST = getCliArg('--host') || process.env.HOST || '0.0.0.0';
+
+const BACKEND_HOST =
+  getCliArg('--backend-host') ||
+  process.env.BACKEND_HOST ||
+  '127.0.0.1';
 
 // Locate dist directory (supports raw development, external override, and packaged binary layouts)
 let DIST_DIR = path.join(currentDir, 'dist');
@@ -141,15 +155,10 @@ const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const KEYS_DIR = path.join(DATA_DIR, 'keys');
 try {
-  if (fs.existsSync(KEYS_DIR)) {
-    // Purge any stored private keys on disk - User keys must be strictly in-memory only
-    const staleFiles = fs.readdirSync(KEYS_DIR);
-    for (const sf of staleFiles) {
-      if (sf.endsWith('.pem') || sf.endsWith('.ppk') || sf.endsWith('.key')) {
-        try { fs.unlinkSync(path.join(KEYS_DIR, sf)); } catch {}
-      }
-    }
+  if (!fs.existsSync(KEYS_DIR)) {
+    fs.mkdirSync(KEYS_DIR, { recursive: true, mode: 0o700 });
   }
+  try { fs.chmodSync(KEYS_DIR, 0o700); } catch {}
 } catch {}
 
 // MIME types dictionary
@@ -216,6 +225,108 @@ function writeJsonSafe(filePath, data) {
     return false;
   }
 }
+
+// -------------------------------------------------------------
+// Secure First-Run Authentication
+// -------------------------------------------------------------
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+
+  return {
+    password_salt: salt,
+    password_hash: hash
+  };
+}
+
+function verifyPassword(auth, password) {
+  if (typeof password !== 'string' || !password) {
+    return false;
+  }
+
+  // New password format: scrypt hash.
+  if (auth.password_hash && auth.password_salt) {
+    const calculated = crypto.scryptSync(
+      password,
+      auth.password_salt,
+      64
+    );
+
+    const stored = Buffer.from(auth.password_hash, 'hex');
+
+    return stored.length === calculated.length &&
+      crypto.timingSafeEqual(stored, calculated);
+  }
+
+  // Legacy password migration support.
+  if (typeof auth.password === 'string') {
+    return crypto.timingSafeEqual(
+      Buffer.from(password),
+      Buffer.from(auth.password)
+    );
+  }
+
+  return false;
+}
+
+function initializeAuthentication() {
+  let auth = readJsonSafe(AUTH_FILE, null);
+
+  const isValidHashedAuth =
+    auth &&
+    auth.username &&
+    auth.password_hash &&
+    auth.password_salt;
+
+  if (isValidHashedAuth) {
+    return;
+  }
+
+  let initialPassword;
+
+  if (auth && auth.username && auth.password &&
+      auth.password !== 'sshdesktop') {
+    // Preserve an existing custom password while migrating it.
+    initialPassword = auth.password;
+  } else {
+    // Generate a new random password for a fresh installation,
+    // or rotate the old insecure default password.
+    initialPassword = crypto.randomBytes(24).toString('base64url');
+  }
+
+  const username = auth?.username || 'admin';
+
+  const hashed = hashPassword(initialPassword);
+
+  const newAuth = {
+    username,
+    ...hashed,
+    must_change_password: true
+  };
+
+  if (!writeJsonSafe(AUTH_FILE, newAuth)) {
+    throw new Error('Unable to initialize SSH Desktop authentication.');
+  }
+
+  const credentialsFile = path.join(
+    DATA_DIR,
+    'initial-admin-credentials.txt'
+  );
+
+  fs.writeFileSync(
+    credentialsFile,
+    `SSH Desktop Initial Login\nUsername: ${username}\nPassword: ${initialPassword}\nChange this password immediately after login.\n`,
+    { encoding: 'utf8', mode: 0o600 }
+  );
+
+  fs.chmodSync(credentialsFile, 0o600);
+
+  console.log(
+    `[SSH Desktop] Initial credentials saved to: ${credentialsFile}`
+  );
+}
+
+initializeAuthentication();
 
 // -------------------------------------------------------------
 // 1-Hour Session Management Engine (Website Security)
@@ -684,8 +795,44 @@ function startSocks5Proxy(sshClient, preferredPort = 1080) {
 }
 
 // ==========================================
-// SSH Client Configuration Helper
+// SSH Client Configuration & Key Helper
 // ==========================================
+function ensureKeyFile(connId, keyInput) {
+  if (!keyInput || typeof keyInput !== 'string') return null;
+  const trimmed = keyInput.trim();
+  if (!trimmed) return null;
+
+  // 1. If it's already an existing file on disk, return its path
+  if (fs.existsSync(trimmed)) {
+    try { fs.chmodSync(trimmed, 0o600); } catch {}
+    return trimmed;
+  }
+
+  // 2. If it is raw key content (PEM or PPK string)
+  if (trimmed.includes('PRIVATE KEY') || trimmed.includes('PuTTY-User-Key-File') || trimmed.includes('\n')) {
+    try {
+      if (!fs.existsSync(KEYS_DIR)) {
+        fs.mkdirSync(KEYS_DIR, { recursive: true, mode: 0o700 });
+      }
+      try { fs.chmodSync(KEYS_DIR, 0o700); } catch {}
+
+      const isPpk = trimmed.includes('PuTTY-User-Key-File');
+      const ext = isPpk ? 'ppk' : 'pem';
+      const safeId = String(connId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const targetFile = path.join(KEYS_DIR, `${safeId}.${ext}`);
+
+      fs.writeFileSync(targetFile, trimmed, { encoding: 'utf8', mode: 0o600 });
+      try { fs.chmodSync(targetFile, 0o600); } catch {}
+      return targetFile;
+    } catch (err) {
+      console.warn(`[SSH Desktop] Failed to save key file for ${connId}:`, err.message);
+      return null;
+    }
+  }
+
+  return null;
+}
+
 function buildSshClientConfig(config, targetId) {
   const host = String(config.host || '').trim();
   const port = parseInt(config.port || 22, 10);
@@ -746,26 +893,31 @@ function buildSshClientConfig(config, targetId) {
 
   const rawAuth = String(config.auth_method || config.authMethod || config.auth_type || '').toLowerCase().trim();
   const rawKey = config.private_key || config.private_key_path || config.privateKeyPath || config.key_path || config.keyPath;
+  const trimmedKey = typeof rawKey === 'string' ? rawKey.trim() : '';
 
-  const isPassword = rawAuth === 'password' || (!rawAuth && config.password && (!rawKey || !String(rawKey).includes('PRIVATE KEY')));
+  const hasKey = Boolean(
+    trimmedKey &&
+    (fs.existsSync(trimmedKey) || trimmedKey.includes('PRIVATE KEY') || trimmedKey.includes('\n') || trimmedKey.endsWith('.pem') || trimmedKey.endsWith('.ppk'))
+  );
+
+  const isPassword = rawAuth === 'password' || (!rawAuth && config.password && !hasKey);
 
   if (isPassword) {
     // STRICT PASSWORD AUTHENTICATION: Never attach privateKey
     connectConfig.password = String(config.password || '');
     connectConfig.tryKeyboard = true;
   } else {
-    // STRICT KEY AUTHENTICATION (PEM Only, In-Memory)
-    if (rawKey && typeof rawKey === 'string' && rawKey.trim()) {
-      const trimmed = rawKey.trim();
-      if (trimmed.includes('PRIVATE KEY') || trimmed.includes('\n')) {
-        // Pure in-memory PEM string - DO NOT write to disk
-        connectConfig.privateKey = Buffer.from(trimmed, 'utf8');
-      } else if (fs.existsSync(trimmed)) {
-        // Existing local file on disk (native desktop mode)
+    // STRICT KEY AUTHENTICATION (PEM/PPK: In-Memory string or On-Disk file)
+    if (trimmedKey) {
+      if (trimmedKey.includes('PRIVATE KEY') || trimmedKey.includes('\n')) {
+        // In-memory PEM string
+        connectConfig.privateKey = Buffer.from(trimmedKey, 'utf8');
+      } else if (fs.existsSync(trimmedKey)) {
+        // Saved key file on disk
         try {
-          connectConfig.privateKey = fs.readFileSync(trimmed);
+          connectConfig.privateKey = fs.readFileSync(trimmedKey);
         } catch (e) {
-          console.warn(`[SSH Desktop] Failed to read private key from ${trimmed}:`, e.message);
+          console.warn(`[SSH Desktop] Failed to read private key from ${trimmedKey}:`, e.message);
         }
       }
     }
@@ -793,17 +945,15 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
     case 'auth_get_status': {
       const token = extractSessionToken(null, { args });
       const session = currentSession || (token ? getSession(token) : null);
-      const auth = readJsonSafe(AUTH_FILE, {
-        username: 'admin',
-        must_change_password: false
-      });
-      const isAuthenticated = Boolean(session);
-      const expiresIn = session ? Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000)) : 0;
+      const auth = readJsonSafe(AUTH_FILE, {});
+
       return {
         is_configured: true,
-        is_authenticated: isAuthenticated,
-        session_expired: !isAuthenticated && Boolean(token),
-        expires_in_seconds: expiresIn,
+        is_authenticated: Boolean(session),
+        session_expired: !session && Boolean(token),
+        expires_in_seconds: session
+          ? Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000))
+          : 0,
         session_duration_seconds: Math.floor(SESSION_TTL_MS / 1000),
         must_change_password: !!auth.must_change_password,
         username: session ? session.username : (auth.username || 'admin'),
@@ -813,37 +963,104 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
 
     case 'auth_login': {
       const { username, password } = args || {};
-      const auth = readJsonSafe(AUTH_FILE, { username: 'admin', password: 'sshdesktop' });
-      const validUser = (auth.username || 'admin').trim().toLowerCase();
-      const inputUser = (username || '').trim().toLowerCase();
-      const validPass = auth.password || 'sshdesktop';
+      const auth = readJsonSafe(AUTH_FILE, {});
 
-      if (inputUser === validUser && password === validPass) {
-        const session = createSession(auth.username || 'admin');
+      const validUser = String(auth.username || '')
+        .trim()
+        .toLowerCase();
+
+      const inputUser = String(username || '')
+        .trim()
+        .toLowerCase();
+
+      if (
+        inputUser === validUser &&
+        verifyPassword(auth, password)
+      ) {
+        const session = createSession(auth.username);
+
         return {
           success: true,
           token: session.token,
           expires_at: session.expiresAt,
           expires_in_seconds: Math.floor(SESSION_TTL_MS / 1000),
           must_change_password: !!auth.must_change_password,
-          username: auth.username || 'admin'
+          username: auth.username
         };
       }
-      return { success: false, must_change_password: false, username, message: 'Invalid username or password.' };
+
+      return {
+        success: false,
+        must_change_password: false,
+        username,
+        message: 'Invalid username or password.'
+      };
     }
 
     case 'auth_change_credentials': {
       const { currentPassword, newUsername, newPassword } = args || {};
-      const auth = readJsonSafe(AUTH_FILE, { username: 'admin', password: 'sshdesktop' });
-      const validPass = auth.password || 'sshdesktop';
-      if (currentPassword !== validPass) {
-        return { success: false, must_change_password: true, username: newUsername, message: 'Current password incorrect.' };
+
+      const auth = readJsonSafe(AUTH_FILE, {});
+
+      if (!verifyPassword(auth, currentPassword)) {
+        return {
+          success: false,
+          message: 'Current password incorrect.'
+        };
       }
-      auth.username = newUsername || 'admin';
-      auth.password = newPassword;
+
+      if (
+        typeof newPassword !== 'string' ||
+        newPassword.length < 12
+      ) {
+        return {
+          success: false,
+          message: 'New password must contain at least 12 characters.'
+        };
+      }
+
+      const username = String(newUsername || '').trim();
+
+      if (!username) {
+        return {
+          success: false,
+          message: 'Username cannot be empty.'
+        };
+      }
+
+      const hashed = hashPassword(newPassword);
+
+      auth.username = username;
+      auth.password_hash = hashed.password_hash;
+      auth.password_salt = hashed.password_salt;
       auth.must_change_password = false;
-      writeJsonSafe(AUTH_FILE, auth);
-      return { success: true, must_change_password: false, username: newUsername, message: 'Credentials updated successfully.' };
+
+      delete auth.password;
+
+      if (!writeJsonSafe(AUTH_FILE, auth)) {
+        return {
+          success: false,
+          message: 'Unable to save new credentials.'
+        };
+      }
+
+      const credentialsFile = path.join(
+        DATA_DIR,
+        'initial-admin-credentials.txt'
+      );
+
+      try {
+        if (fs.existsSync(credentialsFile)) {
+          fs.unlinkSync(credentialsFile);
+        }
+      } catch {}
+
+      return {
+        success: true,
+        must_change_password: false,
+        username,
+        message: 'Credentials updated successfully.'
+      };
     }
 
     case 'auth_logout': {
@@ -3035,35 +3252,54 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     }
 
     case 'store_upload_key': {
-      // Zero disk writes: Private keys are kept strictly in-memory
-      return { success: true, message: 'Private keys are stored in-memory only' };
+      const { key, id, name } = args || {};
+      const targetId = id || name || `key_${Date.now()}`;
+      const savedPath = ensureKeyFile(targetId, key);
+      return {
+        success: Boolean(savedPath),
+        path: savedPath,
+        message: savedPath ? 'Private key saved successfully' : 'Failed to save private key'
+      };
     }
 
     case 'store_save_connection': {
       const { connection } = args || {};
-      if (!connection) return;
+      if (!connection) return null;
       const list = readJsonSafe(CONNECTIONS_FILE, []);
-      // Sanitize connection object: Strip private keys completely so they NEVER persist to server disk
       const sanitized = { ...connection };
+      if (!sanitized.id) sanitized.id = `conn-${Date.now()}`;
+
+      // Securely store private key PEM file with 0600 permissions
+      const rawKey = sanitized.private_key || sanitized.privateKey || sanitized.privateKeyPath || sanitized.private_key_path;
+      if (rawKey && typeof rawKey === 'string' && rawKey.trim()) {
+        const savedPath = ensureKeyFile(sanitized.id, rawKey);
+        if (savedPath) {
+          sanitized.privateKeyPath = savedPath;
+          sanitized.private_key_path = savedPath;
+        }
+      }
       delete sanitized.private_key;
       delete sanitized.privateKey;
-      if (sanitized.privateKeyPath && (sanitized.privateKeyPath.includes('-----BEGIN') || sanitized.privateKeyPath.includes('\n'))) {
-        delete sanitized.privateKeyPath;
-      }
-      if (sanitized.private_key_path && (sanitized.private_key_path.includes('-----BEGIN') || sanitized.private_key_path.includes('\n'))) {
-        delete sanitized.private_key_path;
-      }
+
       const idx = list.findIndex(c => c.id === sanitized.id);
       if (idx >= 0) list[idx] = sanitized;
       else list.push(sanitized);
       writeJsonSafe(CONNECTIONS_FILE, list);
-      return;
+      return sanitized.id;
     }
 
     case 'store_delete_connection': {
+      const connId = args?.id;
       const list = readJsonSafe(CONNECTIONS_FILE, []);
-      writeJsonSafe(CONNECTIONS_FILE, list.filter(c => c.id !== args?.id));
-      return;
+      const conn = list.find(c => c.id === connId);
+      if (conn) {
+        const keyPath = conn.privateKeyPath || conn.private_key_path;
+        if (keyPath && typeof keyPath === 'string' && keyPath.startsWith(KEYS_DIR) && fs.existsSync(keyPath)) {
+          try { fs.unlinkSync(keyPath); } catch {}
+        }
+      }
+      writeJsonSafe(CONNECTIONS_FILE, list.filter(c => c.id !== connId));
+      return true;
     }
 
     case 'settings_get': {
@@ -4944,15 +5180,27 @@ frontendServer.on('upgrade', (req, socket, head) => {
 // -------------------------------------------------------------
 // Start Both Servers
 // -------------------------------------------------------------
-backendServer.listen(BACKEND_PORT, HOST, () => {
+
+backendServer.on('error', (err) => {
+  console.error('[SSH Desktop] Backend server error:', err);
+  process.exit(1);
+});
+
+frontendServer.on('error', (err) => {
+  console.error('[SSH Desktop] Frontend server error:', err);
+  process.exit(1);
+});
+
+// Backend is private. Only the frontend is exposed to the network.
+backendServer.listen(BACKEND_PORT, BACKEND_HOST, () => {
   frontendServer.listen(FRONTEND_PORT, HOST, () => {
-    console.log('\n================================================================');
-    console.log('🚀 SSH Desktop All-in-One Dual Engine Running!');
-    console.log(`🌐 Frontend UI:     http://${HOST}:${FRONTEND_PORT} (Web Desktop)`);
-    console.log(`⚡ Backend API:     http://${HOST}:${BACKEND_PORT} (SSH2 Engine & PTY)`);
-    console.log(`📟 WebSocket PTY:   ws://${HOST}:${FRONTEND_PORT}/ws/terminal & ws://${HOST}:${BACKEND_PORT}/ws/terminal`);
-    console.log(`🔒 Authentication:  admin / sshdesktop (1 Hour Session Expiration)`);
-    console.log(`💾 Local Storage:   ${DATA_DIR} (Protected: 0700 - Owner Only)`);
-    console.log('================================================================\n');
+    console.log('\n======================================================');
+    console.log('SSH Desktop Standalone Server Started');
+    console.log('======================================================');
+    console.log(`Frontend: http://${HOST}:${FRONTEND_PORT}`);
+    console.log(`Backend:  http://${BACKEND_HOST}:${BACKEND_PORT}`);
+    console.log(`Data:     ${DATA_DIR}`);
+    console.log('Backend access: localhost only');
+    console.log('======================================================\n');
   });
 });
