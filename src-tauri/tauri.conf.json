@@ -47,7 +47,7 @@
     "linux": {
       "deb": {
         "depends": [
-          "libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37",
+          "libwebkit2gtk-4.1-0",
           "libgtk-3-0",
           "libayatana-appindicator3-1 | libappindicator3-1",
           "librsvg2-common"
@@ -57,7 +57,7 @@
       },
       "rpm": {
         "depends": [
-          "webkit2gtk4.1 || webkit2gtk3",
+          "webkit2gtk4.1",
           "gtk3",
           "libappindicator-gtk3"
         ],
