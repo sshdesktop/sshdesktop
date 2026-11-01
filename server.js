@@ -155,15 +155,10 @@ const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const KEYS_DIR = path.join(DATA_DIR, 'keys');
 try {
-  if (fs.existsSync(KEYS_DIR)) {
-    // Purge any stored private keys on disk - User keys must be strictly in-memory only
-    const staleFiles = fs.readdirSync(KEYS_DIR);
-    for (const sf of staleFiles) {
-      if (sf.endsWith('.pem') || sf.endsWith('.ppk') || sf.endsWith('.key')) {
-        try { fs.unlinkSync(path.join(KEYS_DIR, sf)); } catch {}
-      }
-    }
+  if (!fs.existsSync(KEYS_DIR)) {
+    fs.mkdirSync(KEYS_DIR, { recursive: true, mode: 0o700 });
   }
+  try { fs.chmodSync(KEYS_DIR, 0o700); } catch {}
 } catch {}
 
 // MIME types dictionary
@@ -800,8 +795,44 @@ function startSocks5Proxy(sshClient, preferredPort = 1080) {
 }
 
 // ==========================================
-// SSH Client Configuration Helper
+// SSH Client Configuration & Key Helper
 // ==========================================
+function ensureKeyFile(connId, keyInput) {
+  if (!keyInput || typeof keyInput !== 'string') return null;
+  const trimmed = keyInput.trim();
+  if (!trimmed) return null;
+
+  // 1. If it's already an existing file on disk, return its path
+  if (fs.existsSync(trimmed)) {
+    try { fs.chmodSync(trimmed, 0o600); } catch {}
+    return trimmed;
+  }
+
+  // 2. If it is raw key content (PEM or PPK string)
+  if (trimmed.includes('PRIVATE KEY') || trimmed.includes('PuTTY-User-Key-File') || trimmed.includes('\n')) {
+    try {
+      if (!fs.existsSync(KEYS_DIR)) {
+        fs.mkdirSync(KEYS_DIR, { recursive: true, mode: 0o700 });
+      }
+      try { fs.chmodSync(KEYS_DIR, 0o700); } catch {}
+
+      const isPpk = trimmed.includes('PuTTY-User-Key-File');
+      const ext = isPpk ? 'ppk' : 'pem';
+      const safeId = String(connId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const targetFile = path.join(KEYS_DIR, `${safeId}.${ext}`);
+
+      fs.writeFileSync(targetFile, trimmed, { encoding: 'utf8', mode: 0o600 });
+      try { fs.chmodSync(targetFile, 0o600); } catch {}
+      return targetFile;
+    } catch (err) {
+      console.warn(`[SSH Desktop] Failed to save key file for ${connId}:`, err.message);
+      return null;
+    }
+  }
+
+  return null;
+}
+
 function buildSshClientConfig(config, targetId) {
   const host = String(config.host || '').trim();
   const port = parseInt(config.port || 22, 10);
@@ -862,26 +893,31 @@ function buildSshClientConfig(config, targetId) {
 
   const rawAuth = String(config.auth_method || config.authMethod || config.auth_type || '').toLowerCase().trim();
   const rawKey = config.private_key || config.private_key_path || config.privateKeyPath || config.key_path || config.keyPath;
+  const trimmedKey = typeof rawKey === 'string' ? rawKey.trim() : '';
 
-  const isPassword = rawAuth === 'password' || (!rawAuth && config.password && (!rawKey || !String(rawKey).includes('PRIVATE KEY')));
+  const hasKey = Boolean(
+    trimmedKey &&
+    (fs.existsSync(trimmedKey) || trimmedKey.includes('PRIVATE KEY') || trimmedKey.includes('\n') || trimmedKey.endsWith('.pem') || trimmedKey.endsWith('.ppk'))
+  );
+
+  const isPassword = rawAuth === 'password' || (!rawAuth && config.password && !hasKey);
 
   if (isPassword) {
     // STRICT PASSWORD AUTHENTICATION: Never attach privateKey
     connectConfig.password = String(config.password || '');
     connectConfig.tryKeyboard = true;
   } else {
-    // STRICT KEY AUTHENTICATION (PEM Only, In-Memory)
-    if (rawKey && typeof rawKey === 'string' && rawKey.trim()) {
-      const trimmed = rawKey.trim();
-      if (trimmed.includes('PRIVATE KEY') || trimmed.includes('\n')) {
-        // Pure in-memory PEM string - DO NOT write to disk
-        connectConfig.privateKey = Buffer.from(trimmed, 'utf8');
-      } else if (fs.existsSync(trimmed)) {
-        // Existing local file on disk (native desktop mode)
+    // STRICT KEY AUTHENTICATION (PEM/PPK: In-Memory string or On-Disk file)
+    if (trimmedKey) {
+      if (trimmedKey.includes('PRIVATE KEY') || trimmedKey.includes('\n')) {
+        // In-memory PEM string
+        connectConfig.privateKey = Buffer.from(trimmedKey, 'utf8');
+      } else if (fs.existsSync(trimmedKey)) {
+        // Saved key file on disk
         try {
-          connectConfig.privateKey = fs.readFileSync(trimmed);
+          connectConfig.privateKey = fs.readFileSync(trimmedKey);
         } catch (e) {
-          console.warn(`[SSH Desktop] Failed to read private key from ${trimmed}:`, e.message);
+          console.warn(`[SSH Desktop] Failed to read private key from ${trimmedKey}:`, e.message);
         }
       }
     }
@@ -3216,35 +3252,54 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     }
 
     case 'store_upload_key': {
-      // Zero disk writes: Private keys are kept strictly in-memory
-      return { success: true, message: 'Private keys are stored in-memory only' };
+      const { key, id, name } = args || {};
+      const targetId = id || name || `key_${Date.now()}`;
+      const savedPath = ensureKeyFile(targetId, key);
+      return {
+        success: Boolean(savedPath),
+        path: savedPath,
+        message: savedPath ? 'Private key saved successfully' : 'Failed to save private key'
+      };
     }
 
     case 'store_save_connection': {
       const { connection } = args || {};
-      if (!connection) return;
+      if (!connection) return null;
       const list = readJsonSafe(CONNECTIONS_FILE, []);
-      // Sanitize connection object: Strip private keys completely so they NEVER persist to server disk
       const sanitized = { ...connection };
+      if (!sanitized.id) sanitized.id = `conn-${Date.now()}`;
+
+      // Securely store private key PEM file with 0600 permissions
+      const rawKey = sanitized.private_key || sanitized.privateKey || sanitized.privateKeyPath || sanitized.private_key_path;
+      if (rawKey && typeof rawKey === 'string' && rawKey.trim()) {
+        const savedPath = ensureKeyFile(sanitized.id, rawKey);
+        if (savedPath) {
+          sanitized.privateKeyPath = savedPath;
+          sanitized.private_key_path = savedPath;
+        }
+      }
       delete sanitized.private_key;
       delete sanitized.privateKey;
-      if (sanitized.privateKeyPath && (sanitized.privateKeyPath.includes('-----BEGIN') || sanitized.privateKeyPath.includes('\n'))) {
-        delete sanitized.privateKeyPath;
-      }
-      if (sanitized.private_key_path && (sanitized.private_key_path.includes('-----BEGIN') || sanitized.private_key_path.includes('\n'))) {
-        delete sanitized.private_key_path;
-      }
+
       const idx = list.findIndex(c => c.id === sanitized.id);
       if (idx >= 0) list[idx] = sanitized;
       else list.push(sanitized);
       writeJsonSafe(CONNECTIONS_FILE, list);
-      return;
+      return sanitized.id;
     }
 
     case 'store_delete_connection': {
+      const connId = args?.id;
       const list = readJsonSafe(CONNECTIONS_FILE, []);
-      writeJsonSafe(CONNECTIONS_FILE, list.filter(c => c.id !== args?.id));
-      return;
+      const conn = list.find(c => c.id === connId);
+      if (conn) {
+        const keyPath = conn.privateKeyPath || conn.private_key_path;
+        if (keyPath && typeof keyPath === 'string' && keyPath.startsWith(KEYS_DIR) && fs.existsSync(keyPath)) {
+          try { fs.unlinkSync(keyPath); } catch {}
+        }
+      }
+      writeJsonSafe(CONNECTIONS_FILE, list.filter(c => c.id !== connId));
+      return true;
     }
 
     case 'settings_get': {
