@@ -13,6 +13,7 @@ pub struct TerminalSession {
     pub cols: u16,
     pub created_at: i64,
     pub tx: Option<UnboundedSender<Vec<u8>>>,
+    pub resize_tx: Option<UnboundedSender<(u16, u16)>>,
     pub child_pid: Option<u32>,
 }
 
@@ -179,9 +180,17 @@ pub async fn terminal_create(
 
         if let Some(h) = handle {
             match crate::ssh::session::open_pty_shell(&h, "xterm-256color", cols as u32, rows as u32).await {
-                Ok((mut reader, mut writer)) => {
+                Ok((mut reader, mut writer, channel_for_resize)) => {
                     log::info!("SSH Desktop: Native russh interactive PTY shell opened for {}@{}:{}", user, host, port);
                     let (tx, mut rx) = unbounded_channel::<Vec<u8>>();
+                    let (resize_tx, mut resize_rx) = unbounded_channel::<(u16, u16)>();
+
+                    // Window Change / Resize Pump
+                    tokio::spawn(async move {
+                        while let Some((c, r)) = resize_rx.recv().await {
+                            let _ = channel_for_resize.window_change(c as u32, r as u32, 0, 0).await;
+                        }
+                    });
 
                     // Stdin / Writer Pump
                     tokio::spawn(async move {
@@ -226,6 +235,7 @@ pub async fn terminal_create(
                         cols,
                         created_at: chrono::Utc::now().timestamp(),
                         tx: Some(tx),
+                        resize_tx: Some(resize_tx),
                         child_pid: None,
                     };
                     state.terminals.lock().insert(term_id.clone(), session);
@@ -375,6 +385,7 @@ pub async fn terminal_create(
         cols,
         created_at: chrono::Utc::now().timestamp(),
         tx: Some(tx),
+        resize_tx: None,
         child_pid,
     };
 
@@ -410,9 +421,18 @@ pub async fn terminal_resize(
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
-    if let Some(term) = state.terminals.lock().get_mut(&terminal_id) {
-        term.rows = rows;
-        term.cols = cols;
+    let tx_opt = {
+        let mut terms = state.terminals.lock();
+        if let Some(term) = terms.get_mut(&terminal_id) {
+            term.rows = rows;
+            term.cols = cols;
+            term.resize_tx.clone()
+        } else {
+            None
+        }
+    };
+    if let Some(tx) = tx_opt {
+        let _ = tx.send((cols, rows));
     }
     Ok(())
 }
