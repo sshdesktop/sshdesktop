@@ -1,6 +1,6 @@
 {
   "productName": "SSH Desktop",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "identifier": "com.sshdesktop.app",
   "build": {
     "beforeDevCommand": "npm run dev",
