@@ -125,11 +125,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          TARGET="${{ matrix.target }}"
+
+          BUNDLE_DIR="target/${TARGET}/release/bundle"
+
           if [ ! -d "$BUNDLE_DIR" ]; then
-            echo "Missing bundle directory: $BUNDLE_DIR"
+            BUNDLE_DIR="src-tauri/target/${TARGET}/release/bundle"
+          fi
+
+          if [ ! -d "$BUNDLE_DIR" ]; then
+            echo "Bundle directory not found."
+            echo "Checked:"
+            echo "target/${TARGET}/release/bundle"
+            echo "src-tauri/target/${TARGET}/release/bundle"
             exit 1
           fi
+
           mkdir -p build-output
           case "${{ matrix.id }}" in
             windows-*)
@@ -166,9 +177,7 @@ jobs:
           retention-days: 7
 
   # ============================================================
-  # LINUX SERVER: Build x64 and ARM64 SEA executables
-  # Package each as DEB and RPM.
-  # No Node.js installation required on customer machines.
+  # LINUX SERVER: Standalone SEA executable + DEB + RPM
   # ============================================================
   linux-server:
     name: Linux Server - ${{ matrix.arch }}
@@ -198,10 +207,10 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install npm dependencies
+      - name: Install dependencies
         run: npm ci
 
-      - name: Install Linux packaging tools
+      - name: Install packaging tools
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -217,12 +226,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm run build
-          npm run build:sea-prep
+          npm run build:binary
           test -s dist-server/bundle.cjs
           test -s dist-server/sea-prep.blob
+          test -s embedded-dist.js
 
-      - name: Create standalone Linux executable
+      - name: Build standalone Linux executable
         shell: bash
         run: |
           set -euo pipefail
@@ -235,37 +244,40 @@ jobs:
             dist-server/sea-prep.blob \
             --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
           chmod 0755 "$BINARY"
-          echo "Checking Linux executable architecture..."
+          echo "Checking architecture..."
           readelf -h "$BINARY" | grep -F "${{ matrix.elf_machine }}"
-          echo "Checking runtime dependencies..."
+          echo "Checking shared libraries..."
           ldd "$BINARY"
           if ldd "$BINARY" | grep -q "not found"; then
-            echo "Missing shared library dependency"
+            echo "Missing shared library."
             exit 1
           fi
-          echo "Checking application version..."
-          "$BINARY" --version
-          echo "Checking application help..."
-          "$BINARY" --help
+          echo "Checking standalone executable..."
+          ./sshdesktop-server --version
+          ./sshdesktop-server --help
 
-      - name: Prepare package metadata
+      - name: Prepare package structure
         shell: bash
         run: |
           set -euo pipefail
-          VERSION=$(node -p "require('./package.json').version")
+          VERSION="$(node -p "require('./package.json').version")"
           STAGE="$PWD/package-stage"
           OUTPUT="$PWD/server-output"
           mkdir -p \
             "$STAGE/usr/bin" \
+            "$STAGE/usr/lib/systemd/system" \
             "$OUTPUT"
           install -m 0755 \
             sshdesktop-server \
             "$STAGE/usr/bin/sshdesktop-server"
+          install -m 0644 \
+            .github/package/sshdesktop.service \
+            "$STAGE/usr/lib/systemd/system/sshdesktop.service"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "STAGE=$STAGE" >> "$GITHUB_ENV"
           echo "OUTPUT=$OUTPUT" >> "$GITHUB_ENV"
 
-      - name: Build Debian DEB package
+      - name: Build Debian package
         shell: bash
         run: |
           set -euo pipefail
@@ -285,15 +297,16 @@ jobs:
             --depends libgcc-s1 \
             --package "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.deb" \
             --chdir "$STAGE" \
-            usr/bin/sshdesktop-server
-          ACTUAL_ARCH=$(dpkg-deb -f \
+            usr/bin/sshdesktop-server \
+            usr/lib/systemd/system/sshdesktop.service
+          ACTUAL_ARCH="$(dpkg-deb -f \
             "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.deb" \
-            Architecture)
+            Architecture)"
           test "$ACTUAL_ARCH" = "${{ matrix.deb_arch }}"
           dpkg-deb -c \
             "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.deb"
 
-      - name: Build Fedora and RHEL RPM package
+      - name: Build RPM package
         shell: bash
         run: |
           set -euo pipefail
@@ -313,24 +326,35 @@ jobs:
             --depends libgcc \
             --package "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.rpm" \
             --chdir "$STAGE" \
-            usr/bin/sshdesktop-server
-          ACTUAL_ARCH=$(rpm -qp \
+            usr/bin/sshdesktop-server \
+            usr/lib/systemd/system/sshdesktop.service
+          ACTUAL_ARCH="$(rpm -qp \
             --queryformat '%{ARCH}' \
-            "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.rpm")
+            "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.rpm")"
           test "$ACTUAL_ARCH" = "${{ matrix.rpm_arch }}"
           rpm -qpl \
             "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.rpm"
 
-      - name: Verify both server packages
+      - name: Verify packages
         shell: bash
         run: |
           set -euo pipefail
-          test -s "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.deb"
-          test -s "$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.rpm"
-          echo "Server installer packages:"
+          DEB="$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.deb"
+          RPM="$OUTPUT/sshdesktop-server-linux-${{ matrix.arch }}.rpm"
+          test -s "$DEB"
+          test -s "$RPM"
+          # Confirm both packages contain the new service.
+          dpkg-deb -c "$DEB" | grep -F "sshdesktop.service"
+          rpm -qpl "$RPM" | grep -F "sshdesktop.service"
+          # No Node.js or npm runtime dependency.
+          if dpkg-deb -f "$DEB" Depends | grep -Eqi 'nodejs|npm'; then
+            echo "Unexpected Node.js package dependency."
+            exit 1
+          fi
+          echo "Verified Linux server packages:"
           ls -lh "$OUTPUT"
 
-      - name: Upload Linux server installers
+      - name: Upload Linux server packages
         uses: actions/upload-artifact@v4
         with:
           name: sshdesktop-server-linux-${{ matrix.arch }}
