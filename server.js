@@ -3801,7 +3801,7 @@ function handleBrowserGatewayRequest(req, res) {
   if (targetPath.includes('co=') && (targetPath.includes('/recaptcha/') || targetPath.includes('google.com/recaptcha'))) {
     const targetOriginWithPort = `${proto}://${host}:${port}`;
     const targetCoBase64 = Buffer.from(targetOriginWithPort).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '.');
-    targetPath = targetPath.replace(/([?&]co=)(?:aHR0cDovL2xvY2FsaG9zd|aHR0cDovLzEyNy4w)[^&#]*/gi, `$1${targetCoBase64}`);
+    targetPath = targetPath.replace(/([?&]co=)(?:aHR0cDovL2xvY2FsaG9zd|aHR0cHM6Ly9sb2NhbGhvc3Q|aHR0cDovLzEyNy4w|aHR0cHM6Ly8xMjcuMA)[^&#]*/gi, `$1${targetCoBase64}`);
   }
 
   const requestOptions = {
@@ -4075,6 +4075,9 @@ function handleBrowserGatewayRequest(req, res) {
     if (typeof window.resURL === 'undefined') {
       window.resURL = '';
     }
+    if (typeof window.solveSimpleChallenge === 'undefined') {
+      window.solveSimpleChallenge = null;
+    }
   } catch(e) {}
 
   function rewriteUrl(u) {
@@ -4089,7 +4092,7 @@ function handleBrowserGatewayRequest(req, res) {
     } else if (u.startsWith('undefined/')) {
       u = '/' + u.slice('undefined/'.length);
     } else if (u.includes('/undefined/')) {
-      u = u.replace(/\/undefined\//g, '/');
+      u = u.split('/undefined/').join('/');
     }
     if (!u || u === '/') return GW + '/';
     if (u.startsWith('#') || u.startsWith('javascript:') || u.startsWith('mailto:') || u.startsWith('tel:') || u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('about:')) {
@@ -4148,10 +4151,11 @@ function handleBrowserGatewayRequest(req, res) {
     return u;
   }
 
-  // Prevent frame-busting (e.g. if (top !== self) top.location = "https://localhost.com/login")
+  // Prevent frame-busting on top window while preserving parent/top postMessage communication for iframes
   try {
-    Object.defineProperty(window, 'top', { get: function() { return window; }, configurable: true });
-    Object.defineProperty(window, 'parent', { get: function() { return window; }, configurable: true });
+    if (window.self === window.top) {
+      Object.defineProperty(window, 'top', { get: function() { return window; }, configurable: true });
+    }
   } catch (e) {}
 
   // Intercept Location.prototype.replace & Location.prototype.assign if configurable
@@ -4304,16 +4308,41 @@ function handleBrowserGatewayRequest(req, res) {
     _obs.observe(document.documentElement || document, { childList: true, subtree: true });
   }
 
-  // Intercept Window.prototype.postMessage to prevent targetOrigin mismatch errors between captcha and page
-  if (window.Window && Window.prototype && Window.prototype.postMessage) {
-    var _origWinPostMessage = Window.prototype.postMessage;
-    Window.prototype.postMessage = function(message, targetOrigin, transfer) {
-      if (targetOrigin && targetOrigin !== '*' && (targetOrigin.indexOf('localhost') !== -1 || targetOrigin.indexOf('127.0.0.1') !== -1 || targetOrigin.indexOf(TARGET_HOST) !== -1)) {
-        targetOrigin = '*';
-      }
-      return _origWinPostMessage.call(this, message, targetOrigin, transfer);
+  // Intercept Window.prototype.postMessage & window.postMessage to prevent targetOrigin mismatch errors
+  try {
+    var patchPostMsg = function(targetObj) {
+      if (!targetObj || !targetObj.postMessage) return;
+      var _orig = targetObj.postMessage;
+      targetObj.postMessage = function(message, targetOrigin, transfer) {
+        if (targetOrigin && targetOrigin !== '*') {
+          targetOrigin = '*';
+        }
+        return _orig.call(this, message, targetOrigin, transfer);
+      };
     };
-  }
+    if (window.Window && Window.prototype) patchPostMsg(Window.prototype);
+    patchPostMsg(window);
+  } catch(e) {}
+
+  // Intercept MessageEvent.prototype.origin to ensure captchas and cross-frame handlers accept the message
+  try {
+    if (window.MessageEvent && MessageEvent.prototype) {
+      var _originDesc = Object.getOwnPropertyDescriptor(MessageEvent.prototype, 'origin');
+      if (_originDesc && _originDesc.get) {
+        var _origOriginGet = _originDesc.get;
+        Object.defineProperty(MessageEvent.prototype, 'origin', {
+          get: function() {
+            var o = _origOriginGet.call(this);
+            if (o === window.location.origin) {
+              return TARGET_ORIGIN;
+            }
+            return o;
+          },
+          configurable: true
+        });
+      }
+    }
+  } catch(e) {}
 
   // Document domain spoofing
   try {
