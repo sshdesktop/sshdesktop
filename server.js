@@ -47,9 +47,10 @@ Usage: sshdesktop [options]
 Options:
   -v, --version         Show version number (${VERSION})
   -h, --help            Show this help manual
+  --host <host>         Frontend bind address (default: 0.0.0.0)
+  --backend-host <host> Backend bind address (default: 127.0.0.1)
   --port <port>         Frontend web desktop port (default: 2222)
-  --backend-port <port> Backend SSH2 API port (default: 2020)
-  --host <host>         Bind host address (default: 0.0.0.0)
+  --backend-port <port> Backend API port (default: 2020)
   --data-dir <path>     Directory for secure local storage
 `);
   process.exit(0);
@@ -64,10 +65,23 @@ function getCliArg(flag) {
   return null;
 }
 
-// Port Configuration per requirements: Frontend on 2222, Backend on 2020
-const FRONTEND_PORT = parseInt(getCliArg('--port') || process.env.FRONTEND_PORT || process.env.PORT || '2222', 10);
-const BACKEND_PORT = parseInt(getCliArg('--backend-port') || process.env.BACKEND_PORT || '2020', 10);
+// Port Configuration: Frontend on 2222 (public/bind), Backend on 2020 (localhost private)
+const FRONTEND_PORT = parseInt(
+  getCliArg('--port') || process.env.FRONTEND_PORT || process.env.PORT || '2222',
+  10
+);
+
+const BACKEND_PORT = parseInt(
+  getCliArg('--backend-port') || process.env.BACKEND_PORT || '2020',
+  10
+);
+
 const HOST = getCliArg('--host') || process.env.HOST || '0.0.0.0';
+
+const BACKEND_HOST =
+  getCliArg('--backend-host') ||
+  process.env.BACKEND_HOST ||
+  '127.0.0.1';
 
 // Locate dist directory (supports raw development, external override, and packaged binary layouts)
 let DIST_DIR = path.join(currentDir, 'dist');
@@ -216,6 +230,108 @@ function writeJsonSafe(filePath, data) {
     return false;
   }
 }
+
+// -------------------------------------------------------------
+// Secure First-Run Authentication
+// -------------------------------------------------------------
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+
+  return {
+    password_salt: salt,
+    password_hash: hash
+  };
+}
+
+function verifyPassword(auth, password) {
+  if (typeof password !== 'string' || !password) {
+    return false;
+  }
+
+  // New password format: scrypt hash.
+  if (auth.password_hash && auth.password_salt) {
+    const calculated = crypto.scryptSync(
+      password,
+      auth.password_salt,
+      64
+    );
+
+    const stored = Buffer.from(auth.password_hash, 'hex');
+
+    return stored.length === calculated.length &&
+      crypto.timingSafeEqual(stored, calculated);
+  }
+
+  // Legacy password migration support.
+  if (typeof auth.password === 'string') {
+    return crypto.timingSafeEqual(
+      Buffer.from(password),
+      Buffer.from(auth.password)
+    );
+  }
+
+  return false;
+}
+
+function initializeAuthentication() {
+  let auth = readJsonSafe(AUTH_FILE, null);
+
+  const isValidHashedAuth =
+    auth &&
+    auth.username &&
+    auth.password_hash &&
+    auth.password_salt;
+
+  if (isValidHashedAuth) {
+    return;
+  }
+
+  let initialPassword;
+
+  if (auth && auth.username && auth.password &&
+      auth.password !== 'sshdesktop') {
+    // Preserve an existing custom password while migrating it.
+    initialPassword = auth.password;
+  } else {
+    // Generate a new random password for a fresh installation,
+    // or rotate the old insecure default password.
+    initialPassword = crypto.randomBytes(24).toString('base64url');
+  }
+
+  const username = auth?.username || 'admin';
+
+  const hashed = hashPassword(initialPassword);
+
+  const newAuth = {
+    username,
+    ...hashed,
+    must_change_password: true
+  };
+
+  if (!writeJsonSafe(AUTH_FILE, newAuth)) {
+    throw new Error('Unable to initialize SSH Desktop authentication.');
+  }
+
+  const credentialsFile = path.join(
+    DATA_DIR,
+    'initial-admin-credentials.txt'
+  );
+
+  fs.writeFileSync(
+    credentialsFile,
+    `SSH Desktop Initial Login\nUsername: ${username}\nPassword: ${initialPassword}\nChange this password immediately after login.\n`,
+    { encoding: 'utf8', mode: 0o600 }
+  );
+
+  fs.chmodSync(credentialsFile, 0o600);
+
+  console.log(
+    `[SSH Desktop] Initial credentials saved to: ${credentialsFile}`
+  );
+}
+
+initializeAuthentication();
 
 // -------------------------------------------------------------
 // 1-Hour Session Management Engine (Website Security)
@@ -793,17 +909,15 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
     case 'auth_get_status': {
       const token = extractSessionToken(null, { args });
       const session = currentSession || (token ? getSession(token) : null);
-      const auth = readJsonSafe(AUTH_FILE, {
-        username: 'admin',
-        must_change_password: false
-      });
-      const isAuthenticated = Boolean(session);
-      const expiresIn = session ? Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000)) : 0;
+      const auth = readJsonSafe(AUTH_FILE, {});
+
       return {
         is_configured: true,
-        is_authenticated: isAuthenticated,
-        session_expired: !isAuthenticated && Boolean(token),
-        expires_in_seconds: expiresIn,
+        is_authenticated: Boolean(session),
+        session_expired: !session && Boolean(token),
+        expires_in_seconds: session
+          ? Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000))
+          : 0,
         session_duration_seconds: Math.floor(SESSION_TTL_MS / 1000),
         must_change_password: !!auth.must_change_password,
         username: session ? session.username : (auth.username || 'admin'),
@@ -813,37 +927,104 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
 
     case 'auth_login': {
       const { username, password } = args || {};
-      const auth = readJsonSafe(AUTH_FILE, { username: 'admin', password: 'sshdesktop' });
-      const validUser = (auth.username || 'admin').trim().toLowerCase();
-      const inputUser = (username || '').trim().toLowerCase();
-      const validPass = auth.password || 'sshdesktop';
+      const auth = readJsonSafe(AUTH_FILE, {});
 
-      if (inputUser === validUser && password === validPass) {
-        const session = createSession(auth.username || 'admin');
+      const validUser = String(auth.username || '')
+        .trim()
+        .toLowerCase();
+
+      const inputUser = String(username || '')
+        .trim()
+        .toLowerCase();
+
+      if (
+        inputUser === validUser &&
+        verifyPassword(auth, password)
+      ) {
+        const session = createSession(auth.username);
+
         return {
           success: true,
           token: session.token,
           expires_at: session.expiresAt,
           expires_in_seconds: Math.floor(SESSION_TTL_MS / 1000),
           must_change_password: !!auth.must_change_password,
-          username: auth.username || 'admin'
+          username: auth.username
         };
       }
-      return { success: false, must_change_password: false, username, message: 'Invalid username or password.' };
+
+      return {
+        success: false,
+        must_change_password: false,
+        username,
+        message: 'Invalid username or password.'
+      };
     }
 
     case 'auth_change_credentials': {
       const { currentPassword, newUsername, newPassword } = args || {};
-      const auth = readJsonSafe(AUTH_FILE, { username: 'admin', password: 'sshdesktop' });
-      const validPass = auth.password || 'sshdesktop';
-      if (currentPassword !== validPass) {
-        return { success: false, must_change_password: true, username: newUsername, message: 'Current password incorrect.' };
+
+      const auth = readJsonSafe(AUTH_FILE, {});
+
+      if (!verifyPassword(auth, currentPassword)) {
+        return {
+          success: false,
+          message: 'Current password incorrect.'
+        };
       }
-      auth.username = newUsername || 'admin';
-      auth.password = newPassword;
+
+      if (
+        typeof newPassword !== 'string' ||
+        newPassword.length < 12
+      ) {
+        return {
+          success: false,
+          message: 'New password must contain at least 12 characters.'
+        };
+      }
+
+      const username = String(newUsername || '').trim();
+
+      if (!username) {
+        return {
+          success: false,
+          message: 'Username cannot be empty.'
+        };
+      }
+
+      const hashed = hashPassword(newPassword);
+
+      auth.username = username;
+      auth.password_hash = hashed.password_hash;
+      auth.password_salt = hashed.password_salt;
       auth.must_change_password = false;
-      writeJsonSafe(AUTH_FILE, auth);
-      return { success: true, must_change_password: false, username: newUsername, message: 'Credentials updated successfully.' };
+
+      delete auth.password;
+
+      if (!writeJsonSafe(AUTH_FILE, auth)) {
+        return {
+          success: false,
+          message: 'Unable to save new credentials.'
+        };
+      }
+
+      const credentialsFile = path.join(
+        DATA_DIR,
+        'initial-admin-credentials.txt'
+      );
+
+      try {
+        if (fs.existsSync(credentialsFile)) {
+          fs.unlinkSync(credentialsFile);
+        }
+      } catch {}
+
+      return {
+        success: true,
+        must_change_password: false,
+        username,
+        message: 'Credentials updated successfully.'
+      };
     }
 
     case 'auth_logout': {
@@ -4944,15 +5125,27 @@ frontendServer.on('upgrade', (req, socket, head) => {
 // -------------------------------------------------------------
 // Start Both Servers
 // -------------------------------------------------------------
-backendServer.listen(BACKEND_PORT, HOST, () => {
+
+backendServer.on('error', (err) => {
+  console.error('[SSH Desktop] Backend server error:', err);
+  process.exit(1);
+});
+
+frontendServer.on('error', (err) => {
+  console.error('[SSH Desktop] Frontend server error:', err);
+  process.exit(1);
+});
+
+// Backend is private. Only the frontend is exposed to the network.
+backendServer.listen(BACKEND_PORT, BACKEND_HOST, () => {
   frontendServer.listen(FRONTEND_PORT, HOST, () => {
-    console.log('\n================================================================');
-    console.log('🚀 SSH Desktop All-in-One Dual Engine Running!');
-    console.log(`🌐 Frontend UI:     http://${HOST}:${FRONTEND_PORT} (Web Desktop)`);
-    console.log(`⚡ Backend API:     http://${HOST}:${BACKEND_PORT} (SSH2 Engine & PTY)`);
-    console.log(`📟 WebSocket PTY:   ws://${HOST}:${FRONTEND_PORT}/ws/terminal & ws://${HOST}:${BACKEND_PORT}/ws/terminal`);
-    console.log(`🔒 Authentication:  admin / sshdesktop (1 Hour Session Expiration)`);
-    console.log(`💾 Local Storage:   ${DATA_DIR} (Protected: 0700 - Owner Only)`);
-    console.log('================================================================\n');
+    console.log('\n======================================================');
+    console.log('SSH Desktop Standalone Server Started');
+    console.log('======================================================');
+    console.log(`Frontend: http://${HOST}:${FRONTEND_PORT}`);
+    console.log(`Backend:  http://${BACKEND_HOST}:${BACKEND_PORT}`);
+    console.log(`Data:     ${DATA_DIR}`);
+    console.log('Backend access: localhost only');
+    console.log('======================================================\n');
   });
 });
