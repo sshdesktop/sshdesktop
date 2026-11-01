@@ -213,14 +213,12 @@ pub async fn open_pty_shell(
     term: &str,
     cols: u32,
     rows: u32,
-) -> Result<(tokio::io::ReadHalf<russh::ChannelStream<russh::client::Msg>>, tokio::io::WriteHalf<russh::ChannelStream<russh::client::Msg>>, russh::Channel<russh::client::Msg>), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(tokio::io::ReadHalf<russh::ChannelStream<russh::client::Msg>>, tokio::io::WriteHalf<russh::ChannelStream<russh::client::Msg>>), Box<dyn std::error::Error + Send + Sync>> {
     let channel = handle.channel_open_session().await?;
     channel.request_pty(false, term, cols, rows, 0, 0, &[]).await?;
     channel.request_shell(true).await?;
-    let channel_for_resize = channel.clone();
     let stream = channel.into_stream();
-    let (r, w) = tokio::io::split(stream);
-    Ok((r, w, channel_for_resize))
+    Ok(tokio::io::split(stream))
 }
 
 

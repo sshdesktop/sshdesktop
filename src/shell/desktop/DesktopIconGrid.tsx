@@ -65,7 +65,7 @@ export default function DesktopIconGrid({
 
   if (useStacks) {
     return (
-      <div className="absolute inset-0 pointer-events-none p-6 pt-12 overflow-hidden select-none">
+      <div className="absolute inset-0 pointer-events-none p-6 pt-12 overflow-hidden select-none z-[1]">
         <div className="flex flex-col flex-wrap gap-4 max-h-[80vh] items-start">
           {Object.entries(stacksMap).map(([stackName, stackItems], idx) => {
             const isExpanded = expandedStack === stackName;
@@ -116,7 +116,7 @@ export default function DesktopIconGrid({
   }
 
   return (
-    <div className="absolute inset-0 pointer-events-none select-none overflow-hidden">
+    <div className="absolute inset-0 pointer-events-none select-none overflow-hidden z-[1]">
       {items.map((item, idx) => {
         const isDraggingThis = draggingIconId === item.id;
         const pos = isDraggingThis && draggingCurrentPos
@@ -137,7 +137,7 @@ export default function DesktopIconGrid({
               left: `${pos.x}px`,
               top: `${pos.y}px`,
               width: `${cfg.w}px`,
-              zIndex: isDraggingThis ? 9999 : isSelected ? 30 : 20,
+              zIndex: isDraggingThis ? 5 : isSelected ? 2 : 1,
             }}
             onMouseDown={(e) => {
               e.stopPropagation();
