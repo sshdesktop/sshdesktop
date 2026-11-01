@@ -683,79 +683,9 @@ function startSocks5Proxy(sshClient, preferredPort = 1080) {
   });
 }
 
-async function handleInvokeCommand(cmd, args, currentSession = null) {
-  const connId = args?.connId;
-  const entry = getActiveEntry(connId);
-
-  switch (cmd) {
-    // ==========================================
-    // 1. Web Authentication & Session (1-Hour Expiration)
-    // ==========================================
-    case 'auth_get_status': {
-      const token = extractSessionToken(null, { args });
-      const session = currentSession || (token ? getSession(token) : null);
-      const auth = readJsonSafe(AUTH_FILE, {
-        username: 'admin',
-        must_change_password: false
-      });
-      const isAuthenticated = Boolean(session);
-      const expiresIn = session ? Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000)) : 0;
-      return {
-        is_configured: true,
-        is_authenticated: isAuthenticated,
-        session_expired: !isAuthenticated && Boolean(token),
-        expires_in_seconds: expiresIn,
-        session_duration_seconds: Math.floor(SESSION_TTL_MS / 1000),
-        must_change_password: !!auth.must_change_password,
-        username: session ? session.username : (auth.username || 'admin'),
-        storage_path: DATA_DIR
-      };
-    }
-
-    case 'auth_login': {
-      const { username, password } = args || {};
-      const auth = readJsonSafe(AUTH_FILE, { username: 'admin', password: 'sshdesktop' });
-      const validUser = (auth.username || 'admin').trim().toLowerCase();
-      const inputUser = (username || '').trim().toLowerCase();
-      const validPass = auth.password || 'sshdesktop';
-
-      if (inputUser === validUser && (password === validPass || password === 'admin' || password === 'sshdesktop')) {
-        const session = createSession(auth.username || 'admin');
-        return {
-          success: true,
-          token: session.token,
-          expires_at: session.expiresAt,
-          expires_in_seconds: Math.floor(SESSION_TTL_MS / 1000),
-          must_change_password: !!auth.must_change_password,
-          username: auth.username || 'admin'
-        };
-      }
-      return { success: false, must_change_password: false, username, message: 'Invalid username or password.' };
-    }
-
-    case 'auth_change_credentials': {
-      const { currentPassword, newUsername, newPassword } = args || {};
-      const auth = readJsonSafe(AUTH_FILE, { username: 'admin', password: 'sshdesktop' });
-      if (currentPassword !== auth.password && currentPassword !== 'admin' && currentPassword !== 'sshdesktop') {
-        return { success: false, must_change_password: true, username: newUsername, message: 'Current password incorrect.' };
-      }
-      auth.username = newUsername || 'admin';
-      auth.password = newPassword;
-      auth.must_change_password = false;
-      writeJsonSafe(AUTH_FILE, auth);
-      return { success: true, must_change_password: false, username: newUsername, message: 'Credentials updated successfully.' };
-    }
-
-    case 'auth_logout': {
-      const token = extractSessionToken(null, { args });
-      if (token) destroySession(token);
-      if (currentSession?.token) destroySession(currentSession.token);
-      return true;
-    }
-
-    // ==========================================
-    // 2. SSH Connection Management
-    // ==========================================
+// ==========================================
+// SSH Client Configuration Helper
+// ==========================================
 function buildSshClientConfig(config, targetId) {
   const host = String(config.host || '').trim();
   const port = parseInt(config.port || 22, 10);
@@ -852,7 +782,80 @@ function buildSshClientConfig(config, targetId) {
   return connectConfig;
 }
 
-case 'ssh_connect': {
+async function handleInvokeCommand(cmd, args, currentSession = null) {
+  const connId = args?.connId;
+  const entry = getActiveEntry(connId);
+
+  switch (cmd) {
+    // ==========================================
+    // 1. Web Authentication & Session (1-Hour Expiration)
+    // ==========================================
+    case 'auth_get_status': {
+      const token = extractSessionToken(null, { args });
+      const session = currentSession || (token ? getSession(token) : null);
+      const auth = readJsonSafe(AUTH_FILE, {
+        username: 'admin',
+        must_change_password: false
+      });
+      const isAuthenticated = Boolean(session);
+      const expiresIn = session ? Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000)) : 0;
+      return {
+        is_configured: true,
+        is_authenticated: isAuthenticated,
+        session_expired: !isAuthenticated && Boolean(token),
+        expires_in_seconds: expiresIn,
+        session_duration_seconds: Math.floor(SESSION_TTL_MS / 1000),
+        must_change_password: !!auth.must_change_password,
+        username: session ? session.username : (auth.username || 'admin'),
+        storage_path: DATA_DIR
+      };
+    }
+
+    case 'auth_login': {
+      const { username, password } = args || {};
+      const auth = readJsonSafe(AUTH_FILE, { username: 'admin', password: 'sshdesktop' });
+      const validUser = (auth.username || 'admin').trim().toLowerCase();
+      const inputUser = (username || '').trim().toLowerCase();
+      const validPass = auth.password || 'sshdesktop';
+
+      if (inputUser === validUser && (password === validPass || password === 'admin' || password === 'sshdesktop')) {
+        const session = createSession(auth.username || 'admin');
+        return {
+          success: true,
+          token: session.token,
+          expires_at: session.expiresAt,
+          expires_in_seconds: Math.floor(SESSION_TTL_MS / 1000),
+          must_change_password: !!auth.must_change_password,
+          username: auth.username || 'admin'
+        };
+      }
+      return { success: false, must_change_password: false, username, message: 'Invalid username or password.' };
+    }
+
+    case 'auth_change_credentials': {
+      const { currentPassword, newUsername, newPassword } = args || {};
+      const auth = readJsonSafe(AUTH_FILE, { username: 'admin', password: 'sshdesktop' });
+      if (currentPassword !== auth.password && currentPassword !== 'admin' && currentPassword !== 'sshdesktop') {
+        return { success: false, must_change_password: true, username: newUsername, message: 'Current password incorrect.' };
+      }
+      auth.username = newUsername || 'admin';
+      auth.password = newPassword;
+      auth.must_change_password = false;
+      writeJsonSafe(AUTH_FILE, auth);
+      return { success: true, must_change_password: false, username: newUsername, message: 'Credentials updated successfully.' };
+    }
+
+    case 'auth_logout': {
+      const token = extractSessionToken(null, { args });
+      if (token) destroySession(token);
+      if (currentSession?.token) destroySession(currentSession.token);
+      return true;
+    }
+
+    // ==========================================
+    // 2. SSH Connection Management
+    // ==========================================
+    case 'ssh_connect': {
       const { config } = args || {};
       if (!config) throw new Error('Missing SSH connection config');
       const targetId = config.id || `conn-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
