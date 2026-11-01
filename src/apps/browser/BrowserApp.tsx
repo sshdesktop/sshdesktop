@@ -14,11 +14,8 @@ import {
   sftpWriteTextFile, 
   sftpMkdir,
   openExternalUrl,
-  getProxiedBrowserUrl,
   sshStartSocks5,
   sshGetSocks5,
-  openBrowserWindow,
-  closeBrowserWindow,
   isTauri
 } from '../../lib/tauri-bridge';
 import DiscoveredServicesBar from './components/DiscoveredServicesBar';
@@ -84,6 +81,7 @@ export default function BrowserApp() {
   const [urlInput, setUrlInput] = useState('');
   const [tunnelStatusText, setTunnelStatusText] = useState<string | null>(null);
   const [copiedSocks, setCopiedSocks] = useState(false);
+  const [copiedCurl, setCopiedCurl] = useState(false);
 
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0];
 
@@ -262,18 +260,6 @@ export default function BrowserApp() {
         return;
       }
 
-      // 2. In Tauri Native runtime, spawn or focus native browser window with SOCKS5 proxy
-      if (isTauri()) {
-        openBrowserWindow(
-          resolvedUrl,
-          resolvedUrl,
-          `socks5://127.0.0.1:${socksPort}`,
-          currentTabId
-        ).catch(err => {
-          console.warn('[BrowserApp] Native browser window notice:', err);
-        });
-      }
-
       // Pure SSH Dynamic SOCKS5 Proxy: routes all network traffic directly through SSH tunnel
       setTabs(prev => prev.map(t => {
         if (t.id !== currentTabId) return t;
@@ -308,10 +294,6 @@ export default function BrowserApp() {
       // -------------------------------------------------------------
       // Branch 2: User Network Mode (SSH: OFF) - Direct Local PC
       // -------------------------------------------------------------
-      if (isTauri()) {
-        openBrowserWindow(resolvedUrl, resolvedUrl, undefined, currentTabId).catch(() => {});
-      }
-
       setTabs(prev => prev.map(t => {
         if (t.id !== currentTabId) return t;
         return {
@@ -392,9 +374,6 @@ export default function BrowserApp() {
   const handleCloseTab = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (tabs.length === 1) return;
-    if (isTauri()) {
-      closeBrowserWindow(id).catch(() => {});
-    }
     const remaining = tabs.filter(t => t.id !== id);
     setTabs(remaining);
     if (activeTabId === id) {
@@ -809,7 +788,6 @@ export default function BrowserApp() {
                 /* Clean Start Page */
                 <BrowserStartPage
                   onNavigate={(target) => navigateUrl(target, tab.id, tab.networkMode)}
-                  onLaunchNative={(url) => navigateUrl(url || 'https://google.com', tab.id, tab.networkMode)}
                   networkMode={tab.networkMode}
                   onToggleNetworkMode={() => handleToggleNetworkMode(tab.id)}
                   serverHost={serverHost}
@@ -861,7 +839,7 @@ export default function BrowserApp() {
                   </div>
                 </div>
               ) : tab.networkMode === 'server' ? (
-                /* Server Network (SSH: ON): SOCKS5 Dynamic Proxy & Live Inspector (NO IFRAME) */
+                /* Server Network (SSH: ON): SOCKS5 Dynamic Proxy & Service Gateway (NO LIVE WEBVIEW / NO IFRAME) */
                 <div className="w-full h-full flex flex-col overflow-hidden bg-[#181825]">
                   {/* Top SOCKS5 Tunnel Controller Bar */}
                   <div className="p-4 bg-[#1e1e2e] border-b border-white/[0.08] flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0 shadow-lg">
@@ -884,54 +862,15 @@ export default function BrowserApp() {
                       </div>
                     </div>
 
-                    {/* SOCKS5 Action Buttons & View Mode Toggle */}
+                    {/* SOCKS5 Action Buttons */}
                     <div className="flex items-center space-x-2 shrink-0">
-                      <div className="flex items-center bg-black/40 p-0.5 rounded-xl border border-white/10 shrink-0">
-                        <button
-                          onClick={() => setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, viewMode: 'interactive' } : t))}
-                          className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer flex items-center space-x-1 ${
-                            tab.viewMode !== 'telemetry' ? 'bg-emerald-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'
-                          }`}
-                        >
-                          <Globe className="w-3.5 h-3.5" />
-                          <span className="hidden sm:inline">Live Webview</span>
-                        </button>
-                        <button
-                          onClick={() => setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, viewMode: 'telemetry' } : t))}
-                          className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer flex items-center space-x-1 ${
-                            tab.viewMode === 'telemetry' ? 'bg-emerald-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'
-                          }`}
-                        >
-                          <Activity className="w-3.5 h-3.5" />
-                          <span className="hidden sm:inline">Telemetry</span>
-                        </button>
-                      </div>
                       <button
-                        onClick={async () => {
-                          if (isTauri()) {
-                            let port = tab.socks5Port || 1080;
-                            if (activeConnectionId) {
-                              try {
-                                port = await sshStartSocks5(activeConnectionId, port);
-                              } catch (err) {
-                                console.warn('[BrowserApp] Failed to verify SOCKS5 port:', err);
-                              }
-                            }
-                            openBrowserWindow(
-                              tab.displayUrl || tab.url,
-                              tab.title || tab.displayUrl || tab.url,
-                              `socks5://127.0.0.1:${port}`,
-                              tab.id
-                            );
-                          } else {
-                            openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, true);
-                          }
-                        }}
+                        onClick={() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, true)}
                         className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-semibold shadow-md shadow-emerald-900/30 transition-all cursor-pointer flex items-center space-x-1.5"
-                        title="Open native browser window with SOCKS5 proxy"
+                        title="Open in your default external browser"
                       >
                         <ExternalLink className="w-3.5 h-3.5" />
-                        <span>Launch in Browser</span>
+                        <span>Open in System Browser</span>
                       </button>
 
                       <button
@@ -948,35 +887,30 @@ export default function BrowserApp() {
                       </button>
 
                       <button
-                        onClick={() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, true)}
-                        className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white border border-white/10 transition-colors cursor-pointer"
-                        title="Open in System Default Browser via SSH Gateway"
+                        onClick={() => {
+                          const curlCmd = `curl --socks5-hostname 127.0.0.1:${tab.socks5Port || 1080} "${tab.displayUrl || tab.url}"`;
+                          navigator.clipboard.writeText(curlCmd);
+                          setCopiedCurl(true);
+                          setTimeout(() => setCopiedCurl(false), 2000);
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 text-xs font-mono transition-colors cursor-pointer flex items-center space-x-1.5"
+                        title="Copy cURL command with SOCKS5 proxy"
                       >
-                        <Globe className="w-3.5 h-3.5" />
+                        {copiedCurl ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Terminal className="w-3.5 h-3.5" />}
+                        <span>{copiedCurl ? 'Copied cURL' : 'Copy cURL'}</span>
                       </button>
                     </div>
                   </div>
 
-                  {/* Main Content: Live Webview OR Response Inspector */}
-                  {tab.viewMode !== 'telemetry' ? (
-                    <div className="flex-1 w-full h-full relative bg-white overflow-hidden">
-                      <iframe
-                        key={`${tab.id}-${tab.url}`}
-                        src={getProxiedBrowserUrl(tab.url, activeConnectionId)}
-                        className="w-full h-full border-none bg-white"
-                        sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
-                        title={tab.title || tab.url}
-                      />
-                    </div>
-                  ) : (
+                  {/* Main Content: SOCKS5 Service Gateway & Inspector */}
                   <div className="flex-1 overflow-auto p-4 space-y-4">
                     {/* Telemetry Metrics Bar */}
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                       <div className="p-3 rounded-2xl bg-[#1e1e2e] border border-white/10">
-                        <div className="text-[10px] text-gray-400 uppercase tracking-wider font-semibold">HTTP Status</div>
+                        <div className="text-[10px] text-gray-400 uppercase tracking-wider font-semibold">Tunnel Status</div>
                         <div className="text-sm font-bold font-mono text-emerald-400 mt-1 flex items-center space-x-1.5">
-                          <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                          <span>{tab.statusCode || 200} {tab.statusText || 'OK'}</span>
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                          <span>{tab.statusText || 'SOCKS5 Active'}</span>
                         </div>
                       </div>
 
@@ -1005,21 +939,57 @@ export default function BrowserApp() {
                     </div>
 
                     {/* SOCKS5 Setup & Browser Command Info Card */}
-                    <div className="p-4 rounded-2xl bg-gradient-to-r from-blue-900/20 via-indigo-900/20 to-purple-900/20 border border-blue-500/20 text-xs text-gray-300 space-y-2">
-                      <div className="flex items-center space-x-2 text-blue-400 font-semibold">
-                        <ShieldCheck className="w-4 h-4" />
-                        <span>SSH Dynamic SOCKS5 Proxy Active</span>
+                    <div className="p-5 rounded-2xl bg-gradient-to-r from-blue-900/20 via-indigo-900/20 to-purple-900/20 border border-blue-500/20 text-xs text-gray-300 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center space-x-2 text-blue-400 font-semibold text-sm">
+                          <ShieldCheck className="w-5 h-5 text-emerald-400" />
+                          <span>SSH Dynamic SOCKS5 Proxy Active</span>
+                        </div>
+                        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                          127.0.0.1:{tab.socks5Port || 1080}
+                        </span>
                       </div>
-                      <p className="text-[11px] text-gray-400 leading-relaxed">
-                        All TCP and HTTP/HTTPS network traffic for this target is routed 100% encrypted through your remote SSH server (<strong>{serverHost}</strong>). No iframe embedding restrictions (X-Frame-Options or CSP) apply.
+                      <p className="text-xs text-gray-300 leading-relaxed">
+                        All TCP and HTTP/HTTPS network traffic for this target is routed 100% encrypted through your remote SSH server (<strong>{serverHost}</strong>). You can open this target directly in your default system browser, or point any browser/CLI tool to the local SOCKS5 proxy endpoint.
                       </p>
-                      <div className="flex flex-wrap items-center gap-2 pt-1 font-mono text-[11px]">
-                        <span className="text-gray-400">SOCKS5 Proxy:</span>
-                        <code className="px-2 py-0.5 rounded bg-black/40 text-emerald-300 border border-white/10 select-all">
-                          socks5://127.0.0.1:{tab.socks5Port || 1080}
-                        </code>
-                        <span className="text-gray-500">•</span>
-                        <span className="text-blue-300 font-sans">Full WebSockets, cookies, scripts, and video streaming supported</span>
+                      
+                      <div className="flex flex-wrap items-center gap-3 pt-2">
+                        <button
+                          onClick={() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, true)}
+                          className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-2"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                          <span>Open in System Browser</span>
+                        </button>
+                        
+                        <div className="flex items-center space-x-2 font-mono text-xs bg-black/40 px-3 py-2 rounded-xl border border-white/10">
+                          <span className="text-gray-400">Proxy:</span>
+                          <code className="text-emerald-300 font-bold select-all">
+                            socks5://127.0.0.1:{tab.socks5Port || 1080}
+                          </code>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Quick Command Guide */}
+                    <div className="p-4 rounded-2xl bg-[#11111b] border border-white/10 space-y-3 text-xs">
+                      <div className="flex items-center space-x-2 text-gray-300 font-semibold">
+                        <Terminal className="w-4 h-4 text-cyan-400" />
+                        <span>Quick Proxy Commands</span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="p-3 rounded-xl bg-[#181825] border border-white/5 space-y-1.5">
+                          <div className="text-[11px] text-gray-400 font-medium">cURL Command</div>
+                          <code className="block p-2 rounded-lg bg-black/50 text-[11px] font-mono text-emerald-300 select-all overflow-x-auto whitespace-pre">
+                            curl --socks5-hostname 127.0.0.1:{tab.socks5Port || 1080} "{tab.displayUrl || tab.url}"
+                          </code>
+                        </div>
+                        <div className="p-3 rounded-xl bg-[#181825] border border-white/5 space-y-1.5">
+                          <div className="text-[11px] text-gray-400 font-medium">Chrome / Chromium with Proxy</div>
+                          <code className="block p-2 rounded-lg bg-black/50 text-[11px] font-mono text-blue-300 select-all overflow-x-auto whitespace-pre">
+                            chrome --proxy-server="socks5://127.0.0.1:{tab.socks5Port || 1080}" "{tab.displayUrl || tab.url}"
+                          </code>
+                        </div>
                       </div>
                     </div>
 
@@ -1058,15 +1028,14 @@ export default function BrowserApp() {
                         </div>
                         <pre className="overflow-auto whitespace-pre-wrap leading-relaxed">
                           {(tab.htmlContent || tab.textContent || '').slice(0, 10000)}
-                          {(tab.htmlContent || tab.textContent || '').length > 10000 ? '\n\n... [Content truncated for preview. Use Launch in Browser to view full interactive page]' : ''}
+                          {(tab.htmlContent || tab.textContent || '').length > 10000 ? '\n\n... [Content truncated for preview. Use Open in System Browser to view full interactive page]' : ''}
                         </pre>
                       </div>
                     ) : null}
                   </div>
-                  )}
                 </div>
               ) : (
-                /* User Network Mode (SSH: OFF): Direct PC Browser Gateway (NO IFRAME) */
+                /* User Network Mode (SSH: OFF): Direct PC Browser Gateway (NO LIVE WEBVIEW) */
                 <div className="w-full h-full flex flex-col items-center justify-center p-8 bg-[#181825] text-center select-none">
                   <div className="w-16 h-16 rounded-3xl bg-blue-600/15 border border-blue-500/30 text-blue-400 flex items-center justify-center mb-4 shadow-xl">
                     <Globe className="w-8 h-8" />
@@ -1079,17 +1048,11 @@ export default function BrowserApp() {
                   </p>
                   <div className="flex items-center space-x-3">
                     <button
-                      onClick={() => {
-                        if (isTauri()) {
-                          openBrowserWindow(tab.displayUrl || tab.url, tab.title || tab.displayUrl || tab.url, undefined, tab.id);
-                        } else {
-                          openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, false);
-                        }
-                      }}
+                      onClick={() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, false)}
                       className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
                     >
                       <ExternalLink className="w-3.5 h-3.5" />
-                      <span>Launch Browser Window</span>
+                      <span>Open in System Browser</span>
                     </button>
                     <button
                       onClick={() => handleToggleNetworkMode(tab.id)}

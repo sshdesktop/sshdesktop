@@ -238,7 +238,7 @@ export default function Window({ window: win, children }: { window: WindowState;
         }}
         className={`absolute window-shell select-none ${win.minimized ? 'pointer-events-none' : 'pointer-events-auto'}`}
         style={{ 
-          zIndex: isFullScreen ? 1000001 : win.zIndex,
+          zIndex: isFullScreen ? 1000001 : Math.max(win.zIndex || 100, 100),
           display: win.minimized ? 'none' : 'block'
         }}
       >

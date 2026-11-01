@@ -462,7 +462,7 @@ interface WindowStoreState {
 
 export const useWindowStore = create<WindowStoreState>((set, get) => ({
   windows: [],
-  nextZIndex: 10,
+  nextZIndex: 100,
   launchingAppId: null,
   closeInterceptors: {},
   registerCloseInterceptor: (id, fn) => set((state) => ({
@@ -488,7 +488,7 @@ export const useWindowStore = create<WindowStoreState>((set, get) => ({
           maximized: isAutoFS ? true : (win.maximized ?? false),
           snapState: 'none',
           fullscreen: false,
-          zIndex: state.nextZIndex,
+          zIndex: Math.max(state.nextZIndex, 100),
           focused: true
         }
       ],
@@ -512,7 +512,7 @@ export const useWindowStore = create<WindowStoreState>((set, get) => ({
       ...w,
       focused: w.id === id,
       minimized: w.id === id ? false : w.minimized,
-      zIndex: w.id === id ? state.nextZIndex : w.zIndex
+      zIndex: w.id === id ? Math.max(state.nextZIndex, 100) : Math.max(w.zIndex || 100, 100)
     })),
     nextZIndex: state.nextZIndex + 1
   })),
@@ -520,7 +520,7 @@ export const useWindowStore = create<WindowStoreState>((set, get) => ({
     windows: state.windows.map(w => w.id === id ? { ...w, minimized: true, focused: false } : w)
   })),
   restoreWindow: (id) => set((state) => ({
-    windows: state.windows.map(w => w.id === id ? { ...w, minimized: false, focused: true, zIndex: state.nextZIndex } : { ...w, focused: false }),
+    windows: state.windows.map(w => w.id === id ? { ...w, minimized: false, focused: true, zIndex: Math.max(state.nextZIndex, 100) } : { ...w, focused: false }),
     nextZIndex: state.nextZIndex + 1
   })),
   minimizeAllWindows: () => set((state) => ({
@@ -583,7 +583,7 @@ export const useWindowStore = create<WindowStoreState>((set, get) => ({
   bringToFront: (id) => set((state) => ({
     windows: state.windows.map(w => ({
       ...w,
-      zIndex: w.id === id ? state.nextZIndex : w.zIndex,
+      zIndex: w.id === id ? Math.max(state.nextZIndex, 100) : Math.max(w.zIndex || 100, 100),
       minimized: w.id === id ? false : w.minimized,
       focused: w.id === id
     })),
