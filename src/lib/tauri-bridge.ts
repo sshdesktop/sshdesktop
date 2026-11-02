@@ -45,6 +45,30 @@ export function clearStoredSession(): void {
   } catch {}
 }
 
+// ----------------- Closed Connections Tracking -----------------
+const intentionallyClosedConnections = new Map<string, number>();
+
+export function markConnectionClosed(connId?: string | null): void {
+  if (!connId) return;
+  intentionallyClosedConnections.set(connId, Date.now() + 15000);
+}
+
+export function markConnectionOpened(connId?: string | null): void {
+  if (!connId) return;
+  intentionallyClosedConnections.delete(connId);
+}
+
+export function isConnectionClosed(connId?: string | null): boolean {
+  if (!connId) return false;
+  const expiry = intentionallyClosedConnections.get(connId);
+  if (!expiry) return false;
+  if (Date.now() > expiry) {
+    intentionallyClosedConnections.delete(connId);
+    return false;
+  }
+  return true;
+}
+
 export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {}, fallback: T): Promise<T> {
   if (isTauri()) {
     try {
@@ -82,10 +106,13 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
         errMsg.includes('No active SSH connection') ||
         errMsg.includes('Please connect to a server first');
 
-      if (isConnectionLoss && !isNotDropEvent) {
+      const targetConnId = args?.connId || args?.connectionId || args?.id;
+      const isExplicitlyClosed = targetConnId && isConnectionClosed(targetConnId);
+
+      if (isConnectionLoss && !isNotDropEvent && !isExplicitlyClosed) {
         if (typeof window !== 'undefined') {
           const detail = { 
-            connId: args?.connId,
+            connId: targetConnId,
             command: cmd,
             reason: errMsg 
           };
@@ -207,10 +234,16 @@ function setupWebTerminalSocket(termId: string, connId: string, cols: number, ro
 
 // ----------------- SSH Commands -----------------
 export async function sshConnect(config: any): Promise<string> {
+  if (config?.id) {
+    markConnectionOpened(config.id);
+  }
   return safeInvoke<string>('ssh_connect', { config }, '');
 }
 
 export async function sshDisconnect(connId: string): Promise<void> {
+  if (connId) {
+    markConnectionClosed(connId);
+  }
   return safeInvoke<void>('ssh_disconnect', { connId }, undefined);
 }
 
