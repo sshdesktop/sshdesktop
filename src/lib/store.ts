@@ -5,7 +5,8 @@ export type { WindowState } from './types';
 import { 
   sshConnect, sshDisconnect, settingsGet, settingsSave, 
   storeSaveConnection, storeDeleteConnection, storeListConnections,
-  sshGetUserPrivilege
+  sshGetUserPrivilege,
+  markConnectionClosed, markConnectionOpened, isConnectionClosed
 } from './tauri-bridge';
 import { ensureServerDirectories } from './server-init';
 
@@ -28,6 +29,9 @@ interface ConnectionState {
   removeConnection: (id: string) => void;
   setActive: (id: string | null) => void;
   setDisconnected: (isDisconnected: boolean, reason?: string | null, serverId?: string | null) => void;
+  isAlertDismissed: boolean;
+  dismissedServerId: string | null;
+  dismissDisconnectAlert: (serverId?: string | null) => void;
   triggerDisconnectAlert: (reason?: string, serverId?: string | null) => void;
   resetReconnectAttempts: () => void;
   connect: (id: string, overrideConfig?: Partial<SavedConnection>) => Promise<void>;
@@ -48,6 +52,8 @@ export const useConnectionStore = create<ConnectionState>()(
       connectedServers: new Map(),
       isDisconnected: false,
       disconnectReason: null,
+      isAlertDismissed: false,
+      dismissedServerId: null,
       isReconnecting: false,
       reconnectAttempts: 0,
       reconnectError: null,
@@ -176,19 +182,47 @@ export const useConnectionStore = create<ConnectionState>()(
           }
         }).catch(() => {});
       },
+      dismissDisconnectAlert: (serverId) => {
+        const targetId = serverId || get().disconnectedServerId || get().activeConnectionId;
+        set({
+          isDisconnected: false,
+          disconnectReason: null,
+          disconnectedServerId: null,
+          isAlertDismissed: true,
+          dismissedServerId: targetId || null,
+          isReconnecting: false,
+          reconnectAttempts: 0,
+          reconnectError: null,
+        });
+      },
       setDisconnected: (isDisconnected, reason, serverId) => {
         const targetId = serverId || get().activeConnectionId || get().disconnectedServerId;
         set({
           isDisconnected,
           disconnectReason: reason || (isDisconnected ? 'Connection to remote server was lost or stopped.' : null),
           disconnectedServerId: isDisconnected ? (targetId || null) : null,
+          isAlertDismissed: false,
+          dismissedServerId: null,
           isReconnecting: false,
           reconnectAttempts: isDisconnected ? 0 : get().reconnectAttempts,
           reconnectError: null,
         });
       },
       triggerDisconnectAlert: (reason, serverId) => {
-        const targetId = serverId || get().activeConnectionId || get().disconnectedServerId;
+        const activeId = get().activeConnectionId;
+        if (!activeId) return;
+
+        const targetId = serverId || activeId;
+        if (targetId && targetId !== activeId) return;
+
+        if (get().isAlertDismissed && (get().dismissedServerId === targetId || !get().dismissedServerId)) {
+          return;
+        }
+
+        if (isConnectionClosed(targetId)) {
+          return;
+        }
+
         const newMap = new Map(get().connectedServers);
         if (targetId) {
           newMap.delete(targetId);
@@ -277,6 +311,8 @@ export const useConnectionStore = create<ConnectionState>()(
           isDisconnected: false,
           disconnectReason: null,
           disconnectedServerId: null,
+          isAlertDismissed: false,
+          dismissedServerId: null,
           isReconnecting: false,
           reconnectAttempts: 0,
           reconnectError: null,
@@ -291,7 +327,14 @@ export const useConnectionStore = create<ConnectionState>()(
       reconnect: async (targetServerId) => {
         const targetId = targetServerId || get().disconnectedServerId || get().activeConnectionId;
         if (!targetId) return;
-        set((s) => ({ isReconnecting: true, reconnectError: null, reconnectAttempts: s.reconnectAttempts + 1 }));
+        markConnectionOpened(targetId);
+        set((s) => ({
+          isReconnecting: true,
+          reconnectError: null,
+          reconnectAttempts: s.reconnectAttempts + 1,
+          isAlertDismissed: false,
+          dismissedServerId: null,
+        }));
         try {
           await get().connect(targetId);
           set({
@@ -299,6 +342,8 @@ export const useConnectionStore = create<ConnectionState>()(
             disconnectReason: null,
             disconnectedServerId: null,
             activeConnectionId: targetId,
+            isAlertDismissed: false,
+            dismissedServerId: null,
           });
         } catch (err: any) {
           set({ isReconnecting: false, reconnectError: err?.message || String(err) });
@@ -331,6 +376,8 @@ export const useConnectionStore = create<ConnectionState>()(
         });
       },
       closeServer: async (id) => {
+        markConnectionClosed(id);
+        useWindowStore.getState().closeAllWindows?.(id);
         try {
           await sshDisconnect(id);
         } catch {}
@@ -343,6 +390,10 @@ export const useConnectionStore = create<ConnectionState>()(
         const nextActiveId = remainingConnected.length > 0 ? remainingConnected[0] : null;
         const nextPriv = nextActiveId ? nextPrivs[nextActiveId] || null : null;
 
+        if (!nextActiveId) {
+          useWindowStore.getState().closeAllWindows?.();
+        }
+
         set({
           connectedServers: newMap,
           userPrivileges: nextPrivs,
@@ -351,6 +402,8 @@ export const useConnectionStore = create<ConnectionState>()(
           isDisconnected: false,
           disconnectReason: null,
           disconnectedServerId: null,
+          isAlertDismissed: false,
+          dismissedServerId: null,
           isReconnecting: false,
           reconnectAttempts: 0,
           reconnectError: null,
@@ -359,10 +412,12 @@ export const useConnectionStore = create<ConnectionState>()(
       switchToOtherServer: async (targetId) => {
         const failedId = get().disconnectedServerId || get().activeConnectionId;
         if (failedId && failedId !== targetId) {
+          markConnectionClosed(failedId);
           try {
             await sshDisconnect(failedId);
           } catch {}
         }
+        markConnectionOpened(targetId);
         const newMap = new Map(get().connectedServers);
         if (failedId && failedId !== targetId) {
           newMap.delete(failedId);
@@ -372,6 +427,8 @@ export const useConnectionStore = create<ConnectionState>()(
           isDisconnected: false,
           disconnectReason: null,
           disconnectedServerId: null,
+          isAlertDismissed: false,
+          dismissedServerId: null,
           activeConnectionId: targetId,
           userPrivilege: cachedPriv,
           connectedServers: newMap,
@@ -392,10 +449,12 @@ export const useConnectionStore = create<ConnectionState>()(
       returnToServersList: () => {
         const failedId = get().disconnectedServerId || get().activeConnectionId;
         if (failedId) {
+          markConnectionClosed(failedId);
           try {
             sshDisconnect(failedId).catch(() => {});
           } catch {}
         }
+        useWindowStore.getState().closeAllWindows?.();
         const newMap = new Map(get().connectedServers);
         if (failedId) {
           newMap.delete(failedId);
@@ -404,6 +463,8 @@ export const useConnectionStore = create<ConnectionState>()(
           isDisconnected: false,
           disconnectReason: null,
           disconnectedServerId: null,
+          isAlertDismissed: false,
+          dismissedServerId: null,
           activeConnectionId: null,
           connectedServers: newMap,
           isReconnecting: false,
@@ -458,6 +519,7 @@ interface WindowStoreState {
   minimizeAllWindows: () => void;
   restoreAllWindows: () => void;
   restoreToNormal: (id: string, x: number, y: number) => void;
+  closeAllWindows: (serverId?: string) => void;
 }
 
 export const useWindowStore = create<WindowStoreState>((set, get) => ({
@@ -473,6 +535,9 @@ export const useWindowStore = create<WindowStoreState>((set, get) => ({
     delete next[id];
     return { closeInterceptors: next };
   }),
+  closeAllWindows: (serverId) => set((state) => ({
+    windows: serverId ? state.windows.filter(w => w.serverId !== serverId) : []
+  })),
   setLaunchingApp: (id) => set({ launchingAppId: id }),
   openWindow: (win) => set((state) => {
     const id = `win-${Date.now()}`;

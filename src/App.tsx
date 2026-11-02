@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { useConnectionStore, useWindowStore, useSettingsStore, useNotificationStore } from './lib/store';
-import { storeSaveConnection, settingsGet } from './lib/tauri-bridge';
+import { storeSaveConnection, settingsGet, isConnectionClosed } from './lib/tauri-bridge';
 import ConnectionScreen from './pages/ConnectionScreen';
 import Desktop from './shell/Desktop';
 import DisconnectAlertModal from './shell/DisconnectAlertModal';
@@ -89,17 +89,31 @@ export default function App() {
     // Global listener for SSH disconnect events dispatched by bridge
     const handleDisconnectEvent = (e: any) => {
       const connId = e?.detail?.connId;
-      const activeConnId = useConnectionStore.getState().activeConnectionId;
+      const { activeConnectionId, connectedServers, isAlertDismissed, dismissedServerId } = useConnectionStore.getState();
 
-      // When a secondary or fleet automation server (e.g. srv-...) is unreachable or disconnected,
-      // NEVER trigger the full-screen disconnect alert for the primary desktop workspace!
-      if (connId && activeConnId && connId !== activeConnId) {
-        console.warn(`[Disconnect Event] Suppressed disconnect alert for non-active fleet server "${connId}"`);
+      // 1. If user is NOT in an active desktop session (e.g. on server list screen), NEVER open alert!
+      if (!activeConnectionId) {
+        return;
+      }
+
+      // 2. If connId is specified and does not match the active session, suppress
+      if (connId && connId !== activeConnectionId) {
+        console.warn(`[Disconnect Event] Suppressed disconnect alert for non-active server "${connId}"`);
+        return;
+      }
+
+      // 3. If active session is marked closed or not in connectedServers, suppress
+      if (!connectedServers.has(activeConnectionId) || isConnectionClosed(activeConnectionId)) {
+        return;
+      }
+
+      // 4. If alert was dismissed by user for this server, suppress
+      if (isAlertDismissed && (dismissedServerId === activeConnectionId || !dismissedServerId)) {
         return;
       }
 
       const reason = e?.detail?.reason || 'SSH connection was lost or server was stopped.';
-      useConnectionStore.getState().triggerDisconnectAlert(reason, connId);
+      useConnectionStore.getState().triggerDisconnectAlert(reason, connId || activeConnectionId);
     };
     window.addEventListener('sshdesktop-ssh-disconnected', handleDisconnectEvent);
     window.addEventListener('clouddesk-ssh-disconnected', handleDisconnectEvent);
