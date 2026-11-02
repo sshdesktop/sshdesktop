@@ -1,8 +1,54 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Minus, Square, X, LogOut, Power, AlertCircle, ExternalLink } from 'lucide-react';
-import { isTauri } from '../lib/tauri-bridge';
+import { Minus, Square, X, LogOut, Power, AlertCircle, ExternalLink, CheckCircle2 } from 'lucide-react';
+import { isTauri, authLogout, clearStoredSession, sshDisconnect, markConnectionClosed } from '../lib/tauri-bridge';
 import { useSettingsStore, useConnectionStore, useWindowStore } from '../lib/store';
+
+// Function to cleanly logout all login sessions across Web and Desktop modes
+export async function performAllSessionsLogout(): Promise<void> {
+  const { connectedServers, activeConnectionId, disconnectedServerId, returnToServersList } = useConnectionStore.getState();
+
+  // 1. Gather all active server sessions
+  const serverIds = Array.from(connectedServers.keys());
+  if (activeConnectionId && !serverIds.includes(activeConnectionId)) {
+    serverIds.push(activeConnectionId);
+  }
+  if (disconnectedServerId && !serverIds.includes(disconnectedServerId)) {
+    serverIds.push(disconnectedServerId);
+  }
+
+  // 2. Disconnect each SSH connection cleanly
+  await Promise.all(
+    serverIds.map(async (id) => {
+      try {
+        markConnectionClosed(id);
+        await sshDisconnect(id);
+      } catch (err) {
+        console.warn(`[Logout] Error disconnecting server ${id}:`, err);
+      }
+    })
+  );
+
+  // 3. Close all open desktop windows
+  useWindowStore.getState().closeAllWindows?.();
+
+  // 4. Reset connection store state
+  returnToServersList();
+
+  // 5. In Web Mode (and clearing local session cache), perform complete Web Auth Logout
+  try {
+    await authLogout();
+  } catch (err) {
+    console.warn('[Logout] Web auth logout error:', err);
+  }
+  clearStoredSession();
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('sshdesktop-session-expired', {
+      detail: { reason: 'Logged out by closing main window.' }
+    }));
+  }
+}
 
 interface MainWindowControlsProps {
   className?: string;
@@ -14,7 +60,7 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
   variant = 'auto',
 }) => {
   const { theme } = useSettingsStore();
-  const { disconnect, activeConnectionId, connections } = useConnectionStore();
+  const { activeConnectionId, connections } = useConnectionStore();
   const { minimizeAllWindows } = useWindowStore();
 
   const isLightMode = variant === 'light' || (variant === 'auto' && theme === 'light');
@@ -22,8 +68,10 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
   const [isMaximized, setIsMaximized] = useState(false);
   const [showWebCloseModal, setShowWebCloseModal] = useState(false);
   const [showToast, setShowToast] = useState<string | null>(null);
+  const [isClosing, setIsClosing] = useState(false);
 
   const unlistenResizeRef = useRef<(() => void) | null>(null);
+  const unlistenCloseRef = useRef<(() => void) | null>(null);
 
   // Initialize maximized state and listeners
   useEffect(() => {
@@ -52,6 +100,20 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
             } else {
               unlisten();
             }
+
+            // Register native window close listener to log out sessions before closing
+            try {
+              const unlistenClose = await appWin.onCloseRequested(async () => {
+                try {
+                  await performAllSessionsLogout();
+                } catch {}
+              });
+              if (mounted) {
+                unlistenCloseRef.current = unlistenClose;
+              } else {
+                unlistenClose();
+              }
+            } catch {}
           } catch (err) {
             console.warn('[MainWindowControls] Tauri window init failed:', err);
           }
@@ -90,6 +152,12 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
           unlistenResizeRef.current();
         } catch {}
         unlistenResizeRef.current = null;
+      }
+      if (unlistenCloseRef.current) {
+        try {
+          unlistenCloseRef.current();
+        } catch {}
+        unlistenCloseRef.current = null;
       }
     };
   }, []);
@@ -190,40 +258,39 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
     }
   };
 
-  // Handle Close
+  // Handle Close: Disconnect and logout all sessions before closing
   const handleClose = async (e: React.MouseEvent) => {
     e.stopPropagation();
+    if (isClosing) return;
+    setIsClosing(true);
 
+    try {
+      // 1. All login sessions logout (disconnect SSH connections, close windows, clear web auth)
+      await performAllSessionsLogout();
+    } catch (err) {
+      console.warn('[MainWindowControls] Error during session logout on close:', err);
+    }
+
+    // 2. Then close window
     if (isTauri()) {
       try {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
         await getCurrentWindow().close();
       } catch (err) {
         console.warn('[MainWindowControls] Tauri close error:', err);
+      } finally {
+        setIsClosing(false);
       }
     } else {
-      // Web Mode:
-      // Try closing the tab directly first
+      // Web Mode: Try closing browser tab directly first
       try {
         window.close();
       } catch {}
 
-      // If browser security blocks window.close(), display modern web confirmation modal
+      // If browser security blocks window.close(), display clean logout confirmation modal
       setShowWebCloseModal(true);
+      setIsClosing(false);
     }
-  };
-
-  // Web Disconnect & Logout Action
-  const handleWebDisconnectAndExit = () => {
-    if (activeConnectionId) {
-      try {
-        disconnect(activeConnectionId);
-      } catch (e) {
-        console.warn('[MainWindowControls] Web disconnect error:', e);
-      }
-    }
-    setShowWebCloseModal(false);
-    setShowToast('Logged out of session');
   };
 
   const currentServer = connections.find(c => c.id === activeConnectionId);
@@ -292,11 +359,16 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
         <button
           type="button"
           onClick={handleClose}
-          className={closeBtnClass}
-          title="Close Window"
+          disabled={isClosing}
+          className={`${closeBtnClass} ${isClosing ? 'opacity-60 cursor-wait' : ''}`}
+          title="Logout All Sessions & Close Window"
           aria-label="Close"
         >
-          <X className="w-3.5 h-3.5" />
+          {isClosing ? (
+            <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+          ) : (
+            <X className="w-3.5 h-3.5" />
+          )}
         </button>
       </div>
 
@@ -322,11 +394,11 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
             {/* Header */}
             <div className="flex items-center justify-between border-b border-white/10 pb-3">
               <div className="flex items-center space-x-2.5">
-                <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400">
-                  <Power className="w-4 h-4" />
+                <div className="w-8 h-8 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                  <CheckCircle2 className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-sm text-white">Exit SSH Desktop</h3>
+                  <h3 className="font-bold text-sm text-white">Logged Out & Closed</h3>
                   <p className="text-[11px] text-gray-400">Web Browser Session</p>
                 </div>
               </div>
@@ -341,45 +413,28 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
 
             {/* Description */}
             <div className="space-y-2 text-xs text-gray-300 leading-relaxed">
+              <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-2.5 flex items-center space-x-2 text-xs text-emerald-300 font-medium">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>All login sessions logged out successfully.</span>
+              </div>
               <p>
-                You are running SSH Desktop via the web browser interface.
+                All SSH connections have been terminated and your web session has been completely signed out.
               </p>
-              {currentServer && (
-                <div className="bg-white/5 border border-white/10 rounded-xl p-2.5 flex items-center space-x-2 text-xs">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  <span className="text-gray-300">Connected to:</span>
-                  <span className="font-semibold text-white truncate max-w-[170px]">
-                    {currentServer.name || currentServer.host}
-                  </span>
-                </div>
-              )}
               <p className="text-[11px] text-gray-400">
-                To close the application, close this browser tab (press <kbd className="px-1.5 py-0.5 rounded bg-white/10 font-mono text-[10px] text-gray-200">Ctrl+W</kbd> / <kbd className="px-1.5 py-0.5 rounded bg-white/10 font-mono text-[10px] text-gray-200">⌘W</kbd>) or choose an option below:
+                You can safely close this browser tab (press <kbd className="px-1.5 py-0.5 rounded bg-white/10 font-mono text-[10px] text-gray-200">Ctrl+W</kbd> / <kbd className="px-1.5 py-0.5 rounded bg-white/10 font-mono text-[10px] text-gray-200">⌘W</kbd>).
               </p>
             </div>
 
             {/* Action Buttons */}
             <div className="flex flex-col space-y-2 pt-2 border-t border-white/10">
-              {activeConnectionId && (
-                <button
-                  type="button"
-                  onClick={handleWebDisconnectAndExit}
-                  className="w-full py-2.5 px-3 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs shadow-md transition-colors flex items-center justify-center space-x-2 cursor-pointer"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                  <span>Disconnect Server & Sign Out</span>
-                </button>
-              )}
-
               <button
                 type="button"
                 onClick={() => {
                   try {
                     window.close();
                   } catch {}
-                  setShowWebCloseModal(false);
                 }}
-                className="w-full py-2.5 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white font-medium text-xs transition-colors flex items-center justify-center space-x-2 cursor-pointer"
+                className="w-full py-2.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs transition-colors flex items-center justify-center space-x-2 cursor-pointer shadow-lg shadow-blue-500/20 active:scale-[0.98]"
               >
                 <ExternalLink className="w-3.5 h-3.5" />
                 <span>Close Browser Tab Now</span>
@@ -387,10 +442,13 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
 
               <button
                 type="button"
-                onClick={() => setShowWebCloseModal(false)}
-                className="w-full py-2 px-3 rounded-xl text-gray-400 hover:text-white text-xs transition-colors cursor-pointer"
+                onClick={() => {
+                  window.location.reload();
+                }}
+                className="w-full py-2 px-3 rounded-xl bg-white/10 hover:bg-white/15 text-gray-200 hover:text-white text-xs transition-colors cursor-pointer flex items-center justify-center space-x-2 active:scale-[0.98]"
               >
-                Cancel
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Sign In Again</span>
               </button>
             </div>
           </div>
