@@ -1106,7 +1106,7 @@ export default function ConnectionScreen() {
                         <div className="flex items-center space-x-2 truncate">
                           <Key className="w-4 h-4 text-blue-400 shrink-0" />
                           <span className="text-gray-300 truncate">
-                            {firstProfile.privateKeyPath || 'Click to select key (.pem, id_rsa, id_ed25519)...'}
+                            {firstProfile.privateKeyPath || 'Click to select key (.pem)...'}
                           </span>
                         </div>
                         <span className="text-[10px] text-blue-400 shrink-0 font-medium ml-2">Browse</span>
@@ -1594,7 +1594,7 @@ export default function ConnectionScreen() {
                       >
                         <Upload className="w-5 h-5 text-blue-400" />
                         <div className="text-xs text-gray-300 font-medium">
-                          Select or Drop Private Key (<span className="font-mono text-gray-400">.pem</span>, <span className="font-mono text-gray-400">id_rsa</span>, <span className="font-mono text-gray-400">id_ed25519</span>)
+                          Select or Drop Private Key (<span className="font-mono text-gray-400">.pem</span>)
                         </div>
                         <div className="text-[10px] text-gray-500">Supports OpenSSH (.pem)</div>
                       </div>
@@ -1883,13 +1883,13 @@ export default function ConnectionScreen() {
               ) : (
                 <div className="space-y-3">
                   <div>
-                    <label className="text-gray-300 block mb-1 font-medium">Private Key File (.pem, id_rsa, .ppk)</label>
+                    <label className="text-gray-300 block mb-1 font-medium">Private Key File (.pem)</label>
                     <div className="flex items-center space-x-2">
                       <input
                         type="text"
                         value={modalForm.privateKeyPath}
                         onChange={e => setModalForm(f => ({ ...f, privateKeyPath: e.target.value }))}
-                        placeholder="e.g. ~/.ssh/id_rsa or /home/username/.ssh/id_rsa"
+                        placeholder="e.g. ~/.ssh/key.pem or /home/username/.ssh/key.pem"
                         className="flex-1 bg-[#10121d] border border-white/10 rounded-xl px-3 py-2 text-white font-mono text-xs focus:outline-none focus:border-blue-500"
                       />
                       <button
