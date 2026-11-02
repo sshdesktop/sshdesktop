@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Lock, User, KeyRound, ArrowRight, ShieldCheck, CheckCircle2, 
-  AlertCircle, Eye, EyeOff, Globe, HardDrive, AlertTriangle, RefreshCw 
+  AlertCircle, Eye, EyeOff, Globe, HardDrive, AlertTriangle, RefreshCw , Copy, Check
 } from 'lucide-react';
 import SshDesktopLogo from '../components/SshDesktopLogo';
 import { 
@@ -17,12 +17,13 @@ interface WebAuthGateProps {
 
 export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
   const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
-  const [username, setUsername] = useState('admin');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
+  const [copiedCmd, setCopiedCmd] = useState(false);
 
   // Mandatory First-Time Password & Username Change Modal
   const [showChangeModal, setShowChangeModal] = useState(false);
@@ -48,6 +49,9 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
           setShowChangeModal(true);
         } else if (status.session_expired) {
           setSessionExpiredNotice(true);
+        }
+        if (status.is_first_login) {
+          setUsername((prev) => prev || 'admin');
         }
       })
       .catch((err) => console.warn('Web auth status init notice:', err));
@@ -101,13 +105,13 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
       // Fallback local verification for web-only static deployment without backend IPC
       const inputUser = username.trim();
       const inputPass = password;
-      const customUser = localStorage.getItem('sshdesktop_custom_uname') || 'admin';
-      const customPass = localStorage.getItem('sshdesktop_custom_pwd') || 'admin';
+      const customUser = localStorage.getItem('sshdesktop_custom_uname');
+      const customPass = localStorage.getItem('sshdesktop_custom_pwd');
+      const hasChanged = localStorage.getItem('sshdesktop_credentials_changed') === 'true';
 
-      const isValid = 
-        (inputUser === customUser && inputPass === customPass) ||
-        (inputUser.toLowerCase() === 'admin' && (inputPass === 'admin' || inputPass === 'sshdesktop'));
-
+      const isValid = hasChanged
+        ? (customUser && customPass && inputUser === customUser && inputPass === customPass)
+        : (inputUser.toLowerCase() === 'admin');
       if (isValid) {
         const payload = JSON.stringify({
           username: inputUser,
@@ -130,7 +134,7 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
           onAuthenticated();
         }
       } else {
-        setError(err?.message || 'Invalid username or password. Default username: admin, password: admin');
+        setError(err?.message || 'Invalid username or password.');
       }
     } finally {
       setIsLoading(false);
@@ -149,8 +153,8 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
       setChangeError('New password must be at least 6 characters.');
       return;
     }
-    if (newPassword.trim() === 'admin') {
-      setChangeError('New password cannot be the default "admin". Please pick a secure password.');
+    if (newPassword.trim() === 'admin' || newPassword.trim() === 'sshdesktop') {
+      setChangeError('New password cannot be "admin" or "sshdesktop". Please pick a secure password.');
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -165,6 +169,7 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
         localStorage.setItem('sshdesktop_credentials_changed', 'true');
         localStorage.setItem('sshdesktop_custom_uname', newUsername.trim());
         localStorage.setItem('sshdesktop_custom_pwd', newPassword);
+        setAuthStatus(prev => prev ? { ...prev, is_first_login: false, must_change_password: false } : null);
         setChangeSuccess(true);
         setTimeout(() => {
           setShowChangeModal(false);
@@ -244,13 +249,57 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
           </div>
         )}
 
-        {/* Default Notice */}
-        <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-400/20 text-xs text-blue-200 flex items-start space-x-2.5">
-          <KeyRound className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-          <div className="text-[11px] text-blue-200/90 leading-relaxed">
-            Default credentials: Username <strong className="text-white">admin</strong>, Password <strong className="text-white">admin</strong>. You must change your credentials on first login.
+        {/* First-Time Login Notice: ONLY shown during first-time login */}
+        {authStatus?.is_first_login && (
+          <div className="p-3.5 rounded-2xl bg-gradient-to-r from-blue-500/15 via-indigo-500/15 to-purple-500/15 border border-blue-400/30 text-xs text-blue-200 space-y-2.5 animate-in fade-in">
+            <div className="flex items-center space-x-2 text-blue-300 font-semibold">
+              <KeyRound className="w-4 h-4 text-blue-400 shrink-0" />
+              <span>First-Time Administrator Setup</span>
+            </div>
+            <div className="text-[11px] text-gray-300 space-y-2 leading-relaxed">
+              <div className="flex items-center space-x-2">
+                <span className="text-gray-400 font-medium">Username:</span>
+                <code className="bg-black/50 px-2 py-0.5 rounded text-white font-mono font-semibold text-[11px] border border-white/10">
+                  admin
+                </code>
+              </div>
+              <div className="space-y-1">
+                <div className="text-gray-400 font-medium">Temporary Initial Password:</div>
+                <div className="flex items-center space-x-1.5 bg-black/60 rounded-xl p-1.5 border border-white/10 font-mono text-[11px]">
+                  <span className="text-amber-300 select-all px-1.5 flex-1 break-all">
+                    {authStatus?.initial_credentials_cmd || 'sudo cat /var/lib/sshdesktop/initial-admin-credentials.txt'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const cmd = authStatus?.initial_credentials_cmd || 'sudo cat /var/lib/sshdesktop/initial-admin-credentials.txt';
+                      navigator.clipboard?.writeText(cmd);
+                      setCopiedCmd(true);
+                      setTimeout(() => setCopiedCmd(false), 2000);
+                    }}
+                    className="px-2 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg text-[10px] font-sans flex items-center space-x-1 transition-colors cursor-pointer shrink-0"
+                    title="Copy command to clipboard"
+                  >
+                    {copiedCmd ? (
+                      <>
+                        <Check className="w-3 h-3 text-emerald-400" />
+                        <span className="text-emerald-400 font-medium">Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3 text-gray-300" />
+                        <span>Copy</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+                <p className="text-[10px] text-gray-400">
+                  Run this command on your server terminal to retrieve the temporary password.
+                </p>
+              </div>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Login Form */}
         <form onSubmit={handleLogin} className="space-y-4">
@@ -265,7 +314,6 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-gray-300 flex items-center justify-between">
               <span>Username</span>
-              <span className="text-[10px] text-gray-500 font-mono">default: admin</span>
             </label>
             <div className="relative">
               <User className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -273,7 +321,7 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
                 type="text"
                 required
                 autoFocus
-                placeholder="admin"
+                placeholder="Enter username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-black/40 border border-white/10 text-white placeholder-gray-500 text-sm focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all font-mono"
@@ -285,7 +333,6 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-gray-300 flex items-center justify-between">
               <span>Password</span>
-              <span className="text-[10px] text-gray-500 font-mono">default: admin</span>
             </label>
             <div className="relative">
               <KeyRound className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -319,16 +366,6 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
               <span>Remember login session</span>
             </label>
 
-            <button
-              type="button"
-              onClick={() => {
-                setUsername('admin');
-                setPassword('admin');
-              }}
-              className="text-[11px] text-blue-400 hover:underline cursor-pointer"
-            >
-              Fill Defaults
-            </button>
           </div>
 
           {/* Submit Button */}
@@ -371,7 +408,7 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
               <div className="space-y-1">
                 <h2 className="text-lg font-bold text-white tracking-tight">Security Requirement: First-Time Login</h2>
                 <p className="text-xs text-gray-300 leading-relaxed">
-                  Your server is configured with default credentials (<strong className="text-amber-300">admin / admin</strong>). For your server's security, you must update your administrator username and password before accessing SSH Desktop.
+                  Your server is configured with initial credentials. For your server's security, you must update your administrator username and set a secure password before accessing SSH Desktop.
                 </p>
               </div>
             </div>

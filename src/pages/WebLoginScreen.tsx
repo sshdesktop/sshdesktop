@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   ShieldCheck, Lock, User, KeyRound, AlertTriangle, CheckCircle2, 
-  ArrowRight, RefreshCw, HardDrive, Server, Eye, EyeOff
+  ArrowRight, RefreshCw, HardDrive, Server, Eye, EyeOff, Copy, Check
 } from 'lucide-react';
 import { authGetStatus, authLogin, authChangeCredentials, AuthStatusResponse } from '../lib/tauri-bridge';
 import SshDesktopLogo from '../components/SshDesktopLogo';
@@ -16,11 +16,12 @@ export default function WebLoginScreen({ children }: WebLoginScreenProps) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
 
   // Login Form State
-  const [username, setUsername] = useState('admin');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [copiedCmd, setCopiedCmd] = useState(false);
 
   // Mandatory First-Time Password Change Modal State
   const [showChangeModal, setShowChangeModal] = useState(false);
@@ -44,6 +45,9 @@ export default function WebLoginScreen({ children }: WebLoginScreenProps) {
           setIsAuthenticated(true);
         } else if (status.is_authenticated && status.must_change_password) {
           setShowChangeModal(true);
+        }
+        if (status.is_first_login) {
+          setUsername((prev) => prev || 'admin');
         }
       } catch (err) {
         console.warn('Web auth status check:', err);
@@ -91,8 +95,8 @@ export default function WebLoginScreen({ children }: WebLoginScreenProps) {
       setChangeError('New password must be at least 6 characters.');
       return;
     }
-    if (newPassword.trim() === 'admin') {
-      setChangeError('New password cannot be the default "admin". Please pick a strong password.');
+    if (newPassword.trim() === 'admin' || newPassword.trim() === 'sshdesktop') {
+      setChangeError('New password cannot be "admin" or "sshdesktop". Please pick a strong password.');
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -105,6 +109,7 @@ export default function WebLoginScreen({ children }: WebLoginScreenProps) {
       const res = await authChangeCredentials(currentPassword, newUsername.trim(), newPassword);
       if (res.success) {
         setChangeSuccess(true);
+        setAuthStatus(prev => prev ? { ...prev, is_first_login: false, must_change_password: false } : null);
         setTimeout(() => {
           setShowChangeModal(false);
           setIsAuthenticated(true);
@@ -166,16 +171,57 @@ export default function WebLoginScreen({ children }: WebLoginScreenProps) {
           </div>
         )}
 
-        {/* Default Credentials Notice */}
-        <div className="flex items-start space-x-2.5 p-3 rounded-xl bg-blue-500/10 border border-blue-400/20 text-xs text-blue-200">
-          <KeyRound className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-          <div className="space-y-0.5">
-            <div className="font-semibold text-blue-300">Default Access Credentials</div>
-            <div className="text-[11px] text-blue-200/80 leading-relaxed">
-              Default login: Username <code className="bg-black/30 px-1 py-0.5 rounded text-white font-mono">admin</code> & Password <code className="bg-black/30 px-1 py-0.5 rounded text-white font-mono">admin</code>. You will be prompted to change credentials immediately.
+        {/* First-Time Login Notice: ONLY shown during first-time login */}
+        {authStatus?.is_first_login && (
+          <div className="p-3.5 rounded-2xl bg-gradient-to-r from-blue-500/15 via-indigo-500/15 to-purple-500/15 border border-blue-400/30 text-xs text-blue-200 space-y-2.5 animate-in fade-in">
+            <div className="flex items-center space-x-2 text-blue-300 font-semibold">
+              <KeyRound className="w-4 h-4 text-blue-400 shrink-0" />
+              <span>First-Time Administrator Setup</span>
+            </div>
+            <div className="text-[11px] text-gray-300 space-y-2 leading-relaxed">
+              <div className="flex items-center space-x-2">
+                <span className="text-gray-400 font-medium">Username:</span>
+                <code className="bg-black/50 px-2 py-0.5 rounded text-white font-mono font-semibold text-[11px] border border-white/10">
+                  admin
+                </code>
+              </div>
+              <div className="space-y-1">
+                <div className="text-gray-400 font-medium">Temporary Initial Password:</div>
+                <div className="flex items-center space-x-1.5 bg-black/60 rounded-xl p-1.5 border border-white/10 font-mono text-[11px]">
+                  <span className="text-amber-300 select-all px-1.5 flex-1 break-all">
+                    {authStatus?.initial_credentials_cmd || 'sudo cat /var/lib/sshdesktop/initial-admin-credentials.txt'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const cmd = authStatus?.initial_credentials_cmd || 'sudo cat /var/lib/sshdesktop/initial-admin-credentials.txt';
+                      navigator.clipboard?.writeText(cmd);
+                      setCopiedCmd(true);
+                      setTimeout(() => setCopiedCmd(false), 2000);
+                    }}
+                    className="px-2 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg text-[10px] font-sans flex items-center space-x-1 transition-colors cursor-pointer shrink-0"
+                    title="Copy command to clipboard"
+                  >
+                    {copiedCmd ? (
+                      <>
+                        <Check className="w-3 h-3 text-emerald-400" />
+                        <span className="text-emerald-400 font-medium">Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3 text-gray-300" />
+                        <span>Copy</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+                <p className="text-[10px] text-gray-400">
+                  Run this command on your server terminal to retrieve the temporary password.
+                </p>
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Login Form */}
         <form onSubmit={handleLogin} className="space-y-4">
@@ -197,7 +243,7 @@ export default function WebLoginScreen({ children }: WebLoginScreenProps) {
               onChange={(e) => setUsername(e.target.value)}
               required
               className="w-full px-3.5 py-2.5 rounded-xl bg-black/40 border border-white/15 text-white text-xs focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 transition-all font-mono"
-              placeholder="e.g. admin"
+              placeholder="Enter username"
             />
           </div>
 
@@ -267,7 +313,7 @@ export default function WebLoginScreen({ children }: WebLoginScreenProps) {
               <div className="space-y-1">
                 <h2 className="text-lg font-bold text-white tracking-tight">Security Notice: First-Time Login</h2>
                 <p className="text-xs text-gray-300 leading-relaxed">
-                  Your server is running with the default credentials (<strong className="text-amber-300">admin / admin</strong>). For your server's protection, you must change your administrator username and password before entering SSH Desktop.
+                  Your server is running with initial credentials. For your server's security, you must change your administrator username and set a secure password before entering SSH Desktop.
                 </p>
               </div>
             </div>
