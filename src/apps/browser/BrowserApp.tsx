@@ -14,6 +14,9 @@ import {
   sftpWriteTextFile, 
   sftpMkdir,
   openExternalUrl,
+  openBrowserWindow,
+  closeBrowserWindow,
+  focusBrowserWindow,
   sshStartSocks5,
   sshGetSocks5,
   isTauri
@@ -290,6 +293,19 @@ export default function BrowserApp() {
         statusCode: 200,
         serverHost: serverHost,
       });
+
+      // In Tauri Desktop Mode: launch/focus native browser window with SOCKS5 proxy
+      if (isTauri()) {
+        openBrowserWindow(
+          resolvedUrl,
+          resolvedUrl,
+          `socks5://127.0.0.1:${socksPort}`,
+          currentTabId
+        ).catch(err => {
+          console.warn('[BrowserApp] Native browser window error:', err);
+          openExternalUrl(resolvedUrl, activeConnectionId, true);
+        });
+      }
     } else {
       // -------------------------------------------------------------
       // Branch 2: User Network Mode (SSH: OFF) - Direct Local PC
@@ -320,6 +336,19 @@ export default function BrowserApp() {
         statusCode: 200,
         serverHost: 'PC Network',
       });
+
+      // In Tauri Desktop Mode: launch/focus native browser window directly
+      if (isTauri()) {
+        openBrowserWindow(
+          resolvedUrl,
+          resolvedUrl,
+          undefined,
+          currentTabId
+        ).catch(err => {
+          console.warn('[BrowserApp] Native browser window error:', err);
+          openExternalUrl(resolvedUrl, activeConnectionId, false);
+        });
+      }
     }
   }, [activeTabId, tabs, activeTab, activeConnectionId, serverHost, addHistoryItem]);
 
@@ -374,6 +403,9 @@ export default function BrowserApp() {
   const handleCloseTab = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (tabs.length === 1) return;
+    if (isTauri()) {
+      closeBrowserWindow(id).catch(() => {});
+    }
     const remaining = tabs.filter(t => t.id !== id);
     setTabs(remaining);
     if (activeTabId === id) {
@@ -705,7 +737,15 @@ export default function BrowserApp() {
           {/* Open in Desktop PC Browser */}
           {Boolean(activeTab.displayUrl || activeTab.url) && (
             <button
-              onClick={() => openExternalUrl(activeTab.displayUrl || activeTab.url, activeConnectionId, activeTab.networkMode === 'server')}
+              onClick={() => {
+                if (isTauri()) {
+                  const proxyArg = activeTab.networkMode === 'server' ? `socks5://127.0.0.1:${activeTab.socks5Port || 1080}` : undefined;
+                  openBrowserWindow(activeTab.displayUrl || activeTab.url, activeTab.title || activeTab.displayUrl || activeTab.url, proxyArg, activeTab.id)
+                    .catch(() => openExternalUrl(activeTab.displayUrl || activeTab.url, activeConnectionId, activeTab.networkMode === 'server'));
+                } else {
+                  openExternalUrl(activeTab.displayUrl || activeTab.url, activeConnectionId, activeTab.networkMode === 'server');
+                }
+              }}
               className="p-1 rounded-lg ml-1 text-gray-400 hover:text-blue-300 hover:bg-white/10 transition-colors cursor-pointer flex items-center space-x-1"
               title="Open in your default external PC browser (Chrome/Edge/Firefox)"
             >
@@ -864,6 +904,23 @@ export default function BrowserApp() {
 
                     {/* SOCKS5 Action Buttons */}
                     <div className="flex items-center space-x-2 shrink-0">
+                      {isTauri() && (
+                        <button
+                          onClick={() => {
+                            openBrowserWindow(
+                              tab.displayUrl || tab.url,
+                              tab.title || tab.displayUrl || tab.url,
+                              `socks5://127.0.0.1:${tab.socks5Port || 1080}`,
+                              tab.id
+                            ).catch(() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, true));
+                          }}
+                          className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-semibold shadow-md shadow-blue-900/30 transition-all cursor-pointer flex items-center space-x-1.5"
+                          title="Open or focus native browser window"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          <span>Launch Native Window</span>
+                        </button>
+                      )}
                       <button
                         onClick={() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, true)}
                         className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-semibold shadow-md shadow-emerald-900/30 transition-all cursor-pointer flex items-center space-x-1.5"
@@ -954,6 +1011,22 @@ export default function BrowserApp() {
                       </p>
                       
                       <div className="flex flex-wrap items-center gap-3 pt-2">
+                        {isTauri() && (
+                          <button
+                            onClick={() => {
+                              openBrowserWindow(
+                                tab.displayUrl || tab.url,
+                                tab.title || tab.displayUrl || tab.url,
+                                `socks5://127.0.0.1:${tab.socks5Port || 1080}`,
+                                tab.id
+                              ).catch(() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, true));
+                            }}
+                            className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-2"
+                          >
+                            <ExternalLink className="w-4 h-4" />
+                            <span>Launch Native Window</span>
+                          </button>
+                        )}
                         <button
                           onClick={() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, true)}
                           className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-2"
@@ -1047,13 +1120,30 @@ export default function BrowserApp() {
                     Connecting directly from your local computer without SSH proxying.
                   </p>
                   <div className="flex items-center space-x-3">
-                    <button
-                      onClick={() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, false)}
-                      className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      <span>Open in System Browser</span>
-                    </button>
+                    {isTauri() ? (
+                      <button
+                        onClick={() => {
+                          openBrowserWindow(
+                            tab.displayUrl || tab.url,
+                            tab.title || tab.displayUrl || tab.url,
+                            undefined,
+                            tab.id
+                          ).catch(() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, false));
+                        }}
+                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>Launch Native Window</span>
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => openExternalUrl(tab.displayUrl || tab.url, activeConnectionId, false)}
+                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-all cursor-pointer flex items-center space-x-1.5"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>Open in System Browser</span>
+                      </button>
+                    )}
                     <button
                       onClick={() => handleToggleNetworkMode(tab.id)}
                       className="px-4 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-300 text-xs font-semibold border border-emerald-500/30 transition-colors cursor-pointer flex items-center space-x-1.5"
