@@ -1664,6 +1664,8 @@ export interface AuthStatusResponse {
   is_configured: boolean;
   is_authenticated: boolean;
   must_change_password: boolean;
+  is_first_login?: boolean;
+  initial_credentials_cmd?: string;
   username: string;
   storage_path: string;
   expires_in_seconds?: number;
@@ -1683,11 +1685,15 @@ export interface AuthActionResult {
 
 export async function authGetStatus(): Promise<AuthStatusResponse> {
   const session = getStoredSession();
+  const hasChanged = localStorage.getItem('sshdesktop_credentials_changed') === 'true';
+  const customUser = localStorage.getItem('sshdesktop_custom_uname');
   return safeInvoke<AuthStatusResponse>('auth_get_status', { token: session?.token }, {
-    is_configured: false,
+    is_configured: true,
     is_authenticated: false,
-    must_change_password: false,
-    username: 'admin',
+    must_change_password: !hasChanged,
+    is_first_login: !hasChanged,
+    initial_credentials_cmd: 'sudo cat /var/lib/sshdesktop/initial-admin-credentials.txt',
+    username: hasChanged ? (customUser || '') : 'admin',
     storage_path: '/var/lib/sshdesktop/auth.json',
   });
 }

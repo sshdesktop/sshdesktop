@@ -53,7 +53,8 @@ if command -v ufw >/dev/null 2>&1; then
 fi
 
 echo "🎉 SSH Desktop is running on port \${PORT}! Access at: http://<SERVER_IP>:\${PORT}"
-echo "🔑 Login: admin / sshdesktop"
+echo "🔑 Initial Username: admin"
+echo "🔑 Initial Password: sudo cat /var/lib/sshdesktop/initial-admin-credentials.txt"
 `;
 fs.writeFileSync(path.join(DIST_PACKAGES, 'sshdesktop-installer.sh'), linuxInstallerSh, 'utf8');
 

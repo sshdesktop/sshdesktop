@@ -320,7 +320,24 @@ function initializeAuthentication() {
     { encoding: 'utf8', mode: 0o600 }
   );
 
-  fs.chmodSync(credentialsFile, 0o600);
+  try { fs.chmodSync(credentialsFile, 0o600); } catch {}
+
+  // On Linux, mirror to /var/lib/sshdesktop/initial-admin-credentials.txt if accessible
+  if (process.platform === 'linux' && DATA_DIR !== '/var/lib/sshdesktop') {
+    try {
+      const varLibDir = '/var/lib/sshdesktop';
+      if (!fs.existsSync(varLibDir)) {
+        fs.mkdirSync(varLibDir, { recursive: true, mode: 0o700 });
+      }
+      const varLibFile = path.join(varLibDir, 'initial-admin-credentials.txt');
+      fs.writeFileSync(
+        varLibFile,
+        `SSH Desktop Initial Login\nUsername: ${username}\nPassword: ${initialPassword}\nChange this password immediately after login.\n`,
+        { encoding: 'utf8', mode: 0o600 }
+      );
+      try { fs.chmodSync(varLibFile, 0o600); } catch {}
+    } catch {}
+  }
 
   console.log(
     `[SSH Desktop] Initial credentials saved to: ${credentialsFile}`
@@ -1349,6 +1366,11 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
       const session = currentSession || (token ? getSession(token) : null);
       const auth = readJsonSafe(AUTH_FILE, {});
 
+      const credFile = path.join(DATA_DIR, 'initial-admin-credentials.txt');
+      const varLibCredFile = '/var/lib/sshdesktop/initial-admin-credentials.txt';
+      const hasInitialCreds = fs.existsSync(credFile) || (process.platform === 'linux' && fs.existsSync(varLibCredFile));
+      const isFirstLogin = Boolean(auth.must_change_password || hasInitialCreds);
+
       return {
         is_configured: true,
         is_authenticated: Boolean(session),
@@ -1358,7 +1380,9 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
           : 0,
         session_duration_seconds: Math.floor(SESSION_TTL_MS / 1000),
         must_change_password: !!auth.must_change_password,
-        username: session ? session.username : (auth.username || 'admin'),
+        is_first_login: isFirstLogin,
+        initial_credentials_cmd: 'sudo cat /var/lib/sshdesktop/initial-admin-credentials.txt',
+        username: session ? session.username : (isFirstLogin ? 'admin' : (auth.username || '')),
         storage_path: DATA_DIR
       };
     }
@@ -1446,16 +1470,15 @@ async function handleInvokeCommand(cmd, args, currentSession = null) {
         };
       }
 
-      const credentialsFile = path.join(
-        DATA_DIR,
-        'initial-admin-credentials.txt'
-      );
-
-      try {
-        if (fs.existsSync(credentialsFile)) {
-          fs.unlinkSync(credentialsFile);
-        }
-      } catch {}
+      const candidatePaths = [
+        path.join(DATA_DIR, 'initial-admin-credentials.txt'),
+        '/var/lib/sshdesktop/initial-admin-credentials.txt'
+      ];
+      for (const p of candidatePaths) {
+        try {
+          if (fs.existsSync(p)) fs.unlinkSync(p);
+        } catch {}
+      }
 
       return {
         success: true,
