@@ -526,7 +526,7 @@ export default function Taskbar({
                           <div className="flex items-center space-x-2 truncate">
                             <Key className="w-4 h-4 text-blue-400 shrink-0" />
                             <span className="text-gray-300 truncate font-mono text-[11px]">
-                              {promptKeyPath || 'Click to select key (.pem, id_rsa, id_ed25519)...'}
+                              {promptKeyPath || 'Click to select key (.pem)...'}
                             </span>
                           </div>
                           <span className="text-[10px] text-blue-400 shrink-0 font-medium ml-2">Browse</span>
@@ -819,7 +819,7 @@ export default function Taskbar({
                       >
                         <Upload className="w-5 h-5 text-gray-400" />
                         <span className="text-xs text-gray-300 font-medium">Click to browse or drop SSH key file</span>
-                        <span className="text-[10px] text-gray-500">Supports OpenSSH (.pem), id_rsa, id_ed25519, id_ecdsa</span>
+                        <span className="text-[10px] text-gray-500">Supports OpenSSH (.pem)</span>
                       </div>
                     )}
 

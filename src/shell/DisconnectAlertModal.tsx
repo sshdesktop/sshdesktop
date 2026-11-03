@@ -19,6 +19,7 @@ export default function DisconnectAlertModal() {
     reconnectError, 
     reconnect, 
     resetReconnectAttempts,
+    dismissDisconnectAlert,
     closeServer,
     switchToOtherServer,
     returnToServersList, 
@@ -125,8 +126,21 @@ export default function DisconnectAlertModal() {
     }
   };
 
+  // Stop countdown and dismiss the alert modal
+  const handleDismissAlert = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    dismissDisconnectAlert(targetServerId || undefined);
+  };
+
   // Close this disconnected server session
   const handleCloseServer = async () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
     if (targetServerId) {
       await closeServer(targetServerId);
     } else {
@@ -136,6 +150,10 @@ export default function DisconnectAlertModal() {
 
   // Return to server list
   const handleReturnToLogin = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
     returnToServersList();
   };
 
@@ -161,9 +179,9 @@ export default function DisconnectAlertModal() {
             SSH Desktop Connection Alert
           </span>
           <button 
-            onClick={handleReturnToLogin}
-            className="text-xs text-gray-500 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors"
-            title="Return to Servers"
+            onClick={handleDismissAlert}
+            className="text-xs text-gray-400 hover:text-white p-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
+            title="Close Alert Window"
           >
             <X className="w-4 h-4" />
           </button>
@@ -234,7 +252,7 @@ export default function DisconnectAlertModal() {
                       </div>
                     </div>
                     <button
-                      onClick={() => switchToOtherServer(srv.id)}
+                      onClick={() => { if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; } switchToOtherServer(srv.id); }}
                       className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shrink-0 flex items-center space-x-1 shadow-md shadow-emerald-600/30 transition-transform active:scale-95"
                     >
                       <span>Switch to Server</span>
@@ -257,7 +275,7 @@ export default function DisconnectAlertModal() {
                       </div>
                     </div>
                     <button
-                      onClick={() => switchToOtherServer(srv.id)}
+                      onClick={() => { if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; } switchToOtherServer(srv.id); }}
                       className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shrink-0 flex items-center space-x-1 shadow-md shadow-blue-600/30 transition-transform active:scale-95"
                     >
                       <span>Connect</span>
