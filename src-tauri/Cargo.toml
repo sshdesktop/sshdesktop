@@ -1,6 +1,6 @@
 [package]
 name = "ssh-desktop"
-version = "2.4.1"
+version = "2.4.2"
 description = "SSH Desktop - Remote Linux Administration Interface"
 authors = ["you"]
 edition = "2021"
