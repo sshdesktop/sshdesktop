@@ -1,39 +1,257 @@
-# SSH Desktop
+# SSH Desktop – The Free, Open-Source GUI SSH Client & Remote Linux Desktop
 
 <p align="center">
-  <img src="src-tauri/icons/128x128.png" alt="SSH Desktop Logo" width="100" height="100" />
+  <a href="https://sshdesktop.com" target="_blank" rel="noopener noreferrer">
+    <img src="https://sshdesktop.com/assets/images/logo.svg" alt="SSH Desktop – Free GUI SSH Client & Linux Remote Desktop" width="380" />
+  </a>
 </p>
 
 <p align="center">
-  <strong>The Agentless, Enterprise-Grade Remote Linux Desktop & Server Management OS</strong>
+  <strong>The Agentless, Enterprise-Grade Remote Linux Desktop & Server Management OS</strong><br>
+  <em>Turn any headless Ubuntu, Debian, RHEL, CentOS, Fedora, Arch, or Rocky Linux server into a fluid, visual macOS-inspired cloud desktop over pure SSH (Port 22). Zero server agents, zero extra open ports, zero idle RAM.</em>
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License" /></a>
-  <a href="https://tauri.app/"><img src="https://img.shields.io/badge/Tauri-2.0-24C8DB.svg?logo=tauri&logoColor=white" alt="Tauri 2" /></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-2021%20Edition-DEA584.svg?logo=rust&logoColor=white" alt="Rust" /></a>
-  <a href="https://react.dev/"><img src="https://img.shields.io/badge/React-19-61DAFB.svg?logo=react&logoColor=black" alt="React 19" /></a>
-  <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.x-3178C6.svg?logo=typescript&logoColor=white" alt="TypeScript" /></a>
-  <a href="https://tailwindcss.com/"><img src="https://img.shields.io/badge/Tailwind-CSS%203-38B2AC.svg?logo=tailwind-css&logoColor=white" alt="Tailwind CSS" /></a>
+  <a href="https://sshdesktop.com"><img src="https://img.shields.io/badge/Official%20Website-sshdesktop.com-0071e3?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Official Website" /></a>
+  <a href="https://github.com/sshdesktop/sshdesktop/releases/latest"><img src="https://img.shields.io/github/v/release/sshdesktop/sshdesktop?style=for-the-badge&color=28cd41&logo=github" alt="Latest Release" /></a>
+  <a href="https://github.com/sshdesktop/sshdesktop/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge" alt="License" /></a>
+  <a href="https://tauri.app/"><img src="https://img.shields.io/badge/Tauri-2.0-24C8DB.svg?style=for-the-badge&logo=tauri&logoColor=white" alt="Tauri 2" /></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-2021-DEA584.svg?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" /></a>
+  <a href="https://react.dev/"><img src="https://img.shields.io/badge/React-19-61DAFB.svg?style=for-the-badge&logo=react&logoColor=black" alt="React 19" /></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/sshdesktop/sshdesktop/releases"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-orange?style=flat-square" alt="Supported Platforms" /></a>
+  <img src="https://img.shields.io/badge/Security-256--bit%20AES%20SSH2-brightgreen?style=flat-square" alt="256-bit AES Encryption" />
+  <img src="https://img.shields.io/badge/Server%20Footprint-0%25%20Agentless-blue?style=flat-square" alt="Zero Server Agent" />
+  <img src="https://img.shields.io/badge/Telemetry-Zero%20Tracking-blueviolet?style=flat-square" alt="Zero Telemetry" />
 </p>
 
 ---
 
-## 🌟 Overview
+## 📸 Interactive Showcase & Screenshots
 
-**SSH Desktop** transforms any remote Linux server into an authentic, interactive macOS-inspired desktop operating system running directly on your client computer.
+> Experience the full suite of 25 native Linux management applications running directly over encrypted SSH tunnels. Visit the official interactive demo at **[https://sshdesktop.com](https://sshdesktop.com)**.
 
-Unlike Webmin, Cockpit, or traditional management dashboards, **SSH Desktop is 100% agentless**. You do not need to install daemon processes, open HTTP/HTTPS ports, run background node agents, or expose insecure web interfaces on your server. All system telemetry, file transfers, container controls, and service management are tunneled transparently through standard, encrypted **SSH2 (port 22)** channels.
-
-Whether you are managing a single Ubuntu VPS, an enterprise fleet of RHEL/CentOS servers, or edge devices across multiple data centers, SSH Desktop gives you the power of a modern desktop environment with zero server-side footprint.
+### 🖥️ macOS Sonoma Cloud Desktop Shell
+Transform any headless Linux server into a fluid, visual workspace complete with window management, menu bar, dynamic wallpapers, dock, and mission control.
+<p align="center">
+  <a href="https://sshdesktop.com">
+    <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-sonoma.webp" alt="SSH Desktop macOS Sonoma Cloud Desktop Shell Screenshot - Linux Remote Desktop GUI" width="95%" />
+  </a>
+</p>
 
 ---
 
-## 🏛️ Architecture
+### 🗂️ Core Applications at a Glance
 
-SSH Desktop utilizes a two-tier high-performance architecture:
-- **Client Native Layer**: Built on **Tauri 2.0** and **Rust** (`ssh2`, `portable-pty`, `tokio`). Manages raw SSH transport, encrypted PTY multiplexing, high-throughput SFTP streaming, elevation fallbacks, and local file caching.
-- **Client Interface Shell**: Built on **React 19**, **TypeScript**, and **Tailwind CSS**. A glassmorphic macOS desktop shell complete with window management, menu bars, dock, mission control, notifications, and dedicated system apps.
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <strong>📟 Hardware-Accelerated PTY Terminal</strong><br>
+      <em>24-bit TrueColor, split panes, command chips, and low latency</em><br><br>
+      <a href="https://sshdesktop.com">
+        <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-terminal.webp" alt="SSH Desktop Terminal - Hardware Accelerated PTY Terminal Screenshot" />
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <strong>📁 Dual-Pane SFTP Finder & File Manager</strong><br>
+      <em>Parallel multi-stream SFTP, drag-and-drop, chmod/chown, bookmarks</em><br><br>
+      <a href="https://sshdesktop.com">
+        <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-sftp.webp" alt="SSH Desktop SFTP Client - Dual-Pane SFTP Finder Screenshot" />
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>💻 Monaco Code Editor (VS Code Engine)</strong><br>
+      <em>Syntax highlighting for 80+ languages, tabs, elevated sudo save</em><br><br>
+      <a href="https://sshdesktop.com">
+        <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-monaco.webp" alt="SSH Desktop Monaco Code Editor - VS Code Remote Editing over SSH" />
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <strong>🐳 Docker & Container Management GUI</strong><br>
+      <em>Lifecycle controls, live ANSI logs, bridge networks, shell exec</em><br><br>
+      <a href="https://sshdesktop.com">
+        <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-docker.webp" alt="SSH Desktop Docker GUI - Container Management over SSH Screenshot" />
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>🗄️ Database Studio with Zero-Config Tunnels</strong><br>
+      <em>PostgreSQL, MySQL, MariaDB, Redis, SQLite over automatic SSH tunnels</em><br><br>
+      <a href="https://sshdesktop.com">
+        <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-database.webp" alt="SSH Desktop Database Studio - PostgreSQL MySQL Redis GUI with SSH Tunnel" />
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <strong>📊 Real-Time System Hardware Monitor</strong><br>
+      <em>Live CPU core meters, RAM breakdown, disk I/O, load averages</em><br><br>
+      <a href="https://sshdesktop.com">
+        <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-system-monitor.webp" alt="SSH Desktop System Monitor - Linux Hardware Telemetry GUI Screenshot" />
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>⚙️ Systemd Service & Daemon Manager</strong><br>
+      <em>Start, stop, restart, enable, disable services with live journalctl tail</em><br><br>
+      <a href="https://sshdesktop.com">
+        <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-systemd.webp" alt="SSH Desktop Systemd GUI - Linux Service and Daemon Manager Screenshot" />
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <strong>🛡️ Point-and-Click Firewall GUI (UFW & Firewalld)</strong><br>
+      <em>Visual inbound/outbound rules with Port 22 anti-lockout protection</em><br><br>
+      <a href="https://sshdesktop.com">
+        <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-firewall.webp" alt="SSH Desktop Firewall GUI - Linux UFW and Firewalld Visual Manager" />
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>⚡ Fleet Automation & Multi-Server Matrix</strong><br>
+      <em>Broadcast bash tasks and rolling playbooks across 100+ Linux nodes</em><br><br>
+      <a href="https://sshdesktop.com">
+        <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-multi-server.webp" alt="SSH Desktop Multi-Server Automation - Fleet DevOps Matrix Screenshot" />
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <strong>🔒 SSL & Let's Encrypt Certbot Manager</strong><br>
+      <em>Automated HTTPS provisioning, cert countdowns, renewal hooks</em><br><br>
+      <a href="https://sshdesktop.com">
+        <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-ssl-manager.webp" alt="SSH Desktop SSL Certbot Manager - Let's Encrypt HTTPS GUI Screenshot" />
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>🌐 Visual SSH Port Forwarding & Tunnels</strong><br>
+      <em>Local (-L), Remote Reverse (-R), and Dynamic SOCKS5 (-D) proxies</em><br><br>
+      <a href="https://sshdesktop.com">
+        <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-tunnels.webp" alt="SSH Desktop Port Forwarding - Visual SSH Tunnel Manager Screenshot" />
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <strong>🔍 Linux Security & Vulnerability Auditor</strong><br>
+      <em>Automated CIS Linux benchmarks, root lockdown audits, CVE scans</em><br><br>
+      <a href="https://sshdesktop.com">
+        <img src="https://sshdesktop.com/assets/images/screenshots/screenshot-security-auditor.webp" alt="SSH Desktop Security Auditor - CIS Linux Security Audit Screenshot" />
+      </a>
+    </td>
+  </tr>
+</table>
+
+---
+
+## 📑 Table of Contents
+
+- [Why Choose SSH Desktop?](#-why-choose-ssh-desktop)
+- [Feature Comparison vs Competitors](#-feature-comparison-vs-competitors)
+- [Integrated Applications Catalog (25 Apps)](#-integrated-applications-catalog)
+- [Architecture & Performance](#-architecture--performance)
+- [Security Guarantees & Privacy](#-security-guarantees--privacy)
+- [Quick Download & Installation](#-quick-download--installation)
+  - [Windows 11 / 10](#windows-11--10)
+  - [Apple macOS (Apple Silicon & Intel)](#apple-macos-m1m2m3--intel)
+  - [Linux (Ubuntu, Debian, Fedora, Arch)](#linux-desktop-packages)
+  - [Linux Server Standalone Mode (Web Desktop)](#-linux-server-standalone-mode-web-desktop-port-2222)
+- [Building from Source](#-building-from-source)
+- [Frequently Asked Questions (FAQ)](#-frequently-asked-questions-faq)
+- [Official Website & Community](#-official-website--community)
+
+---
+
+## 🌟 Why Choose SSH Desktop?
+
+Traditional server administration forces you to choose between two suboptimal paths:
+1. **Command-Line Terminals Only (PuTTY, OpenSSH)**: Efficient, but lacking visual context when navigating complex directory trees, reviewing logs, inspecting container health, or managing firewalls.
+2. **Server-Side Control Panels (Webmin, Cockpit, cPanel)**: Require heavyweight node agents, consume significant server RAM, open insecure HTTP/HTTPS ports, and create substantial attack surfaces on your production servers.
+
+**SSH Desktop delivers the best of both worlds**:
+
+- 🛡️ **100% Agentless**: Connects over standard **Port 22 SSH**. No daemons, no background Python/Node scripts, no open HTTP ports on your server.
+- ⚡ **Lightweight & High-Performance**: Built with **Tauri 2.0 and Rust** — consumes 90% less RAM than Electron alternatives like Termius or MobaXterm.
+- 🎨 **Authentic macOS Desktop Experience**: Complete with smooth windowing, dock magnification, mission control, wallpaper engine, and dark/light themes.
+- 🔒 **Zero Cloud Lock-In & Zero Telemetry**: Your private keys, connection credentials, and passwords stay strictly on your local machine.
+- 🌐 **Dual Deployment**: Run as a native desktop application on Windows, Mac, or Linux, OR deploy as a single standalone server binary providing an in-browser web desktop.
+
+---
+
+## ⚖️ Feature Comparison vs Competitors
+
+| Feature | **SSH Desktop** | **Termius** | **PuTTY** | **MobaXterm** | **Cockpit / Webmin** |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **Price** | **100% Free & Open Source** | $10–$30/mo | Free | Freemium ($69) | Free / Paid |
+| **Server-Side Agent Required?** | ❌ **No (100% Agentless)** | ❌ No | ❌ No | ❌ No | ⚠️ **Yes (Heavyweight)** |
+| **Authentic Desktop Window GUI** | ✅ **Yes (macOS Sonoma Shell)** | ❌ No | ❌ No | ❌ Tabbed only | ⚠️ Web dashboard |
+| **Idle Server RAM Footprint** | **0 MB** | 0 MB | 0 MB | 0 MB | **50–200 MB** |
+| **Integrated SFTP File Finder** | ✅ **Dual-Pane + Drag & Drop** | ⚠️ Paid tier | ❌ Separate (PSFTP) | ✅ Yes | ⚠️ Basic |
+| **VS Code Monaco Editor (80+ Langs)** | ✅ **Yes (Built-in)** | ❌ No | ❌ No | ❌ Basic Notepad | ❌ Basic textarea |
+| **Docker GUI with ANSI Log Stream** | ✅ **Yes** | ❌ No | ❌ No | ❌ No | ⚠️ Requires plugin |
+| **Database Studio (Postgres/MySQL/Redis)**| ✅ **Yes (Auto SSH Tunnel)** | ❌ No | ❌ No | ❌ No | ❌ No |
+| **Cross-Platform (Win / Mac / Linux)** | ✅ **Native Everywhere** | ✅ Yes | ❌ Windows only | ❌ Windows only | ⚠️ Web browser |
+| **Memory Consumption (Client)** | **~85 MB (Tauri + Rust)** | ~600 MB (Electron) | ~15 MB | ~300 MB | N/A |
+| **Multi-Server Fleet Automation** | ✅ **Parallel & Rolling Matrix** | ⚠️ Enterprise | ❌ No | ❌ No | ❌ Single node |
+| **Port 22 Anti-Lockout Firewall GUI** | ✅ **Yes** | ❌ No | ❌ No | ❌ No | ⚠️ Basic |
+| **Privacy & Zero Cloud Tracking** | ✅ **100% Local Encryption** | ⚠️ Cloud account sync | ✅ Local | ✅ Local | ⚠️ Server-dependent |
+
+---
+
+## 📦 Integrated Applications Catalog
+
+SSH Desktop includes **25 purpose-built visual tools** that eliminate the need for third-party utilities:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                    SSH DESKTOP 25-APP SUITE                            │
+├───────────────────┬───────────────────┬────────────────────────────────┤
+│ 🖥️ Core Desktop   │ 📁 Files & Code   │ 🚀 DevOps & Containers         │
+│ • Desktop Shell   │ • SFTP Finder     │ • Docker Manager               │
+│ • PTY Terminal    │ • Monaco Editor   │ • Multi-Server Automation      │
+│ • App Switcher    │ • Sticky Notes    │ • Systemd Service Manager      │
+│ • Mission Control │ • Log Analysis    │ • Cron Job Scheduler           │
+├───────────────────┼───────────────────┼────────────────────────────────┤
+│ 🗄️ Data & Cloud   │ 🛡️ Security & Net │ ⚙️ System Administration       │
+│ • Database Studio │ • Firewall GUI    │ • System Hardware Monitor      │
+│ • API Studio      │ • Security Audit  │ • Linux Process Explorer       │
+│ • Port Tunnels    │ • SSL / Certbot   │ • Package Manager (APT/DNF)    │
+│ • Cloud Browser   │ • Network Auditor │ • User & Privilege Manager     │
+│ • Backup/Restore  │ • Env Variables   │ • Disk Partition Visualizer    │
+└───────────────────┴───────────────────┴────────────────────────────────┘
+```
+
+1. **🖥️ macOS Sonoma Cloud Desktop**: Fluid window manager with window snapping, minimizable dock, wallpaper engine, and system tray.
+2. **📟 Hardware-Accelerated Terminal**: Low-latency PTY terminal engine supporting xterm-256color, ANSI escape sequences, split panes, and instant reconnect.
+3. **📁 SFTP Finder (File Manager)**: Visual dual-pane directory explorer with drag-and-drop transfers, folder bookmarks, and deep permission editing (`chmod`/`chown`).
+4. **💻 Monaco Code Editor**: Powered by the VS Code engine with auto-complete and syntax highlighting for **80+ languages**, paired with privileged sudo staging pipes.
+5. **🐳 Docker & Container Manager**: Manage container lifecycles (start, stop, pause, kill), stream colored logs in real time, inspect networks, and open exec shells.
+6. **🗄️ Database Studio**: Direct GUI client for **PostgreSQL, MySQL, MariaDB, SQLite, and Redis** with automated zero-configuration SSH tunnels.
+7. **📊 System Hardware Monitor**: Real-time telemetry streaming for CPU, RAM, Swap, Disk I/O, Load Averages, and network throughput.
+8. **⚙️ Systemd Service Manager**: Full control over systemd units, services, sockets, and timers with integrated live `journalctl` log streams.
+9. **🛡️ Visual Firewall Manager**: Multi-engine management (**UFW**, **Firewalld**, **Iptables**) with intelligent **Port 22 anti-lockout protection**.
+10. **⚡ Multi-Server Fleet Automation**: Organize infrastructure by **Organization > Group > Server** and broadcast parallel or rolling bash playbooks.
+11. **🔒 SSL & Certbot Manager**: Provision and renew **Let's Encrypt** certificates with automated Nginx and Apache reverse-proxy hooks.
+12. **🌐 SSH Port Forwarding & Tunnels**: Configure Local (`-L`), Remote Reverse (`-R`), and Dynamic SOCKS5 (`-D`) proxies visually with live health probes.
+13. **👥 User & Group Manager**: Create user accounts, manage SSH keys, configure shells, and automatically detect `sudo` vs `wheel` privilege mechanisms.
+14. **💾 Disk Partition Visualizer**: Inspect partitions, mount points, filesystem types, and inode health with visual threshold warnings.
+15. **⏱️ Visual Crontab Scheduler**: Intuitive schedule generator for periodic background jobs with human-readable interval previews.
+16. **🧪 API Studio (Postman Alternative)**: Test internal microservices, private endpoints, and `localhost` APIs through server-side HTTP tunneling.
+17. **🔍 Linux Security & CIS Auditor**: Automated system hardening checks, SSH root lockdown audits, and CVE exposure reports.
+18. **🌲 Interactive Process Explorer**: Sort, search, inspect process trees, renice priorities, and terminate rogue processes with `SIGTERM`/`SIGKILL`.
+19. **📦 Universal Package Manager**: Unified GUI wrapper supporting **APT** (Debian/Ubuntu), **DNF/YUM** (RHEL/CentOS), **Pacman** (Arch), and **APK** (Alpine).
+20. **📡 Network Port Auditor**: Live socket inspector listing all active listening TCP/UDP ports and bound process IDs.
+21. **📝 Live Log Analysis & Grep**: Multi-stream log tailing across `/var/log/syslog`, `/var/log/auth.log`, and web server access logs.
+22. **🔑 Environment Variables Manager**: Safely view and edit `/etc/environment` and project `.env` files with masked secrets.
+23. **🌍 Reverse Proxy Cloud Browser**: Embedded browser for previewing local development ports (`localhost:3000`, `localhost:8080`) over SSH.
+24. **📝 Desktop Sticky Notes**: Scratchpad notes pinned to your cloud desktop and automatically synced to `~/.sshdesktop/stickies.txt`.
+25. **💾 Disaster Recovery & Backup**: 1-click backup of all user preferences, server profiles, and configurations to `~/.sshdesktop/settings.json` with `.tar.gz` export.
+
+---
+
+## 🏛️ Architecture & Performance
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -42,7 +260,7 @@ SSH Desktop utilizes a two-tier high-performance architecture:
 │  React 19 Desktop Shell                                                │
 │  ├─ Window Manager (Z-index, Snap, Maximize, Minimized Dock)          │
 │  ├─ Multi-Server Fleet Matrix & Target Selector                        │
-│  └─ 19 Integrated System & DevOps Applications                         │
+│  └─ 25 Integrated System & DevOps Applications                         │
 ├────────────────────────────────────────────────────────────────────────┤
 │  Tauri 2.0 IPC Bridge (Type-safe Invoke API)                           │
 ├────────────────────────────────────────────────────────────────────────┤
@@ -55,7 +273,7 @@ SSH Desktop utilizes a two-tier high-performance architecture:
                                     │ Encrypted Port 22 SSH Connection
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                  REMOTE LINUX SERVER (AGENTLESS)                       │
+│                  REMOTE LINUX SERVER (100% AGENTLESS)                  │
 ├────────────────────────────────────────────────────────────────────────┤
 │  Standard Linux Stack (Ubuntu / Debian / RHEL / CentOS / Arch / etc.)  │
 │  ├─ OpenSSH Daemon (sshd)                                              │
@@ -66,350 +284,142 @@ SSH Desktop utilizes a two-tier high-performance architecture:
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 🚀 Key Advantages
-
-- 🛡️ **Zero Server Agent Required**: No npm packages, python scripts, docker containers, or background agents running on the server. Connect with a normal SSH key or password.
-- ⚡ **Ultra-Fast & Memory Efficient**: Tauri + Rust binary uses a fraction of the RAM of typical Electron applications while delivering native 60fps desktop rendering.
-- 🔐 **Privilege & Permission Boundary Protection**: Automatically detects user permissions (`root`, `sudo`, `wheel`, or standard user). Operations needing administrative privileges leverage elevated base64 pipe handlers with safety bounds.
-- 🌐 **Enterprise Fleet Matrix**: Organize infrastructure hierarchically across **Organizations > Groups > Servers**. Execute parallel or rolling automations across multiple machines simultaneously.
-- 💾 **Remote Persistence (`~/.sshdesktop`)**: User settings, stickies, bookmarks, and configurations sync seamlessly to the login user's home directory (`/home/<user>/.sshdesktop`) with 1-click backup, restore, and tar packaging.
+- **Client Runtime**: Built on **Tauri 2.0** and **Rust** (`ssh2`, `portable-pty`, `tokio`). Delivers native performance, tiny installer sizes (~10 MB), and instantaneous window rendering.
+- **Frontend Layer**: Built on **React 19**, **TypeScript**, and **Tailwind CSS** with 60fps glassmorphic transitions.
+- **Transport Security**: Standard SSH2 cryptographic handshakes (Ed25519, ECDSA, RSA-4096) with AES-GCM or ChaCha20-Poly1305 encryption.
 
 ---
 
-## 📦 Integrated Applications Catalog
+## 📥 Quick Download & Installation
 
-SSH Desktop ships with 19 full-featured native applications:
+Visit the **[Official Download Page](https://sshdesktop.com/#download)** for automated package detection, or download installers directly from our **[GitHub Releases](https://github.com/sshdesktop/sshdesktop/releases/latest)**.
 
-### 1. 📊 System Monitor
-- Real-time CPU, RAM, Swap, Disk, and Network telemetry streaming.
-- Live interactive process tree with sorting, CPU/Memory percentages, and priority.
-- Send signals (`SIGTERM`, `SIGKILL`, `SIGHUP`) to runaway processes.
-- Visual memory breakdown: Active, Cached, Buffers, and Free memory.
+### Windows 11 / 10
+- **Standard Installer (x64)**: [sshdesktop-windows-x64-setup.exe](https://github.com/sshdesktop/sshdesktop/releases/latest)
+- **Enterprise MSI (x64)**: [sshdesktop-windows-x64.msi](https://github.com/sshdesktop/sshdesktop/releases/latest)
+- **Windows on ARM (ARM64)**: [sshdesktop-windows-arm64-setup.exe](https://github.com/sshdesktop/sshdesktop/releases/latest)
 
-### 2. 📁 File Manager (Finder)
-- Dual-pane navigation with breadcrumbs, grid view, list view, and tree navigation.
-- SFTP upload, download, drag-and-drop, inline folder creation, and search.
-- File permissions editor (`chmod` octal/symbolic and `chown` user:group).
-- File cut, copy, duplicate with non-colliding names (`1.txt` ➔ `1 - Copy.txt`).
-- Quick navigation bookmarks and hidden files toggle (`Ctrl+H` / `Cmd+H`).
+### Apple macOS (M1/M2/M3 & Intel)
+- **Apple Silicon (M1/M2/M3/M4)**: [sshdesktop-macos-arm64.dmg](https://github.com/sshdesktop/sshdesktop/releases/latest)
+- **Intel Mac (x86_64)**: [sshdesktop-macos-x64.dmg](https://github.com/sshdesktop/sshdesktop/releases/latest)
 
-### 3. 💻 Code Editor
-- Integrated Monaco Editor (VS Code engine).
-- Syntax highlighting and auto-completion for **80+ languages** (Rust, TypeScript, Python, Go, C++, SQL, Dockerfile, Nginx config, YAML, JSON, Shell script, etc.).
-- Bottom status bar with 1-click **Language Mode Selector** and `Ctrl+K M` chord.
-- Privileged file saving: edit root-protected system files (e.g. `/etc/nginx/nginx.conf`) safely via temporary base64 staging pipes.
-- Integrated PTY terminal drawer with multiple tabs and folder navigation.
-
-### 4. ⚡ Fleet Automation & Matrix
-- Enterprise infrastructure hierarchy: **Organization ➔ Group ➔ Server**.
-- Direct CRUD operations for servers, groups, and organizations inside the UI.
-- Live server connectivity probes (real-time latency, active/inactive badges).
-- Built-in Monaco recipe editor with environment interpolation (`{{SERVER_NAME}}`, `{{IP}}`).
-- **Parallel** or **Rolling** batch execution across dozens of nodes with live output streaming.
-- Comprehensive audit history with single-server and bundled multi-server report download (`.md` / `.log`).
-- Custom **Delete Confirmation Alert Modals** protecting all infrastructure assets.
-
-### 5. 🗄️ Database Studio
-- Connects directly through the encrypted SSH tunnel to databases running on `localhost` or private networks.
-- Full support for **PostgreSQL**, **MySQL / MariaDB**, **SQLite**, and **Redis**.
-- Interactive query editor with syntax highlighting, execution duration, and table grid results.
-- Schema browser: inspect databases, tables, columns, indexes, and keys.
-
-### 6. 🐳 Docker & Container Manager
-- Live container dashboard: start, stop, restart, pause, and kill containers.
-- Container log streaming with ANSI color formatting and auto-scroll.
-- Image management: inspect layers, pull new images from registries, and remove untagged images.
-- Volumes and networks inspector.
-
-### 7. 📦 Package Manager
-- Universal package manager wrapper supporting **APT** (Debian/Ubuntu), **DNF/YUM** (RHEL/Fedora/CentOS), **Pacman** (Arch), **Zypper** (openSUSE), and **APK** (Alpine).
-- Search repositories, view package metadata, dependencies, and install sizes.
-- 1-click system upgrades (`apt update && apt upgrade -y`, `dnf update -y`).
-- Installation and removal history logs.
-
-### 8. ⚙️ Service Manager (Systemd)
-- Comprehensive Systemd manager: list active, inactive, failed, and masked units.
-- Filter by services, sockets, timers, targets, and mounts.
-- Manage unit state: Start, Stop, Restart, Reload, Enable, and Disable on boot.
-- Live journalctl log viewer for individual services.
-
-### 9. 🛡️ Firewall Manager
-- Multi-engine firewall management: **UFW** (Ubuntu/Debian), **Firewalld** (RHEL/CentOS), and **Iptables / NFTables**.
-- View active listening ports and inbound/outbound rules.
-- Add and delete custom rules: specify protocol (TCP/UDP), port ranges, and IP CIDR blocks.
-- 1-click toggle for default incoming and outgoing policies.
-
-### 10. 👥 User & Group Manager
-- User account CRUD: create new users, modify login shells (`/bin/bash`, `/bin/zsh`, `/bin/sh`), and set passwords.
-- **Cross-Distribution Administrative Privilege System**: Automatically detects whether target OS uses `sudo` (Ubuntu/Debian) or `wheel` (RHEL/CentOS/Fedora/Arch/Amazon Linux) and assigns privileges seamlessly.
-- Account status locking/unlocking via shadow crypt inspection.
-- Active user session inspector (`who`, `w`, `loginctl`, `ps`).
-
-### 11. 💾 Disk Manager
-- Filesystem partition layout, mount points, total/used/free space, and inode consumption.
-- Visual disk usage bars with threshold alerts (>85% warning).
-- Mount and unmount utilities.
-
-### 12. 🌐 Network Manager
-- Network interfaces listing with MAC addresses, IPv4/IPv6 assignments, and MTU.
-- Active sockets and listening TCP/UDP ports with bound process IDs.
-- Remote ping and DNS lookup diagnostic tools.
-
-### 13. ⏱️ Cron Job Scheduler
-- Inspect user crontabs and system cron directories (`/etc/cron.d`, `/etc/cron.daily`, etc.).
-- Visual cron schedule generator with human-readable interval previews.
-- Create, edit, and toggle periodic background jobs.
-
-### 14. 🔒 SSL & Certbot Manager
-- Inspect installed certificates in `/etc/letsencrypt/live` and `/etc/ssl`.
-- Automated detection of Nginx and Apache Certbot plugins without slow system package scans.
-- Issue Let's Encrypt certificates with dry-run testing.
-- Built-in self-signed certificate generator with instant output display and key export.
-
-### 15. 🧪 API Studio
-- Full-featured REST & HTTP client running through the server environment.
-- Method selector (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`).
-- Headers, URL parameters, authentication, and JSON request bodies.
-- Sync request collections and history to `~/.sshdesktop/api_studio.json`.
-
-### 16. 🌍 Cloud Browser
-- Embedded WebKit browser window for testing web applications, dashboards, or local services directly within the desktop shell.
-- Bookmarks bar synced to remote `~/.sshdesktop/browser_bookmarks.json`.
-
-### 17. ⚙️ App Settings & Backup/Restore
-- Theme selector (Dark / Light / OLED Catppuccin themes).
-- Authentic macOS Sonoma, Ventura, and Monterey dynamic wallpapers.
-- Dock customizations: Position (Bottom / Left / Right), Auto-hide, and icon sizes.
-- **Backup & Restore (~/.sshdesktop)**:
-  - 1-click **Backup Now** to save all preferences to `<userHome>/.sshdesktop/settings.json`.
-  - 1-click **Restore Now** to rehydrate preferences.
-  - **Auto-Restore on User Login** toggle (`User Login OK`).
-  - Full `.tar.gz` / `.tar` directory packaging, download to PC, and upload recovery.
-
-### 18. 📟 Integrated Terminal
-- Pure PTY Xterm.js terminal with raw ANSI escape code rendering.
-- Full keyboard shortcut support (`Ctrl+C`, `Ctrl+V`, `Ctrl+A`).
-- Right-click context menu (Copy Selection, Paste, Clear, Reset, Select All).
-- Spawns multiple terminal tabs per connection.
-
-### 19. 📝 Desktop Widgets & Stickies
-- Interactive macOS-style sticky notes on the desktop wallpaper, auto-synced to `~/.sshdesktop/stickies.txt`.
-- Desktop widget tray with live clock, active server badge, and telemetry stats.
+### Linux Desktop Packages
+- **Debian / Ubuntu / Linux Mint (.deb)**:
+  ```bash
+  sudo dpkg -i sshdesktop-linux-x64.deb
+  ```
+- **Fedora / RHEL / Rocky Linux / openSUSE (.rpm)**:
+  ```bash
+  sudo rpm -ivh sshdesktop-linux-x64.rpm
+  ```
+- **Linux ARM64 (.deb / .rpm)**: Available for Raspberry Pi 4/5 and AWS Graviton.
 
 ---
 
-## 🚀 Linux Server Standalone Single Binary Mode (Dual Engine 2222 / 2020)
+## 🚀 Linux Server Standalone Mode (Web Desktop Port 2222)
 
-In addition to the native desktop application, SSH Desktop can be deployed directly on any Linux server as a **single standalone binary executable** with **zero external dependencies**:
+Want to access your remote Linux desktop through any modern web browser? SSH Desktop can run as a **single standalone Linux server binary** with **zero external dependencies**:
 
-- **Frontend Web Desktop**: Port `2222` (interactive macOS desktop shell in your browser)
-- **Backend API & SSH Engine**: Port `2020` (Node SEA SSH2 engine, reverse-proxied transparently)
-- **Single Systemd Service**: Managed via `sshdesktop.service`
-
-### Quick Run
 ```bash
-# Download and run the single binary (no Node.js or npm needed)
+# 1. Download and make executable
 chmod +x sshdesktop-linux-x64
+
+# 2. Run standalone server
 ./sshdesktop-linux-x64
 ```
-Access at: `http://<YOUR_SERVER_IP>:2222`  
-Default Login: `admin` / `sshdesktop`
 
-### 24/7 Systemd Service Installation
+Access in your browser:  
+👉 **`http://<YOUR_SERVER_IP>:2222`**
+
+### Install as 24/7 Systemd Background Service
 ```bash
 sudo bash install.sh
 ```
-Check status: `systemctl status sshdesktop`  
-View live logs: `journalctl -u sshdesktop -f`
-
-### Build Single Standalone Binary from Source
-```bash
-npm run build:binary
-```
+- Status check: `systemctl status sshdesktop`
+- Live log tail: `journalctl -u sshdesktop -f`
 
 ---
 
-## 🛠️ Getting Started & Development
+## 🛠️ Building from Source
 
 ### Prerequisites
+- **Node.js**: Version 20.x or 22.x LTS
+- **Rust Toolchain**: Stable (1.75+)
+- **System Libraries**:
+  - *Ubuntu/Debian*: `sudo apt install build-essential curl wget libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev patchelf`
+  - *macOS*: Xcode Command Line Tools (`xcode-select --install`)
+  - *Windows*: Visual Studio C++ Build Tools & WebView2
 
-1. **Rust**: Latest stable toolchain (1.75+)
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   ```
-2. **Node.js**: Version 20.x or 22.x LTS
-   ```bash
-   # Verify version
-   node -v
-   npm -v
-   ```
-3. **OS-Specific Tauri Dependencies**:
-   - **Linux (Ubuntu/Debian)**:
-     ```bash
-     sudo apt-get update
-     sudo apt-get install -y build-essential curl wget file libssl-dev libgtk-3-dev \
-       libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev patchelf
-     ```
-   - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
-   - **Windows**: Microsoft Visual Studio C++ Build Tools & WebView2 (pre-installed on Windows 10/11)
-
----
-
-### Installation & Setup
-
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/sshdesktop/sshdesktop.git
-   cd sshdesktop
-   ```
-
-2. **Install frontend dependencies**:
-   ```bash
-   npm install
-   ```
-
-3. **Run in development mode** (hot-reload frontend & live Rust rebuild):
-   ```bash
-   npm run tauri:dev
-   ```
-
-4. **Verify TypeScript compilation**:
-   ```bash
-   npx tsc --noEmit
-   ```
-
-5. **Fast production build** (Vite asset bundle check):
-   ```bash
-   npm run build:fast
-   ```
-
-6. **Build native desktop distribution package**:
-   ```bash
-   npm run tauri build
-   ```
-   Compiled installers will be placed in:
-   - **Windows**: `src-tauri/target/release/bundle/nsis/*.exe` and `*.msi`
-   - **Linux**: `src-tauri/target/release/bundle/deb/*.deb`, `*.rpm`, `*.AppImage`
-   - **macOS**: `src-tauri/target/release/bundle/dmg/*.dmg`
-
----
-
-## 🌿 Git Branching Model & CI/CD
-
-SSH Desktop follows a streamlined branch lifecycle:
-
-| Branch | Purpose | CI/CD Action Behavior |
-|---|---|---|
-| **`main`** | **Production Releases** | Automatically triggers the GitHub Actions multi-platform release pipeline (`.github/workflows/build.yml`) to compile and publish installers for Windows, Linux, and macOS. |
-| **`dev`** | **Active Development** | Feature branches and ongoing code changes are pushed here. **GitHub Actions builds are suppressed on `dev`**, saving CI runner minutes and preventing premature releases. |
-
-### Development Flow
+### Build Steps
 ```bash
-# Checkout or create dev branch
-git checkout dev
+# 1. Clone repository
+git clone https://github.com/sshdesktop/sshdesktop.git
+cd sshdesktop
 
-# Make changes, verify builds
-npm run build:fast
-npx tsc --noEmit
+# 2. Install dependencies
+npm install
 
-# Commit and push to dev
-git add .
-git commit -m "feat: description of improvement"
-git push -u origin dev
+# 3. Run in development mode (hot reload)
+npm run tauri:dev
+
+# 4. Compile production desktop package
+npm run tauri build
 ```
+
+Compiled installers will be placed in `src-tauri/target/release/bundle/`.
 
 ---
 
-## 📂 Project Structure
+## 🔒 Security Guarantees & Privacy
 
-```
-sshdesktop/
-├── .github/
-│   └── workflows/
-│       └── build.yml             # Multi-platform CI/CD (Windows, Linux, macOS)
-├── public/                       # Static public assets, wallpapers, and icons
-├── src/                          # React 19 Frontend Shell
-│   ├── apps/                     # 19 Dedicated Desktop Applications
-│   │   ├── api/                  # API Studio (REST client)
-│   │   ├── automation/           # Fleet Matrix & Parallel Runner
-│   │   ├── browser/              # WebKit Browser
-│   │   ├── cron/                 # Cron Job Manager
-│   │   ├── database/             # Database Client (Postgres, MySQL, Redis, SQLite)
-│   │   ├── disk/                 # Disk & Partition Manager
-│   │   ├── docker/               # Docker Container & Image Manager
-│   │   ├── editor/               # VS Code Monaco Editor (80+ languages)
-│   │   ├── filemanager/          # SFTP Finder File Manager
-│   │   ├── firewall/             # UFW / Firewalld Manager
-│   │   ├── network/              # Network & Port Manager
-│   │   ├── notes/                # Sticky Notes & Editor
-│   │   ├── packages/             # APT / DNF / Pacman Package Manager
-│   │   ├── services/             # Systemd Service Manager
-│   │   ├── settings/             # Settings, Wallpapers, Backup & Restore
-│   │   ├── ssh/                  # Server Profile & Credential Manager
-│   │   ├── ssl/                  # SSL & Certbot Manager
-│   │   ├── monitor/              # System Monitor & Telemetry
-│   │   └── users/                # User & Group Manager
-│   ├── components/               # Glassmorphic UI components, modals & alerts
-│   ├── lib/                      # Tauri bridge, SFTP streamer, and stores
-│   │   ├── store.ts              # Zustand core state
-│   │   ├── permissions.ts        # Dynamic privilege evaluator
-│   │   ├── server-backup.ts      # .tar / .tar.gz directory backup engine
-│   │   ├── server-settings.ts    # ~/.sshdesktop settings sync engine
-│   │   └── tauri-bridge.ts       # Type-safe Rust IPC wrapper
-│   ├── shell/                    # macOS Glassmorphic Desktop Shell
-│   │   ├── Desktop.tsx           # Window canvas, wallpaper, icon grid
-│   │   ├── Dock.tsx              # Animated dock with running indicators
-│   │   ├── Taskbar.tsx           # Top status menu bar
-│   │   └── Window.tsx            # Drag, resize, snap, and minimize manager
-│   ├── App.tsx                   # Main application entrypoint
-│   └── main.tsx                  # React root mount
-├── src-tauri/                    # Native Rust Engine (Tauri 2.0)
-│   ├── src/
-│   │   ├── ssh/                  # SSH2 connection pool, PTY socket, SFTP
-│   │   ├── system/               # Native telemetry & user privilege probes
-│   │   └── main.rs               # Tauri IPC command registration
-│   ├── Cargo.toml                # Rust crate dependencies
-│   └── tauri.conf.json           # Window configuration and app capabilities
-├── package.json                  # Node dependencies & scripts
-├── vite.config.ts                # Vite bundler configuration
-└── LICENSE                       # Apache License 2.0
-```
+1. **Zero Server Agent Footprint**: No background listening ports, no daemon processes, and no server modifications.
+2. **256-Bit Cryptographic Security**: All communication is encapsulated in native SSH2 transport with modern ciphers (`chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com`).
+3. **Safe Privilege Escalation**: Administrative commands use temporary one-time base64 stdin pipes. Passwords and keys are never logged in shell history.
+4. **Local Key Storage**: SSH keys and passwords are encrypted locally on your computer with system-level keychain protection.
+5. **No Analytics or Telemetry**: We do not collect analytics, telemetry, or server metrics. Your infrastructure belongs strictly to you.
 
 ---
 
-## 🔒 Security Architecture
+## ❓ Frequently Asked Questions (FAQ)
 
-1. **Zero-Agent Surface**: No listener daemon or open ports on your server. If standard OpenSSH is secure, SSH Desktop is secure.
-2. **Encrypted Transport**: All traffic uses standard SSH2 cryptographic handshakes (Ed25519, ECDSA, RSA) with AES-GCM or ChaCha20-Poly1305 encryption.
-3. **Elevated Privileges Boundary**: Operations requiring root privileges (saving system configs, managing services, editing users) never leave plain text passwords in shell history. Stdin pipes and one-time base64 streams are used with automated cleanup.
-4. **Local Credential Storage**: SSH private keys, passphrases, and connection profiles are encrypted and stored locally on your client machine.
+<details>
+<summary><strong>Q: Does SSH Desktop require installing any software on my server?</strong></summary>
+<p><strong>No.</strong> SSH Desktop is 100% agentless. As long as your Linux server has standard OpenSSH running (port 22), SSH Desktop can connect and provide all features immediately.</p>
+</details>
+
+<details>
+<summary><strong>Q: How does SSH Desktop compare to Termius or MobaXterm?</strong></summary>
+<p>SSH Desktop is completely free and open-source, built on high-performance Tauri 2.0 (using a fraction of the RAM of Electron-based clients). Unlike Termius, it does not require a paid monthly subscription for SFTP or terminal features, and unlike MobaXterm, it runs natively on macOS, Linux, and Windows.</p>
+</details>
+
+<details>
+<summary><strong>Q: Can I manage databases that only listen on localhost (127.0.0.1)?</strong></summary>
+<p><strong>Yes.</strong> The integrated Database Studio establishes an automatic, transparent SSH tunnel to your server's localhost interface, allowing you to query MySQL, PostgreSQL, Redis, and SQLite securely without exposing database ports to the internet.</p>
+</details>
+
+<details>
+<summary><strong>Q: Is SSH Desktop safe for production environments?</strong></summary>
+<p><strong>Yes.</strong> SSH Desktop does not introduce new ports, background processes, or cloud proxies. All commands and transfers flow exclusively through your existing, battle-tested SSH daemon.</p>
+</details>
+
+<details>
+<summary><strong>Q: Where are my server profiles and settings stored?</strong></summary>
+<p>All connection profiles, saved bookmarks, and preferences are stored encrypted on your local client machine. Optionally, server-specific desktop configurations can be synced to <code>~/.sshdesktop/settings.json</code> with 1-click tar backup and restore.</p>
+</details>
 
 ---
 
-## 📄 License
+## 🌐 Official Website & Community
 
-SSH Desktop is an open-source project licensed under the **Apache License, Version 2.0**.
-
-```
-Copyright 2026 SSH Desktop Contributors
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
+- 🌍 **Official Website**: [https://sshdesktop.com](https://sshdesktop.com)
+- 📖 **Documentation**: [https://sshdesktop.com/cloud-desktop.html](https://sshdesktop.com/cloud-desktop.html)
+- 🐛 **Issue Tracker**: [https://github.com/sshdesktop/sshdesktop/issues](https://github.com/sshdesktop/sshdesktop/issues)
+- 💬 **Discussions**: [https://github.com/sshdesktop/sshdesktop/discussions](https://github.com/sshdesktop/sshdesktop/discussions)
+- 📜 **License**: [Apache License 2.0](LICENSE)
 
 ---
 
 <p align="center">
-  Developed with ❤️ for developers, sysadmins, and DevOps engineers worldwide.
+  <sub>Built with ❤️ for DevOps engineers, systems administrators, cloud architects, and Linux developers worldwide.</sub><br>
+  <sub>&copy; 2026 SSH Desktop Contributors. Open-source under Apache-2.0.</sub>
 </p>
