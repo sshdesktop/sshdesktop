@@ -107,6 +107,11 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         _ => conn.config.private_key_path.is_some(),
     };
     let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
+    if let Some(key_path) = selected_key_path {
+        if crate::ssh::connection::resolve_key_path(key_path).is_none() {
+            return (format!("Selected SSH identity '{}' could not be found. No alternate key will be used.", key_path), -1);
+        }
+    }
 
     // ── 1. Password auth via plink (only if not key auth) ───────────────────
     if !is_key_auth {
@@ -513,6 +518,11 @@ pub async fn run_cmd_with_stdin(
         _ => conn.config.private_key_path.is_some(),
     };
     let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
+    if let Some(key_path) = selected_key_path {
+        if crate::ssh::connection::resolve_key_path(key_path).is_none() {
+            return (format!("Selected SSH identity '{}' could not be found. No alternate key will be used.", key_path), -1);
+        }
+    }
 
     // 1. Password auth via plink (only if not key auth)
     if !is_key_auth {
