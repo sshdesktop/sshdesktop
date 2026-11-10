@@ -447,8 +447,6 @@ pub async fn ssh_launch_putty(
         None => return Err(format!("Connection {} not found", conn_id)),
     };
 
-    crate::ssh::connection::cleanup_putty_host_key(&conn.config.host, &conn.config.port.to_string());
-
     let putty_path = if std::path::Path::new(r"C:\Program Files\PuTTY\putty.exe").exists() {
         r"C:\Program Files\PuTTY\putty.exe"
     } else {
