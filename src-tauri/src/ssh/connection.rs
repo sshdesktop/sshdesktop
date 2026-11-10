@@ -1,8 +1,10 @@
 pub fn validate_ssh_target(host: &str, port: u16, username: &str) -> Result<(), String> {
+    let raw_host = host;
+    let raw_username = username;
     let host = host.trim();
     let username = username.trim();
     if host.is_empty() || username.is_empty()
-        || host != host.trim() || username != username.trim()
+        || host != raw_host || username != raw_username
         || host.len() > 253
         || !host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':' | b'[' | b']'))
     {
