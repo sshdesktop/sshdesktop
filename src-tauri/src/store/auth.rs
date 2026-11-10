@@ -3,6 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use sha2::{Digest, Sha256};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use argon2::password_hash::SaltString;
 
 static IS_AUTHENTICATED: AtomicBool = AtomicBool::new(false);
 
@@ -70,13 +72,36 @@ pub fn enforce_strict_permissions(path: &PathBuf) {
     }
 }
 
-/// Secure salted SHA-256 password hashing
+/// Argon2id password hashing. The supplied per-user salt is encoded into the
+/// PHC string so existing config storage remains backward compatible.
 pub fn hash_password(password: &str, salt: &str) -> String {
+    let encoded_salt = base64::engine::general_purpose::STANDARD_NO_PAD.encode(salt.as_bytes());
+    let salt = SaltString::from_b64(&encoded_salt).expect("UUID salt must be valid base64 salt");
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("Argon2id hashing should succeed with the default parameters")
+        .to_string()
+}
+
+fn legacy_sha256_password(password: &str, salt: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
     hasher.update(b"::sshdesktop_secure_auth_v2::");
     hasher.update(password.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn verify_password(password: &str, salt: &str, stored: &str) -> bool {
+    if stored.starts_with("$argon2") {
+        return PasswordHash::new(stored)
+            .ok()
+            .map(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
+            .unwrap_or(false);
+    }
+    // Constant-time comparison for legacy SHA-256 hashes during migration.
+    let candidate = legacy_sha256_password(password, salt);
+    use subtle::ConstantTimeEq;
+    candidate.as_bytes().ct_eq(stored.as_bytes()).into()
 }
 
 /// Loads or auto-initializes the default admin/admin configuration
@@ -136,9 +161,13 @@ pub async fn auth_login(username: String, password: String) -> Result<AuthAction
         return Err("Invalid username or password.".to_string());
     }
 
-    let calculated_hash = hash_password(&password, &config.salt);
-    if calculated_hash != config.password_hash {
+    if !verify_password(&password, &config.salt, &config.password_hash) {
         return Err("Invalid username or password.".to_string());
+    }
+    // Transparently upgrade legacy fast hashes after a successful login.
+    if !config.password_hash.starts_with("$argon2") {
+        config.salt = uuid::Uuid::new_v4().to_string();
+        config.password_hash = hash_password(&password, &config.salt);
     }
 
     IS_AUTHENTICATED.store(true, Ordering::SeqCst);
@@ -166,8 +195,7 @@ pub async fn auth_change_credentials(
     let (mut config, path) = load_or_init_auth_config();
 
     // Verify current password first
-    let current_hash = hash_password(&current_password, &config.salt);
-    if current_hash != config.password_hash {
+    if !verify_password(&current_password, &config.salt, &config.password_hash) {
         return Err("Current password verification failed. Please check your current password.".to_string());
     }
 
