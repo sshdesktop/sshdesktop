@@ -177,6 +177,45 @@ pub async fn run_stream_channel(
     Ok(exit_code)
 }
 
+pub async fn run_log_stream_channel(
+    app: &tauri::AppHandle,
+    handle: &ClientHandle,
+    stream_id: &str,
+    command: &str,
+) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
+    use tauri::Emitter;
+    let mut channel = handle.channel_open_session().await?;
+    channel.exec(true, command).await?;
+    let mut exit_code = 0;
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            ChannelMsg::Data { ref data } => {
+                let _ = app.emit("log-stream-data", serde_json::json!({
+                    "stream_id": stream_id,
+                    "data": String::from_utf8_lossy(data).to_string(),
+                    "done": false
+                }));
+            }
+            ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                let _ = app.emit("log-stream-data", serde_json::json!({
+                    "stream_id": stream_id,
+                    "data": String::from_utf8_lossy(data).to_string(),
+                    "done": false
+                }));
+            }
+            ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status as i32,
+            _ => {}
+        }
+    }
+    let _ = app.emit("log-stream-data", serde_json::json!({
+        "stream_id": stream_id,
+        "data": "",
+        "done": true,
+        "exit_code": exit_code
+    }));
+    Ok(exit_code)
+}
+
 pub async fn connect_session(
     host: &str,
     port: u16,
