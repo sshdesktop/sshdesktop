@@ -869,7 +869,7 @@ pub async fn ssh_start_socks5(
         }
 
         cmd.arg(&host);
-        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::piped());
         cmd
