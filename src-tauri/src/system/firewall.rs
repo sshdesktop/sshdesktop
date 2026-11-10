@@ -428,7 +428,12 @@ pub async fn firewall_add_rule_advanced(
     }
     let backend_choice = payload.backend.as_deref();
     let fw = if let Some(b) = backend_choice {
-        if b == "firewalld" { "firewalld" } else { "ufw" }
+        match b.as_str() {
+            "firewalld" => "firewalld",
+            "ufw" => "ufw",
+            "iptables" => "iptables",
+            _ => return Err("Unsupported firewall backend.".into()),
+        }
     } else {
         detect_firewall(&state, &conn_id).await
     };
@@ -550,7 +555,7 @@ pub async fn firewall_delete_rule_advanced(
         }
     }
     let fw = if let Some(b) = backend {
-        if b == "firewalld" { "firewalld" } else if b == "ufw" || b == "iptables" { "ufw" } else {
+        if b == "firewalld" { "firewalld" } else if b == "ufw" { "ufw" } else if b == "iptables" { "iptables" } else {
             return Err("Unsupported firewall backend.".into());
         }
     } else {
