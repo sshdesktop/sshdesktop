@@ -4,7 +4,7 @@ use super::types::{
     ActiveDatabaseSession, BatchStatementResult, ColumnMeta, DatabaseConnectionConfig,
     DatabaseObject, DriverInstance, QueryResult, ServerCapabilities, urlencoding,
 };
-use super::serialization::{get_mysql_opt_str, get_mysql_str, serialize_mysql_row, split_sql_statements};
+use super::serialization::{get_mysql_opt_str, get_mysql_str, serialize_mysql_row, split_sql_statements_for_engine};
 
 pub async fn connect_mysql(
     effective_host: &str,
@@ -105,7 +105,7 @@ pub async fn execute_query_mysql(
     session: &ActiveDatabaseSession,
     start: Instant,
 ) -> Result<QueryResult, String> {
-    let statements = split_sql_statements(query);
+    let statements = split_sql_statements_for_engine(query, "mysql");
     if statements.is_empty() {
         return Err("Query string is empty".to_string());
     }
