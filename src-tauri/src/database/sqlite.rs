@@ -1,3 +1,16 @@
+fn sqlite_cache_path(config: &DatabaseConnectionConfig, remote_path: &str) -> Result<std::path::PathBuf, String> {
+    use sha2::{Digest, Sha256};
+    let cache_dir = std::env::temp_dir().join("sshdesktop_sqlite");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("Failed to create SQLite cache directory: {}", e))?;
+    let mut hasher = Sha256::new();
+    hasher.update(config.id.as_bytes());
+    hasher.update([0]);
+    hasher.update(remote_path.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    Ok(cache_dir.join(format!("{}.db", digest)))
+}
+
 use futures::TryStreamExt;
 use std::time::Instant;
 use super::types::{
@@ -16,8 +29,7 @@ pub async fn connect_sqlite(
         return Err("SQLite file path is empty. Please specify a database file path.".to_string());
     }
 
-    let is_unix_path = raw_path.starts_with('/') || raw_path.starts_with('~');
-    let should_use_ssh = config.use_ssh || is_unix_path;
+    let should_use_ssh = config.use_ssh;
 
     let effective_path = if should_use_ssh {
         if let Some(app_state) = state {
@@ -40,17 +52,7 @@ pub async fn connect_sqlite(
                 return Err(format!("Could not inspect remote SQLite file '{}': {}", raw_path, test_out.trim()));
             }
 
-            let cache_dir = std::env::temp_dir().join("sshdesktop_sqlite");
-            std::fs::create_dir_all(&cache_dir)
-                .map_err(|e| format!("Failed to create local SQLite cache directory: {}", e))?;
-            let safe_id: String = config.id.chars()
-                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-                .take(64).collect();
-            let safe_path: String = raw_path.chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .take(100).collect();
-            let safe_name = format!("{}_{}", if safe_id.is_empty() { "connection" } else { &safe_id }, if safe_path.is_empty() { "database" } else { &safe_path });
-            let local_cache = cache_dir.join(format!("{}.db", safe_name));
+            let local_cache = sqlite_cache_path(config, raw_path)?;
 
             if test_out.contains("MISSING") {
                 let (touch_out, touch_code) = crate::ssh::exec::run_cmd(
@@ -84,11 +86,12 @@ pub async fn connect_sqlite(
         raw_path.to_string()
     };
 
-    let url = format!("sqlite://{}", effective_path);
-
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&effective_path)
+        .create_if_missing(true);
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&url)
+        .connect_with(options)
         .await
         .map_err(|e| format!("SQLite connection error: {}", e))?;
 
@@ -242,12 +245,11 @@ pub async fn execute_query_sqlite(
     if had_mutation && session.config.use_ssh {
         if let Some(conn_id) = &session.config.ssh_connection_id {
             let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database);
-            let cache_dir = std::env::temp_dir().join("sshdesktop_sqlite");
-            let safe_name = format!("{}_{}", session.config.id, raw_path.replace(|c: char| !c.is_alphanumeric(), "_"));
-            let local_cache = cache_dir.join(format!("{}.db", safe_name));
-            if let Ok(bytes) = std::fs::read(&local_cache) {
-                let _ = crate::ssh::sftp::sftp_write_bytes(state, conn_id, raw_path, &bytes).await;
-            }
+            let local_cache = sqlite_cache_path(&session.config, raw_path)?;
+            let bytes = std::fs::read(&local_cache)
+                .map_err(|e| format!("Failed to read updated local SQLite cache: {}", e))?;
+            crate::ssh::sftp::sftp_write_bytes(state, conn_id, raw_path, &bytes).await
+                .map_err(|e| format!("SQLite changes were applied locally but remote sync failed: {}", e))?;
         }
     }
 
