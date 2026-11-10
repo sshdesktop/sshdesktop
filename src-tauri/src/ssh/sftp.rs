@@ -59,7 +59,8 @@ async fn run_scp_transfer(
         command.arg("-O")
             .arg("-P").arg(conn.config.port.to_string())
             .arg("-o").arg("StrictHostKeyChecking=yes")
-            .arg("-o").arg("IdentitiesOnly=yes");
+            .arg("-o").arg("IdentitiesOnly=yes")
+            .arg("-o").arg("BatchMode=yes");
         if let Some(key) = selected_key_path {
             command.arg("-i").arg(key);
         }
