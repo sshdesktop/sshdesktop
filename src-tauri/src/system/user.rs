@@ -343,8 +343,9 @@ pub async fn user_modify(
 
     if let Some(sh) = shell {
         // Login shells must be absolute executable paths, not shell fragments.
-        if !sh.starts_with('/')
-            || sh.chars().any(|c| c.is_whitespace() || matches!(c, '\\'' | '"' | ';' | '&' | '|' | '
+        if !sh.starts_with('/') || !sh.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.')) {
+            return Err("Invalid login shell path.".into());
+        }
         if code != 0 && code != -1 && !out.is_empty() {
             return Err(format!("usermod shell change failed: {}", out.trim()));
         }
