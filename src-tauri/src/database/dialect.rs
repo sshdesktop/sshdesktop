@@ -298,7 +298,7 @@ pub fn generate_drop_index_sql(engine: &str, table: &str, index_name: &str) -> S
     let q_tbl = quote_ident(engine, table);
     match engine {
         "mysql" | "mariadb" => format!("DROP INDEX {} ON {};", q_idx, q_tbl),
-        "mssql" => format!("DROP INDEX {}.{};", q_tbl, q_idx),
+        "mssql" => format!("DROP INDEX {} ON {};", q_idx, q_tbl),
         _ => format!("DROP INDEX {};", q_idx),
     }
 }
