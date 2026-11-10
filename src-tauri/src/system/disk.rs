@@ -1069,7 +1069,10 @@ pub async fn disk_check_filesystem(
     }
     let flag = if repair { "-y" } else { "-n" };
     let cmd = format!("fsck {} {} 2>&1", flag, shell_quote(clean_dev));
-    let (stdout, _) = run_sudo(&state, &conn_id, &cmd).await;
+    let (stdout, code) = run_sudo(&state, &conn_id, &cmd).await;
+    if code == -1 || code >= 4 {
+        return Err(format!("Filesystem check failed (exit code {}): {}", code, stdout.trim()));
+    }
     Ok(stdout)
 }
 
