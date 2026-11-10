@@ -167,7 +167,7 @@ pub async fn sftp_extract_archive_pure(
             escaped_dest, shell_escape("import os,sys,stat,zipfile\narchive,dest=sys.argv[1],os.path.realpath(sys.argv[2])\nwith zipfile.ZipFile(archive) as z:\n    members=z.infolist()\n    for m in members:\n        target=os.path.realpath(os.path.join(dest,m.filename))\n        mode=(m.external_attr >> 16) & 0xffff\n        if os.path.commonpath([dest,target]) != dest or os.path.isabs(m.filename) or stat.S_ISLNK(mode):\n            raise SystemExit('Unsafe ZIP member: '+repr(m.filename))\n    z.extractall(dest)"), escaped_arch, escaped_dest
         )
     } else {
-        format!("mkdir -p '{}' && tar -xvf '{}' -C '{}'", escaped_dest, escaped_arch, escaped_dest)
+        return Err("Unsupported archive format. Supported: tar, tar.gz, tgz, tar.bz2, tar.xz, zip, and gzip.".into());
     };
 
     let (out, code) = run_cmd(&state, &conn_id, &cmd).await;
