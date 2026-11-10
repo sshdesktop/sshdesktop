@@ -21,7 +21,7 @@ fn validate_sql_type(value: &str) -> Result<String, String> {
     let (base, params, suffix) = if let Some(open) = ty.find('(') {
         let close = ty[open + 1..].find(')').map(|i| open + 1 + i)
             .ok_or_else(|| "Invalid SQL data type parameters.".to_string())?;
-        if ty[close + 1..].contains(['(', ')']) {
+        if ty[close + 1..].chars().any(|ch| ch == '(' || ch == ')') {
             return Err("Invalid SQL data type parameters.".into());
         }
         (&ty[..open], Some(&ty[open + 1..close]), ty[close + 1..].trim())
