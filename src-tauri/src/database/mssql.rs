@@ -124,6 +124,7 @@ pub async fn execute_query_mssql(
     let mut total_affected = 0u64;
     let mut batch_results = Vec::new();
     let mut remaining_rows = limit;
+    let mut warnings = Vec::new();
 
     for stmt in &statements {
         let stmt_start = Instant::now();
@@ -148,6 +149,7 @@ pub async fn execute_query_mssql(
                 .into_first_result().await.map_err(|e| format!("MSSQL row limit reset failed: {}", e))?;
             if rows.len() > remaining_rows {
                 rows.truncate(remaining_rows);
+                warnings.push(format!("Statement result truncated to {} rows.", remaining_rows));
             }
             remaining_rows = remaining_rows.saturating_sub(rows.len());
         }
@@ -208,7 +210,7 @@ pub async fn execute_query_mssql(
         execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
         command_type: "T-SQL".to_string(),
         server_version: Some(session.capabilities.server_version.clone()),
-        warnings: Vec::new(),
+        warnings,
         all_results: Some(batch_results),
     })
 }
