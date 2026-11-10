@@ -700,6 +700,9 @@ pub async fn disk_delete_partition(
 ) -> Result<String, String> {
     let clean_dev = device.trim().to_string();
     let dev_path = if clean_dev.starts_with('/') { clean_dev } else { format!("/dev/{}", clean_dev) };
+    if !valid_device_path(&dev_path) || part_number == 0 {
+        return Err("Invalid block device or partition number.".into());
+    }
     let pdev = part_device.unwrap_or_else(|| {
         if dev_path.chars().last().map(|c| c.is_ascii_digit()).unwrap_or(false) {
             format!("{}p{}", dev_path, part_number)
@@ -708,12 +711,16 @@ pub async fn disk_delete_partition(
         }
     });
 
+    if !valid_device_path(&pdev) {
+        return Err("Invalid partition device path.".into());
+    }
+
     let rm_cmd = format!(
         r#"{ensure_parted}
 set -e
-DEV='{dev}'
+DEV={dev}
 NUM={num}
-PDEV='{pdev}'
+PDEV={pdev}
 
 if [ -b "$PDEV" ]; then
     swapoff "$PDEV" 2>/dev/null || true
@@ -760,6 +767,12 @@ pub async fn disk_resize_partition(
     let clean_dev = device.trim().to_string();
     let dev_path = if clean_dev.starts_with('/') { clean_dev } else { format!("/dev/{}", clean_dev) };
     let clean_end = new_end.trim().to_string();
+    if !valid_device_path(&dev_path) || part_number == 0 || clean_end.is_empty()
+        || clean_end.len() > 32
+        || !clean_end.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '%'))
+    {
+        return Err("Invalid device, partition number, or new boundary.".into());
+    }
     let pdev = part_device.unwrap_or_else(|| {
         if dev_path.chars().last().map(|c| c.is_ascii_digit()).unwrap_or(false) {
             format!("{}p{}", dev_path, part_number)
@@ -768,15 +781,21 @@ pub async fn disk_resize_partition(
         }
     });
     let fs = fstype.as_deref().unwrap_or("").to_lowercase();
+    if !fs.is_empty() && !matches!(fs.as_str(), "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "vfat" | "ntfs" | "swap") {
+        return Err("Unsupported filesystem type.".into());
+    }
+    if !valid_device_path(&pdev) {
+        return Err("Invalid partition device path.".into());
+    }
 
     let resize_script = format!(
         r#"{ensure_parted}
 set -e
-DEV='{dev}'
+DEV={dev}
 NUM={num}
-PDEV='{pdev}'
-NEW_END='{end}'
-FS='{fs}'
+PDEV={pdev}
+NEW_END={end}
+FS={fs}
 
 # Find current partition end in MiB
 CUR_END_MIB=$(parted -s -m "$DEV" unit MiB print 2>/dev/null | awk -F: -v p="$NUM" '$1 == p {{ 
