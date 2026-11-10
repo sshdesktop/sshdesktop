@@ -90,6 +90,47 @@ pub fn invalidate_user_privilege_cache(conn_id: &str) {
     map.remove("default");
 }
 
+/// A short-lived password file for PuTTY command-line tools. The password is
+/// never placed in process arguments; the file is owner-only on Unix and lives
+/// in the current user's protected temporary directory on Windows.
+pub struct SshPasswordFile {
+    path: std::path::PathBuf,
+}
+
+impl SshPasswordFile {
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for SshPasswordFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+pub fn create_password_file(password: &str) -> Result<SshPasswordFile, String> {
+    if password.contains(['\\r', '\\n']) {
+        return Err("SSH passwords containing newline characters cannot be passed safely to PuTTY".into());
+    }
+    let path = std::env::temp_dir().join(format!("sshdesktop-pw-{}.tmp", Uuid::new_v4()));
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+            .open(&path).map_err(|e| format!("Could not create protected SSH password file: {}", e))?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+        .open(&path).map_err(|e| format!("Could not create protected SSH password file: {}", e))?;
+    use std::io::Write;
+    if let Err(error) = writeln!(file, "{}", password).and_then(|_| file.sync_all()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("Could not write protected SSH password file: {}", error));
+    }
+    Ok(SshPasswordFile { path })
+}
+
 pub fn get_plink_path() -> &'static str {
     if std::path::Path::new(r"C:\Program Files\PuTTY\plink.exe").exists() {
         r"C:\Program Files\PuTTY\plink.exe"
