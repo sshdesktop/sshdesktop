@@ -143,6 +143,21 @@ pub async fn execute_query_redis(
         return Err("Empty Redis command".to_string());
     }
 
+    if session.config.read_only {
+        let command = parts[0].to_ascii_uppercase();
+        const READ_ONLY_COMMANDS: &[&str] = &[
+            "GET", "MGET", "EXISTS", "TYPE", "TTL", "PTTL", "STRLEN",
+            "HGET", "HMGET", "HGETALL", "HEXISTS", "HLEN", "HKEYS", "HVALS",
+            "LRANGE", "LLEN", "LINDEX", "SCARD", "SISMEMBER", "SMISMEMBER",
+            "SMEMBERS", "SRANDMEMBER", "ZCARD", "ZSCORE", "ZMSCORE", "ZRANGE",
+            "ZREVRANGE", "ZRANGEBYSCORE", "ZCOUNT", "INFO", "PING", "DBSIZE",
+            "SCAN", "RANDOMKEY", "TIME", "ROLE"
+        ];
+        if !READ_ONLY_COMMANDS.contains(&command.as_str()) {
+            return Err(format!("Redis command '{}' is not permitted in read-only mode.", command));
+        }
+    }
+
     let mut cmd = redis::cmd(&parts[0]);
     for arg in &parts[1..] {
         cmd.arg(arg);
