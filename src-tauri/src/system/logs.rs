@@ -1,3 +1,12 @@
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn valid_unit_name(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | ':' | '-'))
+}
+
 use crate::AppState;
 use crate::ssh::exec::run_cmd;
 use tauri::{Emitter, Manager};
@@ -18,7 +27,7 @@ pub async fn logs_journal(
 ) -> Result<String, String> {
     // Validate unit name
     if let Some(ref u) = unit {
-        if u.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')' | '<' | '>')) {
+        if !valid_unit_name(u) {
             return Err("Invalid unit name.".into());
         }
     }
@@ -29,7 +38,7 @@ pub async fn logs_journal(
     cmd_parts.push(format!("-n {}", lines_capped));
 
     if let Some(ref u) = unit {
-        cmd_parts.push(format!("-u '{}'", u));
+        cmd_parts.push(format!("-u {}", shell_quote(u)));
     }
 
     if let Some(ref p) = priority {
@@ -37,7 +46,7 @@ pub async fn logs_journal(
         let valid_priorities = ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug",
                                  "0", "1", "2", "3", "4", "5", "6", "7"];
         if valid_priorities.contains(&p.to_lowercase().as_str()) {
-            cmd_parts.push(format!("-p '{}'", p.to_lowercase()));
+            cmd_parts.push(format!("-p {}", shell_quote(&p.to_lowercase())));
         }
     }
 
@@ -106,7 +115,19 @@ pub async fn logs_stream_start(
     source: String,
     stream_id: String,
 ) -> Result<(), String> {
-    // Mark stream as active
+    if stream_id.trim().is_empty() || stream_id.len() > 128
+        || stream_id.chars().any(|c| !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_'))
+    {
+        return Err("Invalid log stream ID.".into());
+    }
+    let is_file = source.starts_with('/');
+    if source.is_empty() || source.len() > 4096 || source.chars().any(|c| c.is_control())
+        || (!is_file && !valid_unit_name(&source))
+    {
+        return Err("Invalid log source.".into());
+    }
+
+    // Replace any stale stream with this ID only after validation.
     ACTIVE_STREAMS.lock().insert(stream_id.clone(), true);
 
     let app_clone = app.clone();
@@ -114,19 +135,14 @@ pub async fn logs_stream_start(
     let conn_id_clone = conn_id.clone();
     let source_clone = source.clone();
 
-    // Validate source
-    if source.chars().any(|c| matches!(c, ';' | '&' | '`' | '$' | '(' | ')')) {
-        return Err("Invalid log source.".into());
-    }
-
     tokio::spawn(async move {
         // Build the streaming command
         let cmd = if source_clone.starts_with('/') {
             // File path — use tail -f
-            format!("tail -n 50 -f '{}' 2>&1", source_clone.replace('\'', r"'\''"))
+            format!("tail -n 50 -f {} 2>&1", shell_quote(&source_clone))
         } else {
             // journalctl unit
-            format!("journalctl -u '{}' -f -n 50 --no-pager 2>&1", source_clone)
+            format!("journalctl -u {} -f -n 50 --no-pager 2>&1", shell_quote(&source_clone))
         };
 
         // Execute and stream output in chunks
