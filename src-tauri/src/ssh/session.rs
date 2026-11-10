@@ -59,14 +59,21 @@ pub async fn run_exec_channel(
     ).await.map_err(|_| "Timed out starting remote command")??;
     let mut stdout = Vec::new();
     let mut exit_code = -1;
+    const MAX_OUTPUT_BYTES: usize = 80 * 1024 * 1024;
 
     let completed = tokio::time::timeout(std::time::Duration::from_secs(120), async {
         while let Some(msg) = channel.wait().await {
             match msg {
                 ChannelMsg::Data { ref data } => {
+                    if stdout.len().saturating_add(data.len()) > MAX_OUTPUT_BYTES {
+                        return Err("Remote command output exceeded the 80 MiB safety limit.".into());
+                    }
                     stdout.extend_from_slice(data);
                 }
                 ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                    if stdout.len().saturating_add(data.len()) > MAX_OUTPUT_BYTES {
+                        return Err("Remote command output exceeded the 80 MiB safety limit.".into());
+                    }
                     stdout.extend_from_slice(data);
                 }
                 ChannelMsg::ExitStatus { exit_status } => {
@@ -110,10 +117,21 @@ pub async fn run_exec_channel_with_stdin(
 
         let mut stdout = Vec::new();
         let mut exit_code = -1;
+        const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
         while let Some(msg) = channel.wait().await {
             match msg {
-                ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
-                ChannelMsg::ExtendedData { ref data, ext: 1 } => stdout.extend_from_slice(data),
+                ChannelMsg::Data { ref data } => {
+                    if stdout.len().saturating_add(data.len()) > MAX_OUTPUT_BYTES {
+                        return Err("Remote command output exceeded the 16 MiB safety limit.".into());
+                    }
+                    stdout.extend_from_slice(data);
+                }
+                ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                    if stdout.len().saturating_add(data.len()) > MAX_OUTPUT_BYTES {
+                        return Err("Remote command output exceeded the 16 MiB safety limit.".into());
+                    }
+                    stdout.extend_from_slice(data);
+                }
                 ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status as i32,
                 _ => {}
             }
