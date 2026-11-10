@@ -1,3 +1,19 @@
+fn valid_remote_absolute_path(value: &str) -> bool {
+    value.starts_with('/') && value.len() <= 4096 && !value.chars().any(|c| c.is_control())
+}
+
+fn valid_archive_filename(value: &str) -> bool {
+    !value.is_empty() && value != "." && value != ".." && value.len() <= 255
+        && !value.contains('/') && !value.contains('\\')
+        && !value.chars().any(|c| c.is_control())
+}
+
+fn valid_archive_item(value: &str) -> bool {
+    !value.is_empty() && !value.starts_with('/') && !value.contains('\\')
+        && !value.chars().any(|c| c.is_control())
+        && !value.split('/').any(|part| part == ".." || part.is_empty())
+}
+
 use crate::AppState;
 use crate::ssh::exec::{run_cmd, run_cmd_priv};
 
@@ -25,8 +41,13 @@ pub async fn sftp_create_zip_pure(
     if items.is_empty() {
         return Err("No items selected to archive".into());
     }
+    if !valid_remote_absolute_path(&base_dir) || !valid_archive_filename(&output_filename)
+        || items.iter().any(|item| !valid_archive_item(item))
+    {
+        return Err("Archive directory, filename, or selected item path is invalid.".into());
+    }
 
-    let clean_dir = if base_dir.is_empty() || base_dir == "/" { "/" } else { base_dir.trim_end_matches('/') };
+    let clean_dir = if base_dir == "/" { "/" } else { base_dir.trim_end_matches('/') };
     let archive_path = format!("{}/{}", clean_dir, output_filename);
 
     let escaped_items = items
@@ -112,7 +133,10 @@ pub async fn sftp_extract_archive_pure(
     archive_path: String,
     dest_dir: String,
 ) -> Result<String, String> {
-    let clean_dest = if dest_dir.is_empty() || dest_dir == "/" { "/" } else { dest_dir.trim_end_matches('/') };
+    if !valid_remote_absolute_path(&archive_path) || !valid_remote_absolute_path(&dest_dir) {
+        return Err("Archive and destination paths must be absolute and contain no control characters.".into());
+    }
+    let clean_dest = if dest_dir == "/" { "/" } else { dest_dir.trim_end_matches('/') };
     let escaped_arch = shell_escape(&archive_path);
     let escaped_dest = shell_escape(clean_dest);
 
@@ -139,10 +163,9 @@ pub async fn sftp_extract_archive_pure(
             shell_escape(&uncompressed_name)
         )
     } else if lower.ends_with(".zip") {
+        // Validate every archive member before extraction to prevent zip-slip paths.
         format!(
-            "mkdir -p '{}' && (command -v unzip >/dev/null 2>&1 && unzip -o '{}' -d '{}' || python3 -m zipfile -e '{}' '{}')",
-            escaped_dest,
-            escaped_arch,
+            "mkdir -p '{}' && python3 -c 'import os,sys,zipfile; root=os.path.realpath(sys.argv[2]); z=zipfile.ZipFile(sys.argv[1]); bad=[i.filename for i in z.infolist() if os.path.commonpath([root,os.path.realpath(os.path.join(root,i.filename))]) != root]; bad and sys.exit("Unsafe archive member path: " + repr(bad[0])); z.extractall(root)' '{}' '{}'",
             escaped_dest,
             escaped_arch,
             escaped_dest
