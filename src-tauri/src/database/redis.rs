@@ -1,4 +1,7 @@
 fn parse_redis_args(input: &str) -> Result<Vec<String>, String> {
+    if input.len() > 1024 * 1024 {
+        return Err("Redis command exceeds the 1 MiB input limit.".into());
+    }
     let mut args = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
@@ -39,13 +42,16 @@ fn parse_redis_args(input: &str) -> Result<Vec<String>, String> {
     }
 
     if escaped {
-        current.push('\\');
+        return Err("Redis command ends with an incomplete escape sequence.".into());
     }
     if quote.is_some() {
         return Err("Unterminated quote in Redis command.".into());
     }
     if token_started {
         args.push(current);
+    }
+    if args.len() > 10_000 || args.iter().any(|arg| arg.len() > 256 * 1024) {
+        return Err("Redis command exceeds the argument count or per-argument size limit.".into());
     }
     Ok(args)
 }
