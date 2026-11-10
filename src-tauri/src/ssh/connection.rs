@@ -237,12 +237,13 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
 
     // 0. Primary Fast Path: Try establishing persistent in-memory SSH transport
     if !is_ppk {
-        if let Ok(handle) = crate::ssh::session::connect_session(
+        if let Ok(handle) = crate::ssh::session::connect_session_with_passphrase(
             host,
             config.port,
             user,
             if is_key_auth { None } else { config.password.as_deref() },
             config.private_key_path.as_deref(),
+            config.passphrase.as_deref(),
         ).await {
             verified = true;
             let mut sessions = state.sessions.lock().await;
@@ -325,9 +326,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                 .arg("-p")
                 .arg(&port)
                 .arg("-o")
-                .arg("StrictHostKeyChecking=no")
-                .arg("-o")
-                .arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
+                .arg("StrictHostKeyChecking=accept-new")
                 .arg("-o")
                 .arg("BatchMode=yes")
                 .arg("-o")

@@ -6,9 +6,17 @@ import {
   Eye, EyeOff, ArrowRight, RotateCcw, Power, Wifi,
   Palette, Terminal, CheckCircle2,
   Edit2, Laptop, Shield, Search, ChevronLeft, ChevronRight,
-  ChevronDown, SlidersHorizontal, Copy, Download, LayoutGrid, List, Tag, Filter
+  ChevronDown, SlidersHorizontal, Copy, Download, LayoutGrid, List, Tag, Filter,
+  ShieldAlert, Sparkles, Cpu, FolderKey
 } from 'lucide-react';
-import { sshTestConnection, sshLaunchPutty, pickKeyFile, storeListConnections } from '../lib/tauri-bridge';
+import { 
+  sshTestConnection, sshLaunchPutty, pickKeyFile, storeListConnections,
+  sshConfigReadHosts, sshConfigSaveHost, sshConfigGetPath,
+  sshVerifyHostKey, sshTrustHostKey,
+  sshGenerateKeyPair, sshListLocalKeys, sshInstallPublicKey,
+  sshAgentGetStatus,
+  type SshConfigHost, type HostKeyVerification, type GeneratedKeyPair, type LocalKeyInfo, type SshAgentStatus
+} from '../lib/tauri-bridge';
 import { WALLPAPERS } from '../shell/Desktop';
 import { SshDesktopLogo } from '../components/SshDesktopLogo';
 import { MainWindowControls } from '../components/MainWindowControls';
@@ -29,6 +37,7 @@ interface ProfileFormData {
   authMethod: 'password' | 'key';
   password: string;
   privateKeyPath: string;
+  saveToSshConfig?: boolean;
 }
 
 export default function ConnectionScreen() {
@@ -99,6 +108,26 @@ export default function ConnectionScreen() {
   const [saveCredentials, setSaveCredentials] = useState(true);
   const keyFileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // OpenSSH Standard Authentication & Config State
+  const [sshConfigPath, setSshConfigPath] = useState('');
+  const [agentStatus, setAgentStatus] = useState<SshAgentStatus | null>(null);
+  const [localKeys, setLocalKeys] = useState<LocalKeyInfo[]>([]);
+  const [pendingHostVerification, setPendingHostVerification] = useState<{
+    verification: HostKeyVerification;
+    targetHost: string;
+    targetPort: number;
+    connId?: string;
+    overrideConn?: any;
+  } | null>(null);
+  const [showKeyGenModal, setShowKeyGenModal] = useState(false);
+  const [keyGenName, setKeyGenName] = useState('id_ed25519');
+  const [keyGenComment, setKeyGenComment] = useState('sshdesktop');
+  const [keyGenPassphrase, setKeyGenPassphrase] = useState('');
+  const [isGeneratingKey, setIsGeneratingKey] = useState(false);
+  const [generatedResult, setGeneratedResult] = useState<GeneratedKeyPair | null>(null);
+  const [keyGenCopied, setKeyGenCopied] = useState(false);
+  const [keyInstallStatus, setKeyInstallStatus] = useState<string | null>(null);
+
   // Inline "Create First Profile" form state (when connections.length === 0)
   const [firstProfile, setFirstProfile] = useState<ProfileFormData>({
     id: '',
@@ -140,7 +169,40 @@ export default function ConnectionScreen() {
         });
       }
     }).catch(() => {});
-  }, [addConnection]);
+
+    // Discover OpenSSH standard configuration, local SSH keys & SSH Agent
+    sshConfigGetPath().then(setSshConfigPath).catch(() => {});
+    sshAgentGetStatus().then(setAgentStatus).catch(() => {});
+    sshListLocalKeys().then(setLocalKeys).catch(() => {});
+
+    sshConfigReadHosts().then((sshHosts) => {
+      if (sshHosts && Array.isArray(sshHosts) && sshHosts.length > 0) {
+        sshHosts.forEach((sh) => {
+          const targetHost = sh.hostname || sh.host;
+          if (!targetHost || targetHost === '*') return;
+          const exists = connections.some(c => c.host === targetHost || c.name === sh.host);
+          if (!exists) {
+            const newConn: any = {
+              id: `ssh-config-${sh.host.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}`,
+              name: sh.host,
+              host: targetHost,
+              port: sh.port || 22,
+              username: sh.user || 'root',
+              authMethod: sh.identity_file ? 'key' : 'password',
+              privateKeyPath: sh.identity_file || '',
+              private_key_path: sh.identity_file || '',
+              fromSshConfig: true,
+              tags: ['~/.ssh/config', 'OpenSSH'],
+              group: 'SSH Config',
+              color: '#a6e3a1',
+              created_at: Date.now(),
+            };
+            addConnection(newConn);
+          }
+        });
+      }
+    }).catch(() => {});
+  }, [addConnection, connections]);
 
   // Caps Lock detection
   useEffect(() => {
@@ -443,7 +505,7 @@ export default function ConnectionScreen() {
   };
 
   // Launch / Connect Handler with Apple-style progress
-  const handleLaunch = async (connId?: string, overrideConn?: any) => {
+  const handleLaunch = async (connId?: string, overrideConn?: any, skipHostCheck: boolean = false) => {
     setIsConnecting(true);
     setErrorMsg(null);
     setConnectingStep('Resolving host address & routing network path...');
@@ -463,6 +525,28 @@ export default function ConnectionScreen() {
         setTimeout(() => setShake(false), 500);
         setIsConnecting(false);
         return;
+      }
+
+      // Standard OpenSSH host authentication (known_hosts)
+      if (!skipHostCheck) {
+        try {
+          setConnectingStep('Verifying server host identity in ~/.ssh/known_hosts...');
+          setConnectingProgress(25);
+          const verification = await sshVerifyHostKey(targetHost, targetPort);
+          if (verification.status === 'not_found' || verification.status === 'changed') {
+            setPendingHostVerification({
+              verification,
+              targetHost,
+              targetPort,
+              connId,
+              overrideConn,
+            });
+            setIsConnecting(false);
+            return;
+          }
+        } catch (verifyErr) {
+          console.warn('[Host verification skipped on non-fatal error]:', verifyErr);
+        }
       }
 
       if (authMethod === 'password' && !effectivePassword) {
@@ -506,6 +590,7 @@ export default function ConnectionScreen() {
         authMethod,
         password: effectivePassword || undefined,
         privateKeyPath: authMethod === 'key' ? effectiveKey : undefined,
+        passphrase: authMethod === 'key' ? (keyPassphrase || undefined) : undefined,
         color: conn?.color || '#89b4fa',
         group: 'Servers',
         tags: ['Linux', 'SSH2 direct'],
@@ -561,6 +646,75 @@ export default function ConnectionScreen() {
     }
   };
 
+  // OpenSSH Host Verification Confirmation Handler
+  const handleTrustHostAndConnect = async () => {
+    if (!pendingHostVerification) return;
+    try {
+      await sshTrustHostKey(
+        pendingHostVerification.targetHost,
+        pendingHostVerification.targetPort,
+        pendingHostVerification.verification.key_type || 'ssh-ed25519',
+        pendingHostVerification.verification.raw_public_key_b64 || ''
+      );
+      const { connId, overrideConn } = pendingHostVerification;
+      setPendingHostVerification(null);
+      await handleLaunch(connId, overrideConn, true);
+    } catch (err: any) {
+      setErrorMsg(`Failed to trust host key: ${err?.message || err}`);
+      setPendingHostVerification(null);
+    }
+  };
+
+  // OpenSSH Key Pair Generator Handler
+  const handleGenerateKeyPairAction = async () => {
+    setIsGeneratingKey(true);
+    try {
+      const res = await sshGenerateKeyPair(
+        keyGenName.trim() || 'id_ed25519',
+        keyGenComment.trim() || 'sshdesktop',
+        keyGenPassphrase.trim() || undefined
+      );
+      setGeneratedResult(res);
+      const refreshedKeys = await sshListLocalKeys();
+      setLocalKeys(refreshedKeys);
+    } catch (err: any) {
+      alert(`Key generation failed: ${err?.message || err}`);
+    } finally {
+      setIsGeneratingKey(false);
+    }
+  };
+
+  // Select generated key pair
+  const handleUseGeneratedKeyAction = (res: GeneratedKeyPair) => {
+    setPrivateKeyPath(res.private_key_path);
+    setUploadedKey({
+      name: res.private_key_path.split(/[\\/]/).pop() || 'id_ed25519',
+      size: 'Local Key File',
+      type: 'OpenSSH Ed25519 Key',
+      content: res.private_key_path,
+    });
+    setAuthMethod('key');
+    if (keyGenPassphrase) {
+      setKeyPassphrase(keyGenPassphrase);
+    }
+    setShowKeyGenModal(false);
+  };
+
+  // Install public key to remote server ~/.ssh/authorized_keys
+  const handleInstallPublicKeyAction = async (pubKey: string) => {
+    if (!selectedId) {
+      alert('Please select or connect to a server profile first.');
+      return;
+    }
+    setKeyInstallStatus('Installing public key to remote ~/.ssh/authorized_keys...');
+    try {
+      const res = await sshInstallPublicKey(selectedId, pubKey);
+      setKeyInstallStatus(res || 'Public key successfully registered in authorized_keys (0600)!');
+    } catch (err: any) {
+      setKeyInstallStatus(`Installation failed: ${err?.message || err}`);
+    }
+  };
+
   // Open Edit Profile Modal
   const handleOpenEditModal = (targetConn?: any) => {
     // Ensure targetConn is an actual connection object, not a React SyntheticEvent
@@ -583,6 +737,7 @@ export default function ConnectionScreen() {
       authMethod: isKey ? 'key' : 'password',
       password: connToEdit.password || '',
       privateKeyPath: keyP,
+      saveToSshConfig: Boolean(connToEdit.fromSshConfig),
     });
     setProfileModalOpen(true);
   };
@@ -599,6 +754,7 @@ export default function ConnectionScreen() {
       authMethod: 'password',
       password: '',
       privateKeyPath: '',
+      saveToSshConfig: true,
     });
     setProfileModalOpen(true);
   };
@@ -614,6 +770,18 @@ export default function ConnectionScreen() {
     const cleanUser = modalForm.username.trim() || 'root';
     const keyPath = modalForm.authMethod === 'key' ? sanitizeKeyPath(modalForm.privateKeyPath) : undefined;
     const pass = modalForm.password?.trim() || undefined;
+
+    // OpenSSH Config sync
+    if (modalForm.saveToSshConfig) {
+      sshConfigSaveHost({
+        host: cleanName.toLowerCase().replace(/\s+/g, '-'),
+        hostname: cleanHost,
+        user: cleanUser,
+        port: cleanPort,
+        identity_file: keyPath,
+        identities_only: Boolean(keyPath),
+      }).catch(e => console.warn('Sync to ~/.ssh/config error:', e));
+    }
 
     if (modalMode === 'edit') {
       const existing = connections.find(c => c.id === modalForm.id);
@@ -1556,6 +1724,73 @@ export default function ConnectionScreen() {
                       className="hidden"
                     />
 
+                    {/* OpenSSH Agent & Key Generator Header */}
+                    <div className="flex items-center justify-between text-xs pt-0.5">
+                      {agentStatus?.is_running ? (
+                        <div className="flex items-center space-x-1.5 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px]" title="OpenSSH Agent is running on this system">
+                          <Shield className="w-3 h-3 text-emerald-400" />
+                          <span>SSH Agent Active ({agentStatus.keys.length} key{agentStatus.keys.length === 1 ? '' : 's'})</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center space-x-1 text-[10px] text-gray-400">
+                          <Key className="w-3 h-3 text-blue-400" />
+                          <span>Standard OpenSSH Keys</span>
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGeneratedResult(null);
+                          setKeyInstallStatus(null);
+                          setShowKeyGenModal(true);
+                        }}
+                        className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-300 hover:text-white border border-blue-500/30 text-[10px] font-medium transition-colors"
+                      >
+                        <Sparkles className="w-3 h-3 text-blue-400" />
+                        <span>Generate Key</span>
+                      </button>
+                    </div>
+
+                    {/* Discovered Local Keys Chips */}
+                    {localKeys.length > 0 && (
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[10px] text-gray-400">
+                          <span>Detected in ~/.ssh/</span>
+                          <span className="text-gray-500">{localKeys.length} standard key(s)</span>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto p-1.5 bg-black/30 rounded-xl border border-white/5">
+                          {localKeys.map((k) => {
+                            const isSelected = privateKeyPath === k.full_path;
+                            return (
+                              <button
+                                key={k.full_path}
+                                type="button"
+                                onClick={() => {
+                                  setPrivateKeyPath(k.full_path);
+                                  setUploadedKey({
+                                    name: k.filename,
+                                    size: 'Local Key',
+                                    type: `${k.key_type} (${k.has_public ? 'pair' : 'private'})`,
+                                    content: k.full_path,
+                                  });
+                                }}
+                                className={`px-2 py-0.5 rounded-lg text-[10px] font-mono flex items-center space-x-1 border transition-all ${
+                                  isSelected
+                                    ? 'bg-blue-600 text-white border-blue-400 shadow-sm'
+                                    : 'bg-white/5 text-gray-300 border-white/10 hover:border-white/30 hover:text-white'
+                                }`}
+                              >
+                                <Key className="w-2.5 h-2.5 text-blue-300" />
+                                <span>{k.filename}</span>
+                                <span className="text-[9px] opacity-60">({k.key_type.replace('ssh-', '')})</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
                     {/* Prominently show Key Location when available */}
                     {privateKeyPath ? (
                       <div className="p-3 rounded-2xl bg-white/[0.04] border border-white/15 flex flex-col space-y-1.5 text-left">
@@ -1918,6 +2153,21 @@ export default function ConnectionScreen() {
                   </div>
                 </div>
               )}
+              {/* Sync with ~/.ssh/config */}
+              <div className="pt-1 border-t border-white/5">
+                <label className="flex items-center space-x-2 text-xs text-gray-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={modalForm.saveToSshConfig ?? true}
+                    onChange={e => setModalForm(f => ({ ...f, saveToSshConfig: e.target.checked }))}
+                    className="w-3.5 h-3.5 rounded border-white/20 bg-white/10 text-blue-600 focus:ring-0 cursor-pointer"
+                  />
+                  <span>Sync to OpenSSH <span className="font-mono text-emerald-400">~/.ssh/config</span></span>
+                </label>
+                <div className="text-[10px] text-gray-500 pl-5.5">
+                  Maintains non-destructive <span className="font-mono text-gray-400">Host</span> blocks in your system OpenSSH configuration
+                </div>
+              </div>
             </div>
 
             <div className="flex justify-between items-center pt-3 border-t border-white/10">
@@ -2429,6 +2679,280 @@ export default function ConnectionScreen() {
                 Close
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* OpenSSH Host Key Verification Dialog (known_hosts) */}
+      {pendingHostVerification && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[70] flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150">
+          <div className="bg-[#181a2c]/95 backdrop-blur-2xl border border-white/20 rounded-3xl w-full max-w-md p-6 shadow-2xl text-xs text-gray-200 space-y-4">
+            <div className="flex items-center space-x-3">
+              <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 ${
+                pendingHostVerification.verification.status === 'changed'
+                  ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                  : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+              }`}>
+                <ShieldAlert className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">
+                  {pendingHostVerification.verification.status === 'changed'
+                    ? 'SECURITY WARNING: Host Key Changed!'
+                    : 'Verify Remote Host Identity'}
+                </h3>
+                <p className="text-[11px] text-gray-400 font-mono">
+                  {pendingHostVerification.targetHost}:{pendingHostVerification.targetPort}
+                </p>
+              </div>
+            </div>
+
+            {pendingHostVerification.verification.status === 'changed' ? (
+              <div className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-200 text-xs space-y-2">
+                <p className="font-semibold text-rose-300">
+                  POTENTIAL MAN-IN-THE-MIDDLE ATTACK DETECTED!
+                </p>
+                <p className="text-[11px] leading-relaxed text-rose-200/90">
+                  The host key received from this server does not match the key registered in your <span className="font-mono underline">~/.ssh/known_hosts</span> file. Someone could be intercepting your connection.
+                </p>
+                {pendingHostVerification.verification.known_fingerprint_sha256 && (
+                  <div className="text-[10px] font-mono bg-black/40 p-2 rounded-lg break-all">
+                    <span className="text-gray-400">Known: </span>{pendingHostVerification.verification.known_fingerprint_sha256}
+                  </div>
+                )}
+                {pendingHostVerification.verification.fingerprint_sha256 && (
+                  <div className="text-[10px] font-mono bg-black/40 p-2 rounded-lg break-all">
+                    <span className="text-gray-400">Offered: </span>{pendingHostVerification.verification.fingerprint_sha256}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-gray-300 text-xs leading-relaxed">
+                  The authenticity of host <span className="font-mono text-blue-300 font-semibold">{pendingHostVerification.targetHost}</span> cannot be established automatically because it is not yet registered in your OpenSSH <span className="font-mono text-emerald-400">known_hosts</span> file.
+                </p>
+                
+                <div className="bg-black/50 p-3 rounded-2xl border border-white/10 space-y-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-gray-400">Key Algorithm:</span>
+                    <span className="text-white font-mono font-medium">{pendingHostVerification.verification.key_type || 'ssh-ed25519'}</span>
+                  </div>
+                  <div className="space-y-1">
+                    <span className="text-gray-400 text-[10px] block">SHA256 Fingerprint:</span>
+                    <div className="p-2 bg-black/60 rounded-xl font-mono text-[11px] text-amber-300 break-all select-all border border-amber-500/20">
+                      {pendingHostVerification.verification.fingerprint_sha256 || 'SHA256: Unknown'}
+                    </div>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-gray-400">
+                  Are you sure you want to continue connecting? Trusted host keys will be permanently added to <span className="font-mono text-gray-300">~/.ssh/known_hosts</span>.
+                </p>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => setPendingHostVerification(null)}
+                className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white font-medium transition-colors text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleTrustHostAndConnect}
+                className={`px-4 py-2 rounded-xl text-white font-medium transition-all text-xs flex items-center space-x-1.5 ${
+                  pendingHostVerification.verification.status === 'changed'
+                    ? 'bg-rose-600 hover:bg-rose-500 shadow-lg shadow-rose-600/30'
+                    : 'bg-blue-600 hover:bg-blue-500 shadow-lg shadow-blue-600/30'
+                }`}
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>{pendingHostVerification.verification.status === 'changed' ? 'Accept New Key & Proceed' : 'Trust & Connect'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* OpenSSH Ed25519 Key Pair Generator Modal */}
+      {showKeyGenModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[70] flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150">
+          <div className="bg-[#181a2c]/95 backdrop-blur-2xl border border-white/20 rounded-3xl w-full max-w-lg p-6 shadow-2xl text-xs text-gray-200 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Generate OpenSSH Key Pair</h3>
+                  <p className="text-[10px] text-gray-400">Ed25519 Edwards-curve standard cryptographic keys</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowKeyGenModal(false)}
+                className="w-6 h-6 rounded-full hover:bg-white/10 text-white/60 hover:text-white flex items-center justify-center transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+
+            {!generatedResult ? (
+              <div className="space-y-3">
+                <div className="p-3 rounded-2xl bg-blue-500/10 border border-blue-500/20 text-blue-200 text-xs">
+                  Ed25519 is the modern OpenSSH standard key type: faster, smaller, and mathematically more secure than legacy RSA keys.
+                </div>
+
+                <div>
+                  <label className="text-gray-300 block mb-1 font-medium">Key Filename</label>
+                  <input
+                    type="text"
+                    value={keyGenName}
+                    onChange={e => setKeyGenName(e.target.value)}
+                    placeholder="id_ed25519"
+                    className="w-full bg-[#10121d] border border-white/10 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-blue-500"
+                  />
+                  <div className="text-[10px] text-gray-500 mt-1">Saved automatically in ~/.ssh/{keyGenName || 'id_ed25519'}</div>
+                </div>
+
+                <div>
+                  <label className="text-gray-300 block mb-1 font-medium">Key Comment</label>
+                  <input
+                    type="text"
+                    value={keyGenComment}
+                    onChange={e => setKeyGenComment(e.target.value)}
+                    placeholder="sshdesktop"
+                    className="w-full bg-[#10121d] border border-white/10 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-gray-300 block mb-1 font-medium">Passphrase (Optional)</label>
+                  <input
+                    type="password"
+                    value={keyGenPassphrase}
+                    onChange={e => setKeyGenPassphrase(e.target.value)}
+                    placeholder="Leave empty for passwordless key..."
+                    className="w-full bg-[#10121d] border border-white/10 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div className="pt-2 flex justify-end space-x-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowKeyGenModal(false)}
+                    className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleGenerateKeyPairAction}
+                    disabled={isGeneratingKey}
+                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium flex items-center space-x-1.5 transition-all shadow-md shadow-blue-600/30"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>{isGeneratingKey ? 'Generating...' : 'Generate Ed25519 Key Pair'}</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3 animate-in fade-in duration-200">
+                <div className="p-3 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center space-x-2 text-emerald-300">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span className="font-semibold text-xs">Ed25519 Key Pair Generated & Saved to Disk!</span>
+                </div>
+
+                <div className="space-y-1.5 bg-black/40 p-3 rounded-2xl border border-white/10 text-[11px] font-mono">
+                  <div><span className="text-gray-400">Private: </span><span className="text-white break-all">{generatedResult.private_key_path}</span></div>
+                  <div><span className="text-gray-400">Public: </span><span className="text-white break-all">{generatedResult.public_key_path}</span></div>
+                  <div><span className="text-gray-400">Fingerprint: </span><span className="text-amber-300 break-all">{generatedResult.fingerprint_sha256}</span></div>
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-gray-300 font-medium text-xs">Public Key Content</label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(generatedResult.public_key_content);
+                        setKeyGenCopied(true);
+                        setTimeout(() => setKeyGenCopied(false), 2000);
+                      }}
+                      className="text-blue-400 hover:text-blue-300 text-[11px] flex items-center space-x-1"
+                    >
+                      {keyGenCopied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                      <span>{keyGenCopied ? 'Copied to Clipboard!' : 'Copy Public Key'}</span>
+                    </button>
+                  </div>
+                  <textarea
+                    readOnly
+                    rows={3}
+                    value={generatedResult.public_key_content}
+                    className="w-full bg-[#10121d] border border-white/10 rounded-xl p-2.5 text-white font-mono text-[10px] select-all focus:outline-none"
+                  />
+                </div>
+
+                {/* Server Installation Helper */}
+                <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/10 space-y-2">
+                  <div className="text-[11px] font-semibold text-white flex items-center space-x-1.5">
+                    <Laptop className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Install Key on Remote Linux Server</span>
+                  </div>
+                  <div className="text-[10px] text-gray-400">
+                    Use OpenSSH standard command to authorize this key on your remote server:
+                  </div>
+                  <div className="bg-black/60 p-2 rounded-xl font-mono text-[10px] text-emerald-300 select-all border border-emerald-500/20">
+                    ssh-copy-id -i {generatedResult.public_key_path} {username}@{host || 'SERVER_IP'}
+                  </div>
+
+                  {keyInstallStatus && (
+                    <div className="text-[10px] text-blue-300 font-mono bg-blue-500/10 p-2 rounded-lg border border-blue-500/20">
+                      {keyInstallStatus}
+                    </div>
+                  )}
+
+                  {selectedId && (
+                    <button
+                      type="button"
+                      onClick={() => handleInstallPublicKeyAction(generatedResult.public_key_content)}
+                      className="w-full py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium transition-colors flex items-center justify-center space-x-1"
+                    >
+                      <Upload className="w-3 h-3" />
+                      <span>Install Key Directly to Active Server (~/.ssh/authorized_keys)</span>
+                    </button>
+                  )}
+                </div>
+
+                <div className="pt-2 flex justify-between items-center border-t border-white/10">
+                  <button
+                    type="button"
+                    onClick={() => setGeneratedResult(null)}
+                    className="px-3 py-1.5 text-xs text-gray-400 hover:text-white"
+                  >
+                    Generate Another
+                  </button>
+                  <div className="flex space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowKeyGenModal(false)}
+                      className="px-4 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white text-xs"
+                    >
+                      Done
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleUseGeneratedKeyAction(generatedResult)}
+                      className="px-4 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30"
+                    >
+                      Use Key for Current Profile
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

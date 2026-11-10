@@ -1,8 +1,13 @@
 use std::sync::Arc;
 use russh::*;
 use russh::client::*;
+use russh_keys::PublicKeyBase64;
+use directories::BaseDirs;
 
-pub struct ClientHandler;
+pub struct ClientHandler {
+    pub host: String,
+    pub port: u16,
+}
 
 #[async_trait::async_trait]
 impl client::Handler for ClientHandler {
@@ -10,8 +15,25 @@ impl client::Handler for ClientHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh_keys::key::PublicKey,
+        server_public_key: &russh_keys::key::PublicKey,
     ) -> Result<bool, Self::Error> {
+        let key_type = server_public_key.name().to_string();
+        let b64 = server_public_key.public_key_base64();
+
+        let (status, msg) = crate::ssh::known_hosts::check_known_hosts(&self.host, self.port, &key_type, &b64);
+        if status == "changed" {
+            log::error!(
+                "SECURITY ALERT: Remote host identification for {}:{} has changed! {}",
+                self.host, self.port, msg
+            );
+            return Ok(false);
+        }
+
+        if status == "not_found" {
+            // Automatically trust on user-initiated connection
+            let _ = crate::ssh::known_hosts::ssh_trust_host_key(self.host.clone(), self.port, key_type, b64).await;
+        }
+
         Ok(true)
     }
 }
@@ -152,31 +174,47 @@ pub async fn connect_session(
     password: Option<&str>,
     key_path: Option<&str>,
 ) -> Result<ClientHandle, Box<dyn std::error::Error + Send + Sync>> {
+    connect_session_with_passphrase(host, port, user, password, key_path, None).await
+}
+
+pub async fn connect_session_with_passphrase(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: Option<&str>,
+    key_path: Option<&str>,
+    passphrase: Option<&str>,
+) -> Result<ClientHandle, Box<dyn std::error::Error + Send + Sync>> {
     let config = Arc::new(russh::client::Config::default());
+    let handler = ClientHandler {
+        host: host.to_string(),
+        port,
+    };
     let mut handle = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        russh::client::connect(config, (host, port), ClientHandler)
+        russh::client::connect(config, (host, port), handler)
     ).await??;
 
     let mut authenticated = false;
 
+    // Priority 1 & 3: Custom or specified Key path
     if let Some(key_p) = key_path {
         let trimmed_key = key_p.trim();
         if !trimmed_key.is_empty() {
             // 1. Try loading from file path
-            if let Ok(key) = russh_keys::load_secret_key(trimmed_key, None) {
+            if let Ok(key) = russh_keys::load_secret_key(trimmed_key, passphrase) {
                 authenticated = handle.authenticate_publickey(user, Arc::new(key)).await.unwrap_or(false);
             }
             // 2. Try decoding directly as PEM string
             if !authenticated {
-                if let Ok(key) = russh_keys::decode_secret_key(trimmed_key, None) {
+                if let Ok(key) = russh_keys::decode_secret_key(trimmed_key, passphrase) {
                     authenticated = handle.authenticate_publickey(user, Arc::new(key)).await.unwrap_or(false);
                 }
             }
             // 3. Try reading file on disk then decoding content
             if !authenticated {
                 if let Ok(content) = std::fs::read_to_string(trimmed_key) {
-                    if let Ok(key) = russh_keys::decode_secret_key(&content, None) {
+                    if let Ok(key) = russh_keys::decode_secret_key(&content, passphrase) {
                         authenticated = handle.authenticate_publickey(user, Arc::new(key)).await.unwrap_or(false);
                     }
                 }
@@ -184,6 +222,27 @@ pub async fn connect_session(
         }
     }
 
+    // Priority 2: Standard ~/.ssh/ default keys (id_ed25519, id_rsa, id_ecdsa)
+    if !authenticated {
+        if let Some(base) = BaseDirs::new() {
+            let ssh_dir = base.home_dir().join(".ssh");
+            let default_keys = ["id_ed25519", "id_rsa", "id_ecdsa"];
+            for key_name in default_keys {
+                let candidate = ssh_dir.join(key_name);
+                if candidate.exists() {
+                    if let Ok(key) = russh_keys::load_secret_key(&candidate, passphrase) {
+                        if handle.authenticate_publickey(user, Arc::new(key)).await.unwrap_or(false) {
+                            log::info!("SSH Desktop: Authenticated successfully using default key ~/.ssh/{}", key_name);
+                            authenticated = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Priority 4: Password authentication fallback
     if !authenticated {
         if let Some(pwd) = password {
             if !pwd.is_empty() {
@@ -195,7 +254,7 @@ pub async fn connect_session(
     if authenticated {
         Ok(handle)
     } else {
-        Err("Authentication failed".into())
+        Err("Authentication failed: No valid SSH keys or password accepted by server".into())
     }
 }
 
@@ -220,10 +279,3 @@ pub async fn open_pty_shell(
     let stream = channel.into_stream();
     Ok(tokio::io::split(stream))
 }
-
-
-
-
-
-
-
