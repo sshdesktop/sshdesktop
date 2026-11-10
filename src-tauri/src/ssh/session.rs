@@ -225,8 +225,16 @@ pub async fn connect_session_with_passphrase(
         }
     }
 
+    // An explicitly selected identity is an authentication boundary. Never
+    // silently substitute another local key or a password if that identity fails.
+    if key_path.map(|p| !p.trim().is_empty()).unwrap_or(false) && !authenticated {
+        return Err("Authentication failed: the explicitly selected SSH key was rejected or could not be loaded. No alternate credentials were attempted.".into());
+    }
+
+    // Only use agent-independent default identities when the user did not
+    // explicitly select a key for this connection.
     // Priority 2: Standard ~/.ssh/ default keys (id_ed25519, id_rsa, id_ecdsa)
-    if !authenticated {
+    if !authenticated && key_path.map(|p| p.trim().is_empty()).unwrap_or(true) {
         if let Some(base) = BaseDirs::new() {
             let ssh_dir = base.home_dir().join(".ssh");
             let default_keys = ["id_ed25519", "id_rsa", "id_ecdsa"];
