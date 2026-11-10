@@ -186,7 +186,26 @@ pub async fn db_execute_query(
         .get_mut(&connection_id)
         .ok_or_else(|| "Database connection not active".to_string())?;
 
-    let limit = max_rows.unwrap_or(500);
+    // Read-only sessions must not execute arbitrary SQL/commands. Keep this
+    // conservative: only single-statement read/query commands are permitted.
+    if session.config.read_only {
+        let normalized = query.trim();
+        let upper = normalized.to_ascii_uppercase();
+        let allowed = ["SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "PRAGMA"];
+        let is_read = allowed.iter().any(|prefix| {
+            upper == *prefix || upper.starts_with(&format!("{} ", prefix)) || upper.starts_with(&format!("{}\\n", prefix))
+        });
+        if !is_read || normalized.contains(';') && normalized.trim_end_matches(';').contains(';') {
+            return Err("Read-only session: only a single read/query statement is allowed".to_string());
+        }
+        // Redis and Mongo use command/query languages where a textual prefix
+        // allow-list cannot reliably guarantee read-only semantics.
+        if matches!(&session.driver, DriverInstance::Redis(_) | DriverInstance::Mongo(_)) {
+            return Err("Read-only mode for Redis/Mongo query consoles is not supported safely; use a read-only database account".to_string());
+        }
+    }
+
+    let limit = max_rows.unwrap_or(500).min(10000);
     let start = Instant::now();
 
     let res = match &session.driver {
@@ -402,7 +421,9 @@ pub async fn db_execute_operation(
         | DriverInstance::Db2 { .. }
         | DriverInstance::Cassandra { .. }
         | DriverInstance::DynamoDb { .. }
-        | DriverInstance::CosmosDb { .. } => 0,
+        | DriverInstance::CosmosDb { .. } => {
+            return Err("Schema operation is not implemented for this database driver".to_string());
+        },
         _ => return Err("Operation not supported for this database driver".to_string()),
     };
 
