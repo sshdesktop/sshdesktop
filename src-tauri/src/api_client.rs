@@ -93,7 +93,8 @@ pub async fn api_send_request(
     if req.url.trim().is_empty() || req.url.len() > 8192 {
         return Err("Target URL must be between 1 and 8192 characters.".to_string());
     }
-    if req.headers.len() > 100 || req.query_params.len() > 200 {
+    if req.headers.len() > 100 || req.query_params.len() > 200
+        || req.form_data.as_ref().map(|items| items.len() > 1000).unwrap_or(false) {
         return Err("A request may contain at most 100 headers and 200 query parameters.".into());
     }
     if req.headers.iter().filter(|h| h.enabled).any(|h| h.key.len() > 256 || h.value.len() > 8192)
@@ -102,7 +103,7 @@ pub async fn api_send_request(
         return Err("A request header or query parameter exceeds the supported size limit.".into());
     }
     if req.raw_body.as_ref().map(|b| b.len() > 10 * 1024 * 1024).unwrap_or(false)
-        || req.form_data.as_ref().map(|items| items.iter().filter(|i| i.enabled).map(|i| i.key.len() + i.value.len()).sum::<usize>() > 10 * 1024 * 1024).unwrap_or(false)
+        || req.form_data.as_ref().map(|items| items.iter().filter(|i| i.enabled).fold(0usize, |total, i| total.saturating_add(i.key.len()).saturating_add(i.value.len())) > 10 * 1024 * 1024).unwrap_or(false)
     {
         return Err("HTTP request body cannot exceed 10 MiB.".into());
     }
