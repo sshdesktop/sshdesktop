@@ -150,7 +150,7 @@ pub async fn sftp_list_dir(
     );
     let (stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
 
-    if code == -1 && stdout.is_empty() {
+    if code == -1 {
         return Err("No active SSH connection. Please connect to a server first.".into());
     }
 
@@ -163,6 +163,10 @@ pub async fn sftp_list_dir(
         || stdout.contains("Not a directory")
     {
         return Err(format!("Directory not found: '{}'. The specified directory does not exist or cannot be accessed.", clean_path));
+    }
+
+    if code != 0 {
+        return Err(format!("Failed to list remote directory '{}': {}", clean_path, stdout.trim()));
     }
 
     let mut entries = Vec::new();
@@ -240,7 +244,7 @@ pub async fn sftp_read_file(
     // Check the remote size before encoding to avoid transferring an oversized file.
     let command = format!("size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 50331648 ] || {{ echo 'File exceeds 48 MiB limit' >&2; exit 1; }}; base64 < '{}' | tr -d '\\n'", escaped, escaped);
     let (encoded, code) = run_cmd(&state, &conn_id, &command).await;
-    if code == -1 && encoded.is_empty() {
+    if code == -1 {
         return Err("No active SSH connection.".into());
     }
     if code != 0 {
@@ -269,7 +273,7 @@ pub async fn sftp_read_text_file(
     let escaped = shell_escape(&path);
     let cmd = format!("size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 8388608 ] || {{ echo 'Text file exceeds 8 MiB limit' >&2; exit 1; }}; cat '{}'", escaped, escaped);
     let (stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
-    if code == -1 && stdout.is_empty() {
+    if code == -1 {
         return Err("No active SSH connection.".into());
     }
     if code == 0 {
@@ -630,7 +634,7 @@ pub async fn sftp_read_file_base64(
     let escaped = shell_escape(&path);
     let cmd = format!("size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 50331648 ] || {{ echo 'File exceeds 48 MiB limit' >&2; exit 1; }}; base64 '{}' | tr -d '\\n'", escaped, escaped);
     let (stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
-    if code == -1 && stdout.is_empty() {
+    if code == -1 {
         return Err("No active SSH connection.".into());
     }
     if code == 0 {
@@ -704,7 +708,13 @@ pub async fn sftp_folder_size(
     let escaped = shell_escape(&path);
     let cmd = format!("du -sh '{}' 2>/dev/null | cut -f1", escaped);
     let (stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
-    if code == 0 && !stdout.trim().is_empty() {
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 {
+        return Err(format!("Failed to calculate folder size: {}", stdout.trim()));
+    }
+    if !stdout.trim().is_empty() {
         Ok(stdout.trim().to_string())
     } else {
         Ok("—".to_string())
