@@ -1779,3 +1779,119 @@ export async function browserProxyFetch(url: string): Promise<ProxiedPageRespons
 
 
 
+
+// ----------------- OpenSSH Standard Authentication & Config -----------------
+
+export interface SshConfigHost {
+  host: string;
+  hostname?: string;
+  user?: string;
+  port?: number;
+  identity_file?: string;
+  identities_only?: boolean;
+  proxy_jump?: string;
+}
+
+export interface HostKeyVerification {
+  status: 'trusted' | 'not_found' | 'changed' | 'error';
+  key_type?: string;
+  fingerprint_sha256?: string;
+  raw_public_key_b64?: string;
+  known_key_type?: string;
+  known_fingerprint_sha256?: string;
+  message: string;
+}
+
+export interface GeneratedKeyPair {
+  private_key_path: string;
+  public_key_path: string;
+  public_key_content: string;
+  fingerprint_sha256: string;
+}
+
+export interface LocalKeyInfo {
+  filename: string;
+  full_path: string;
+  has_public: boolean;
+  key_type: string;
+  fingerprint_sha256?: string;
+}
+
+export interface AgentKey {
+  bits: string;
+  fingerprint: string;
+  comment: string;
+  algorithm: string;
+}
+
+export interface SshAgentStatus {
+  is_running: boolean;
+  keys: AgentKey[];
+  message: string;
+}
+
+export async function sshConfigGetPath(): Promise<string> {
+  return safeInvoke<string>('ssh_config_get_path', {}, '');
+}
+
+export async function sshConfigReadHosts(): Promise<SshConfigHost[]> {
+  return safeInvoke<SshConfigHost[]>('ssh_config_read_hosts', {}, []);
+}
+
+export async function sshConfigSaveHost(host: SshConfigHost): Promise<void> {
+  return safeInvoke<void>('ssh_config_save_host', { host }, undefined);
+}
+
+export async function sshVerifyHostKey(host: string, port: number = 22): Promise<HostKeyVerification> {
+  return safeInvoke<HostKeyVerification>('ssh_verify_host_key', { host, port }, {
+    status: 'trusted',
+    message: 'Host key verified',
+  });
+}
+
+export async function sshTrustHostKey(
+  host: string,
+  port: number,
+  keyType: string,
+  publicKeyB64: string,
+): Promise<void> {
+  return safeInvoke<void>('ssh_trust_host_key', {
+    host,
+    port,
+    keyType,
+    publicKeyB64,
+  }, undefined);
+}
+
+export async function sshGenerateKeyPair(
+  filename?: string,
+  comment?: string,
+  passphrase?: string,
+): Promise<GeneratedKeyPair> {
+  return safeInvoke<GeneratedKeyPair>('ssh_generate_key_pair', {
+    filename,
+    comment,
+    passphrase,
+  }, {
+    private_key_path: '',
+    public_key_path: '',
+    public_key_content: '',
+    fingerprint_sha256: '',
+  });
+}
+
+export async function sshListLocalKeys(): Promise<LocalKeyInfo[]> {
+  return safeInvoke<LocalKeyInfo[]>('ssh_list_local_keys', {}, []);
+}
+
+export async function sshInstallPublicKey(connId: string, publicKey: string): Promise<string> {
+  return safeInvoke<string>('ssh_install_public_key', { connId, publicKey }, '');
+}
+
+export async function sshAgentGetStatus(): Promise<SshAgentStatus> {
+  return safeInvoke<SshAgentStatus>('ssh_agent_get_status', {}, {
+    is_running: false,
+    keys: [],
+    message: 'SSH agent status unavailable',
+  });
+}

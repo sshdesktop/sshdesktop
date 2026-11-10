@@ -185,6 +185,17 @@ fn main() {
             ssh::tunnel::ssh_stop_socks5,
             ssh::tunnel::ssh_get_socks5,
             
+            // OpenSSH Architecture commands
+            ssh::config_parser::ssh_config_get_path,
+            ssh::config_parser::ssh_config_read_hosts,
+            ssh::config_parser::ssh_config_save_host,
+            ssh::known_hosts::ssh_verify_host_key,
+            ssh::known_hosts::ssh_trust_host_key,
+            ssh::key_gen::ssh_generate_key_pair,
+            ssh::key_gen::ssh_list_local_keys,
+            ssh::key_gen::ssh_install_public_key,
+            ssh::agent::ssh_agent_get_status,
+            
             // System commands
             system::monitor::system_get_stats,
             system::monitor::system_get_disks,

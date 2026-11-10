@@ -6,3 +6,7 @@ pub mod sftp;
 pub mod exec;
 pub mod tunnel;
 pub mod transfer;
+pub mod config_parser;
+pub mod known_hosts;
+pub mod key_gen;
+pub mod agent;
