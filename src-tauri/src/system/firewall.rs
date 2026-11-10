@@ -594,9 +594,9 @@ pub async fn firewall_delete_rule_advanced(
             if let Some(ref p) = port {
                 let proto = protocol.as_deref().unwrap_or("tcp");
                 if p.parse::<u16>().is_ok() {
-                    format!("firewall-cmd --permanent {} --remove-port={}/{} 2>&1; firewall-cmd --reload 2>&1", zone_flag, p, proto)
+                    format!("firewall-cmd --permanent {} --remove-port={}/{} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, p, proto)
                 } else {
-                    format!("firewall-cmd --permanent {} --remove-service={} 2>&1; firewall-cmd --reload 2>&1", zone_flag, p)
+                    format!("firewall-cmd --permanent {} --remove-service={} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, p)
                 }
             } else {
                 return Err("Port or service name is required to delete a firewalld rule.".into());
