@@ -1,3 +1,7 @@
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 use std::collections::HashMap;
 use std::time::Instant;
 use serde::{Deserialize, Serialize};
@@ -251,27 +255,25 @@ async fn execute_remote_ssh_request(
 
     curl_args.push_str(&format!(" '{}'", target_url_str.replace('\'', "'\\''")));
 
-    // 3. Assemble shell pipeline with base64 for safe binary/text transfer
-    let remote_cmd = if let Some(body_bytes) = body_bytes_opt {
+    // Use bash pipefail so a failed remote curl command is not hidden by a
+    // successful base64 process at the end of the pipeline.
+    let pipeline = if let Some(body_bytes) = body_bytes_opt {
         let b64 = to_base64(&body_bytes);
         format!("printf '%s' '{}' | base64 -d | curl {} --data-binary @- 2>&1 | base64", b64, curl_args)
     } else {
         format!("curl {} 2>&1 | base64", curl_args)
     };
+    let remote_cmd = format!("bash -o pipefail -c {}", shell_quote(&pipeline));
 
     let start_time = Instant::now();
     let (stdout, exit_code) = crate::ssh::exec::run_cmd(state, conn_id, &remote_cmd).await;
     let duration_ms = start_time.elapsed().as_millis() as u64;
 
-    // Decode base64 stdout
-    let raw_bytes = if let Some(bytes) = crate::database::tunnel::from_base64(&stdout) {
-        bytes
-    } else {
-        if exit_code != 0 && stdout.trim().is_empty() {
-            return Err("Remote SSH process failed to execute request. Ensure the remote SSH server is reachable and active.".to_string());
-        }
-        stdout.into_bytes()
-    };
+    let raw_bytes = crate::database::tunnel::from_base64(&stdout)
+        .unwrap_or_else(|| stdout.into_bytes());
+    if exit_code != 0 {
+        return Err(format!("Remote API request failed (exit code {}): {}", exit_code, String::from_utf8_lossy(&raw_bytes).trim()));
+    }
 
     parse_curl_bytes(&raw_bytes, duration_ms, &target_url_str, conn_id)
 }
