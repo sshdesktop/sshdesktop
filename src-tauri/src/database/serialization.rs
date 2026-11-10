@@ -265,6 +265,11 @@ pub fn serialize_sqlite_row(row: &sqlx::sqlite::SqliteRow) -> (Vec<ColumnMeta>, 
 }
 
 pub fn split_sql_statements(input: &str) -> Vec<String> {
+    split_sql_statements_for_engine(input, "")
+}
+
+pub fn split_sql_statements_for_engine(input: &str, engine: &str) -> Vec<String> {
+    let is_mysql = matches!(engine.to_ascii_lowercase().as_str(), "mysql" | "mariadb");
     let mut statements = Vec::new();
     let mut current_delimiter = ";".to_string();
     let mut current_stmt = String::new();
@@ -399,10 +404,9 @@ pub fn split_sql_statements(input: &str) -> Vec<String> {
             i += 2;
             continue;
         }
-        // MySQL hash comments are recognized only when followed by whitespace.
-        // This avoids treating PostgreSQL JSON operators (#>, #>>) and SQL Server
-        // temporary-table identifiers (#temp) as comments.
-        if ch == '#' && next_ch.map(|n| n.is_whitespace()).unwrap_or(false) {
+        // MySQL treats any unquoted # as a line comment. Other dialects
+        // retain # operators and SQL Server temporary-table identifiers.
+        if ch == '#' && (is_mysql || next_ch.map(|n| n.is_whitespace()).unwrap_or(false)) {
             in_line_comment = true;
             current_stmt.push('#');
             i += 1;
