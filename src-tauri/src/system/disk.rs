@@ -960,10 +960,11 @@ pub async fn disk_format_filesystem(
     // ignore unmount failures: continuing could destroy a live filesystem.
     let preflight = format!(
         r#"DEV={}
+command -v findmnt >/dev/null 2>&1 || {{ echo "findmnt is required for safe filesystem formatting" >&2; exit 127; }}
 if grep -qF -- "$DEV " /proc/swaps 2>/dev/null; then
     swapoff "$DEV" || {{ echo "Failed to disable active swap on $DEV" >&2; exit 1; }}
 fi
-if command -v findmnt >/dev/null 2>&1 && findmnt -rn -S "$DEV" >/dev/null 2>&1; then
+if findmnt -rn -S "$DEV" >/dev/null 2>&1; then
     umount "$DEV" || {{ echo "Failed to unmount $DEV; refusing to format" >&2; exit 1; }}
 fi
 if command -v findmnt >/dev/null 2>&1 && findmnt -rn -S "$DEV" >/dev/null 2>&1; then
