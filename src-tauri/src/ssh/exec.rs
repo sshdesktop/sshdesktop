@@ -28,7 +28,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         let handle_opt = {
             let sessions = state.sessions.lock().await;
             if conn_id == "default" || conn_id.is_empty() {
-                sessions.get("default").cloned().or_else(|| sessions.values().next().cloned())
+                sessions.get("default").cloned()
             } else {
                 sessions.get(conn_id).cloned()
             }
@@ -739,7 +739,7 @@ pub async fn ssh_exec_stream(
             let state_ref = app_clone.state::<AppState>();
             let sessions = state_ref.sessions.lock().await;
             if conn_id_clone == "default" || conn_id_clone.is_empty() {
-                sessions.get("default").cloned().or_else(|| sessions.values().next().cloned())
+                sessions.get("default").cloned()
             } else {
                 sessions.get(&conn_id_clone).cloned()
             }
