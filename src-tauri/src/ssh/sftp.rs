@@ -202,7 +202,8 @@ pub async fn sftp_write_bytes(
     let clean_path = path.trim();
     if !clean_path.starts_with('/') || clean_path.len() > 4096
         || clean_path.chars().any(|c| c.is_control())
-        || clean_path.rsplit('/').next().map(|n| n.is_empty() || n == "." || n == "..").unwrap_or(true)
+        || clean_path.split('/').any(|part| part == "." || part == "..")
+        || clean_path.rsplit('/').next().map(|n| n.is_empty()).unwrap_or(true)
     {
         return Err("Remote upload path must be a valid absolute file path.".into());
     }
