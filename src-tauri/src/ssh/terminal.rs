@@ -476,7 +476,7 @@ pub async fn terminal_close(
             {
                 use std::os::windows::process::CommandExt;
                 let _ = std::process::Command::new("taskkill")
-                    .args(&["/F", "/T", "/PID", &pid.to_string()])
+                    .args(["/F", "/T", "/PID", &pid.to_string()])
                     .creation_flags(0x08000000)
                     .output();
             }

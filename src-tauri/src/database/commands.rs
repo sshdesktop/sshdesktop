@@ -288,9 +288,8 @@ pub async fn db_execute_query(
             if let Ok(num) = after_sel.parse::<u32>() {
                 session.config.database = num.to_string();
             }
-        } else if trimmed_q.starts_with("\\c ") {
-            let after_c = trimmed_q[3..].trim();
-            let target_db = after_c.trim_matches(|c| c == '\'' || c == '"').trim();
+        } else if let Some(after_c) = trimmed_q.strip_prefix("\\c ") {
+            let target_db = after_c.trim().trim_matches(|c| c == '\'' || c == '"').trim();
             if !target_db.is_empty() {
                 session.config.database = target_db.to_string();
             }

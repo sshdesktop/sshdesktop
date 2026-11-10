@@ -285,7 +285,7 @@ pub async fn sftp_read_text_file(
 const B64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn to_base64(bytes: &[u8]) -> String {
-    let mut result = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0];
         let b1 = chunk.get(1).copied().unwrap_or(0);
@@ -444,7 +444,7 @@ pub async fn sftp_delete(
     let canonical = canonical.trim();
     let canonical = if canonical.len() > 1 { canonical.trim_end_matches('/') } else { canonical };
     let protected = ["/", "/home", "/root", "/etc", "/usr", "/boot", "/sys", "/proc", "/dev", "/bin", "/sbin", "/lib", "/lib64", "/var", "/run"];
-    if protected.iter().any(|root| canonical == *root) {
+    if protected.contains(&canonical) {
         return Err(format!("System protection active: Refusing to delete protected path '{}'", canonical));
     }
     let escaped = shell_escape(canonical);
@@ -563,7 +563,7 @@ pub async fn sftp_stat(
         return Err("No active SSH connection.".into());
     }
     if code == 0 && !stdout.is_empty() {
-        let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
         if parts.len() >= 5 {
             let size = parts[0].parse::<u64>().unwrap_or(0);
             let modified = parts[1].parse::<i64>().unwrap_or(0);
@@ -571,7 +571,7 @@ pub async fn sftp_stat(
             let is_dir = perms.starts_with('d');
             let is_symlink = perms.starts_with('l');
             return Ok(FileEntry {
-                name: path.split('/').last().unwrap_or("file").to_string(),
+                name: path.split('/').next_back().unwrap_or("file").to_string(),
                 path: path.clone(),
                 size,
                 is_dir,
@@ -685,7 +685,7 @@ pub async fn sftp_download_to_downloads(
     let filename = remote_path
         .split('/')
         .filter(|s| !s.is_empty())
-        .last()
+        .next_back()
         .unwrap_or("downloaded_file");
     if filename == "." || filename == ".."
         || filename.contains('/') || filename.contains('\\')

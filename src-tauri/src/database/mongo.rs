@@ -1533,8 +1533,8 @@ pub async fn execute_mongodb_single_command(
         // ── B. Collection-level Methods on `db.<coll>` ─────────────────
 
         // Determine collection name and remaining method chain:
-        let (coll_name, rest) = if after_db.starts_with("getCollection(") {
-            let inner = after_db[14..].trim();
+        let (coll_name, rest) = if let Some(inner_raw) = after_db.strip_prefix("getCollection(") {
+            let inner = inner_raw.trim();
             let quote = if inner.starts_with('"') || inner.starts_with('\'') || inner.starts_with('`') {
                 inner.chars().next().unwrap()
             } else {
@@ -1547,9 +1547,9 @@ pub async fn execute_mongodb_single_command(
             };
             let rem_idx = after_db.find(')').map(|p| p + 1).unwrap_or(after_db.len());
             (coll.to_string(), after_db[rem_idx..].trim_start_matches('.'))
-        } else if after_db.starts_with('[') {
+        } else if let Some(inner_raw) = after_db.strip_prefix('[') {
             // db["coll"] or db['coll']
-            let inner = after_db[1..].trim();
+            let inner = inner_raw.trim();
             let quote = if inner.starts_with('"') || inner.starts_with('\'') || inner.starts_with('`') {
                 inner.chars().next().unwrap()
             } else {

@@ -187,7 +187,7 @@ pub fn cleanup_putty_host_key(host: &str, port: &str) {
         ];
         for k in &keys {
             let _ = std::process::Command::new("reg")
-                .args(&["delete", r"HKCU\Software\SimonTatham\PuTTY\SshHostKeys", "/v", k, "/f"])
+                .args(["delete", r"HKCU\Software\SimonTatham\PuTTY\SshHostKeys", "/v", k, "/f"])
                 .creation_flags(0x08000000)
                 .output();
         }
@@ -594,14 +594,12 @@ pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnecti
             }
             return Some(c);
         }
-        if conn_id == "default" || conn_id.is_empty() {
-            if conn_id == "default" {
-                if let Some(c) = lock.get("default").cloned() {
-                    if validate_ssh_target(&c.config.host, c.config.port, &c.config.username).is_err() {
-                        return None;
-                    }
-                    return Some(c);
+        if conn_id.is_empty() {
+            if let Some(c) = lock.get("default").cloned() {
+                if validate_ssh_target(&c.config.host, c.config.port, &c.config.username).is_err() {
+                    return None;
                 }
+                return Some(c);
             }
         }
     }
@@ -842,7 +840,7 @@ pub async fn ssh_get_user_privilege(
 
     let lines: Vec<&str> = stdout.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
 
-    let uid = lines.get(0).and_then(|s| s.parse::<u32>().ok()).unwrap_or_else(|| {
+    let uid = lines.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or_else(|| {
         if configured_user == "root" { 0 } else { 1000 }
     });
     let gid = lines.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(uid);
