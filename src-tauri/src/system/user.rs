@@ -148,7 +148,9 @@ pub async fn user_add(
         return Err("Invalid login shell path.".into());
     }
     let effective_groups = groups.unwrap_or_default();
-    if effective_groups.iter().any(|g| g.is_empty() || !g.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')) {
+    if effective_groups.len() > 64 || effective_groups.iter().any(|g| g.is_empty() || g.len() > 64
+        || !g.as_bytes().first().map(|b| b.is_ascii_alphanumeric()).unwrap_or(false)
+        || !g.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')) {
         return Err("Invalid group name.".into());
     }
     let wants_sudo = effective_groups.iter().any(|g| g == "sudo" || g == "wheel" || g == "admin");
@@ -164,19 +166,11 @@ pub async fn user_add(
     // Debian/Ubuntu uses 'sudo', RHEL/CentOS/Fedora/Arch/Amazon Linux uses 'wheel', macOS/BSD uses 'admin'
     let sudo_cmd = if wants_sudo {
         format!(
-            " && ( \
-                 ADDED_ADMIN=0; \
-                 if getent group sudo >/dev/null 2>&1 || grep -q '^sudo:' /etc/group 2>/dev/null; then \
-                     usermod -aG sudo '{username}' 2>&1 && ADDED_ADMIN=1; \
-                 fi; \
-                 if getent group wheel >/dev/null 2>&1 || grep -q '^wheel:' /etc/group 2>/dev/null; then \
-                     usermod -aG wheel '{username}' 2>&1 && ADDED_ADMIN=1; \
-                 fi; \
-                 if [ \"$ADDED_ADMIN\" -eq 0 ] && (getent group admin >/dev/null 2>&1 || grep -q '^admin:' /etc/group 2>/dev/null); then \
-                     usermod -aG admin '{username}' 2>&1; \
-                 fi; \
-                 true \
-             )",
+            " && ( ADDED_ADMIN=0; \
+                 if getent group sudo >/dev/null 2>&1 || grep -q '^sudo:' /etc/group 2>/dev/null; then usermod -aG sudo '{username}' 2>&1 && ADDED_ADMIN=1; fi; \
+                 if [ \"$ADDED_ADMIN\" -eq 0 ] && (getent group wheel >/dev/null 2>&1 || grep -q '^wheel:' /etc/group 2>/dev/null); then usermod -aG wheel '{username}' 2>&1 && ADDED_ADMIN=1; fi; \
+                 if [ \"$ADDED_ADMIN\" -eq 0 ] && (getent group admin >/dev/null 2>&1 || grep -q '^admin:' /etc/group 2>/dev/null); then usermod -aG admin '{username}' 2>&1 && ADDED_ADMIN=1; fi; \
+                 if [ \"$ADDED_ADMIN\" -eq 0 ]; then echo 'No sudo, wheel, or admin group found' >&2; exit 1; fi )",
             username = username
         )
     } else {
@@ -186,7 +180,7 @@ pub async fn user_add(
     let mut custom_groups_cmd = String::new();
     for grp in custom_groups {
         custom_groups_cmd.push_str(&format!(
-            " && ( if getent group '{grp}' >/dev/null 2>&1 || grep -q '^{grp}:' /etc/group 2>/dev/null; then usermod -aG '{grp}' '{username}' 2>&1; fi; true )",
+            " && ( getent group '{grp}' >/dev/null 2>&1 || grep -q '^{grp}:' /etc/group 2>/dev/null ) && usermod -aG '{grp}' '{username}' 2>&1",
             grp = grp,
             username = username
         ));
@@ -272,7 +266,7 @@ pub async fn user_toggle_sudo(
              if getent group sudo >/dev/null 2>&1 || grep -q '^sudo:' /etc/group 2>/dev/null; then \
                  usermod -aG sudo '{username}' 2>&1 && ADDED_ADMIN=1; \
              fi; \
-             if getent group wheel >/dev/null 2>&1 || grep -q '^wheel:' /etc/group 2>/dev/null; then \
+             if [ \"$ADDED_ADMIN\" -eq 0 ] && (getent group wheel >/dev/null 2>&1 || grep -q '^wheel:' /etc/group 2>/dev/null); then \
                  usermod -aG wheel '{username}' 2>&1 && ADDED_ADMIN=1; \
              fi; \
              if [ \"$ADDED_ADMIN\" -eq 0 ] && (getent group admin >/dev/null 2>&1 || grep -q '^admin:' /etc/group 2>/dev/null); then \
