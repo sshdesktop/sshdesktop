@@ -266,9 +266,10 @@ pub async fn docker_exec(
     container_id: String,
     command: String,
 ) -> Result<String, String> {
-    if container_id.chars().any(|c| c == ';' || c == '&' || c == '`' || c == '$') {
-        return Err("Invalid container ID.".into());
+    if !valid_container_ref(&container_id) {
+        return Err("Invalid container ID or name.".into());
     }
+    let container_arg = shell_quote(&container_id);
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
