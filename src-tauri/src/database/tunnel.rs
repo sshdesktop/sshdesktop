@@ -14,13 +14,15 @@ pub async fn setup_ssh_tunnel(
     };
     let target_port = config.port;
 
-    let ssh_conn_id = config.ssh_connection_id.clone().unwrap_or_else(|| "default".to_string());
+    let ssh_conn_id = config.ssh_connection_id.as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| "Select an SSH connection for this database tunnel.".to_string())?
+        .to_string();
 
-    // 1. Check if we have an active russh session in state.sessions
+    // Resolve only the explicitly selected SSH session; never borrow an unrelated session.
     let mut maybe_handle = {
         let lock = app_state.sessions.lock().await;
         lock.get(&ssh_conn_id).cloned()
-            .or_else(|| if ssh_conn_id == "default" { lock.get("default").cloned() } else { None })
     };
 
     // 2. Resolve SSH connection configuration from memory or disk
@@ -113,7 +115,12 @@ pub async fn setup_ssh_tunnel(
         let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
         let plink_bin = crate::ssh::connection::get_plink_path();
 
-        let mut cmd = if is_ppk || conn.config.password.is_some() {
+        let password_file = conn.config.password.as_deref()
+            .filter(|password| !password.is_empty())
+            .map(crate::ssh::connection::create_password_file)
+            .transpose()?;
+
+        let mut cmd = if is_ppk || password_file.is_some() {
             let mut c = tokio::process::Command::new(plink_bin);
             #[cfg(windows)]
             c.creation_flags(0x08000000); // CREATE_NO_WINDOW
@@ -126,10 +133,8 @@ pub async fn setup_ssh_tunnel(
             if let Some(ref ppk) = conn.config.private_key_path {
                 c.arg("-i").arg(ppk);
             }
-            if let Some(ref pwd) = conn.config.password {
-                if !pwd.is_empty() {
-                    c.arg("-pw").arg(pwd);
-                }
+            if let Some(ref password_file) = password_file {
+                c.arg("-pwfile").arg(password_file.path());
             }
             c.arg(&conn.config.host);
             c
@@ -177,6 +182,8 @@ pub async fn setup_ssh_tunnel(
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {
+            // Keep the protected password file alive for the full lifetime of Plink.
+            let _password_file = password_file;
             let _ = shutdown_rx.await;
             log::info!("Killing background SSH tunnel process on port {}", local_port);
             let _ = child.kill().await;
