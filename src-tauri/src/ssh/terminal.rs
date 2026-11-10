@@ -167,7 +167,7 @@ pub async fn terminal_create(
                 let is_key_auth = match conn.config.auth_method.as_deref() {
                     Some("password") => false,
                     Some("key") => true,
-                    _ => key_str.is_some(),
+                    _ => key_str.is_some() || password.is_none(),
                 };
                 match crate::ssh::session::connect_session_with_passphrase_auth(
                     &host,
