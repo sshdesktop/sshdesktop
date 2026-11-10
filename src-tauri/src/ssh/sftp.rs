@@ -197,7 +197,7 @@ pub async fn sftp_write_bytes(
     // write safely to /tmp first with regular user permissions, then elevate with sudo mv!
     // This completely bypasses sudo stdin pipe issues while supporting both passwordless sudo (-n) and password sudo (-S).
     let tmp_file = format!("/tmp/.cd_up_{}_{}", std::process::id(), uuid::Uuid::new_v4().simple());
-    let tmp_cmd = format!("base64 -d > '{}'", tmp_file);
+    let tmp_cmd = format!("umask 077 && base64 -d > '{}'", tmp_file);
     let (_tmp_out, tmp_code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &tmp_cmd, b64.as_bytes()).await;
     if tmp_code == 0 {
         let mv_cmd = format!("mv -f '{}' '{}'", tmp_file, escaped_path);
@@ -278,7 +278,8 @@ pub async fn sftp_delete(
     if canonical_code != 0 {
         return Err(format!("Could not safely resolve remote path '{}': {}", path, canonical.trim()));
     }
-    let canonical = canonical.trim().trim_end_matches('/');
+    let canonical = canonical.trim();
+    let canonical = if canonical.len() > 1 { canonical.trim_end_matches('/') } else { canonical };
     let protected = ["/", "/home", "/etc", "/usr", "/boot", "/sys", "/proc", "/dev", "/bin", "/sbin", "/lib", "/lib64", "/var"];
     if protected.iter().any(|root| canonical == *root) {
         return Err(format!("System protection active: Refusing to delete protected path '{}'", canonical));
