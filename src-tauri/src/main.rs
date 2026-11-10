@@ -1,0 +1,363 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![allow(dead_code, unused_variables, unused_imports)]
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use parking_lot::Mutex;
+use tauri::Manager;
+
+mod ssh;
+mod system;
+mod store;
+mod database;
+mod archive;
+mod api_client;
+mod app;
+
+pub struct AppState {
+    pub connections: Arc<Mutex<HashMap<String, ssh::connection::SshConnection>>>,
+    pub terminals: Arc<Mutex<HashMap<String, ssh::terminal::TerminalSession>>>,
+    pub sessions: Arc<tokio::sync::Mutex<HashMap<String, Arc<ssh::session::ClientHandle>>>>,
+}
+
+#[tauri::command]
+async fn open_browser_window(
+    app: tauri::AppHandle,
+    url: String,
+    title: Option<String>,
+    proxy_url: Option<String>,
+    window_id: Option<String>,
+) -> Result<String, String> {
+    use tauri::Manager;
+    let is_proxy = proxy_url.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+    let raw_id = window_id.unwrap_or_else(|| format!("tab-{}", uuid::Uuid::new_v4()));
+    let clean_id: String = raw_id.chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' }).collect();
+    let window_label = format!("browser-{}-{}", if is_proxy { "proxy" } else { "direct" }, clean_id);
+    let opposite_label = format!("browser-{}-{}", if is_proxy { "direct" } else { "proxy" }, clean_id);
+
+    // If an opposite mode window is currently open for this tab (e.g. toggled between SSH: ON and SSH: OFF), close it
+    if let Some(old_win) = app.get_webview_window(&opposite_label) {
+        let _ = old_win.close();
+    }
+
+    let parsed_url = url::Url::parse(&url).map_err(|e| format!("Invalid URL: {}", e))?;
+    let scheme = parsed_url.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err("Only http:// and https:// URLs can be opened in the browser window.".into());
+    }
+
+    if let Some(existing) = app.get_webview_window(&window_label) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        let _ = existing.navigate(parsed_url);
+        return Ok(window_label);
+    }
+
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        &app,
+        &window_label,
+        tauri::WebviewUrl::External(parsed_url),
+    )
+    .title(title.unwrap_or_else(|| {
+        if is_proxy {
+            "SSH Desktop Browser (SSH SOCKS5 Encrypted)".to_string()
+        } else {
+            "SSH Desktop Browser (Direct PC)".to_string()
+        }
+    }))
+    .inner_size(1280.0, 800.0)
+    .center();
+
+    if let Some(ref proxy_str) = proxy_url {
+        let proxy = url::Url::parse(proxy_str).map_err(|e| format!("Invalid proxy URL: {}", e))?;
+        let proxy_scheme = proxy.scheme();
+        if !matches!(proxy_scheme, "socks5" | "socks5h" | "http" | "https") {
+            return Err("Proxy scheme must be socks5, socks5h, http, or https.".into());
+        }
+        builder = builder.proxy_url(proxy);
+    }
+
+    // Isolate User Data Folder for native browser windows.
+    // On Windows (WebView2), windows with custom command line / proxy settings MUST NOT share the default UDF
+    // with the main window, otherwise WebView2 crashes or immediately aborts the secondary window.
+    if let Ok(local_data) = app.path().app_local_data_dir() {
+        let profile_dir = if is_proxy {
+            local_data.join("browser_profiles").join(format!("proxy-{}", clean_id))
+        } else {
+            local_data.join("browser_profiles").join(format!("direct-{}", clean_id))
+        };
+        let _ = std::fs::create_dir_all(&profile_dir);
+        builder = builder.data_directory(profile_dir);
+    }
+
+    let win = builder.build().map_err(|e| {
+        log::error!("Failed to build browser window ({}): {}", window_label, e);
+        format!("Failed to create browser window: {}", e)
+    })?;
+
+    let _ = win.show();
+    let _ = win.set_focus();
+    log::info!("SSH Desktop Browser window opened successfully: label={}, proxy={:?}", window_label, proxy_url);
+    Ok(window_label)
+}
+
+#[tauri::command]
+async fn close_browser_window(
+    app: tauri::AppHandle,
+    window_id: String,
+) -> Result<(), String> {
+    use tauri::Manager;
+    let clean_id: String = window_id.chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' }).collect();
+    if let Some(existing) = app.get_webview_window(&window_id) {
+        let _ = existing.close();
+    } else if let Some(existing) = app.get_webview_window(&format!("browser-proxy-{}", clean_id)) {
+        let _ = existing.close();
+    } else if let Some(existing) = app.get_webview_window(&format!("browser-direct-{}", clean_id)) {
+        let _ = existing.close();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn focus_browser_window(
+    app: tauri::AppHandle,
+    window_id: String,
+) -> Result<(), String> {
+    use tauri::Manager;
+    let clean_id: String = window_id.chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' }).collect();
+    if let Some(existing) = app.get_webview_window(&window_id) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+    } else if let Some(existing) = app.get_webview_window(&format!("browser-proxy-{}", clean_id)) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+    } else if let Some(existing) = app.get_webview_window(&format!("browser-direct-{}", clean_id)) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+    }
+    Ok(())
+}
+
+fn main() {
+    env_logger::init();
+
+    let state = AppState {
+        connections: Arc::new(Mutex::new(HashMap::new())),
+        terminals: Arc::new(Mutex::new(HashMap::new())),
+        sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+    };
+
+    let db_manager = Arc::new(database::DatabaseManager::new());
+
+    tauri::Builder::default()
+        .manage(state)
+        .manage(db_manager)
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            // SSH commands
+            ssh::connection::ssh_connect,
+            ssh::connection::ssh_disconnect,
+            ssh::connection::ssh_list_connections,
+            ssh::connection::ssh_test_connection,
+            ssh::connection::ssh_get_user_privilege,
+            ssh::terminal::terminal_create,
+            ssh::terminal::terminal_write,
+            ssh::terminal::terminal_resize,
+            ssh::terminal::terminal_close,
+            ssh::terminal::ssh_launch_putty,
+            ssh::sftp::sftp_list_dir,
+            ssh::sftp::sftp_read_file,
+            ssh::sftp::sftp_read_text_file,
+            ssh::sftp::sftp_write_file,
+            ssh::sftp::sftp_write_text_file,
+            ssh::sftp::sftp_mkdir,
+            ssh::sftp::sftp_delete,
+            ssh::sftp::sftp_rename,
+            ssh::sftp::sftp_chmod,
+            ssh::sftp::sftp_chown,
+            ssh::sftp::sftp_stat,
+            ssh::sftp::sftp_download,
+            ssh::sftp::sftp_download_to_downloads,
+            ssh::sftp::sftp_upload,
+            ssh::sftp::sftp_read_file_base64,
+            ssh::sftp::sftp_folder_size,
+            ssh::exec::ssh_exec,
+            ssh::exec::ssh_exec_stream,
+            ssh::exec::ssh_exec_stop,
+            ssh::tunnel::ssh_start_tunnel,
+            ssh::tunnel::ssh_stop_tunnel,
+            ssh::tunnel::ssh_list_tunnels,
+            ssh::tunnel::ssh_start_socks5,
+            ssh::tunnel::ssh_stop_socks5,
+            ssh::tunnel::ssh_get_socks5,
+            
+            // OpenSSH Architecture commands
+            ssh::config_parser::ssh_config_get_path,
+            ssh::config_parser::ssh_config_read_hosts,
+            ssh::config_parser::ssh_config_save_host,
+            ssh::known_hosts::ssh_verify_host_key,
+            ssh::known_hosts::ssh_trust_host_key,
+            ssh::key_gen::ssh_generate_key_pair,
+            ssh::key_gen::ssh_list_local_keys,
+            ssh::key_gen::ssh_install_public_key,
+            ssh::agent::ssh_agent_get_status,
+            
+            // System commands
+            system::monitor::system_get_stats,
+            system::monitor::system_get_disks,
+            system::monitor::system_get_network,
+            system::process::process_list,
+            system::process::process_kill,
+            system::process::process_renice,
+            system::service::service_list,
+            system::service::service_action,
+            system::service::service_status,
+            system::service::service_logs,
+            system::docker::docker_containers,
+            system::docker::docker_action,
+            system::docker::docker_logs,
+            system::docker::docker_images,
+            system::docker::docker_exec,
+            system::docker::docker_stats,
+            system::docker::docker_image_remove,
+            system::network::network_ports,
+            system::network::network_connections,
+            system::network::network_interfaces,
+            system::network::network_ping,
+            system::network::network_dns_lookup,
+            system::network::network_kill_port,
+            system::network::network_bandwidth_stats,
+            system::package::package_list,
+            system::package::package_search,
+            system::package::package_install,
+            system::package::package_remove,
+            system::package::package_update,
+            system::package::package_upgradable,
+            system::package::package_detect_manager,
+            system::user::user_list,
+            system::user::user_add,
+            system::user::user_set_password,
+            system::user::user_toggle_sudo,
+            system::user::user_delete,
+            system::user::user_modify,
+            system::user::user_lock,
+            system::user::user_unlock,
+            system::user::group_list,
+            system::user::group_add,
+            system::user::group_delete,
+            system::user::group_add_user,
+            system::user::group_remove_user,
+            system::user::who_is_logged_in,
+            system::user::last_logins,
+            system::cron::cron_list,
+            system::cron::cron_list_all,
+            system::cron::cron_add,
+            system::cron::cron_remove,
+            system::logs::logs_journal,
+            system::logs::logs_file,
+            system::logs::logs_stream_start,
+            system::logs::logs_stream_stop,
+            system::logs::logs_dmesg,
+            system::firewall::firewall_status,
+            system::firewall::firewall_rules,
+            system::firewall::firewall_add_rule,
+            system::firewall::firewall_delete_rule,
+            system::firewall::firewall_toggle,
+            system::firewall::firewall_detect_backend,
+            system::firewall::firewall_add_rule_advanced,
+            system::firewall::firewall_delete_rule_advanced,
+            system::firewall::firewall_install,
+            system::firewall::firewall_set_default_policy,
+            system::firewall::firewall_reset,
+            system::firewall::firewall_reload,
+            system::disk::disk_list,
+            system::disk::disk_usage,
+            system::disk::disk_smart,
+            system::disk::disk_largest_dirs,
+            system::disk::disk_mount,
+            system::disk::disk_unmount,
+            system::disk::disk_remount,
+            system::disk::disk_get_fstab,
+            system::disk::disk_create_label,
+            system::disk::disk_create_partition,
+            system::disk::disk_delete_partition,
+            system::disk::disk_resize_partition,
+            system::disk::disk_set_partition_flag,
+            system::disk::disk_format_filesystem,
+            system::disk::disk_set_label,
+            system::disk::disk_check_filesystem,
+            system::disk::disk_get_swap_info,
+            system::disk::disk_manage_swap,
+            system::disk::disk_get_tmp_info,
+            system::disk::disk_manage_tmp,
+            
+            // Store commands
+            store::connections::store_save_connection,
+            store::connections::store_list_connections,
+            store::connections::store_delete_connection,
+            store::connections::store_update_connection,
+            store::settings::settings_get,
+            store::settings::settings_save,
+
+            // Database commands (Native Drivers + SSH Tunnels)
+            database::db_connect,
+            database::db_disconnect,
+            database::db_test_connection,
+            database::db_execute_query,
+            database::db_list_tables,
+            database::db_get_table_columns,
+            database::redis_scan_keys,
+            database::redis_get_value,
+            database::redis_set_value,
+            database::redis_delete_key,
+            database::mongodb_list_collections,
+            database::mongodb_find_documents,
+            database::mongodb_insert_document,
+            database::db_execute_operation,
+            database::db_get_object_definition,
+            database::db_get_capabilities,
+
+            // Archive and Desktop Notification commands
+            archive::send_desktop_notification,
+            archive::sftp_create_zip_pure,
+            archive::sftp_extract_archive_pure,
+
+            // API Studio commands (Native HTTP Engine over SSH Port Forwarding Tunnel)
+            api_client::api_send_request,
+
+            // Browser commands
+            open_browser_window,
+            close_browser_window,
+            focus_browser_window,
+
+            // Web Auth & Server Security commands
+            store::auth::auth_get_status,
+            store::auth::auth_login,
+            store::auth::auth_change_credentials,
+            store::auth::auth_logout,
+
+            // Browser Reverse Proxy command
+            store::proxy::browser_proxy_fetch,
+
+            // Centralized Lifecycle & Shutdown command
+            app::shutdown::app_request_shutdown,
+        ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let app = window.app_handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        use tauri::Manager;
+                        let state = app.state::<AppState>();
+                        let _ = app::shutdown::app_request_shutdown(app.clone(), state).await;
+                    });
+                }
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
