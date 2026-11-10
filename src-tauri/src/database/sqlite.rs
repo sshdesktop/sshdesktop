@@ -68,8 +68,8 @@ pub async fn connect_sqlite(
                     .map_err(|e| format!("Failed to create local SQLite cache: {}", e))?;
             } else {
                 let download_cmd = format!(
-                    "base64 '{}' | tr -d '\\n'",
-                    escaped
+                    "size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 268435456 ] || {{ echo 'Remote SQLite database exceeds the 256 MiB cache limit' >&2; exit 1; }}; base64 '{}' | tr -d '\\n'",
+                    escaped, escaped
                 );
                 let (cmd_out, cmd_code) = crate::ssh::exec::run_cmd(app_state, &conn_id, &download_cmd).await;
                 if cmd_code != 0 {
