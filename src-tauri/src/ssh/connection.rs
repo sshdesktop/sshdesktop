@@ -1,3 +1,33 @@
+pub fn validate_ssh_target(host: &str, port: u16, username: &str) -> Result<(), String> {
+    let host = host.trim();
+    let username = username.trim();
+    if host.is_empty() || host.len() > 253
+        || !host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':' | b'[' | b']'))
+    {
+        return Err("Invalid SSH hostname or IP address.".into());
+    }
+    let ip_candidate = host.strip_prefix('[').and_then(|v| v.strip_suffix(']')).unwrap_or(host);
+    if ip_candidate.parse::<std::net::IpAddr>().is_err() {
+        let labels: Vec<&str> = host.split('.').collect();
+        if labels.iter().any(|label| label.is_empty() || label.len() > 63
+            || label.starts_with('-') || label.ends_with('-')
+            || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+        {
+            return Err("Invalid SSH hostname.".into());
+        }
+    }
+    if username.is_empty() || username.len() > 128
+        || !username.as_bytes()[0].is_ascii_alphanumeric()
+        || !username.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+    {
+        return Err("Invalid SSH username.".into());
+    }
+    if port == 0 {
+        return Err("SSH port must be between 1 and 65535.".into());
+    }
+    Ok(())
+}
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::AppState;
@@ -253,6 +283,8 @@ pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
 
 #[tauri::command]
 pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: ConnectionConfig) -> Result<String, String> {
+    validate_ssh_target(&config.host, config.port, &config.username)?;
+
     let id = config.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     config.id = Some(id.clone());
     invalidate_user_privilege_cache(&id);
@@ -548,6 +580,7 @@ impl From<crate::store::connections::SavedConnection> for ConnectionConfig {
 /// Searches in-memory connections, auto-restores from disk if needed,
 /// or falls back to the default or first available active server.
 pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnection> {
+    // Reject invalid saved/imported SSH targets before any remote operation.
     // 1. In-memory check
     {
         let lock = state.connections.lock();
@@ -646,6 +679,7 @@ pub async fn ssh_list_connections(state: tauri::State<'_, AppState>) -> Result<V
 
 #[tauri::command]
 pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, String> {
+    validate_ssh_target(&config.host, config.port, &config.username)?;
     if config.host.is_empty() || config.port == 0 {
         return Err("Invalid host or port configuration".into());
     }
