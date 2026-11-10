@@ -101,21 +101,25 @@ pub async fn api_send_request(
         .map_err(|e| format!("Invalid URL '{}': {}", formatted_url, e))?;
 
     let scheme = parsed_url.scheme();
-    let original_host = parsed_url.host_str().unwrap_or("127.0.0.1").to_string();
+    if !matches!(scheme, "http" | "https") {
+        return Err("Only http:// and https:// URLs are supported".to_string());
+    }
+    if parsed_url.host_str().is_none() {
+        return Err("Target URL must include a valid host".to_string());
+    }
+    let original_host = parsed_url.host_str().unwrap().to_string();
     let default_port = if scheme == "https" { 443 } else { 80 };
     let original_port = parsed_url.port().unwrap_or(default_port);
 
     // Route through SSH when enabled
     if req.use_ssh_tunnel {
-        let conn_id = match req.conn_id.as_deref() {
-            Some(id) if !id.trim().is_empty() => id.to_string(),
-            _ => {
-                let connections = state.connections.lock();
-                connections.keys().next().cloned().ok_or_else(|| {
-                    "No active SSH connection found. Please connect to an SSH server in SSH Desktop to route requests through SSH, or toggle SSH Tunnel OFF for direct requests.".to_string()
-                })?
-            }
-        };
+        let conn_id = req.conn_id.as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| "Select an SSH connection before enabling SSH tunneling.".to_string())?
+            .to_string();
+        if !state.connections.lock().contains_key(&conn_id) {
+            return Err(format!("SSH connection '{}' is not available. Select an active connection.", conn_id));
+        }
 
         // 1. Primary path: Execute request via remote SSH server (natively handles HTTPS, TLS/SNI, and public/internal APIs)
         match execute_remote_ssh_request(&state, &conn_id, &req, &parsed_url).await {
@@ -168,14 +172,18 @@ async fn execute_remote_ssh_request(
     }
     let target_url_str = target_url.to_string();
 
-    // 2. Build curl arguments
+    // 2. Build curl arguments. Restrict methods before interpolating into a remote shell command.
+    let method = req.method.trim().to_ascii_uppercase();
+    if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS") {
+        return Err(format!("Unsupported HTTP method '{}'", req.method));
+    }
     let timeout_secs = req.timeout_seconds.unwrap_or(30).clamp(1, 300);
-    let mut curl_args = format!("-s -S -i -X {} --max-time {}", req.method.to_uppercase(), timeout_secs);
+    let mut curl_args = format!("-s -S -i -X {} --max-time {}", method, timeout_secs);
 
     if req.follow_redirects.unwrap_or(true) {
         curl_args.push_str(" -L");
     }
-    if !req.verify_ssl.unwrap_or(false) {
+    if req.verify_ssl == Some(false) {
         curl_args.push_str(" -k");
     }
 
@@ -434,7 +442,7 @@ async fn execute_direct_request(
     let timeout_secs = req.timeout_seconds.unwrap_or(30).clamp(1, 300);
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
-        .danger_accept_invalid_certs(!req.verify_ssl.unwrap_or(false));
+        .danger_accept_invalid_certs(req.verify_ssl == Some(false));
 
     if let Some(false) = req.follow_redirects {
         builder = builder.redirect(reqwest::redirect::Policy::none());
@@ -535,10 +543,21 @@ async fn execute_direct_request(
         }
     }
 
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+    // Bound response memory use even when the server omits Content-Length.
+    const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+    if response.content_length().map(|n| n > MAX_RESPONSE_BYTES as u64).unwrap_or(false) {
+        return Err("Response body exceeds the 10 MiB limit".to_string());
+    }
+    let mut response = response;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await
+        .map_err(|e| format!("Failed to read response body: {}", e))? {
+        if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err("Response body exceeds the 10 MiB limit".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let bytes = body;
     let size_bytes = bytes.len();
 
     let (body_text, is_binary, is_json) = match std::str::from_utf8(&bytes) {
