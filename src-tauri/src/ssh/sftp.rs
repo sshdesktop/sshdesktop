@@ -37,6 +37,7 @@ async fn run_scp_transfer(
     } else {
         conn.config.host.clone()
     };
+    let local_arg = if local_path.starts_with('-') { format!("./{}", local_path) } else { local_path.to_string() };
     let mut cmd = if use_putty {
         let mut command = tokio::process::Command::new("pscp");
         command.kill_on_drop(true);
@@ -45,11 +46,11 @@ async fn run_scp_transfer(
             let password_file = crate::ssh::connection::create_password_file(pwd)?;
             command.arg("-pwfile").arg(password_file.path());
             // Keep the temporary credential file alive until pscp exits.
-            let remote_spec = format!("{}@{}:{}", conn.config.username, host_spec, remote_path);
+            let remote_spec = format!("{}@{}:'{}'", conn.config.username, host_spec, shell_escape(remote_path));
             if upload {
-                command.arg("-r").arg(local_path).arg(&remote_spec);
+                command.arg("-r").arg(&local_arg).arg(&remote_spec);
             } else {
-                command.arg(&remote_spec).arg(local_path);
+                command.arg(&remote_spec).arg(&local_arg);
             }
             command.stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
@@ -80,9 +81,9 @@ async fn run_scp_transfer(
 
     let remote_spec = format!("{}@{}:'{}'", conn.config.username, host_spec, shell_escape(remote_path));
     if upload {
-        cmd.arg(local_path).arg(&remote_spec);
+        cmd.arg(&local_arg).arg(&remote_spec);
     } else {
-        cmd.arg(&remote_spec).arg(local_path);
+        cmd.arg(&remote_spec).arg(&local_arg);
     }
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
