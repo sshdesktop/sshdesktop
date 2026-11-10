@@ -956,8 +956,23 @@ pub async fn disk_format_filesystem(
     let dev_arg = shell_quote(&dev_path);
     let label_arg = shell_quote(lbl);
 
-    // Safely unmount partition if mounted
-    let _ = run_sudo(&state, &conn_id, &format!("swapoff {0} 2>/dev/null || true; umount -f -l {0} 2>/dev/null || true", dev_arg)).await;
+    // Never format a device while it is mounted or active as swap. Do not
+    // ignore unmount failures: continuing could destroy a live filesystem.
+    let preflight = format!(
+        r#"DEV={}
+if grep -qF -- "$DEV " /proc/swaps 2>/dev/null; then
+    swapoff "$DEV" || {{ echo "Failed to disable active swap on $DEV" >&2; exit 1; }}
+fi
+if command -v findmnt >/dev/null 2>&1 && findmnt -rn -S "$DEV" >/dev/null 2>&1; then
+    umount "$DEV" || {{ echo "Failed to unmount $DEV; refusing to format" >&2; exit 1; }}
+fi
+if command -v findmnt >/dev/null 2>&1 && findmnt -rn -S "$DEV" >/dev/null 2>&1; then
+    echo "Device $DEV is still mounted; refusing to format" >&2
+    exit 1
+fi
+"#,
+        dev_arg
+    );
     let format_cmd = match clean_fs.as_str() {
         "ext4" => {
             if !lbl.is_empty() {
@@ -1012,7 +1027,8 @@ pub async fn disk_format_filesystem(
         other => return Err(format!("Unsupported filesystem type '{}'. Supported: ext4, ext3, xfs, btrfs, vfat, ntfs, swap", other)),
     };
 
-    let (stdout, code) = run_sudo(&state, &conn_id, &format!("{} 2>&1", format_cmd)).await;
+    let full_cmd = format!("{}\n{} 2>&1", preflight, format_cmd);
+    let (stdout, code) = run_sudo(&state, &conn_id, &full_cmd).await;
     if code != 0 {
         return Err(format!("Format to {} failed (exit code {}): {}", clean_fs, code, stdout.trim()));
     }
@@ -1039,7 +1055,7 @@ pub async fn disk_set_label(
     let dev_arg = shell_quote(clean_dev);
     let label_arg = shell_quote(clean_lbl);
 
-    let cmd = if clean_fs.contains("ext") {
+    let cmd = if matches!(clean_fs.as_str(), "ext2" | "ext3" | "ext4") {
         format!("e2label {} {}", dev_arg, label_arg)
     } else if clean_fs == "xfs" {
         format!("xfs_admin -L {} {}", label_arg, dev_arg)
