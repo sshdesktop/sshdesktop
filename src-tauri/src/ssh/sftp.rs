@@ -582,8 +582,11 @@ pub async fn sftp_read_file_base64(
     conn_id: String,
     path: String,
 ) -> Result<String, String> {
+    if path.trim().is_empty() || path.len() > 4096 || path.chars().any(|c| c.is_control()) {
+        return Err("Invalid remote file path.".into());
+    }
     let escaped = shell_escape(&path);
-    let cmd = format!("base64 -w 0 '{}' 2>/dev/null || base64 '{}'", escaped, escaped);
+    let cmd = format!("size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 50331648 ] || {{ echo 'File exceeds 48 MiB limit' >&2; exit 1; }}; base64 '{}' | tr -d '\\n'", escaped, escaped);
     let (stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
     if code == -1 && stdout.is_empty() {
         return Err("No active SSH connection.".into());
