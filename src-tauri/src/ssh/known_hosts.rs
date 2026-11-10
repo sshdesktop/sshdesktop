@@ -70,8 +70,26 @@ fn matches_hashed_host(token: &str, candidate: &str) -> bool {
     mac.verify_slice(&expected).is_ok()
 }
 
-/// Match only the exact host token, including OpenSSH's non-default-port form.
-/// Wildcards and negated patterns are deliberately not treated as exact trust.
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    let p = pattern.as_bytes();
+    let v = value.as_bytes();
+    let (mut pi, mut vi, mut star, mut retry) = (0usize, 0usize, None, 0usize);
+    while vi < v.len() {
+        if pi < p.len() && (p[pi] == b'?' || p[pi] == v[vi]) {
+            pi += 1; vi += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi); pi += 1; retry = vi;
+        } else if let Some(si) = star {
+            pi = si + 1; retry += 1; vi = retry;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' { pi += 1; }
+    pi == p.len()
+}
+
+/// Match an OpenSSH host token, including hashed, wildcard and non-default-port forms.
 fn host_token_matches(token: &str, host: &str, port: u16) -> bool {
     let normalized_host = host.to_lowercase();
     let candidates = if port == 22 {
@@ -79,13 +97,25 @@ fn host_token_matches(token: &str, host: &str, port: u16) -> bool {
     } else {
         vec![format!("[{}]:{}", normalized_host, port)]
     };
-
     if token.starts_with("|1|") {
         return candidates.iter().any(|candidate| matches_hashed_host(token, candidate));
     }
+    let pattern = token.to_lowercase();
+    candidates.iter().any(|candidate| wildcard_match(&pattern, candidate))
+}
 
-    let token = token.to_lowercase();
-    candidates.iter().any(|candidate| token == *candidate)
+/// OpenSSH comma-separated host lists are positive matches unless any matching
+/// negated pattern excludes the candidate.
+fn host_field_matches(field: &str, host: &str, port: u16) -> bool {
+    let mut positive_match = false;
+    for token in field.split(',') {
+        if let Some(negative) = token.strip_prefix('!') {
+            if host_token_matches(negative, host, port) { return false; }
+        } else if host_token_matches(token, host, port) {
+            positive_match = true;
+        }
+    }
+    positive_match
 }
 
 pub fn check_known_hosts(
@@ -110,6 +140,8 @@ pub fn check_known_hosts(
 
     let target_key = key_b64.trim();
     let mut found_previous_key: Option<String> = None;
+    let mut trusted_match = false;
+    let mut revoked_match: Option<String> = None;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -132,9 +164,7 @@ pub fn check_known_hosts(
             (None, parts[0], parts[1], parts[2])
         };
 
-        let host_matches = host_field.split(',').any(|token| {
-            !token.starts_with('!') && host_token_matches(token, host, port)
-        });
+        let host_matches = host_field_matches(host_field, host, port);
         if !host_matches {
             continue;
         }
@@ -145,18 +175,28 @@ pub fn check_known_hosts(
 
         if key_field == target_key && key_type_field == key_type {
             if marker == Some("@revoked") {
-                return (
-                    "changed".into(),
-                    "The offered SSH host key is explicitly revoked in known_hosts.".into(),
-                    Some(key_field.to_string()),
-                );
+                revoked_match = Some(key_field.to_string());
+            } else if marker.is_none() {
+                trusted_match = true;
             }
-            return ("trusted".into(), "Host key verified in known_hosts".into(), None);
         }
 
-        if key_type_field == key_type && marker != Some("@revoked") {
+        if key_type_field == key_type && marker.is_none() {
             found_previous_key = Some(key_field.to_string());
         }
+    }
+
+    // A revocation entry always overrides a matching trust entry, regardless of
+    // their order in known_hosts.
+    if let Some(revoked) = revoked_match {
+        return (
+            "changed".into(),
+            "The offered SSH host key is explicitly revoked in known_hosts.".into(),
+            Some(revoked),
+        );
+    }
+    if trusted_match {
+        return ("trusted".into(), "Host key verified in known_hosts".into(), None);
     }
 
     if let Some(previous) = found_previous_key {
@@ -345,12 +385,10 @@ pub async fn ssh_trust_host_key(
             retained.push(line.to_string());
             continue;
         };
-        let same_host = host_field.split(',').any(|token| {
-            !token.starts_with('!') && host_token_matches(token, host, port)
-        });
-        if !(same_host && entry_key_type == key_type) {
-            retained.push(line.to_string());
-        }
+        // Never rewrite existing records: a comma-separated host list may
+        // protect additional hosts, and @revoked/@cert-authority markers carry
+        // security semantics that must not be silently removed.
+        retained.push(line.to_string());
     }
 
     retained.push(new_entry.trim_end().to_string());
