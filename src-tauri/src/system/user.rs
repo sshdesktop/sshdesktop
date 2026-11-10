@@ -132,7 +132,13 @@ pub async fn user_add(
     }
 
     let sh = shell.unwrap_or_else(|| "/bin/bash".into());
+    if !sh.starts_with('/') || !sh.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.')) {
+        return Err("Invalid login shell path.".into());
+    }
     let effective_groups = groups.unwrap_or_default();
+    if effective_groups.iter().any(|g| g.is_empty() || !g.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')) {
+        return Err("Invalid group name.".into());
+    }
     let wants_sudo = effective_groups.iter().any(|g| g == "sudo" || g == "wheel" || g == "admin");
     let custom_groups: Vec<String> = effective_groups
         .into_iter()
@@ -199,7 +205,7 @@ pub async fn user_add(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("Failed to create user: {}", stdout.trim()));
     }
 
@@ -346,7 +352,7 @@ pub async fn user_modify(
         if !sh.starts_with('/') || !sh.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.')) {
             return Err("Invalid login shell path.".into());
         }
-        if code != 0 && code != -1 && !out.is_empty() {
+        if code != 0 {
             return Err(format!("usermod shell change failed: {}", out.trim()));
         }
     }
@@ -395,7 +401,7 @@ pub async fn user_lock(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !out.is_empty() {
+    if code != 0 {
         return Err(format!("Lock user failed: {}", out.trim()));
     }
 
