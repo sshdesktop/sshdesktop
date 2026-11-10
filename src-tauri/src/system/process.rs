@@ -38,7 +38,7 @@ pub async fn process_list(
     let mut list = Vec::new();
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 11 {
+        if parts.len() >= 12 {
             let user       = parts[0].to_string();
             let pid        = parts[1].parse::<u32>().unwrap_or(0);
             let ppid       = parts[2].parse::<u32>().unwrap_or(0);
