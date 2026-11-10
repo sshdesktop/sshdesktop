@@ -40,8 +40,10 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
     {
         let handle_opt = {
             let sessions = state.sessions.lock().await;
-            if conn_id == "default" || conn_id.is_empty() {
+            if conn_id == "default" {
                 sessions.get("default").cloned()
+            } else if conn_id.is_empty() {
+                None
             } else {
                 sessions.get(conn_id).cloned()
             }
