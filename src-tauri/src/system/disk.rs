@@ -15,7 +15,7 @@ fn valid_absolute_path(value: &str) -> bool {
 }
 
 fn fstab_escape(value: &str) -> String {
-    value.replace('\\', "\\\\134")
+    value.replace('\\', "\\134")
         .replace(' ', "\\040")
         .replace('\t', "\\011")
         .replace('#', "\\043")
