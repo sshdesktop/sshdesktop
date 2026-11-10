@@ -372,7 +372,8 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                 #[cfg(windows)]
                 cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
-                cmd.arg("-ssh")
+                cmd.arg("-batch")
+                    .arg("-ssh")
                     .arg("-P")
                     .arg(&port)
                     .arg("-l")
@@ -381,7 +382,6 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                     .arg(pwd)
                     .arg(host)
                     .arg("echo sshdesktop-connected")
-                    .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
 
@@ -537,24 +537,44 @@ pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnecti
 pub async fn ssh_disconnect(state: tauri::State<'_, AppState>, conn_id: String) -> Result<(), String> {
     {
         let mut sessions = state.sessions.lock().await;
-        sessions.remove(&conn_id);
-        if conn_id == "default" || sessions.len() <= 1 {
+        let removed = sessions.remove(&conn_id);
+        if conn_id == "default" {
             sessions.remove("default");
+        } else if let (Some(removed), Some(default)) = (removed.as_ref(), sessions.get("default")) {
+            if std::sync::Arc::ptr_eq(removed, default) {
+                sessions.remove("default");
+            }
+        }
+        if !sessions.contains_key("default") {
+            if let Some(next) = sessions.iter()
+                .find(|(id, _)| id.as_str() != "default")
+                .map(|(_, handle)| handle.clone())
+            {
+                sessions.insert("default".to_string(), next);
+            }
         }
     }
     {
         let mut map = state.connections.lock();
         map.remove(&conn_id);
-        if map.len() == 1 && map.contains_key("default") {
+        if conn_id == "default" || map.get("default").map(|c| c.id == conn_id).unwrap_or(false) {
             map.remove("default");
+        }
+        if !map.contains_key("default") {
+            if let Some(next) = map.iter()
+                .find(|(id, conn)| id.as_str() != "default" && conn.connected)
+                .map(|(_, conn)| conn.clone())
+            {
+                map.insert("default".to_string(), next);
+            }
         }
     }
     {
         let mut priv_map = USER_PRIVILEGE_CACHE.lock();
         priv_map.remove(&conn_id);
-        if conn_id == "default" || priv_map.len() <= 1 {
-            priv_map.remove("default");
-        }
+        // The alias may refer to the disconnected connection; invalidate it rather
+        // than risk returning privilege data for a different active session.
+        priv_map.remove("default");
     }
     let _ = crate::ssh::tunnel::ssh_stop_socks5(conn_id.clone()).await;
     log::info!("SSH Desktop: SSH Session disconnected for ID: {}", conn_id);
@@ -623,8 +643,8 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
             let mut cmd = tokio::process::Command::new(plink_bin);
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
-            cmd.arg("-ssh")
-                .arg("-batch")
+            cmd.arg("-batch")
+                .arg("-ssh")
                 .arg("-P").arg(&port)
                 .arg("-l").arg(user)
                 .arg("-i").arg(key_path)
@@ -641,7 +661,6 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
     // 3. Password probe via Plink
     if let Some(pwd) = &config.password {
         if !pwd.is_empty() {
-            cleanup_putty_host_key(host, &port);
             let plink_bin = get_plink_path();
             let mut cmd = tokio::process::Command::new(plink_bin);
             #[cfg(windows)]
