@@ -523,7 +523,10 @@ pub fn relax_to_strict_json(input: &str) -> String {
             if slice.to_ascii_lowercase().starts_with("numberint(")
                 || slice.to_ascii_lowercase().starts_with("numberlong(")
                 || slice.to_ascii_lowercase().starts_with("numberdecimal(") {
-                let open_paren = slice.find('(').unwrap();
+                let open_paren = match slice.find('(') {
+                    Some(p) => p,
+                    None => { out.push(c); i += 1; continue; }
+                };
                 let mut j = i + open_paren + 1;
                 while j < n && (chars[j] == ' ' || chars[j] == '\t') { j += 1; }
                 let quote = if j < n && (chars[j] == '"' || chars[j] == '\'') { let q = chars[j]; j += 1; q } else { ' ' };
@@ -1536,7 +1539,7 @@ pub async fn execute_mongodb_single_command(
         let (coll_name, rest) = if let Some(inner_raw) = after_db.strip_prefix("getCollection(") {
             let inner = inner_raw.trim();
             let quote = if inner.starts_with('"') || inner.starts_with('\'') || inner.starts_with('`') {
-                inner.chars().next().unwrap()
+                inner.chars().next().unwrap_or('"')
             } else {
                 ')'
             };
@@ -1551,7 +1554,7 @@ pub async fn execute_mongodb_single_command(
             // db["coll"] or db['coll']
             let inner = inner_raw.trim();
             let quote = if inner.starts_with('"') || inner.starts_with('\'') || inner.starts_with('`') {
-                inner.chars().next().unwrap()
+                inner.chars().next().unwrap_or('"')
             } else {
                 ']'
             };

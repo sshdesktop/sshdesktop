@@ -277,12 +277,16 @@ export default function DockerManager() {
     }
   }, [editorOutput]);
 
-  // Clean up Tauri stream event listener on unmount
+  // Clean up Tauri stream event listener & background execution on unmount
   useEffect(() => {
     return () => {
       if (unlistenRef.current) {
         unlistenRef.current();
         unlistenRef.current = null;
+      }
+      if (currentStreamIdRef.current) {
+        sshExecStop(currentStreamIdRef.current).catch(() => {});
+        currentStreamIdRef.current = null;
       }
     };
   }, []);

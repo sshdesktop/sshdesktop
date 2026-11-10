@@ -25,7 +25,8 @@ export default function DisconnectAlertModal() {
     returnToServersList, 
     activeConnectionId, 
     connectedServers,
-    connections 
+    connections,
+    isShuttingDown
   } = useConnectionStore();
 
   const [countdown, setCountdown] = useState<number>(8);
@@ -51,7 +52,7 @@ export default function DisconnectAlertModal() {
 
   // Auto-reconnect countdown timer (Stops strictly after MAX_RECONNECT_ATTEMPTS = 3)
   useEffect(() => {
-    if (!isDisconnected) {
+    if (!isDisconnected || isShuttingDown) {
       setCountdown(8);
       setIsAutoPaused(false);
       setProbeStatus('idle');
@@ -157,7 +158,7 @@ export default function DisconnectAlertModal() {
     returnToServersList();
   };
 
-  if (!isDisconnected) return null;
+  if (!isDisconnected || isShuttingDown) return null;
 
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl animate-in fade-in duration-200 select-none">

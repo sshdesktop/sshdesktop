@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Database,
   Plus,
@@ -30,7 +30,7 @@ import { CosmosStudio } from './engines/CosmosStudio';
 import { CassandraStudio } from './engines/CassandraStudio';
 import { Db2Studio } from './engines/Db2Studio';
 import { DatabaseErrorBoundary } from './components';
-import { dbConnect, sftpReadTextFile, sftpWriteTextFile } from '../../lib/tauri-bridge';
+import { dbConnect, dbDisconnect, sftpReadTextFile, sftpWriteTextFile } from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
 
 const ENGINE_BADGES: Record<DbEngine, { label: string; icon: string; color: string }> = {
@@ -107,6 +107,17 @@ export const DatabaseHub: React.FC = () => {
   });
 
   const [activeProfile, setActiveProfile] = useState<DbConnectionProfile | null>(null);
+  const activeProfileRef = useRef<DbConnectionProfile | null>(activeProfile);
+  activeProfileRef.current = activeProfile;
+
+  // Clean up database session & tunnel on unmount
+  useEffect(() => {
+    return () => {
+      if (activeProfileRef.current) {
+        dbDisconnect(activeProfileRef.current.id).catch(() => {});
+      }
+    };
+  }, []);
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
   const [editingProfile, setEditingProfile] = useState<DbConnectionProfile | null>(null);
   const [searchFilter, setSearchFilter] = useState('');
@@ -223,10 +234,22 @@ export const DatabaseHub: React.FC = () => {
     setActiveProfile(profile);
   };
 
+  const handleCloseStudio = useCallback(async () => {
+    if (activeProfileRef.current) {
+      try {
+        await dbDisconnect(activeProfileRef.current.id);
+      } catch (e) {
+        console.warn('Error disconnecting database session:', e);
+      }
+    }
+    setActiveProfile(null);
+  }, []);
+
   const handleDeleteProfile = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     setProfiles(prev => prev.filter(p => p.id !== id));
     if (activeProfile?.id === id) {
+      dbDisconnect(id).catch(() => {});
       setActiveProfile(null);
     }
     if (connectionError?.id === id) {
@@ -247,7 +270,7 @@ export const DatabaseHub: React.FC = () => {
         {/* Back / Switch Bar */}
         <div className="h-8 bg-black/40 border-b border-white/10 px-3 flex items-center justify-between text-xs shrink-0 z-10">
           <button
-            onClick={() => setActiveProfile(null)}
+            onClick={handleCloseStudio}
             className="flex items-center gap-1.5 text-gray-400 hover:text-white transition-colors"
           >
             <span>← Database Studios Hub</span>
@@ -260,7 +283,7 @@ export const DatabaseHub: React.FC = () => {
             )}
             <span className="text-[11px] text-gray-300 font-mono font-medium">{activeProfile.name}</span>
             <button
-              onClick={() => setActiveProfile(null)}
+              onClick={handleCloseStudio}
               className="px-2 py-0.5 rounded text-[10px] bg-white/10 text-gray-300 hover:text-white hover:bg-white/15 transition-colors"
             >
               Switch Database
@@ -270,18 +293,18 @@ export const DatabaseHub: React.FC = () => {
 
         {/* Studio Window Body */}
         <div className="flex-1 overflow-hidden bg-[#181825]">
-          <DatabaseErrorBoundary onBackToHub={() => setActiveProfile(null)} engineName={activeProfile.engine}>
-            {(activeProfile.engine === 'postgresql' || (activeProfile.engine as string) === 'postgres') && <PostgresStudio profile={activeProfile} onDisconnect={() => setActiveProfile(null)} />}
-            {(activeProfile.engine === 'mysql' || activeProfile.engine === 'mariadb') && <MysqlStudio profile={activeProfile} onDisconnect={() => setActiveProfile(null)} />}
-            {(activeProfile.engine === 'mssql' || (activeProfile.engine as string) === 'sqlserver') && <MssqlStudio profile={activeProfile} onDisconnect={() => setActiveProfile(null)} />}
-            {(activeProfile.engine === 'sqlite' || (activeProfile.engine as string) === 'sqlite3') && <SqliteStudio profile={activeProfile} onDisconnect={() => setActiveProfile(null)} />}
-            {(activeProfile.engine === 'mongodb' || (activeProfile.engine as string) === 'mongo') && <MongoStudio profile={activeProfile} onDisconnect={() => setActiveProfile(null)} />}
-            {activeProfile.engine === 'redis' && <RedisStudio profile={activeProfile} onDisconnect={() => setActiveProfile(null)} />}
-            {activeProfile.engine === 'oracle' && <OracleStudio profile={activeProfile} onDisconnect={() => setActiveProfile(null)} />}
-            {(activeProfile.engine === 'dynamodb' || (activeProfile.engine as string) === 'dynamo') && <DynamoStudio profile={activeProfile} onDisconnect={() => setActiveProfile(null)} />}
-            {(activeProfile.engine === 'cosmos' || (activeProfile.engine as string) === 'cosmosdb') && <CosmosStudio profile={activeProfile} onDisconnect={() => setActiveProfile(null)} />}
-            {activeProfile.engine === 'cassandra' && <CassandraStudio profile={activeProfile} onDisconnect={() => setActiveProfile(null)} />}
-            {activeProfile.engine === 'db2' && <Db2Studio profile={activeProfile} onDisconnect={() => setActiveProfile(null)} />}
+          <DatabaseErrorBoundary onBackToHub={handleCloseStudio} engineName={activeProfile.engine}>
+            {(activeProfile.engine === 'postgresql' || (activeProfile.engine as string) === 'postgres') && <PostgresStudio profile={activeProfile} onDisconnect={handleCloseStudio} />}
+            {(activeProfile.engine === 'mysql' || activeProfile.engine === 'mariadb') && <MysqlStudio profile={activeProfile} onDisconnect={handleCloseStudio} />}
+            {(activeProfile.engine === 'mssql' || (activeProfile.engine as string) === 'sqlserver') && <MssqlStudio profile={activeProfile} onDisconnect={handleCloseStudio} />}
+            {(activeProfile.engine === 'sqlite' || (activeProfile.engine as string) === 'sqlite3') && <SqliteStudio profile={activeProfile} onDisconnect={handleCloseStudio} />}
+            {(activeProfile.engine === 'mongodb' || (activeProfile.engine as string) === 'mongo') && <MongoStudio profile={activeProfile} onDisconnect={handleCloseStudio} />}
+            {activeProfile.engine === 'redis' && <RedisStudio profile={activeProfile} onDisconnect={handleCloseStudio} />}
+            {activeProfile.engine === 'oracle' && <OracleStudio profile={activeProfile} onDisconnect={handleCloseStudio} />}
+            {(activeProfile.engine === 'dynamodb' || (activeProfile.engine as string) === 'dynamo') && <DynamoStudio profile={activeProfile} onDisconnect={handleCloseStudio} />}
+            {(activeProfile.engine === 'cosmos' || (activeProfile.engine as string) === 'cosmosdb') && <CosmosStudio profile={activeProfile} onDisconnect={handleCloseStudio} />}
+            {activeProfile.engine === 'cassandra' && <CassandraStudio profile={activeProfile} onDisconnect={handleCloseStudio} />}
+            {activeProfile.engine === 'db2' && <Db2Studio profile={activeProfile} onDisconnect={handleCloseStudio} />}
             {!['postgresql', 'postgres', 'mysql', 'mariadb', 'mssql', 'sqlserver', 'sqlite', 'sqlite3', 'mongodb', 'mongo', 'redis', 'oracle', 'dynamodb', 'dynamo', 'cosmos', 'cosmosdb', 'cassandra', 'db2'].includes((activeProfile.engine as string).toLowerCase()) && (
               <div className="h-full flex flex-col items-center justify-center p-8 text-center text-gray-400">
                 <AlertCircle className="w-12 h-12 text-amber-400 mb-3" />
@@ -290,7 +313,7 @@ export const DatabaseHub: React.FC = () => {
                   The engine &ldquo;{activeProfile.engine}&rdquo; is not recognized by SSH Desktop Database Studios.
                 </p>
                 <button
-                  onClick={() => setActiveProfile(null)}
+                  onClick={handleCloseStudio}
                   className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-lg transition-colors"
                 >
                   Return to Database Studios Hub

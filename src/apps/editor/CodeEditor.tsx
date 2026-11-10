@@ -639,6 +639,18 @@ export default function CodeEditor() {
     };
   }, []);
 
+  // Cleanup all embedded terminal instances and kill backend PTY sessions when CodeEditor unmounts
+  useEffect(() => {
+    return () => {
+      tabInstances.current.forEach((inst, id) => {
+        inst.disposed = true;
+        try { inst.term.dispose(); } catch {}
+        terminalClose(id).catch(() => {});
+      });
+      tabInstances.current.clear();
+    };
+  }, []);
+
   // Mount real PTY instance into DOM element
   const mountPtyTerminal = useCallback(async (tabId: string, folder: string, el: HTMLDivElement) => {
     if (tabInstances.current.has(tabId)) {

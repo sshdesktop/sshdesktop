@@ -118,20 +118,21 @@ pub async fn ssh_generate_key_pair(
         let pub_b64 = key_pair.public_key_base64();
         let pub_formatted = format!("ssh-ed25519 {} {}\n", pub_b64, comm);
 
-        std::fs::write(&target_priv, &priv_pem)
+        crate::ssh::connection::write_secure_private_key(&target_priv, &priv_pem)
             .map_err(|e| format!("Failed to write private key file: {}", e))?;
         std::fs::write(&target_pub, &pub_formatted)
             .map_err(|e| format!("Failed to write public key file: {}", e))?;
     }
 
+    if let Err(error) = crate::ssh::connection::secure_private_key_permissions(&target_priv) {
+        let _ = std::fs::remove_file(&target_priv);
+        let _ = std::fs::remove_file(&target_pub);
+        return Err(format!("Could not secure generated private key permissions: {}", error));
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(error) = std::fs::set_permissions(&target_priv, std::fs::Permissions::from_mode(0o600)) {
-            let _ = std::fs::remove_file(&target_priv);
-            let _ = std::fs::remove_file(&target_pub);
-            return Err(format!("Could not secure generated private key permissions: {}", error));
-        }
         if let Err(error) = std::fs::set_permissions(&target_pub, std::fs::Permissions::from_mode(0o644)) {
             let _ = std::fs::remove_file(&target_priv);
             let _ = std::fs::remove_file(&target_pub);

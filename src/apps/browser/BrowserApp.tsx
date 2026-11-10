@@ -87,6 +87,19 @@ export default function BrowserApp() {
   const [copiedCurl, setCopiedCurl] = useState(false);
 
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0];
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+
+  // Clean up native browser webviews on unmount
+  useEffect(() => {
+    return () => {
+      if (isTauri()) {
+        for (const tab of tabsRef.current) {
+          closeBrowserWindow(tab.id).catch(() => {});
+        }
+      }
+    };
+  }, []);
 
   // Sync url input with active tab displayUrl
   useEffect(() => {

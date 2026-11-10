@@ -172,6 +172,7 @@ export default function LogViewer() {
   useEffect(() => {
     if (!isStreaming) return;
     const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       fetchLogs();
     }, 5000);
     return () => clearInterval(interval);

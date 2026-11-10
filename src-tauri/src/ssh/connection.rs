@@ -211,6 +211,71 @@ pub fn is_ppk_key(path_or_content: &str) -> bool {
     false
 }
 
+#[cfg(windows)]
+pub fn secure_windows_private_key(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    if let Ok(username) = std::env::var("USERNAME") {
+        let path_str = path.to_string_lossy();
+        let output = std::process::Command::new("icacls.exe")
+            .arg(&*path_str)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(format!("{}:(F)", username))
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output()
+            .map_err(|e| format!("Failed to invoke icacls: {}", e))?;
+        if !output.status.success() {
+            let err_msg = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("icacls failed: {}", err_msg.trim()));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn secure_windows_private_key(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
+}
+
+pub fn secure_private_key_permissions(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed to secure private key permissions (0600): {}", e))?;
+    }
+    #[cfg(windows)]
+    {
+        secure_windows_private_key(path)?;
+    }
+    Ok(())
+}
+
+pub fn write_secure_private_key(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("Failed to create private key file with mode 0600: {}", e))?;
+        file.write_all(data)
+            .map_err(|e| format!("Failed to write private key data: {}", e))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, data)
+            .map_err(|e| format!("Failed to write private key: {}", e))?;
+        secure_private_key_permissions(path)?;
+        Ok(())
+    }
+}
+
 pub fn resolve_key_path(key_input: &str) -> Option<String> {
     let trimmed = key_input.trim();
     if trimmed.is_empty() {
@@ -219,11 +284,7 @@ pub fn resolve_key_path(key_input: &str) -> Option<String> {
 
     let path = std::path::Path::new(trimmed);
     if path.exists() && path.is_file() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        }
+        let _ = secure_private_key_permissions(path);
         return Some(trimmed.to_string());
     }
 
@@ -246,11 +307,7 @@ pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
     // 1. If it's already an existing file on disk, return its path
     let p = std::path::Path::new(trimmed);
     if p.exists() && p.is_file() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
-        }
+        let _ = secure_private_key_permissions(p);
         return Some(trimmed.to_string());
     }
 
@@ -271,12 +328,7 @@ pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
             let safe_id = conn_id.chars().filter(|c| c.is_alphanumeric() || *c == '-').collect::<String>();
             let target_file = keys_dir.join(format!("{}.{}", safe_id, ext));
 
-            if let Ok(()) = std::fs::write(&target_file, trimmed) {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(0o600));
-                }
+            if write_secure_private_key(&target_file, trimmed.as_bytes()).is_ok() {
                 return target_file.to_str().map(|s| s.to_string());
             }
         }
