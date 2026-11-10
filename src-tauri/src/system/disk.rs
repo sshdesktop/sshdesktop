@@ -285,7 +285,7 @@ pub async fn disk_smart(state: tauri::State<'_, AppState>, conn_id: String, devi
         return Err("No active SSH connection.".into());
     }
     if code >= 8 {
-        return Err(format!("Filesystem check failed (exit code {}): {}", code, stdout.trim()));
+        return Err(format!("SMART health query failed (exit code {}): {}", code, stdout.trim()));
     }
     Ok(stdout)
 }
@@ -294,7 +294,10 @@ pub async fn disk_smart(state: tauri::State<'_, AppState>, conn_id: String, devi
 pub async fn disk_largest_dirs(state: tauri::State<'_, AppState>, conn_id: String, path: String) -> Result<String, String> {
     if !valid_absolute_path(&path) { return Err("Directory path must be absolute and contain no control characters.".into()); }
     let cmd = format!("du -h -d 1 {} 2>/dev/null | sort -hr | head -n 10", shell_quote(&path));
-    let (stdout, _) = run_cmd(&state, &conn_id, &cmd).await;
+    let (stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
+    if code != 0 {
+        return Err(format!("Failed to inspect directory sizes: {}", stdout.trim()));
+    }
     Ok(stdout)
 }
 
@@ -433,7 +436,10 @@ pub async fn disk_get_fstab(
     state: tauri::State<'_, AppState>,
     conn_id: String,
 ) -> Result<Vec<FstabEntry>, String> {
-    let (stdout, _) = run_cmd(&state, &conn_id, "cat /etc/fstab 2>/dev/null").await;
+    let (stdout, code) = run_cmd(&state, &conn_id, "cat /etc/fstab 2>/dev/null").await;
+    if code != 0 {
+        return Err(format!("Failed to read /etc/fstab: {}", stdout.trim()));
+    }
     let mut entries = Vec::new();
 
     for line in stdout.lines() {
