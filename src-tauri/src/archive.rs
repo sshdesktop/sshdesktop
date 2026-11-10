@@ -11,7 +11,7 @@ fn valid_archive_filename(value: &str) -> bool {
 fn valid_archive_item(value: &str) -> bool {
     !value.is_empty() && !value.starts_with('/') && !value.contains('\\')
         && !value.chars().any(|c| c.is_control())
-        && !value.split('/').any(|part| part == ".." || part.is_empty())
+        && !value.split('/').any(|part| part == "." || part == ".." || part.is_empty())
 }
 
 use crate::AppState;
