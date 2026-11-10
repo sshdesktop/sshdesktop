@@ -50,8 +50,11 @@ pub async fn docker_containers(
         "docker ps -a --format '{{json .}}' 2>&1",
     ).await;
 
-    if code == -1 && stdout.is_empty() {
+    if code == -1 {
         return Err("No active SSH connection.".into());
+    }
+    if code != 0 {
+        return Err(format!("docker ps failed: {}", stdout.trim()));
     }
 
     if stdout.contains("command not found") || stdout.contains("Cannot connect to the Docker") {
