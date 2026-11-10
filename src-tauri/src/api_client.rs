@@ -178,7 +178,7 @@ async fn execute_remote_ssh_request(
         return Err(format!("Unsupported HTTP method '{}'", req.method));
     }
     let timeout_secs = req.timeout_seconds.unwrap_or(30).clamp(1, 300);
-    let mut curl_args = format!("-s -S -i -X {} --max-time {}", method, timeout_secs);
+    let mut curl_args = format!("-s -S -i -X {} --max-time {} --max-filesize 10485760", method, timeout_secs);
 
     if req.follow_redirects.unwrap_or(true) {
         curl_args.push_str(" -L");
@@ -190,6 +190,9 @@ async fn execute_remote_ssh_request(
     let mut has_content_type = false;
     for h in &req.headers {
         if h.enabled && !h.key.trim().is_empty() {
+            if h.key.chars().any(|c| c == '\r' || c == '\n') || h.value.chars().any(|c| c == '\r' || c == '\n') {
+                return Err("HTTP header names and values cannot contain line breaks.".into());
+            }
             let key = h.key.trim();
             if key.eq_ignore_ascii_case("content-type") {
                 has_content_type = true;
