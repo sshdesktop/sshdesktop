@@ -126,15 +126,13 @@ pub async fn cron_add(
         }
     }
 
-    // Prevent command injection in schedule
-    if schedule.chars().any(|c| matches!(c, ';' | '|' | '&' | '`' | '$')) {
-        return Err("Invalid characters in schedule.".into());
+    if command.trim().is_empty() || command.len() > 8192 || command.chars().any(|c| c == '\n' || c == '\r' || c == '\0') {
+        return Err("Cron command must be 1–8192 characters and contain no line breaks or NUL bytes.".into());
     }
 
     let new_entry = format!("{} {}", schedule, command);
-    // Escape single quotes in the entry for the shell
     let escaped = new_entry.replace('\'', r"'\''");
-    let cmd = format!("(crontab -l 2>/dev/null; echo '{}') | crontab -", escaped);
+    let cmd = format!("(crontab -l 2>/dev/null; printf '%s\\n' '{}') | crontab -", escaped);
 
     let (_out, code) = run_cmd(&state, &conn_id, &cmd).await;
     if code == -1 {
@@ -164,23 +162,14 @@ pub async fn cron_remove(
         return Err("No active SSH connection.".into());
     }
 
-    // Find the Nth non-comment, non-blank line
-    let mut real_line: u32 = 0;
-    let mut actual_line_num: u32 = 0;
-    for (idx, line) in stdout.lines().enumerate() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            real_line += 1;
-            if real_line == line_number {
-                actual_line_num = (idx + 1) as u32;
-                break;
-            }
-        }
+    // The UI receives physical line numbers from cron_list. Remove that exact
+    // line, not the Nth non-comment entry (which could delete a different job).
+    let selected = stdout.lines().nth((line_number - 1) as usize)
+        .ok_or_else(|| format!("Cron line {} not found.", line_number))?;
+    if selected.trim().is_empty() || selected.trim().starts_with('#') {
+        return Err(format!("Cron line {} is not an active job.", line_number));
     }
-
-    if actual_line_num == 0 {
-        return Err(format!("Cron entry #{} not found.", line_number));
-    }
+    let actual_line_num = line_number;
 
     let cmd = format!("crontab -l 2>/dev/null | sed '{}d' | crontab -", actual_line_num);
     let (_out, del_code) = run_cmd(&state, &conn_id, &cmd).await;
