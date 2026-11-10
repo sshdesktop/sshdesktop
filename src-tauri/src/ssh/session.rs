@@ -66,7 +66,7 @@ pub async fn run_exec_channel(
             match msg {
                 ChannelMsg::Data { ref data } => {
                     if stdout.len().saturating_add(data.len()) > MAX_OUTPUT_BYTES {
-                        return Err("Remote command output exceeded the 80 MiB safety limit.".into());
+                        return true;
                     }
                     stdout.extend_from_slice(data);
                 }
@@ -82,11 +82,13 @@ pub async fn run_exec_channel(
                 _ => {}
             }
         }
+        false
     }).await;
 
-    if completed.is_err() {
-        // Dropping the channel closes the SSH channel instead of waiting forever.
-        return Err("Remote command timed out after 120 seconds; SSH channel was closed.".into());
+    match completed {
+        Err(_) => return Err("Remote command timed out after 120 seconds; SSH channel was closed.".into()),
+        Ok(true) => return Err("Remote command output exceeded the 80 MiB safety limit.".into()),
+        Ok(false) => {}
     }
 
     let clean_out = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
