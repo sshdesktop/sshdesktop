@@ -164,12 +164,15 @@ pub async fn terminal_create(
             Some(h) => Some(h),
             None => {
                 let key_str = resolved_key_path.as_deref().or(private_key.as_deref());
-                match crate::ssh::session::connect_session(
+                let explicit_password_auth = conn.config.auth_method.as_deref() == Some("password");
+                match crate::ssh::session::connect_session_with_passphrase_auth(
                     &host,
                     conn.config.port,
                     &user,
-                    password.as_deref(),
-                    key_str,
+                    if explicit_password_auth { password.as_deref() } else { password.as_deref() },
+                    if explicit_password_auth { None } else { key_str },
+                    conn.config.passphrase.as_deref(),
+                    !explicit_password_auth,
                 ).await {
                     Ok(new_handle) => {
                         let arc_h = std::sync::Arc::new(new_handle);
