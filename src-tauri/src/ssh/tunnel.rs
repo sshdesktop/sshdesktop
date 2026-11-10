@@ -362,6 +362,7 @@ pub async fn ssh_start_tunnel(
     // Helper closure to build OpenSSH tunnel command
     let make_openssh_cmd = || {
         let mut cmd = tokio::process::Command::new("ssh");
+    cmd.kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
@@ -395,6 +396,7 @@ pub async fn ssh_start_tunnel(
     // Helper closure to build Plink tunnel command
     let make_plink_cmd = || {
         let mut cmd = tokio::process::Command::new(plink_bin);
+    cmd.kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
@@ -833,6 +835,7 @@ pub async fn ssh_start_socks5(
     // Helper closure to build OpenSSH SOCKS5 command
     let make_openssh_cmd = || {
         let mut cmd = tokio::process::Command::new("ssh");
+    cmd.kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
@@ -861,6 +864,7 @@ pub async fn ssh_start_socks5(
     // Helper closure to build Plink SOCKS5 command
     let make_plink_cmd = || {
         let mut cmd = tokio::process::Command::new(plink_bin);
+    cmd.kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
