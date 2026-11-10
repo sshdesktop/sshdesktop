@@ -107,19 +107,19 @@ pub fn read_connections_from_disk() -> Vec<SavedConnection> {
     if let Some(base) = directories::BaseDirs::new() {
         let legacy_home = base.home_dir().join(".clouddesk").join("connections.json");
         if let Ok(content) = fs::read_to_string(legacy_home) {
-            if let Ok(list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
-                let _ = fs::write(&path, &content);
-                let mut list = list;
-                if hydrate_connection_passwords(&mut list) {
-                    let _ = write_connections_to_disk(&list);
-                }
+            if let Ok(mut list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
+                hydrate_connection_passwords(&mut list);
+                // Only copy legacy data through the sanitizer. If the OS keyring
+                // is unavailable, do not create a new plaintext password file.
+                let _ = write_connections_to_disk(&list);
                 return list;
             }
         }
         let legacy_appdata = base.data_local_dir().join("clouddesk").join("connections.json");
         if let Ok(content) = fs::read_to_string(legacy_appdata) {
-            if let Ok(list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
-                let _ = fs::write(&path, &content);
+            if let Ok(mut list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
+                hydrate_connection_passwords(&mut list);
+                let _ = write_connections_to_disk(&list);
                 return list;
             }
         }
