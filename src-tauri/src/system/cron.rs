@@ -46,15 +46,18 @@ pub async fn cron_list(
     state: tauri::State<'_, AppState>,
     conn_id: String,
 ) -> Result<Vec<CronJob>, String> {
-    let (stdout, code) = run_cmd(&state, &conn_id, "crontab -l 2>/dev/null").await;
+    let (stdout, code) = run_cmd(&state, &conn_id, "crontab -l 2>&1").await;
 
-    if code == -1 && stdout.is_empty() {
+    if code == -1 {
         return Err("No active SSH connection.".into());
     }
 
-    // "no crontab for user" is a normal condition
-    if stdout.trim() == "no crontab for root" || stdout.contains("no crontab for ") {
+    // "no crontab for user" is a normal condition.
+    if stdout.to_ascii_lowercase().contains("no crontab for ") {
         return Ok(vec![]);
+    }
+    if code != 0 {
+        return Err(format!("Failed to list crontab: {}", stdout.trim()));
     }
 
     let mut list = Vec::new();
@@ -99,6 +102,9 @@ pub async fn cron_list_all(
 
     if code == -1 {
         return Err("No active SSH connection.".into());
+    }
+    if code != 0 {
+        return Err(format!("Failed to list system cron jobs: {}", stdout.trim()));
     }
 
     let mut list = Vec::new();
