@@ -890,7 +890,7 @@ pub async fn ssh_exec_stream(
             data,
             is_stderr: false,
             is_done: true,
-            exit_code: Some(if done_exit != -1 { done_exit } else { 0 }),
+            exit_code: Some(done_exit),
         };
         let _ = app_clone.emit("exec-output", chunk);
     });
