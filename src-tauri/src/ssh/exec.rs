@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
+use std::collections::HashMap;
+use parking_lot::Mutex;
+
+lazy_static::lazy_static! {
+    static ref EXEC_STREAMS: Mutex<HashMap<String, tokio::task::AbortHandle>> = Mutex::new(HashMap::new());
+}
+
+struct ExecStreamGuard(String);
+impl Drop for ExecStreamGuard {
+    fn drop(&mut self) {
+        EXEC_STREAMS.lock().remove(&self.0);
+    }
+}
 use tauri::{Emitter, Manager};
 use crate::AppState;
 
@@ -735,12 +748,30 @@ pub async fn ssh_exec_stream(
     command: String,
     stream_id: String,
 ) -> Result<(), String> {
+    if stream_id.trim().is_empty() || stream_id.len() > 128
+        || stream_id.chars().any(|c| !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_'))
+    {
+        return Err("Invalid execution stream ID.".into());
+    }
+    if conn_id.trim().is_empty() || command.len() > 1024 * 1024 {
+        return Err("A connection ID and command (maximum 1 MiB) are required.".into());
+    }
+    {
+        let streams = EXEC_STREAMS.lock();
+        if streams.contains_key(&stream_id) {
+            return Err("An execution stream with this ID is already running.".into());
+        }
+    }
+
     let app_clone = app.clone();
     let stream_id_clone = stream_id.clone();
     let conn_id_clone = conn_id.clone();
     let command_clone = command.clone();
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
+        let _ = start_rx.await;
+        let _stream_guard = ExecStreamGuard(stream_id_clone.clone());
         // 0. Fast Path: Real-time streaming channel over persistent session
         let handle_opt = {
             let state_ref = app_clone.state::<AppState>();
@@ -828,11 +859,22 @@ pub async fn ssh_exec_stream(
         let _ = app_clone.emit("exec-output", chunk);
     });
 
+    EXEC_STREAMS.lock().insert(stream_id.clone(), task.abort_handle());
+    let _ = start_tx.send(());
     Ok(())
 }
 
 #[tauri::command]
-pub async fn ssh_exec_stop(_state: tauri::State<'_, AppState>, _stream_id: String) -> Result<(), String> {
-    log::info!("SSH Desktop: Stopped stream {}", _stream_id);
-    Ok(())
+pub async fn ssh_exec_stop(_state: tauri::State<'_, AppState>, stream_id: String) -> Result<(), String> {
+    if stream_id.trim().is_empty() {
+        return Err("Execution stream ID cannot be empty.".into());
+    }
+    let handle = EXEC_STREAMS.lock().remove(&stream_id);
+    if let Some(handle) = handle {
+        handle.abort();
+        log::info!("SSH Desktop: Cancelled execution stream {}", stream_id);
+        Ok(())
+    } else {
+        Err(format!("Execution stream '{}' is not running.", stream_id))
+    }
 }
