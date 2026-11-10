@@ -6,6 +6,30 @@ use crate::AppState;
 fn default_port() -> u16 { 22 }
 fn default_username() -> String { "root".to_string() }
 
+fn credential_entry(id: &str) -> Result<keyring::Entry, String> {
+    if id.trim().is_empty() {
+        return Err("Connection ID is required for secure credential storage".into());
+    }
+    keyring::Entry::new("com.sshdesktop.app", &format!("ssh-connection:{}", id))
+        .map_err(|e| format!("Could not access the operating-system credential store: {}", e))
+}
+
+fn store_connection_password(id: &str, password: &str) -> Result<(), String> {
+    let entry = credential_entry(id)?;
+    entry.set_password(password)
+        .map_err(|e| format!("Could not save SSH password to the operating-system credential store: {}", e))
+}
+
+fn load_connection_password(id: &str) -> Option<String> {
+    credential_entry(id).ok()?.get_password().ok()
+}
+
+fn delete_connection_password(id: &str) {
+    if let Ok(entry) = credential_entry(id) {
+        let _ = entry.delete_credential();
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SavedConnection {
     pub id: String,
@@ -55,7 +79,22 @@ fn get_storage_path() -> PathBuf {
 pub fn read_connections_from_disk() -> Vec<SavedConnection> {
     let path = get_storage_path();
     if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
+        if let Ok(mut list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
+            let mut migrated_legacy_password = false;
+            for connection in &mut list {
+                if let Some(password) = connection.password.as_ref() {
+                    if !password.is_empty() && store_connection_password(&connection.id, password).is_ok() {
+                        migrated_legacy_password = true;
+                    }
+                } else {
+                    connection.password = load_connection_password(&connection.id);
+                }
+            }
+            if migrated_legacy_password {
+                // write_connections_to_disk serializes a sanitized copy, removing
+                // legacy plaintext password fields only after keyring storage succeeds.
+                let _ = write_connections_to_disk(&list);
+            }
             return list;
         }
     }
@@ -81,7 +120,16 @@ pub fn read_connections_from_disk() -> Vec<SavedConnection> {
 
 pub fn write_connections_to_disk(list: &[SavedConnection]) -> Result<(), String> {
     let path = get_storage_path();
-    let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
+    let mut sanitized = list.to_vec();
+    for connection in &mut sanitized {
+        if let Some(password) = connection.password.as_ref() {
+            if !password.is_empty() {
+                store_connection_password(&connection.id, password)?;
+            }
+        }
+        connection.password = None;
+    }
+    let json = serde_json::to_string_pretty(&sanitized).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -118,6 +166,10 @@ pub fn save_or_update_connection_on_disk(mut connection: SavedConnection) -> Res
         connection.id = uuid::Uuid::new_v4().to_string();
     }
     let id = connection.id.clone();
+    match connection.password.as_deref() {
+        Some(password) if !password.is_empty() => store_connection_password(&id, password)?,
+        _ => delete_connection_password(&id),
+    }
     list.retain(|c| c.id != id);
     list.push(connection);
     write_connections_to_disk(&list)?;
@@ -151,6 +203,7 @@ pub async fn store_list_connections(_state: tauri::State<'_, AppState>) -> Resul
 pub async fn store_delete_connection(_state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     let mut list = read_connections_from_disk();
     list.retain(|c| c.id != id);
+    delete_connection_password(&id);
     write_connections_to_disk(&list)
 }
 
@@ -158,6 +211,10 @@ pub async fn store_delete_connection(_state: tauri::State<'_, AppState>, id: Str
 pub async fn store_update_connection(_state: tauri::State<'_, AppState>, mut connection: SavedConnection) -> Result<(), String> {
     sanitize_connection_secrets(&mut connection);
     let mut list = read_connections_from_disk();
+    match connection.password.as_deref() {
+        Some(password) if !password.is_empty() => store_connection_password(&connection.id, password)?,
+        _ => delete_connection_password(&connection.id),
+    }
     if let Some(pos) = list.iter().position(|c| c.id == connection.id) {
         list[pos] = connection;
     } else {
