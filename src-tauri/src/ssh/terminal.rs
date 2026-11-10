@@ -1,3 +1,26 @@
+async fn terminate_existing_terminal(state: &AppState, terminal_id: &str) {
+    if let Some(previous) = state.terminals.lock().remove(terminal_id) {
+        if let Some(pid) = previous.child_pid {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &pid.to_string()])
+                    .creation_flags(0x08000000)
+                    .output();
+            }
+            #[cfg(unix)]
+            {
+                let _ = tokio::process::Command::new("kill")
+                    .arg("-TERM")
+                    .arg(pid.to_string())
+                    .output()
+                    .await;
+            }
+        }
+    }
+}
+
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
@@ -34,30 +57,16 @@ pub async fn terminal_create(
     terminal_id: Option<String>,
 ) -> Result<String, String> {
     let term_id = terminal_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-    // Ensure clean replacement if session id is reused (prevents duplicate pumps/listeners)
-    if let Some(prev) = state.terminals.lock().remove(&term_id) {
-        if let Some(pid) = prev.child_pid {
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                let _ = std::process::Command::new("taskkill")
-                    .args(&["/F", "/T", "/PID", &pid.to_string()])
-                    .creation_flags(0x08000000)
-                    .output();
-            }
-            #[cfg(unix)]
-            {
-                let _ = tokio::process::Command::new("kill")
-                    .arg("-TERM")
-                    .arg(pid.to_string())
-                    .output()
-                    .await;
-            }
-        }
+    if term_id.is_empty() || term_id.len() > 128
+        || !term_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Err("Invalid terminal ID.".into());
+    }
+    if rows == 0 || cols == 0 || rows > 500 || cols > 1000 {
+        return Err("Terminal dimensions must be between 1x1 and 500x1000.".into());
     }
 
-    // Find connection config (RAM, disk auto-restore, or fallback)
+    // Find connection config before replacing any existing terminal (RAM, disk auto-restore, or fallback)
     let conn = match crate::ssh::connection::resolve_connection(&state, &conn_id) {
         Some(c) => c,
         None => return Err(format!("Connection {} not found", conn_id)),
@@ -247,6 +256,7 @@ pub async fn terminal_create(
                         child_pid: None,
                         password_file: None,
                     };
+                    terminate_existing_terminal(&state, &term_id).await;
                     state.terminals.lock().insert(term_id.clone(), session);
                     return Ok(term_id);
                 }
@@ -406,6 +416,7 @@ pub async fn terminal_create(
         password_file,
     };
 
+    terminate_existing_terminal(&state, &term_id).await;
     state.terminals.lock().insert(term_id.clone(), session);
 
     Ok(term_id)
@@ -418,6 +429,9 @@ pub async fn terminal_write(
     terminal_id: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
+    if data.len() > 1024 * 1024 {
+        return Err("Terminal input chunk cannot exceed 1 MiB.".into());
+    }
     let tx_opt = {
         let terms = state.terminals.lock();
         terms.get(&terminal_id).and_then(|s| s.tx.clone())
