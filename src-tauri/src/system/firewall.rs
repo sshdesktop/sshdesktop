@@ -454,8 +454,11 @@ pub async fn firewall_add_rule_advanced(
             }
             if action == "allow" {
                 if port.parse::<u16>().is_ok() {
-                    let p_arg = format!("{}/{}", port, if proto == "any" { "tcp" } else { proto });
-                    format!("firewall-cmd --permanent {} --add-port={} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, p_arg)
+                    let protocols: Vec<&str> = if proto == "any" { vec!["tcp", "udp"] } else { vec![proto] };
+                    let add_rules = protocols.iter()
+                        .map(|p| format!("firewall-cmd --permanent {} --add-port={}/{} 2>&1", zone_flag, port, p))
+                        .collect::<Vec<_>>().join(" && ");
+                    format!("{} && firewall-cmd --reload 2>&1", add_rules)
                 } else {
                     format!("firewall-cmd --permanent {} --add-service={} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, port)
                 }
@@ -467,12 +470,19 @@ pub async fn firewall_add_rule_advanced(
                     format!(" source address=\\"{}\\" ", from_ip)
                 };
                 let target = if action == "reject" { "reject" } else { "drop" };
-                let rule = if port.parse::<u16>().is_ok() {
-                    format!("rule family=\\"{}\\"{}port port=\\"{}\\" protocol=\\"{}\\" {}", family, source_clause, port, if proto == "any" { "tcp" } else { proto }, target)
+                let rules: Vec<String> = if port.parse::<u16>().is_ok() {
+                    let protocols: Vec<&str> = if proto == "any" { vec!["tcp", "udp"] } else { vec![proto] };
+                    protocols.iter().map(|p| format!(
+                        "rule family=\\"{}\\"{}port port=\\"{}\\" protocol=\\"{}\\" {}",
+                        family, source_clause, port, p, target
+                    )).collect()
                 } else {
-                    format!("rule family=\\"{}\\"{}service name=\\"{}\\" {}", family, source_clause, port, target)
+                    vec![format!("rule family=\\"{}\\"{}service name=\\"{}\\" {}", family, source_clause, port, target)]
                 };
-                format!("firewall-cmd --permanent {} --add-rich-rule={} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, shell_quote(&rule))
+                let add_rules = rules.iter()
+                    .map(|rule| format!("firewall-cmd --permanent {} --add-rich-rule={} 2>&1", zone_flag, shell_quote(rule)))
+                    .collect::<Vec<_>>().join(" && ");
+                format!("{} && firewall-cmd --reload 2>&1", add_rules)
             }
         }
         "ufw" => {
