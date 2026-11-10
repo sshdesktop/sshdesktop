@@ -95,8 +95,19 @@ pub fn generate_create_table_sql(
     let mut pks = Vec::new();
 
     for col in columns {
+        if col.name.trim().is_empty() || col.name.len() > 128 || col.name.chars().any(|ch| ch.is_control()) {
+            return Err("Column names must be 1-128 characters and contain no control characters.".into());
+        }
         let col_quoted = quote_ident(engine, &col.name);
         let data_type = validate_sql_type(&col.data_type)?;
+        if col.auto_increment && !col.primary_key {
+            return Err("Auto-increment columns must be primary keys.".into());
+        }
+        if col.auto_increment && matches!(engine, "mysql" | "mariadb")
+            && !matches!(data_type.as_str(), "INT" | "INTEGER" | "BIGINT" | "SMALLINT" | "TINYINT" | "MEDIUMINT")
+        {
+            return Err("MySQL auto-increment requires an integer column type.".into());
+        }
 
         let (type_clause, is_inline_pk) = match engine {
             "mysql" | "mariadb" => {
