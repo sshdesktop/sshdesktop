@@ -465,6 +465,14 @@ pub async fn terminal_close(
                     .creation_flags(0x08000000)
                     .output();
             }
+            #[cfg(unix)]
+            {
+                let _ = tokio::process::Command::new("kill")
+                    .arg("-TERM")
+                    .arg(pid.to_string())
+                    .output()
+                    .await;
+            }
         }
     }
     log::info!("SSH Desktop: Terminal PTY session closed: {}", terminal_id);
