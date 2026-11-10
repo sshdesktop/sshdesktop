@@ -93,10 +93,6 @@ pub async fn logs_file(
     if !path.starts_with('/') || path.len() > 4096 || path.chars().any(|c| c.is_control()) {
         return Err("Path must be absolute, at most 4096 characters, and contain no control characters.".into());
     }
-    if path.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '
-        return Err("Invalid path.".into());
-    }
-
     let escaped = path.replace('\'', r"'\''");
     let (stdout, code) = run_cmd(
         &state,
