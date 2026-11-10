@@ -254,7 +254,7 @@ pub async fn network_dns_lookup(
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        &format!("dig +noall +answer +comments -- {0} 2>/dev/null || host -- {0} 2>/dev/null || nslookup {0} 2>&1", domain_arg),
+        &format!("dig +noall +answer +comments {0} 2>/dev/null || host {0} 2>/dev/null || nslookup {0} 2>&1", domain_arg),
     ).await;
 
     if code == -1 {
