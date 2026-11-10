@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use sha2::{Digest, Sha256};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::SaltString;
-use base64::Engine;
 
 static IS_AUTHENTICATED: AtomicBool = AtomicBool::new(false);
 
@@ -76,8 +75,7 @@ pub fn enforce_strict_permissions(path: &PathBuf) {
 /// Argon2id password hashing. The supplied per-user salt is encoded into the
 /// PHC string so existing config storage remains backward compatible.
 pub fn hash_password(password: &str, salt: &str) -> String {
-    let encoded_salt = base64::engine::general_purpose::STANDARD_NO_PAD.encode(salt.as_bytes());
-    let salt = SaltString::from_b64(&encoded_salt).expect("UUID salt must be valid base64 salt");
+    let salt = SaltString::encode_b64(salt.as_bytes()).expect("UUID salt must be valid password-hash salt");
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
         .expect("Argon2id hashing should succeed with the default parameters")
@@ -239,4 +237,26 @@ pub async fn auth_logout() -> Result<bool, String> {
     IS_AUTHENTICATED.store(false, Ordering::SeqCst);
     log::info!("SSH Desktop: Web session logged out.");
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn argon2_password_hash_verifies() {
+        let salt = "test-salt-for-sshdesktop";
+        let hash = hash_password("correct horse battery staple", salt);
+        assert!(hash.starts_with("$argon2id$"));
+        assert!(verify_password("correct horse battery staple", salt, &hash));
+        assert!(!verify_password("wrong password", salt, &hash));
+    }
+
+    #[test]
+    fn legacy_sha256_hash_is_accepted_for_migration() {
+        let salt = "legacy-test-salt";
+        let legacy = legacy_sha256_password("legacy-password", salt);
+        assert!(verify_password("legacy-password", salt, &legacy));
+        assert!(!verify_password("incorrect", salt, &legacy));
+    }
 }
