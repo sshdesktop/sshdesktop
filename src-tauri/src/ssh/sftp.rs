@@ -1,3 +1,84 @@
+async fn run_scp_transfer(
+    conn: &crate::ssh::connection::SshConnection,
+    local_path: &str,
+    remote_path: &str,
+    upload: bool,
+) -> Result<(), String> {
+    let is_key_auth = match conn.config.auth_method.as_deref() {
+        Some("password") => false,
+        Some("key") => true,
+        _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
+    };
+    let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
+    if let Some(key) = selected_key_path {
+        if crate::ssh::connection::resolve_key_path(key).is_none() {
+            return Err(format!("Selected SSH identity '{}' could not be found.", key));
+        }
+    }
+    let password = if is_key_auth { None } else { conn.config.password.as_deref().filter(|p| !p.is_empty()) };
+    if !is_key_auth && password.is_none() {
+        return Err("Password authentication was selected, but no SSH password is configured.".into());
+    }
+
+    let use_putty = !is_key_auth || selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    let mut cmd = if use_putty {
+        let mut command = tokio::process::Command::new("pscp");
+        command.kill_on_drop(true);
+        command.arg("-P").arg(conn.config.port.to_string()).arg("-batch");
+        if let Some(pwd) = password {
+            let password_file = crate::ssh::connection::create_password_file(pwd)?;
+            command.arg("-pwfile").arg(password_file.path());
+            // Keep the temporary credential file alive until pscp exits.
+            let remote_spec = format!("{}@{}:'{}'", conn.config.username, conn.config.host, shell_escape(remote_path));
+            if upload {
+                command.arg("-r").arg(local_path).arg(&remote_spec);
+            } else {
+                command.arg(&remote_spec).arg(local_path);
+            }
+            command.stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let output = tokio::time::timeout(std::time::Duration::from_secs(300), command.output())
+                .await.map_err(|_| "PuTTY file transfer timed out after 300 seconds.".to_string())?
+                .map_err(|e| format!("Failed to start pscp: {}", e))?;
+            if output.status.success() { return Ok(()); }
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        if let Some(key) = selected_key_path {
+            command.arg("-i").arg(key);
+        }
+        command
+    } else {
+        let mut command = tokio::process::Command::new("scp");
+        command.kill_on_drop(true);
+        command.arg("-P").arg(conn.config.port.to_string())
+            .arg("-o").arg("StrictHostKeyChecking=yes")
+            .arg("-o").arg("IdentitiesOnly=yes");
+        if let Some(key) = selected_key_path {
+            command.arg("-i").arg(key);
+        }
+        command
+    };
+
+    let remote_spec = format!("{}@{}:'{}'", conn.config.username, conn.config.host, shell_escape(remote_path));
+    if upload {
+        cmd.arg(local_path).arg(&remote_spec);
+    } else {
+        cmd.arg(&remote_spec).arg(local_path);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let output = tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output())
+        .await.map_err(|_| "SCP file transfer timed out after 300 seconds.".to_string())?
+        .map_err(|e| format!("Failed to start SCP: {}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
 use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::ssh::exec::run_cmd;
@@ -462,46 +543,11 @@ pub async fn sftp_download(
         }
     }
 
-    // 2. Fallback: scp
+    // 2. Fallback: use the exact configured authentication method.
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or("No active SSH connection.")?;
+    run_scp_transfer(&conn, &local_path, &remote_path, false).await
 
-    let host = &conn.config.host;
-    let port = conn.config.port.to_string();
-    let user = &conn.config.username;
-    let src = format!("{}@{}:{}", user, host, remote_path);
-
-    let mut cmd = tokio::process::Command::new("scp");
-    cmd.kill_on_drop(true);
-    #[cfg(windows)]
-    cmd.creation_flags(0x08000000);
-    cmd.arg("-P").arg(&port)
-        .arg("-o").arg("StrictHostKeyChecking=yes")
-        .arg("-o").arg("IdentitiesOnly=yes");
-
-    if let Some(key) = &conn.config.private_key_path {
-        if crate::ssh::connection::resolve_key_path(key).is_some() {
-            cmd.arg("-i").arg(key);
-        }
-    }
-    cmd.arg(&src).arg(&local_path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        cmd.output(),
-    ).await
-        .map_err(|_| "Download timed out after 120s".to_string())?
-        .map_err(|e| format!("scp error: {}", e))?;
-
-    if output.status.success() {
-        log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_path);
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
 }
 
 #[tauri::command]
@@ -516,46 +562,11 @@ pub async fn sftp_upload(
         return sftp_write_bytes(&state, &conn_id, &remote_path, &bytes).await;
     }
 
-    // 2. Fallback: scp
+    // 2. Fallback: use the exact configured authentication method.
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or("No active SSH connection.")?;
+    run_scp_transfer(&conn, &local_path, &remote_path, true).await
 
-    let host = &conn.config.host;
-    let port = conn.config.port.to_string();
-    let user = &conn.config.username;
-    let dst = format!("{}@{}:{}", user, host, remote_path);
-
-    let mut cmd = tokio::process::Command::new("scp");
-    cmd.kill_on_drop(true);
-    #[cfg(windows)]
-    cmd.creation_flags(0x08000000);
-    cmd.arg("-P").arg(&port)
-        .arg("-o").arg("StrictHostKeyChecking=yes")
-        .arg("-o").arg("IdentitiesOnly=yes");
-
-    if let Some(key) = &conn.config.private_key_path {
-        if crate::ssh::connection::resolve_key_path(key).is_some() {
-            cmd.arg("-i").arg(key);
-        }
-    }
-    cmd.arg(&local_path).arg(&dst)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        cmd.output(),
-    ).await
-        .map_err(|_| "Upload timed out after 120s".to_string())?
-        .map_err(|e| format!("scp error: {}", e))?;
-
-    if output.status.success() {
-        log::info!("SSH Desktop: Uploaded {} to {}", local_path, remote_path);
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
 }
 
 #[tauri::command]
