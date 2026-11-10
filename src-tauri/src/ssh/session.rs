@@ -366,9 +366,18 @@ pub async fn open_pty_shell(
     cols: u32,
     rows: u32,
 ) -> Result<(tokio::io::ReadHalf<russh::ChannelStream<russh::client::Msg>>, tokio::io::WriteHalf<russh::ChannelStream<russh::client::Msg>>), Box<dyn std::error::Error + Send + Sync>> {
-    let channel = handle.channel_open_session().await?;
-    channel.request_pty(false, term, cols, rows, 0, 0, &[]).await?;
-    channel.request_shell(true).await?;
+    let mut channel = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        handle.channel_open_session()
+    ).await.map_err(|_| "Timed out opening terminal channel")??;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        channel.request_pty(false, term, cols, rows, 0, 0, &[])
+    ).await.map_err(|_| "Timed out requesting terminal PTY")??;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        channel.request_shell(true)
+    ).await.map_err(|_| "Timed out starting remote shell")??;
     let stream = channel.into_stream();
     Ok(tokio::io::split(stream))
 }
