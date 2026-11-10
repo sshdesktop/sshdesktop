@@ -48,6 +48,12 @@ pub async fn ssh_generate_key_pair(
         .unwrap_or_else(|| "id_ed25519".to_string())
         .trim()
         .to_string();
+    if base_name.is_empty()
+        || base_name == "." || base_name == ".."
+        || !base_name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-' || c == b'.')
+    {
+        return Err("Invalid key filename: use only letters, numbers, dot, underscore, and hyphen".into());
+    }
 
     let priv_path = ssh_dir.join(&base_name);
     let pub_path = ssh_dir.join(format!("{}.pub", base_name));
@@ -202,23 +208,32 @@ pub async fn ssh_install_public_key(
     public_key: String,
 ) -> Result<bool, String> {
     let clean_key = public_key.trim();
-    if clean_key.is_empty() {
-        return Err("Public key is empty".into());
+    let fields: Vec<&str> = clean_key.split_whitespace().collect();
+    if fields.len() < 2 || fields.len() > 3
+        || !fields[0].starts_with("ssh-") && !fields[0].starts_with("ecdsa-")
+        || !fields[0].bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    {
+        return Err("Invalid SSH public key format".into());
+    }
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(fields[1])
+        .map_err(|_| "Invalid SSH public key base64 data".to_string())?;
+    if decoded.is_empty() {
+        return Err("SSH public key data is empty".into());
     }
 
+    let mut key_line = clean_key.to_string();
+    key_line.push('\n');
     let sessions = state.sessions.lock().await;
     let handle = sessions
         .get(&conn_id)
-        .or_else(|| sessions.get("default"))
-        .ok_or_else(|| "No active SSH session found for this connection".to_string())?;
+        .ok_or_else(|| "No active SSH session found for this connection ID".to_string())?;
 
-    // Safe POSIX shell script to install into ~/.ssh/authorized_keys with strict 0700 and 0600 permissions
-    let install_cmd = format!(
-        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qxF '{}' ~/.ssh/authorized_keys || echo '{}' >> ~/.ssh/authorized_keys) && echo 'KEY_INSTALLED_OK'",
-        clean_key, clean_key
-    );
-
-    let (output, code) = crate::ssh::session::run_exec_channel(handle, &install_cmd)
+    // Never interpolate public-key data into a remote shell command. Send it
+    // over the SSH channel stdin after creating the protected destination file.
+    let install_cmd = "umask 077 && mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && echo KEY_INSTALLED_OK";
+    let (output, code) = crate::ssh::session::run_exec_channel_with_stdin(handle, install_cmd, key_line.as_bytes())
         .await
         .map_err(|e| format!("Failed to execute key installation: {}", e))?;
 
