@@ -585,11 +585,17 @@ pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnecti
     {
         let lock = state.connections.lock();
         if let Some(c) = lock.get(conn_id).cloned() {
+            if validate_ssh_target(&c.config.host, c.config.port, &c.config.username).is_err() {
+                return None;
+            }
             return Some(c);
         }
         if conn_id == "default" || conn_id.is_empty() {
             if conn_id == "default" {
                 if let Some(c) = lock.get("default").cloned() {
+                    if validate_ssh_target(&c.config.host, c.config.port, &c.config.username).is_err() {
+                        return None;
+                    }
                     return Some(c);
                 }
             }
@@ -605,6 +611,9 @@ pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnecti
             connected: false,
             connected_at: 0,
         };
+        if validate_ssh_target(&restored.config.host, restored.config.port, &restored.config.username).is_err() {
+            return None;
+        }
         let mut lock = state.connections.lock();
         lock.insert(restored.id.clone(), restored.clone());
         if conn_id == "default" || lock.get("default").is_none() {
