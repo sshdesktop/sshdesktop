@@ -309,10 +309,13 @@ SIG="{sig}"
 PID="{pid_target}"
 command -v ss >/dev/null 2>&1 || {{ echo 'ss utility is required to verify port status' >&2; exit 1; }}
 
-# 1. Kill by PID if provided
-if [ "$PID" != "none" ] && [ "$PID" -gt 0 ] 2>/dev/null; then
-    kill -"$SIG" "$PID" 2>/dev/null || true
-    sleep 0.2
+# Identify listeners first; never kill an arbitrary PID supplied by the caller.
+PIDS=$(ss -H -l{ss_flag}np "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2)
+if [ "$PID" != "none" ]; then
+    case " $PIDS " in
+        *" $PID "*) kill -"$SIG" "$PID" 2>/dev/null || true ;;
+        *) echo "PID $PID is not listening on $PROTO port $PORT" >&2; exit 1 ;;
+    esac
 fi
 
 # 2. Try fuser if available
@@ -325,8 +328,7 @@ if command -v lsof >/dev/null 2>&1; then
     lsof -ti{lsof_proto}:$PORT 2>/dev/null | xargs -r kill -"$SIG" 2>/dev/null || true
 fi
 
-# 4. Try ss process identification for the selected transport protocol
-PIDS=$(ss -H -l{ss_flag}np "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2)
+# 4. Signal all remaining listeners identified for this port and protocol
 for P in $PIDS; do
     if [ -n "$P" ]; then kill -"$SIG" "$P" 2>/dev/null || true; fi
 done
