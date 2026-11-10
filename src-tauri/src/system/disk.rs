@@ -536,6 +536,7 @@ pub async fn disk_create_partition(
         || !clean_end.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '%'))
         || (!fs_val.is_empty() && !matches!(fs_val.as_str(), "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "fat32" | "linux-swap"))
         || lbl_val.len() > 64 || !lbl_val.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.'))
+        || (!lbl_val.is_empty() && fs_val.is_empty())
     {
         return Err("Invalid device, partition type, boundary, filesystem, or label.".into());
     }
@@ -675,11 +676,11 @@ fi
 # Optional filesystem label
 if [ -n "$LABEL" ]; then
     case "$FS" in
-        ext4|ext3|ext2) e2label "$NEW_PART" "$LABEL" 2>/dev/null || true ;;
-        xfs)   xfs_admin -L "$LABEL" "$NEW_PART" 2>/dev/null || true ;;
-        btrfs) btrfs filesystem label "$NEW_PART" "$LABEL" 2>/dev/null || true ;;
-        vfat|fat32) fatlabel "$NEW_PART" "$LABEL" 2>/dev/null || true ;;
-        ntfs)  ntfslabel "$NEW_PART" "$LABEL" 2>/dev/null || true ;;
+        ext4|ext3|ext2) e2label "$NEW_PART" "$LABEL" ;;
+        xfs)   xfs_admin -L "$LABEL" "$NEW_PART" ;;
+        btrfs) btrfs filesystem label "$NEW_PART" "$LABEL" ;;
+        vfat|fat32) fatlabel "$NEW_PART" "$LABEL" ;;
+        ntfs)  ntfslabel "$NEW_PART" "$LABEL" ;;
     esac
 fi
 
