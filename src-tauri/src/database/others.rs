@@ -10,33 +10,8 @@ pub async fn connect_dynamodb(
     effective_port: u16,
     config: &DatabaseConnectionConfig,
 ) -> Result<(DriverInstance, ServerCapabilities), String> {
-    let endpoint = if let Some(ref ep) = config.endpoint_url {
-        ep.clone()
-    } else {
-        let scheme = if config.use_ssl { "https" } else { "http" };
-        format!("{}://{}:{}", scheme, effective_host, effective_port)
-    };
-    let region = config.region.clone().unwrap_or_else(|| "us-east-1".to_string());
-
-    let capabilities = ServerCapabilities {
-        engine: "dynamodb".to_string(),
-        server_version: "Amazon DynamoDB (HTTP API)".to_string(),
-        supports_transactions: true,
-        supports_schemas: false,
-        supports_procedures: false,
-        supports_functions: false,
-        supports_triggers: true,
-        supports_views: false,
-        supports_indexes: true,
-        supports_foreign_keys: false,
-        supports_explain: false,
-        supports_process_list: false,
-        read_only: config.read_only,
-        supports_rename_table: false,
-        supports_alter_column: false,
-    };
-
-    Ok((DriverInstance::DynamoDb { endpoint, region }, capabilities))
+    let _ = (effective_host, effective_port, config);
+    Err("DYNAMODB connector is not implemented; refusing to report a simulated connection as successful.".to_string())
 }
 
 pub async fn connect_cosmos(
@@ -44,33 +19,8 @@ pub async fn connect_cosmos(
     effective_port: u16,
     config: &DatabaseConnectionConfig,
 ) -> Result<(DriverInstance, ServerCapabilities), String> {
-    let endpoint = if let Some(ref ep) = config.endpoint_url {
-        ep.clone()
-    } else {
-        let scheme = if config.use_ssl { "https" } else { "http" };
-        format!("{}://{}:{}", scheme, effective_host, effective_port)
-    };
-    let database = config.database.clone();
-
-    let capabilities = ServerCapabilities {
-        engine: "cosmos".to_string(),
-        server_version: "Azure Cosmos DB (SQL API)".to_string(),
-        supports_transactions: true,
-        supports_schemas: true,
-        supports_procedures: true,
-        supports_functions: true,
-        supports_triggers: true,
-        supports_views: false,
-        supports_indexes: true,
-        supports_foreign_keys: false,
-        supports_explain: false,
-        supports_process_list: false,
-        read_only: config.read_only,
-        supports_rename_table: false,
-        supports_alter_column: false,
-    };
-
-    Ok((DriverInstance::CosmosDb { endpoint, database }, capabilities))
+    let _ = (effective_host, effective_port, config);
+    Err("COSMOS connector is not implemented; refusing to report a simulated connection as successful.".to_string())
 }
 
 pub async fn connect_cassandra(
@@ -78,33 +28,8 @@ pub async fn connect_cassandra(
     effective_port: u16,
     config: &DatabaseConnectionConfig,
 ) -> Result<(DriverInstance, ServerCapabilities), String> {
-    let keyspace = config.keyspace.clone().or_else(|| {
-        if !config.database.is_empty() { Some(config.database.clone()) } else { None }
-    });
-
-    let capabilities = ServerCapabilities {
-        engine: "cassandra".to_string(),
-        server_version: "Apache Cassandra (CQL v3.4)".to_string(),
-        supports_transactions: false,
-        supports_schemas: true,
-        supports_procedures: false,
-        supports_functions: true,
-        supports_triggers: true,
-        supports_views: true,
-        supports_indexes: true,
-        supports_foreign_keys: false,
-        supports_explain: true,
-        supports_process_list: false,
-        read_only: config.read_only,
-        supports_rename_table: false,
-        supports_alter_column: true,
-    };
-
-    Ok((DriverInstance::Cassandra {
-        host: effective_host.to_string(),
-        port: effective_port,
-        keyspace,
-    }, capabilities))
+    let _ = (effective_host, effective_port, config);
+    Err("CASSANDRA connector is not implemented; refusing to report a simulated connection as successful.".to_string())
 }
 
 pub async fn connect_oracle(
@@ -112,33 +37,8 @@ pub async fn connect_oracle(
     effective_port: u16,
     config: &DatabaseConnectionConfig,
 ) -> Result<(DriverInstance, ServerCapabilities), String> {
-    let sid = config.sid.clone().or_else(|| {
-        if !config.database.is_empty() { Some(config.database.clone()) } else { None }
-    });
-
-    let capabilities = ServerCapabilities {
-        engine: "oracle".to_string(),
-        server_version: "Oracle Database (TNS/PLSQL)".to_string(),
-        supports_transactions: true,
-        supports_schemas: true,
-        supports_procedures: true,
-        supports_functions: true,
-        supports_triggers: true,
-        supports_views: true,
-        supports_indexes: true,
-        supports_foreign_keys: true,
-        supports_explain: true,
-        supports_process_list: true,
-        read_only: config.read_only,
-        supports_rename_table: true,
-        supports_alter_column: true,
-    };
-
-    Ok((DriverInstance::Oracle {
-        host: effective_host.to_string(),
-        port: effective_port,
-        sid,
-    }, capabilities))
+    let _ = (effective_host, effective_port, config);
+    Err("ORACLE connector is not implemented; refusing to report a simulated connection as successful.".to_string())
 }
 
 pub async fn connect_db2(
@@ -146,31 +46,8 @@ pub async fn connect_db2(
     effective_port: u16,
     config: &DatabaseConnectionConfig,
 ) -> Result<(DriverInstance, ServerCapabilities), String> {
-    let database = config.database.clone();
-
-    let capabilities = ServerCapabilities {
-        engine: "db2".to_string(),
-        server_version: "IBM DB2 LUW (SQL)".to_string(),
-        supports_transactions: true,
-        supports_schemas: true,
-        supports_procedures: true,
-        supports_functions: true,
-        supports_triggers: true,
-        supports_views: true,
-        supports_indexes: true,
-        supports_foreign_keys: true,
-        supports_explain: true,
-        supports_process_list: true,
-        read_only: config.read_only,
-        supports_rename_table: true,
-        supports_alter_column: true,
-    };
-
-    Ok((DriverInstance::Db2 {
-        host: effective_host.to_string(),
-        port: effective_port,
-        database,
-    }, capabilities))
+    let _ = (effective_host, effective_port, config);
+    Err("DB2 connector is not implemented; refusing to report a simulated connection as successful.".to_string())
 }
 
 pub fn execute_query_dynamodb(
