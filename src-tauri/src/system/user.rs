@@ -279,16 +279,17 @@ pub async fn user_toggle_sudo(
         )
     } else {
         format!(
-            "if getent group sudo >/dev/null 2>&1 || grep -q '^sudo:' /etc/group 2>/dev/null; then \
-                 gpasswd -d '{username}' sudo 2>&1 || deluser '{username}' sudo 2>/dev/null || true; \
-             fi; \
-             if getent group wheel >/dev/null 2>&1 || grep -q '^wheel:' /etc/group 2>/dev/null; then \
-                 gpasswd -d '{username}' wheel 2>&1 || deluser '{username}' wheel 2>/dev/null || true; \
-             fi; \
-             if getent group admin >/dev/null 2>&1 || grep -q '^admin:' /etc/group 2>/dev/null; then \
-                 gpasswd -d '{username}' admin 2>&1 || deluser '{username}' admin 2>/dev/null || true; \
-             fi; \
-             true"
+            "REMOVED=0; \
+             for GROUP in sudo wheel admin; do \
+                 if getent group \"$GROUP\" >/dev/null 2>&1; then \
+                     if id -nG '{username}' 2>/dev/null | tr ' ' '\\n' | grep -Fxq \"$GROUP\"; then \
+                         if gpasswd -d '{username}' \"$GROUP\" >/dev/null 2>&1 || deluser '{username}' \"$GROUP\" >/dev/null 2>&1; then REMOVED=1; \
+                         else echo \"Failed to remove user from group $GROUP\" >&2; exit 1; fi; \
+                     fi; \
+                 fi; \
+             done; \
+             if [ \"$REMOVED\" -eq 0 ]; then echo 'User is not a member of an admin group' >&2; exit 1; fi",
+            username = username
         )
     };
 
@@ -296,7 +297,7 @@ pub async fn user_toggle_sudo(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.contains("is not a member") {
+    if code != 0 {
         return Err(format!("Failed to update administrative privileges: {}", stdout.trim()));
     }
     log::info!("SSH Desktop: Toggled sudo for {} (grant={})", username, grant);
