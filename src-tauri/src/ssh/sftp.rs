@@ -186,7 +186,7 @@ pub async fn sftp_write_bytes(
     let b64 = to_base64(bytes);
 
     // 1. Direct write via base64 decode from stdin (fast path for user-owned paths)
-    let cmd = format!("base64 -d > '{}'", escaped_path);
+    let cmd = format!("umask 077 && base64 -d > '{}'", escaped_path);
     let (stdout, code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &cmd, b64.as_bytes()).await;
     if code == 0 {
         log::info!("SSH Desktop: Saved remote file {} ({} bytes)", path, bytes.len());
