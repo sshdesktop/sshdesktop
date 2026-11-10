@@ -277,6 +277,11 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
         _ => config.private_key_path.is_some(),
     };
     let selected_key_path = if is_key_auth { config.private_key_path.as_deref() } else { None };
+    if let Some(key_path) = selected_key_path {
+        if resolve_key_path(key_path).is_none() {
+            return Err(format!("Selected SSH identity '{}' could not be found.", key_path));
+        }
+    }
     let is_ppk = selected_key_path.map(is_ppk_key).unwrap_or(false);
 
     // 0. Primary Fast Path: Try establishing persistent in-memory SSH transport
@@ -657,6 +662,11 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
         _ => config.private_key_path.is_some(),
     };
     let selected_key_path = if is_key_auth { config.private_key_path.as_deref() } else { None };
+    if let Some(key_path) = selected_key_path {
+        if resolve_key_path(key_path).is_none() {
+            return Ok(false);
+        }
+    }
     let is_ppk = selected_key_path.map(is_ppk_key).unwrap_or(false);
 
     // 1. In-memory persistent probe (for PEM keys / password)
