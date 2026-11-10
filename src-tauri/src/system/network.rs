@@ -278,16 +278,28 @@ pub async fn network_kill_port(
     pid: Option<u32>,
     signal: Option<String>,
 ) -> Result<String, String> {
+    if port == 0 {
+        return Err("Port must be between 1 and 65535.".into());
+    }
     let sig_name = signal.unwrap_or_else(|| "KILL".to_string()).to_uppercase();
     let sig_num = match sig_name.as_str() {
         "TERM" | "SIGTERM" | "15" => "15",
         "HUP" | "SIGHUP" | "1" => "1",
         "INT" | "SIGINT" | "2" => "2",
-        _ => "9", // Default SIGKILL
+        "KILL" | "SIGKILL" | "9" => "9",
+        _ => return Err("Signal must be TERM, HUP, INT, or KILL.".into()),
     };
-    let proto = protocol.to_lowercase();
-    let proto_clean = if proto.contains("udp") { "udp" } else { "tcp" };
+    let proto_clean = match protocol.trim().to_ascii_lowercase().as_str() {
+        "udp" => "udp",
+        "tcp" => "tcp",
+        _ => return Err("Protocol must be tcp or udp.".into()),
+    };
+    if pid == Some(0) {
+        return Err("PID must be greater than zero.".into());
+    }
     let pid_str = pid.map(|p| p.to_string()).unwrap_or_else(|| "none".to_string());
+    let ss_flag = if proto_clean == "udp" { "u" } else { "t" };
+    let lsof_proto = if proto_clean == "udp" { "UDP" } else { "TCP" };
 
     let script = format!(
         r#"
@@ -309,38 +321,43 @@ fi
 
 # 3. Try lsof if available
 if command -v lsof >/dev/null 2>&1; then
-    lsof -ti:"$PORT" 2>/dev/null | xargs -r kill -"$SIG" 2>/dev/null || true
+    lsof -ti{lsof_proto}:$PORT 2>/dev/null | xargs -r kill -"$SIG" 2>/dev/null || true
 fi
 
-# 4. Try ss process identification
-PIDS=$(ss -lptn "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2)
+# 4. Try ss process identification for the selected transport protocol
+PIDS=$(ss -H -l{ss_flag}np "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2)
 for P in $PIDS; do
-    if [ -n "$P" ]; then
-        kill -"$SIG" "$P" 2>/dev/null || true
-    fi
+    if [ -n "$P" ]; then kill -"$SIG" "$P" 2>/dev/null || true; fi
 done
 
-sleep 0.2
-RECHECK=$(ss -lptn "sport = :$PORT" 2>/dev/null | grep -c ":$PORT" || echo 0)
+# Wait up to two seconds and verify the listener actually disappeared.
+RECHECK=1
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    RECHECK=$(ss -H -l{ss_flag}n "sport = :$PORT" 2>/dev/null | wc -l)
+    [ "$RECHECK" -eq 0 ] && break
+    sleep 0.2
+done
 if [ "$RECHECK" -eq 0 ]; then
-    echo "SUCCESS: Port :$PORT freed successfully."
+    echo "SUCCESS: {proto_clean} port :$PORT is no longer listening."
 else
-    echo "SIGNAL_SENT: Termination signal sent to port :$PORT."
+    echo "ERROR: {proto_clean} port :$PORT is still listening after the signal." >&2
+    exit 1
 fi
 "#,
         port = port,
         proto = proto_clean,
         sig = sig_num,
         pid_target = pid_str,
+        ss_flag = ss_flag,
+        lsof_proto = lsof_proto,
+        proto_clean = proto_clean,
     );
 
-    let (stdout, _) = crate::ssh::exec::run_cmd_priv(&state, &conn_id, &script).await;
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        Ok(format!("Signal SIG{} sent to port :{}", sig_num, port))
-    } else {
-        Ok(trimmed.to_string())
+    let (stdout, code) = crate::ssh::exec::run_cmd_priv(&state, &conn_id, &script).await;
+    if code != 0 {
+        return Err(format!("Failed to free {} port {}: {}", proto_clean, port, stdout.trim()));
     }
+    Ok(stdout.trim().to_string())
 }
 
 /// Retrieve real-time network bandwidth, transfer rate, packets, errors, drops and link properties
