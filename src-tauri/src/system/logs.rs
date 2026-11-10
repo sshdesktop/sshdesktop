@@ -14,7 +14,14 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 
 lazy_static::lazy_static! {
-    static ref ACTIVE_STREAMS: Mutex<HashMap<String, bool>> = Mutex::new(HashMap::new());
+    static ref ACTIVE_STREAMS: Mutex<HashMap<String, tokio::task::AbortHandle>> = Mutex::new(HashMap::new());
+}
+
+struct LogStreamGuard(String);
+impl Drop for LogStreamGuard {
+    fn drop(&mut self) {
+        ACTIVE_STREAMS.lock().remove(&self.0);
+    }
 }
 
 #[tauri::command]
@@ -127,44 +134,69 @@ pub async fn logs_stream_start(
         return Err("Invalid log source.".into());
     }
 
-    // Replace any stale stream with this ID only after validation.
-    ACTIVE_STREAMS.lock().insert(stream_id.clone(), true);
+    let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
+        .ok_or_else(|| format!("SSH connection '{}' not found.", conn_id))?;
+    if conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false) {
+        return Err("Live log streaming currently requires a PEM/OpenSSH private key or password authentication; PuTTY PPK streaming is not supported by the native SSH channel.".into());
+    }
+
+    let handle = {
+        let sessions = state.sessions.lock().await;
+        sessions.get(&conn_id).cloned()
+            .or_else(|| if conn_id == "default" { sessions.get("default").cloned() } else { None })
+    };
+    let handle = match handle {
+        Some(handle) => handle,
+        None => {
+            let new_handle = crate::ssh::session::connect_session(
+                &conn.config.host,
+                conn.config.port,
+                &conn.config.username,
+                conn.config.password.as_deref(),
+                conn.config.private_key_path.as_deref(),
+            ).await.map_err(|e| format!("Failed to open SSH log stream: {}", e))?;
+            let handle = std::sync::Arc::new(new_handle);
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(conn_id.clone(), handle.clone());
+            if conn_id == "default" {
+                sessions.insert("default".to_string(), handle.clone());
+            }
+            handle
+        }
+    };
+
+    let cmd = if is_file {
+        format!("tail -n 50 -F -- {} 2>&1", shell_quote(&source))
+    } else {
+        format!("journalctl -u {} -f -n 50 --no-pager 2>&1", shell_quote(&source))
+    };
+
+    {
+        let streams = ACTIVE_STREAMS.lock();
+        if streams.contains_key(&stream_id) {
+            return Err("A log stream with this ID is already running.".into());
+        }
+    }
 
     let app_clone = app.clone();
     let stream_id_clone = stream_id.clone();
-    let conn_id_clone = conn_id.clone();
-    let source_clone = source.clone();
-
-    tokio::spawn(async move {
-        // Build the streaming command
-        let cmd = if source_clone.starts_with('/') {
-            // File path — use tail -f
-            format!("tail -n 50 -f {} 2>&1", shell_quote(&source_clone))
-        } else {
-            // journalctl unit
-            format!("journalctl -u {} -f -n 50 --no-pager 2>&1", shell_quote(&source_clone))
-        };
-
-        // Execute and stream output in chunks
-        let state_ref = app_clone.state::<AppState>();
-        let (initial_out, _) = run_cmd(&state_ref, &conn_id_clone, &cmd).await;
-
-        // Check if stream was stopped before we got output
-        if !ACTIVE_STREAMS.lock().get(&stream_id_clone).copied().unwrap_or(false) {
-            return;
-        }
-
-        if !initial_out.is_empty() {
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _ = start_rx.await;
+        let _guard = LogStreamGuard(stream_id_clone.clone());
+        if let Err(error) = crate::ssh::session::run_log_stream_channel(
+            &app_clone, &handle, &stream_id_clone, &cmd
+        ).await {
             let _ = app_clone.emit("log-stream-data", serde_json::json!({
                 "stream_id": stream_id_clone,
-                "data": initial_out,
-                "done": true,
+                "data": format!("Log stream failed: {}", error),
+                "done": true
             }));
         }
-
-        ACTIVE_STREAMS.lock().remove(&stream_id_clone);
     });
 
+    ACTIVE_STREAMS.lock().insert(stream_id, task.abort_handle());
+    let _ = start_tx.send(());
     Ok(())
 }
 
@@ -173,7 +205,9 @@ pub async fn logs_stream_stop(
     _state: tauri::State<'_, AppState>,
     stream_id: String,
 ) -> Result<(), String> {
-    ACTIVE_STREAMS.lock().remove(&stream_id);
+    if let Some(handle) = ACTIVE_STREAMS.lock().remove(&stream_id) {
+        handle.abort();
+    }
     log::info!("SSH Desktop: Log stream {} stopped", stream_id);
     Ok(())
 }
