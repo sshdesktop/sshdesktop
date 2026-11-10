@@ -397,7 +397,9 @@ pub fn split_sql_statements_for_engine(input: &str, engine: &str) -> Vec<String>
         }
 
         // Start comments
-        if ch == '-' && next_ch == Some('-') && (i + 2 >= len || chars[i + 2].is_whitespace()) {
+        if ch == '-' && next_ch == Some('-')
+            && (!is_mysql || i + 2 >= len || chars[i + 2].is_whitespace())
+        {
             in_line_comment = true;
             current_stmt.push('-');
             current_stmt.push('-');
