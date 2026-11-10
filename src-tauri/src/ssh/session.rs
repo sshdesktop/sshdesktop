@@ -133,8 +133,14 @@ pub async fn run_stream_channel(
     cmd: &str,
 ) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
     use tauri::Emitter;
-    let mut channel = handle.channel_open_session().await?;
-    channel.exec(true, cmd).await?;
+    let mut channel = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        handle.channel_open_session()
+    ).await.map_err(|_| "Timed out opening SSH execution channel")??;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        channel.exec(true, cmd)
+    ).await.map_err(|_| "Timed out starting remote command")??;
     let mut exit_code = -1;
 
     while let Some(msg) = channel.wait().await {
@@ -184,8 +190,14 @@ pub async fn run_log_stream_channel(
     command: &str,
 ) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
     use tauri::Emitter;
-    let mut channel = handle.channel_open_session().await?;
-    channel.exec(true, command).await?;
+    let mut channel = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        handle.channel_open_session()
+    ).await.map_err(|_| "Timed out opening SSH log channel")??;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        channel.exec(true, command)
+    ).await.map_err(|_| "Timed out starting remote log stream")??;
     let mut exit_code = -1;
     while let Some(msg) = channel.wait().await {
         match msg {
