@@ -606,7 +606,14 @@ pub async fn firewall_delete_rule_advanced(
             if let Some(ref p) = port {
                 let proto = protocol.as_deref().unwrap_or("tcp");
                 if p.parse::<u16>().is_ok() {
-                    format!("firewall-cmd --permanent {} --remove-port={}/{} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, p, proto)
+                    if proto == "any" {
+                        format!(
+                            "c1=0; firewall-cmd --permanent {} --remove-port={}/tcp 2>&1 || c1=$?; c2=0; firewall-cmd --permanent {} --remove-port={}/udp 2>&1 || c2=$?; if [ $c1 -ne 0 ] && [ $c2 -ne 0 ]; then exit 1; fi; firewall-cmd --reload 2>&1",
+                            zone_flag, p, zone_flag, p
+                        )
+                    } else {
+                        format!("firewall-cmd --permanent {} --remove-port={}/{} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, p, proto)
+                    }
                 } else {
                     format!("firewall-cmd --permanent {} --remove-service={} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, p)
                 }
