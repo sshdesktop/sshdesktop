@@ -118,14 +118,6 @@ pub fn get_clouddesk_dir() -> PathBuf {
     get_sshdesktop_dir()
 }
 
-fn secure_settings_file(path: &std::path::Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-    }
-}
-
 fn get_settings_path() -> PathBuf {
     let dir = get_sshdesktop_dir();
     dir.join("settings.json")
@@ -151,8 +143,7 @@ pub async fn settings_get(_state: tauri::State<'_, AppState>) -> Result<AppSetti
         let legacy = base.data_local_dir().join("clouddesk").join("settings.json");
         if let Ok(content) = fs::read_to_string(legacy) {
             if let Ok(settings) = serde_json::from_str::<AppSettings>(&content) {
-                let _ = fs::write(&path, &content);
-                secure_settings_file(&path);
+                let _ = write_settings_file(&path, &content);
                 return Ok(settings);
             }
         }
