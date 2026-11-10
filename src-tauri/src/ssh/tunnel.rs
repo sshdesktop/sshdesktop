@@ -90,19 +90,27 @@ async fn handle_socks5_client(
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>((target_host, target_port))
     }).await.map_err(|_| "SOCKS5 client handshake timed out")??;
 
-    // 3. Connect via SSH channel_open_direct_tcpip
-    match handle.channel_open_direct_tcpip(&target_host, target_port as u32, "127.0.0.1", local_port as u32).await {
-        Ok(channel) => {
+    // 3. Bound SSH channel creation so an unresponsive server cannot retain
+    // an accepted SOCKS client indefinitely.
+    let channel_result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        handle.channel_open_direct_tcpip(&target_host, target_port as u32, "127.0.0.1", local_port as u32),
+    ).await;
+    match channel_result {
+        Ok(Ok(channel)) => {
             // SOCKS5 success reply: 0x05 (ver), 0x00 (success), 0x00 (rsv), 0x01 (IPv4), 127.0.0.1:0
             stream.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0]).await?;
             let mut ssh_stream = channel.into_stream();
             let _ = tokio::io::copy_bidirectional(stream, &mut ssh_stream).await;
             Ok(())
         }
-        Err(e) => {
-            // 0x05 = Connection refused / host unreachable
+        Ok(Err(e)) => {
             let _ = stream.write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
             Err(e.into())
+        }
+        Err(_) => {
+            let _ = stream.write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+            Err("SSH channel open timed out".into())
         }
     }
 }
