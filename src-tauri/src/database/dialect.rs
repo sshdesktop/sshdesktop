@@ -1,3 +1,46 @@
+fn validate_sql_type(value: &str) -> Result<String, String> {
+    let ty = value.trim().to_ascii_uppercase();
+    if ty.is_empty() || ty.len() > 80
+        || !ty.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, ' ' | '_' | '(' | ')' | ',' | '[' | ']'))
+        || !ty.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false)
+    {
+        return Err("Invalid SQL data type.".into());
+    }
+    let mut depth = 0i32;
+    for ch in ty.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => { depth -= 1; if depth < 0 { return Err("Invalid SQL data type.".into()); } }
+            _ => {}
+        }
+        if depth > 1 { return Err("Invalid SQL data type.".into()); }
+    }
+    if depth != 0 || ty.contains(";;") {
+        return Err("Invalid SQL data type.".into());
+    }
+    Ok(ty)
+}
+
+fn default_clause(value: Option<&String>) -> Result<String, String> {
+    let Some(raw) = value else { return Ok(String::new()); };
+    let value = raw.trim();
+    if value.is_empty() { return Ok(String::new()); }
+    if value.len() > 1024 || value.chars().any(|c| c.is_control()) {
+        return Err("Default value is too long or contains control characters.".into());
+    }
+    let upper = value.to_ascii_uppercase();
+    if matches!(upper.as_str(), "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" | "NULL" | "TRUE" | "FALSE" | "NOW()" | "GETDATE()" | "SYSDATETIME()" | "DATETIME('NOW')" ) {
+        return Ok(format!(" DEFAULT {}", upper));
+    }
+    if value.parse::<f64>().is_ok() {
+        return Ok(format!(" DEFAULT {}", value));
+    }
+    if value.contains('\\') {
+        return Err("Backslashes are not allowed in SQL default literals; use an explicit escaped value supported by the database.".into());
+    }
+    Ok(format!(" DEFAULT '{}'", value.replace('\'', "''")))
+}
+
 use super::types::ColumnSpec;
 
 // ─── SQL Dialect Helpers ──────────────────────────────────────────
@@ -25,7 +68,7 @@ pub fn generate_create_table_sql(
 
     for col in columns {
         let col_quoted = quote_ident(engine, &col.name);
-        let data_type = col.data_type.trim().to_uppercase();
+        let data_type = validate_sql_type(&col.data_type)?;
 
         let (type_clause, is_inline_pk) = match engine {
             "mysql" | "mariadb" => {
@@ -65,22 +108,7 @@ pub fn generate_create_table_sql(
             "NOT NULL"
         };
 
-        let default_clause = match &col.default_value {
-            Some(d) if !d.trim().is_empty() => {
-                let d_clean = d.trim();
-                if d_clean.starts_with("CURRENT_")
-                    || d_clean.starts_with("now(")
-                    || d_clean.starts_with("datetime(")
-                {
-                    format!(" DEFAULT {}", d_clean)
-                } else if d_clean.parse::<f64>().is_ok() {
-                    format!(" DEFAULT {}", d_clean)
-                } else {
-                    format!(" DEFAULT '{}'", d_clean.replace('\'', "''"))
-                }
-            }
-            _ => String::new(),
-        };
+        let default_clause = default_clause(col.default_value.as_ref())?;
 
         if is_inline_pk {
             col_defs.push(format!("  {} {}{}", col_quoted, type_clause, default_clause));
@@ -226,18 +254,16 @@ pub fn generate_truncate_table_sql(engine: &str, table: &str) -> String {
     }
 }
 
-pub fn generate_add_column_sql(engine: &str, table: &str, col: &ColumnSpec) -> String {
+pub fn generate_add_column_sql(engine: &str, table: &str, col: &ColumnSpec) -> Result<String, String> {
     let q_table = quote_ident(engine, table);
     let q_col = quote_ident(engine, &col.name);
+    let data_type = validate_sql_type(&col.data_type)?;
     let null_clause = if col.nullable { "NULL" } else { "NOT NULL" };
-    let default_clause = match &col.default_value {
-        Some(d) if !d.trim().is_empty() => format!(" DEFAULT '{}'", d.replace('\'', "''")),
-        _ => String::new(),
-    };
-    format!(
+    let default_clause = default_clause(col.default_value.as_ref())?;
+    Ok(format!(
         "ALTER TABLE {} ADD COLUMN {} {} {}{};",
-        q_table, q_col, col.data_type, null_clause, default_clause
-    )
+        q_table, q_col, data_type, null_clause, default_clause
+    ))
 }
 
 pub fn generate_drop_column_sql(engine: &str, table: &str, col_name: &str) -> String {
