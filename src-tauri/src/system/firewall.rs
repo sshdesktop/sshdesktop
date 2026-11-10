@@ -656,6 +656,9 @@ pub async fn firewall_install(
     tool: String, // "ufw" or "firewalld"
 ) -> Result<String, String> {
     let tool_name = tool.trim().to_lowercase();
+    if !matches!(tool_name.as_str(), "ufw" | "firewalld") {
+        return Err("Firewall installer supports only ufw or firewalld.".into());
+    }
     let install_cmd = format!(
         "if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y {}; elif command -v dnf >/dev/null 2>&1; then dnf install -y {}; elif command -v yum >/dev/null 2>&1; then yum install -y {}; elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm {}; else echo 'Package manager not supported'; exit 1; fi",
         tool_name, tool_name, tool_name, tool_name
@@ -668,7 +671,10 @@ pub async fn firewall_install(
 
     // If firewalld was installed, enable service
     if tool_name == "firewalld" {
-        let _ = run_cmd_priv(&state, &conn_id, "systemctl enable --now firewalld 2>/dev/null || true").await;
+        let (enable_out, enable_code) = run_cmd_priv(&state, &conn_id, "systemctl enable --now firewalld 2>&1").await;
+        if enable_code != 0 {
+            return Err(format!("firewalld installed, but enabling its service failed: {}", enable_out.trim()));
+        }
     }
 
     Ok(format!("{} installed successfully!", tool_name.to_uppercase()))
@@ -683,6 +689,11 @@ pub async fn firewall_set_default_policy(
 ) -> Result<String, String> {
     let dir = direction.trim().to_lowercase();
     let pol = policy.trim().to_lowercase();
+    if !matches!(dir.as_str(), "incoming" | "outgoing" | "routed")
+        || !matches!(pol.as_str(), "allow" | "deny" | "reject")
+    {
+        return Err("Default policy must use incoming/outgoing/routed and allow/deny/reject.".into());
+    }
     let cmd = format!("ufw default {} {} 2>&1", pol, dir);
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
     if code != 0 {
