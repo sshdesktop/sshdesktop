@@ -102,40 +102,8 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
         setError(res.message || 'Invalid username or password.');
       }
     } catch (err: any) {
-      // Fallback local verification for web-only static deployment without backend IPC
-      const inputUser = username.trim();
-      const inputPass = password;
-      const customUser = localStorage.getItem('sshdesktop_custom_uname');
-      const customPass = localStorage.getItem('sshdesktop_custom_pwd');
-      const hasChanged = localStorage.getItem('sshdesktop_credentials_changed') === 'true';
-
-      const isValid = hasChanged
-        ? (customUser && customPass && inputUser === customUser && inputPass === customPass)
-        : (inputUser.toLowerCase() === 'admin');
-      if (isValid) {
-        const payload = JSON.stringify({
-          username: inputUser,
-          token: 'ssh_token_' + Date.now(),
-          loginAt: Date.now(),
-          expiresAt: Date.now() + 60 * 60 * 1000
-        });
-        if (rememberMe) {
-          localStorage.setItem(AUTH_STORAGE_KEY, payload);
-        } else {
-          sessionStorage.setItem(AUTH_STORAGE_KEY, payload);
-        }
-
-        const hasChanged = localStorage.getItem('sshdesktop_credentials_changed') === 'true';
-        if (!hasChanged && inputPass === 'admin') {
-          setCurrentPassword(password);
-          setNewUsername(inputUser);
-          setShowChangeModal(true);
-        } else {
-          onAuthenticated();
-        }
-      } else {
-        setError(err?.message || 'Invalid username or password.');
-      }
+      console.warn('Backend authentication unreachable:', err);
+      setError(err?.message || 'Authentication service unavailable. Please check backend connection.');
     } finally {
       setIsLoading(false);
     }
@@ -168,7 +136,7 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
       if (res.success) {
         localStorage.setItem('sshdesktop_credentials_changed', 'true');
         localStorage.setItem('sshdesktop_custom_uname', newUsername.trim());
-        localStorage.setItem('sshdesktop_custom_pwd', newPassword);
+        localStorage.removeItem('sshdesktop_custom_pwd');
         setAuthStatus(prev => prev ? { ...prev, is_first_login: false, must_change_password: false } : null);
         setChangeSuccess(true);
         setTimeout(() => {
@@ -179,15 +147,7 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
         setChangeError(res.message || 'Failed to update credentials.');
       }
     } catch (err: any) {
-      // Local fallback for static web server deployment
-      localStorage.setItem('sshdesktop_credentials_changed', 'true');
-      localStorage.setItem('sshdesktop_custom_uname', newUsername.trim());
-      localStorage.setItem('sshdesktop_custom_pwd', newPassword);
-      setChangeSuccess(true);
-      setTimeout(() => {
-        setShowChangeModal(false);
-        onAuthenticated();
-      }, 1200);
+      setChangeError(err?.message || 'Failed to update credentials on server.');
     } finally {
       setIsChanging(false);
     }

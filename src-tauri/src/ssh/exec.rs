@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 
 lazy_static::lazy_static! {
     static ref EXEC_STREAMS: Mutex<HashMap<String, tokio::task::AbortHandle>> = Mutex::new(HashMap::new());
+    static ref CONNECTING_SESSIONS: Mutex<std::collections::HashSet<String>> = Mutex::new(std::collections::HashSet::new());
 }
 
 struct ExecStreamGuard(String);
@@ -66,12 +67,37 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         None => return (String::new(), -1),
     };
 
-    // Attempt lazy persistent session establishment for future instantaneous calls
-    if state.sessions.lock().await.get(conn_id).is_none() {
+    // Attempt lazy persistent session establishment for future instantaneous calls (deduplicating concurrent attempts)
+    let should_spawn = if !conn_id.is_empty() && conn_id != "default" {
+        let is_empty = state.sessions.lock().await.get(conn_id).is_none();
+        if is_empty {
+            let mut connecting = CONNECTING_SESSIONS.lock();
+            if !connecting.contains(conn_id) {
+                connecting.insert(conn_id.to_string());
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if should_spawn {
         let conn_clone = conn.clone();
         let state_sessions = state.sessions.clone();
         let cid = conn_id.to_string();
         tokio::spawn(async move {
+            struct InFlightGuard(String);
+            impl Drop for InFlightGuard {
+                fn drop(&mut self) {
+                    CONNECTING_SESSIONS.lock().remove(&self.0);
+                }
+            }
+            let _guard = InFlightGuard(cid.clone());
+
             let is_key_auth = match conn_clone.config.auth_method.as_deref() {
                 Some("password") => false,
                 Some("key") => true,

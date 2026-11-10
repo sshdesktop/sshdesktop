@@ -13,7 +13,7 @@ pub async fn connect_mysql(
 ) -> Result<(DriverInstance, ServerCapabilities), String> {
     let pwd = config.password.as_deref().unwrap_or("");
     let ssl_param = if config.use_ssl {
-        if config.ssl_verify { "?ssl-mode=Required" } else { "?ssl-mode=Required" }
+        if config.ssl_verify { "?ssl-mode=VerifyIdentity" } else { "?ssl-mode=Required" }
     } else {
         "?ssl-mode=Disabled"
     };

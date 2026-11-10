@@ -745,17 +745,28 @@ pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnecti
 
 #[tauri::command]
 pub async fn ssh_disconnect(state: tauri::State<'_, AppState>, conn_id: String) -> Result<(), String> {
-    {
+    let handle_to_disconnect = {
         let mut sessions = state.sessions.lock().await;
         let removed = sessions.remove(&conn_id);
         if conn_id == "default" {
-            sessions.remove("default");
-        } else if let (Some(removed), Some(default)) = (removed.as_ref(), sessions.get("default")) {
-            if std::sync::Arc::ptr_eq(removed, default) {
-                sessions.remove("default");
+            sessions.remove("default").or(removed)
+        } else {
+            if let (Some(ref r), Some(default)) = (removed.as_ref(), sessions.get("default")) {
+                if std::sync::Arc::ptr_eq(r, default) {
+                    sessions.remove("default");
+                }
             }
+            removed
         }
         // Do not silently retarget the default alias to another server after disconnect.
+    };
+    if let Some(handle) = handle_to_disconnect {
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(800),
+                handle.disconnect(russh::Disconnect::ByApplication, "User Disconnect", "en"),
+            ).await;
+        });
     }
     {
         let mut map = state.connections.lock();

@@ -147,9 +147,17 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-pub fn is_critical_system_mount(_mountpoint: Option<&str>) -> bool {
-    // User requested: "disk application system protected feature remove. I manage it."
-    false
+pub fn is_critical_system_mount(mountpoint: Option<&str>) -> bool {
+    match mountpoint {
+        Some(m) => {
+            let trimmed = m.trim();
+            matches!(
+                trimmed,
+                "/" | "/boot" | "/boot/efi" | "/etc" | "/usr" | "/var" | "/dev" | "/proc" | "/sys"
+            )
+        }
+        None => false,
+    }
 }
 
 fn parse_device_json(dev: &serde_json::Value) -> BlockDevice {
@@ -978,11 +986,15 @@ pub async fn disk_format_filesystem(
     let dev_arg = shell_quote(&dev_path);
     let label_arg = shell_quote(lbl);
 
-    // Never format a device while it is mounted or active as swap. Do not
-    // ignore unmount failures: continuing could destroy a live filesystem.
+    // Never format a device while it is mounted or active as swap, and protect critical system paths.
     let preflight = format!(
         r#"DEV={}
 command -v findmnt >/dev/null 2>&1 || {{ echo "findmnt is required for safe filesystem formatting" >&2; exit 127; }}
+MOUNT=$(findmnt -rn -o TARGET -S "$DEV" 2>/dev/null || true)
+if [ "$MOUNT" = "/" ] || [ "$MOUNT" = "/boot" ] || [ "$MOUNT" = "/boot/efi" ] || [ "$MOUNT" = "/etc" ] || [ "$MOUNT" = "/usr" ] || [ "$MOUNT" = "/var" ]; then
+    echo "CRITICAL SYSTEM PROTECTION: Refusing to format active system mountpoint '$MOUNT'" >&2
+    exit 1
+fi
 if grep -qF -- "$DEV " /proc/swaps 2>/dev/null; then
     swapoff "$DEV" || {{ echo "Failed to disable active swap on $DEV" >&2; exit 1; }}
 fi

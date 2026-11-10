@@ -221,6 +221,11 @@ export const useSshStore = create<SshStoreState>()(
     }),
     {
       name: 'sshdesktop_ssh_studio_store',
+      partialize: (state) => ({
+        ...state,
+        // Strip unencrypted private key data from browser localStorage
+        keys: (state.keys || []).map(({ privateKey, ...rest }) => ({ ...rest, privateKey: '' })),
+      }),
     }
   )
 );

@@ -216,6 +216,7 @@ pub struct RedisValueItem {
 
 // ─── Driver Handles ────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub enum DriverInstance {
     MySql(sqlx::MySqlPool),
     Postgres(sqlx::PgPool),
@@ -251,17 +252,18 @@ pub enum DriverInstance {
     },
 }
 
+#[derive(Clone)]
 pub struct ActiveDatabaseSession {
     pub id: String,
     pub config: DatabaseConnectionConfig,
     pub local_port: u16,
-    pub tunnel_shutdown: Option<oneshot::Sender<()>>,
+    pub tunnel_shutdown: Arc<tokio::sync::Mutex<Option<oneshot::Sender<()>>>>,
     pub driver: DriverInstance,
     pub capabilities: ServerCapabilities,
 }
 
 pub struct DatabaseManager {
-    pub sessions: Arc<tokio::sync::Mutex<HashMap<String, ActiveDatabaseSession>>>,
+    pub sessions: Arc<tokio::sync::Mutex<HashMap<String, Arc<ActiveDatabaseSession>>>>,
 }
 
 impl DatabaseManager {

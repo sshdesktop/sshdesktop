@@ -106,6 +106,10 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
             try {
               const unlistenClose = await appWin.onCloseRequested(async (event) => {
                 event.preventDefault();
+                if (unlistenCloseRef.current) {
+                  unlistenCloseRef.current();
+                  unlistenCloseRef.current = null;
+                }
                 useConnectionStore.getState().setShuttingDown(true);
                 try {
                   await performAllSessionsLogout();
@@ -267,6 +271,11 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
     e.stopPropagation();
     if (isClosing) return;
     setIsClosing(true);
+
+    if (unlistenCloseRef.current) {
+      unlistenCloseRef.current();
+      unlistenCloseRef.current = null;
+    }
 
     try {
       // 1. All login sessions logout (disconnect SSH connections, close windows, clear web auth)

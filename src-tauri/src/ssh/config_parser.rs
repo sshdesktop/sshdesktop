@@ -38,8 +38,25 @@ pub fn expand_tilde(path_str: &str) -> String {
 
 pub fn parse_ssh_config_content(content: &str) -> Vec<SshConfigHost> {
     let mut hosts = Vec::new();
-    let mut current_host: Option<SshConfigHost> = None;
+    let mut current_aliases: Vec<String> = Vec::new();
+    let mut current_template: Option<SshConfigHost> = None;
     let mut global_defaults: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    let flush_aliases = |template: &Option<SshConfigHost>, aliases: &[String], list: &mut Vec<SshConfigHost>| {
+        if let Some(ref tmpl) = template {
+            let primary = aliases.first().cloned().unwrap_or_default();
+            for alias in aliases {
+                if alias != "*" && !alias.is_empty() {
+                    let mut h = tmpl.clone();
+                    h.name = alias.clone();
+                    if h.hostname == primary {
+                        h.hostname = alias.clone();
+                    }
+                    list.push(h);
+                }
+            }
+        }
+    };
 
     for raw_line in content.lines() {
         let line = raw_line.trim();
@@ -56,20 +73,24 @@ pub fn parse_ssh_config_content(content: &str) -> Vec<SshConfigHost> {
         let value = value.trim_matches('"').trim_matches('\'').trim().to_string();
 
         if key == "host" {
-            // If previous host was being collected, save it
-            if let Some(h) = current_host.take() {
-                if h.name != "*" {
-                    hosts.push(h);
-                }
-            }
+            // Flush any previously collected host block
+            flush_aliases(&current_template, &current_aliases, &mut hosts);
 
-            if value == "*" {
-                // Global defaults block
-                current_host = None;
+            let tokens: Vec<String> = value
+                .split_whitespace()
+                .map(|s| s.trim_matches('"').trim_matches('\'').to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if tokens.is_empty() || tokens.iter().all(|t| t == "*") {
+                current_aliases = Vec::new();
+                current_template = None;
             } else {
-                current_host = Some(SshConfigHost {
-                    name: value.clone(),
-                    hostname: value, // Default to Host alias until HostName is found
+                let first_alias = tokens[0].clone();
+                current_aliases = tokens;
+                current_template = Some(SshConfigHost {
+                    name: first_alias.clone(),
+                    hostname: first_alias,
                     user: global_defaults.get("user").cloned(),
                     port: global_defaults.get("port").and_then(|p| p.parse().ok()).or(Some(22)),
                     identity_file: global_defaults.get("identityfile").map(|p| expand_tilde(p)),
@@ -78,7 +99,7 @@ pub fn parse_ssh_config_content(content: &str) -> Vec<SshConfigHost> {
                     proxy_jump: global_defaults.get("proxyjump").cloned(),
                 });
             }
-        } else if let Some(ref mut host) = current_host {
+        } else if let Some(ref mut host) = current_template {
             match key.as_str() {
                 "hostname" => host.hostname = value,
                 "user" => host.user = Some(value),
@@ -105,11 +126,7 @@ pub fn parse_ssh_config_content(content: &str) -> Vec<SshConfigHost> {
         }
     }
 
-    if let Some(h) = current_host {
-        if h.name != "*" {
-            hosts.push(h);
-        }
-    }
+    flush_aliases(&current_template, &current_aliases, &mut hosts);
 
     hosts
 }
@@ -246,14 +263,27 @@ pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
         updated.push_str(&block);
     }
 
-    std::fs::write(&config_path, updated)
-        .map_err(|e| format!("Failed to write to {}: {}", config_path.display(), e))?;
+    let temp_path = ssh_dir.join(format!("config.{}.tmp", uuid::Uuid::new_v4()));
+    if let Err(e) = std::fs::write(&temp_path, &updated) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("Failed to write temporary SSH config: {}", e));
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("Failed to secure SSH config permissions: {}", e))?;
+        let _ = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    if let Err(e) = std::fs::rename(&temp_path, &config_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("Failed to atomically update {}: {}", config_path.display(), e));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
     }
 
     log::info!("SSH Desktop: Successfully saved host '{}' to {}", entry.name, config_path.display());

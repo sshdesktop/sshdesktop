@@ -38,6 +38,11 @@ async fn handle_socks5_client(
     let nmethods = header[1] as usize;
     let mut methods = vec![0u8; nmethods];
     stream.read_exact(&mut methods).await?;
+    // RFC 1928: Verify client offered Method 0x00 (NO AUTHENTICATION REQUIRED)
+    if !methods.contains(&0x00) {
+        let _ = stream.write_all(&[0x05, 0xFF]).await; // 0xFF = NO ACCEPTABLE METHODS
+        return Err("SOCKS5 client did not offer unauthenticated mode (0x00)".into());
+    }
     // Reply: Version 5, Method 0 (No authentication required)
     stream.write_all(&[0x05, 0x00]).await?;
 

@@ -2778,17 +2778,14 @@ pub async fn mongodb_list_collections(
     connection_id: String,
     database: Option<String>,
 ) -> Result<Vec<String>, String> {
-    let mut lock = db_mgr.sessions.lock().await;
-    let session = lock
-        .get_mut(&connection_id)
-        .ok_or_else(|| "Database connection not active".to_string())?;
+    let session = {
+        let lock = db_mgr.sessions.lock().await;
+        lock.get(&connection_id)
+            .cloned()
+            .ok_or_else(|| "Database connection not active".to_string())?
+    };
 
     if let DriverInstance::Mongo(client) = &session.driver {
-        if let Some(ref db_target) = database {
-            if !db_target.trim().is_empty() {
-                session.config.database = db_target.trim().to_string();
-            }
-        }
         let db_target = database.as_deref().unwrap_or(&session.config.database);
         let db = client.database(get_effective_mongo_db(db_target));
         db.list_collection_names(None).await.map_err(|e| e.to_string())
@@ -2806,10 +2803,12 @@ pub async fn mongodb_find_documents(
     skip: Option<u64>,
     limit: Option<i64>,
 ) -> Result<QueryResult, String> {
-    let lock = db_mgr.sessions.lock().await;
-    let session = lock
-        .get(&connection_id)
-        .ok_or_else(|| "Database connection not active".to_string())?;
+    let session = {
+        let lock = db_mgr.sessions.lock().await;
+        lock.get(&connection_id)
+            .cloned()
+            .ok_or_else(|| "Database connection not active".to_string())?
+    };
 
     if let DriverInstance::Mongo(client) = &session.driver {
         let db = client.database(get_effective_mongo_db(&session.config.database));
@@ -2844,10 +2843,12 @@ pub async fn mongodb_insert_document(
     collection: String,
     doc_json: String,
 ) -> Result<String, String> {
-    let lock = db_mgr.sessions.lock().await;
-    let session = lock
-        .get(&connection_id)
-        .ok_or_else(|| "Database connection not active".to_string())?;
+    let session = {
+        let lock = db_mgr.sessions.lock().await;
+        lock.get(&connection_id)
+            .cloned()
+            .ok_or_else(|| "Database connection not active".to_string())?
+    };
 
     if session.config.read_only {
         return Err("Database session is in read-only mode".to_string());

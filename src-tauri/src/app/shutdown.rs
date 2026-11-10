@@ -37,15 +37,21 @@ pub async fn app_request_shutdown(
         drained
     };
 
+    let mut disconnect_futs = Vec::new();
     for (conn_id, handle) in sessions_drained {
         log::info!("SSH Desktop: Disconnecting SSH session '{}'", conn_id);
-        tokio::spawn(async move {
+        disconnect_futs.push(async move {
             let _ = tokio::time::timeout(
-                Duration::from_millis(1500),
+                Duration::from_millis(600),
                 handle.disconnect(russh::Disconnect::ByApplication, "Application Quit", "en"),
             ).await;
         });
     }
+    // Await all disconnects concurrently with a bounded maximum timeout of 800ms
+    let _ = tokio::time::timeout(
+        Duration::from_millis(800),
+        futures::future::join_all(disconnect_futs),
+    ).await;
 
     // 2. Clear state registries
     {
@@ -57,28 +63,28 @@ pub async fn app_request_shutdown(
         terms.clear();
     }
 
-    // 3. Close auxiliary webview windows first (e.g. browser tabs)
+    // 3. Destroy auxiliary webview windows first (destroy cleanly tears down the WebKit/Win32 surface)
     for (label, win) in app.webview_windows() {
         if label != "main" {
-            let _ = win.close();
+            let _ = win.destroy();
         }
     }
 
-    // 4. Close main window and exit application
+    // 4. Destroy main window and exit application cleanly
     let app_clone = app.clone();
     tokio::spawn(async move {
         // Brief pause to allow pending IPC messages to flush
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         if let Some(main_win) = app_clone.get_webview_window("main") {
-            let _ = main_win.close();
+            let _ = main_win.destroy();
         }
 
         // Trigger Tauri application exit
         app_clone.exit(0);
 
-        // Fallback safety guard for Linux WebKitGTK: force terminate process after 1.5s
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // Fallback safety guard for Linux WebKitGTK: force terminate process after 300ms
+        tokio::time::sleep(Duration::from_millis(300)).await;
         std::process::exit(0);
     });
 

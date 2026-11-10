@@ -172,17 +172,21 @@ pub async fn execute_query_sqlite(
     for (stmt_idx, stmt) in statements.iter().enumerate() {
         let stmt_start = Instant::now();
         let s_upper = stmt.trim().to_uppercase();
-        let is_mutation = !s_upper.starts_with("SELECT")
-            && !s_upper.starts_with("EXPLAIN")
-            && !s_upper.starts_with("WITH")
-            && !s_upper.starts_with("PRAGMA TABLE_INFO")
-            && !s_upper.starts_with("PRAGMA FOREIGN_KEY_LIST")
-            && !s_upper.starts_with("PRAGMA INDEX_LIST")
-            && !s_upper.starts_with("PRAGMA DATABASE_LIST")
-            && !s_upper.contains("RETURNING");
+        let is_write_query = s_upper.starts_with("INSERT")
+            || s_upper.starts_with("UPDATE")
+            || s_upper.starts_with("DELETE")
+            || s_upper.starts_with("REPLACE")
+            || s_upper.starts_with("CREATE")
+            || s_upper.starts_with("DROP")
+            || s_upper.starts_with("ALTER")
+            || (s_upper.starts_with("WITH") && (s_upper.contains("INSERT") || s_upper.contains("UPDATE") || s_upper.contains("DELETE")));
 
-        if is_mutation {
+        if is_write_query {
             had_mutation = true;
+        }
+
+        let is_mutation = is_write_query && !s_upper.contains("RETURNING");
+        if is_mutation {
             let res = sqlx::raw_sql(stmt)
                 .execute(pool)
                 .await

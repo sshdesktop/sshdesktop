@@ -682,7 +682,6 @@ export function getDefaultFleetMatrix(connections: SavedConnection[] = []): Flee
     host: c.host,
     port: Number(c.port) || 22,
     username: c.username,
-    password: c.password,
     authType: (c as any).authMethod === 'key' ? 'privateKey' : 'password',
     tags: c.tags || [],
     status: 'active',
@@ -753,7 +752,11 @@ export function loadStoredFleetMatrix(connections: SavedConnection[] = []): Flee
 
 export function saveStoredFleetMatrix(data: FleetMatrixData): FleetMatrixData {
   try {
-    localStorage.setItem(STORAGE_KEY_FLEET_MATRIX, JSON.stringify(data));
+    const sanitized: FleetMatrixData = {
+      ...data,
+      servers: (data.servers || []).map(({ password, ...rest }) => rest as FleetServer),
+    };
+    localStorage.setItem(STORAGE_KEY_FLEET_MATRIX, JSON.stringify(sanitized));
     return data;
   } catch (err) {
     console.error('Failed to save fleet matrix:', err);

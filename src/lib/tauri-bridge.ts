@@ -190,10 +190,9 @@ function setupWebTerminalSocket(termId: string, connId: string, cols: number, ro
   try {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const session = getStoredSession();
-    const tokenParam = session?.token ? `&token=${encodeURIComponent(session.token)}` : '';
-    const wsUrl = `${protocol}//${window.location.host}/ws/terminal?termId=${encodeURIComponent(termId)}&connId=${encodeURIComponent(connId)}&cols=${cols}&rows=${rows}${tokenParam}`;
+    const wsUrl = `${protocol}//${window.location.host}/ws/terminal?termId=${encodeURIComponent(termId)}&connId=${encodeURIComponent(connId)}&cols=${cols}&rows=${rows}`;
     lastKnownTerminalSizes.set(termId, { rows, cols });
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(wsUrl, session?.token ? [session.token] : undefined);
 
     ws.onopen = () => {
       const latest = lastKnownTerminalSizes.get(termId) || { rows, cols };
@@ -252,19 +251,19 @@ export async function sshListConnections(): Promise<any[]> {
 }
 
 export async function sshTestConnection(config: any): Promise<boolean> {
-  return safeInvoke<boolean>('ssh_test_connection', { config }, true);
+  return safeInvoke<boolean>('ssh_test_connection', { config }, false);
 }
 
 export async function sshGetUserPrivilege(connId: string): Promise<UserPrivilegeInfo> {
   return safeInvoke<UserPrivilegeInfo>('ssh_get_user_privilege', { connId }, {
-    username: 'root',
-    uid: 0,
-    gid: 0,
-    home_dir: '/root',
-    is_root: true,
-    has_sudo: true,
-    sudo_type: 'root',
-    groups: ['root'],
+    username: 'user',
+    uid: 1000,
+    gid: 1000,
+    home_dir: '/home/user',
+    is_root: false,
+    has_sudo: false,
+    sudo_type: 'none',
+    groups: [],
   });
 }
 
@@ -272,15 +271,15 @@ export async function sshExec(connId: string, command: string): Promise<{ stdout
   try {
     return await safeInvoke('ssh_exec', { connId, command }, {
       stdout: '',
-      stderr: '',
-      exit_code: 0,
+      stderr: 'Execution failed or bridge disconnected',
+      exit_code: -1,
       duration_ms: 0,
     });
   } catch (err: any) {
     return {
       stdout: '',
       stderr: String(err?.message || err),
-      exit_code: 1,
+      exit_code: -1,
       duration_ms: 0,
     };
   }

@@ -94,9 +94,15 @@ fn delete_connection_password(id: &str) {
 fn hydrate_connection_passwords(list: &mut [SavedConnection]) -> bool {
     let mut migrated = false;
     for connection in list {
-        if let Some(password) = connection.password.as_ref() {
-            if !password.is_empty() && store_connection_password(&connection.id, password).is_ok() {
-                migrated = true;
+        if let Some(password) = connection.password.take() {
+            if !password.is_empty() {
+                if store_connection_password(&connection.id, &password).is_ok() {
+                    migrated = true;
+                    connection.password = Some(password);
+                } else {
+                    log::warn!("Could not migrate SSH password to secure credential store for {}. Wiping plaintext from memory to prevent leak.", connection.id);
+                    connection.password = None;
+                }
             }
         } else {
             connection.password = load_connection_password(&connection.id);
@@ -151,46 +157,63 @@ fn get_storage_path() -> PathBuf {
     dir
 }
 
-pub fn read_connections_from_disk() -> Vec<SavedConnection> {
+pub fn try_read_connections_from_disk() -> Result<Vec<SavedConnection>, String> {
     let path = get_storage_path();
     #[cfg(unix)]
     if path.exists() {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
     }
-    if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(mut list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
-            let migrated_legacy_password = hydrate_connection_passwords(&mut list);
-            if migrated_legacy_password {
-                // write_connections_to_disk serializes a sanitized copy, removing
-                // legacy plaintext password fields only after keyring storage succeeds.
-                let _ = write_connections_to_disk(&list);
+    if path.exists() {
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read connection store at {:?}: {}", path, e))?;
+        if content.trim().is_empty() {
+            return Ok(vec![]);
+        }
+        match serde_json::from_str::<Vec<SavedConnection>>(&content) {
+            Ok(mut list) => {
+                let migrated_legacy_password = hydrate_connection_passwords(&mut list);
+                if migrated_legacy_password {
+                    let _ = write_connections_to_disk(&list);
+                }
+                return Ok(list);
             }
-            return list;
+            Err(e) => {
+                // Critical safeguard: do not return an empty list when parsing an existing file fails.
+                // Overwriting an existing file with an empty list would permanently wipe out user connection profiles.
+                log::error!("Failed to parse connections.json: {}", e);
+                return Err(format!("Corrupted connections storage file: {}. File path: {:?}", e, path));
+            }
         }
     }
     // Fallback migration from legacy ~/.clouddesk/connections.json or AppData
     if let Some(base) = directories::BaseDirs::new() {
         let legacy_home = base.home_dir().join(".clouddesk").join("connections.json");
-        if let Ok(content) = fs::read_to_string(legacy_home) {
-            if let Ok(mut list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
-                hydrate_connection_passwords(&mut list);
-                // Only copy legacy data through the sanitizer. If the OS keyring
-                // is unavailable, do not create a new plaintext password file.
-                let _ = write_connections_to_disk(&list);
-                return list;
+        if legacy_home.exists() {
+            if let Ok(content) = fs::read_to_string(&legacy_home) {
+                if let Ok(mut list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
+                    hydrate_connection_passwords(&mut list);
+                    let _ = write_connections_to_disk(&list);
+                    return Ok(list);
+                }
             }
         }
         let legacy_appdata = base.data_local_dir().join("clouddesk").join("connections.json");
-        if let Ok(content) = fs::read_to_string(legacy_appdata) {
-            if let Ok(mut list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
-                hydrate_connection_passwords(&mut list);
-                let _ = write_connections_to_disk(&list);
-                return list;
+        if legacy_appdata.exists() {
+            if let Ok(content) = fs::read_to_string(&legacy_appdata) {
+                if let Ok(mut list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
+                    hydrate_connection_passwords(&mut list);
+                    let _ = write_connections_to_disk(&list);
+                    return Ok(list);
+                }
             }
         }
     }
-    vec![]
+    Ok(vec![])
+}
+
+pub fn read_connections_from_disk() -> Vec<SavedConnection> {
+    try_read_connections_from_disk().unwrap_or_default()
 }
 
 pub fn write_connections_to_disk(list: &[SavedConnection]) -> Result<(), String> {
@@ -225,7 +248,7 @@ fn sanitize_connection_secrets(connection: &mut SavedConnection) {
 
 pub fn save_or_update_connection_on_disk(mut connection: SavedConnection) -> Result<String, String> {
     sanitize_connection_secrets(&mut connection);
-    let mut list = read_connections_from_disk();
+    let mut list = try_read_connections_from_disk()?;
     if connection.id.is_empty() {
         connection.id = uuid::Uuid::new_v4().to_string();
     }
@@ -265,7 +288,7 @@ pub async fn store_list_connections(_state: tauri::State<'_, AppState>) -> Resul
 
 #[tauri::command]
 pub async fn store_delete_connection(_state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
-    let mut list = read_connections_from_disk();
+    let mut list = try_read_connections_from_disk()?;
     list.retain(|c| c.id != id);
     write_connections_to_disk(&list)?;
     delete_connection_password(&id);
@@ -275,7 +298,7 @@ pub async fn store_delete_connection(_state: tauri::State<'_, AppState>, id: Str
 #[tauri::command]
 pub async fn store_update_connection(_state: tauri::State<'_, AppState>, mut connection: SavedConnection) -> Result<(), String> {
     sanitize_connection_secrets(&mut connection);
-    let mut list = read_connections_from_disk();
+    let mut list = try_read_connections_from_disk()?;
     match connection.password.as_deref() {
         Some(password) if !password.is_empty() => store_connection_password(&connection.id, password)?,
         _ => delete_connection_password(&connection.id),
