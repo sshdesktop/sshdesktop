@@ -257,10 +257,7 @@ pub async fn docker_images(
         }
     }
 
-    if list.is_empty() {
-        return Err("No docker images found on the remote server.".into());
-    }
-
+    // An empty image list is a valid state on a new or cleaned server.
     Ok(list)
 }
 
