@@ -1,3 +1,55 @@
+fn parse_redis_args(input: &str) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut token_started = false;
+
+    for ch in input.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            token_started = true;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            token_started = true;
+            continue;
+        }
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            token_started = true;
+            continue;
+        }
+        match ch {
+            '\'' | '"' => { quote = Some(ch); token_started = true; }
+            c if c.is_whitespace() => {
+                if token_started {
+                    args.push(std::mem::take(&mut current));
+                    token_started = false;
+                }
+            }
+            _ => { current.push(ch); token_started = true; }
+        }
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if quote.is_some() {
+        return Err("Unterminated quote in Redis command.".into());
+    }
+    if token_started {
+        args.push(current);
+    }
+    Ok(args)
+}
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -86,14 +138,14 @@ pub async fn execute_query_redis(
         .await
         .map_err(|e| format!("Redis connection error: {}", e))?;
 
-    let parts: Vec<&str> = query.split_whitespace().collect();
+    let parts = parse_redis_args(query)?;
     if parts.is_empty() {
         return Err("Empty Redis command".to_string());
     }
 
-    let mut cmd = redis::cmd(parts[0]);
+    let mut cmd = redis::cmd(&parts[0]);
     for arg in &parts[1..] {
-        cmd.arg(*arg);
+        cmd.arg(arg);
     }
 
     let val: redis::Value = cmd
@@ -146,7 +198,20 @@ pub async fn execute_query_redis(
 
 pub async fn list_tables_redis(client: &redis::Client) -> Result<Vec<DatabaseObject>, String> {
     let mut con = client.get_multiplexed_tokio_connection().await.map_err(|e| e.to_string())?;
-    let keys: Vec<String> = redis::cmd("KEYS").arg("*").query_async(&mut con).await.unwrap_or_default();
+    let mut keys = Vec::new();
+    let mut cursor: u64 = 0;
+    loop {
+        let (next, mut batch): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor).arg("MATCH").arg("*").arg("COUNT").arg(500)
+            .query_async(&mut con).await.map_err(|e| format!("Redis SCAN failed: {}", e))?;
+        keys.append(&mut batch);
+        if keys.len() >= 10000 {
+            keys.truncate(10000);
+            break;
+        }
+        cursor = next;
+        if cursor == 0 { break; }
+    }
     Ok(keys
         .into_iter()
         .map(|k| DatabaseObject {
