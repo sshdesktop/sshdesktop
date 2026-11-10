@@ -282,7 +282,10 @@ pub async fn connect_session_with_passphrase_auth(
             if !authenticated {
                 if let Ok(content) = std::fs::read_to_string(trimmed_key) {
                     if let Ok(key) = russh_keys::decode_secret_key(&content, passphrase) {
-                        authenticated = handle.authenticate_publickey(user, Arc::new(key)).await.unwrap_or(false);
+                        authenticated = tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            handle.authenticate_publickey(user, Arc::new(key))
+                        ).await.ok().and_then(Result::ok).unwrap_or(false);
                     }
                 }
             }
