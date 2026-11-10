@@ -68,26 +68,35 @@ pub async fn db_connect(
         }
     }
 
-    let (effective_host, effective_port, tunnel_tx) = if config.use_ssh {
+    let (effective_host, effective_port, mut tunnel_tx) = if config.use_ssh {
         let (p, tx) = setup_ssh_tunnel(&config, &state).await?;
         ("127.0.0.1".to_string(), p, Some(tx))
     } else {
         (config.host.clone(), config.port, None)
     };
 
-    let (driver, capabilities) = match engine_lower.as_str() {
-        "mysql" | "mariadb" => connect_mysql(&effective_host, effective_port, &config).await?,
-        "postgresql" | "postgres" => connect_postgres(&effective_host, effective_port, &config).await?,
-        "sqlite" | "sqlite3" => connect_sqlite(&config, Some(&state)).await?,
-        "mssql" | "sqlserver" => connect_mssql(&effective_host, effective_port, &config).await?,
-        "mongodb" | "mongo" => connect_mongo(&effective_host, effective_port, &config).await?,
-        "redis" => connect_redis(&effective_host, effective_port, &config).await?,
-        "dynamodb" | "dynamo" => connect_dynamodb(&effective_host, effective_port, &config).await?,
-        "cosmos" | "cosmosdb" => connect_cosmos(&effective_host, effective_port, &config).await?,
-        "cassandra" => connect_cassandra(&effective_host, effective_port, &config).await?,
-        "oracle" => connect_oracle(&effective_host, effective_port, &config).await?,
-        "db2" => connect_db2(&effective_host, effective_port, &config).await?,
-        other => return Err(format!("Unsupported database engine: {}", other)),
+    let connect_result = match engine_lower.as_str() {
+        "mysql" | "mariadb" => connect_mysql(&effective_host, effective_port, &config).await,
+        "postgresql" | "postgres" => connect_postgres(&effective_host, effective_port, &config).await,
+        "sqlite" | "sqlite3" => connect_sqlite(&config, Some(&state)).await,
+        "mssql" | "sqlserver" => connect_mssql(&effective_host, effective_port, &config).await,
+        "mongodb" | "mongo" => connect_mongo(&effective_host, effective_port, &config).await,
+        "redis" => connect_redis(&effective_host, effective_port, &config).await,
+        "dynamodb" | "dynamo" => connect_dynamodb(&effective_host, effective_port, &config).await,
+        "cosmos" | "cosmosdb" => connect_cosmos(&effective_host, effective_port, &config).await,
+        "cassandra" => connect_cassandra(&effective_host, effective_port, &config).await,
+        "oracle" => connect_oracle(&effective_host, effective_port, &config).await,
+        "db2" => connect_db2(&effective_host, effective_port, &config).await,
+        other => Err(format!("Unsupported database engine: {}", other)),
+    };
+    let (driver, capabilities) = match connect_result {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(tx) = tunnel_tx.take() {
+                let _ = tx.send(());
+            }
+            return Err(error);
+        }
     };
 
     let session = ActiveDatabaseSession {
