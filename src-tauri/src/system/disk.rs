@@ -478,7 +478,7 @@ else
     echo "Error: Neither parted nor sfdisk command found." >&2
     exit 127
 fi
-partprobe '{dev}' 2>/dev/null || true
+partprobe {dev} 2>/dev/null || true
 "#,
         ensure_parted = ensure_parted_script(),
         dev = clean_dev,
@@ -890,16 +890,20 @@ pub async fn disk_set_partition_flag(
 ) -> Result<String, String> {
     let clean_dev = device.trim().to_string();
     let dev_path = if clean_dev.starts_with('/') { clean_dev } else { format!("/dev/{}", clean_dev) };
+    let allowed_flags = ["boot", "root", "swap", "hidden", "raid", "lvm", "lba", "legacy_boot", "msftres", "esp", "bios_grub", "irst", "chromeos_kernel", "bls_boot", "prep", "diag"];
+    if !valid_device_path(&dev_path) || part_number == 0 || !allowed_flags.contains(&flag.trim()) {
+        return Err("Invalid device, partition number, or partition flag.".into());
+    }
     let state_str = if state_on { "on" } else { "off" };
     let cmd = format!(
         r#"{ensure_parted}
 if command -v parted >/dev/null 2>&1; then
-    parted -s '{dev}' set {num} {flag} {st}
+    parted -s {dev} set {num} {flag} {st}
 fi
 partprobe '{dev}' 2>/dev/null || true
 "#,
         ensure_parted = ensure_parted_script(),
-        dev = dev_path,
+        dev = shell_quote(&dev_path),
         num = part_number,
         flag = flag.trim(),
         st = state_str
