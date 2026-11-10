@@ -141,14 +141,12 @@ pub async fn sftp_extract_archive_pure(
     let escaped_dest = shell_escape(clean_dest);
 
     let lower = archive_path.to_lowercase();
-    let cmd = if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
-        format!("mkdir -p '{}' && tar -xzvf '{}' -C '{}'", escaped_dest, escaped_arch, escaped_dest)
-    } else if lower.ends_with(".tar.bz2") {
-        format!("mkdir -p '{}' && tar -xjvf '{}' -C '{}'", escaped_dest, escaped_arch, escaped_dest)
-    } else if lower.ends_with(".tar.xz") {
-        format!("mkdir -p '{}' && tar -xJvf '{}' -C '{}'", escaped_dest, escaped_arch, escaped_dest)
-    } else if lower.ends_with(".tar") {
-        format!("mkdir -p '{}' && tar -xvf '{}' -C '{}'", escaped_dest, escaped_arch, escaped_dest)
+    let mut cmd = if lower.ends_with(".tar.gz") || lower.ends_with(".tgz")
+        || lower.ends_with(".tar.bz2") || lower.ends_with(".tar.xz") || lower.ends_with(".tar") {
+        format!(
+            "mkdir -p '{}' && python3 -c '{}' '{}' '{}'",
+            escaped_dest, shell_escape("import os,sys,tarfile\narchive,dest=sys.argv[1],os.path.realpath(sys.argv[2])\nwith tarfile.open(archive,'r:*') as t:\n    members=t.getmembers()\n    for m in members:\n        target=os.path.realpath(os.path.join(dest,m.name))\n        if os.path.commonpath([dest,target]) != dest or os.path.isabs(m.name) or m.issym() or m.islnk() or not (m.isfile() or m.isdir()):\n            raise SystemExit('Unsafe or unsupported TAR member: '+repr(m.name))\n    t.extractall(dest,members=members)"), escaped_arch, escaped_dest
+        )
     } else if lower.ends_with(".gz") {
         let uncompressed = archive_path.strip_suffix(".gz").unwrap_or(&archive_path);
         let uncompressed_name = std::path::Path::new(uncompressed)
@@ -165,10 +163,8 @@ pub async fn sftp_extract_archive_pure(
     } else if lower.ends_with(".zip") {
         // Validate every archive member before extraction to prevent zip-slip paths.
         format!(
-            "mkdir -p '{}' && python3 -c 'import os,sys,zipfile; root=os.path.realpath(sys.argv[2]); z=zipfile.ZipFile(sys.argv[1]); bad=[i.filename for i in z.infolist() if os.path.commonpath([root,os.path.realpath(os.path.join(root,i.filename))]) != root]; bad and sys.exit("Unsafe archive member path: " + repr(bad[0])); z.extractall(root)' '{}' '{}'",
-            escaped_dest,
-            escaped_arch,
-            escaped_dest
+            "mkdir -p '{}' && python3 -c '{}' '{}' '{}'",
+            escaped_dest, shell_escape("import os,sys,stat,zipfile\narchive,dest=sys.argv[1],os.path.realpath(sys.argv[2])\nwith zipfile.ZipFile(archive) as z:\n    members=z.infolist()\n    for m in members:\n        target=os.path.realpath(os.path.join(dest,m.filename))\n        mode=(m.external_attr >> 16) & 0xffff\n        if os.path.commonpath([dest,target]) != dest or os.path.isabs(m.filename) or stat.S_ISLNK(mode):\n            raise SystemExit('Unsafe ZIP member: '+repr(m.filename))\n    z.extractall(dest)"), escaped_arch, escaped_dest
         )
     } else {
         format!("mkdir -p '{}' && tar -xvf '{}' -C '{}'", escaped_dest, escaped_arch, escaped_dest)
