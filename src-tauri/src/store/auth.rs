@@ -186,7 +186,7 @@ pub async fn auth_login(username: String, password: String) -> Result<AuthAction
     config.last_login_at = Some(chrono::Utc::now().timestamp());
     if let Ok(json) = serde_json::to_string_pretty(&config) {
         let _ = fs::write(&path, json);
-        enforce_strict_permissions(&path);
+        let _ = enforce_strict_permissions(&path);
     }
 
     log::info!("SSH Desktop: Web session authenticated for user '{}'", config.username);
