@@ -202,7 +202,9 @@ pub async fn db_execute_query(
         let upper = normalized.to_ascii_uppercase();
         let allowed = ["SELECT", "SHOW", "DESCRIBE", "DESC"];
         let is_read = allowed.iter().any(|prefix| {
-            upper == *prefix || upper.starts_with(&format!("{} ", prefix)) || upper.starts_with(&format!("{}\\n", prefix))
+            upper.strip_prefix(prefix)
+                .map(|rest| rest.is_empty() || rest.chars().next().map(|c| c.is_whitespace()).unwrap_or(false))
+                .unwrap_or(false)
         });
         let upper_compact = upper.split_whitespace().collect::<Vec<_>>().join(" ");
         let potentially_mutating = [
