@@ -196,43 +196,54 @@ pub async fn sftp_write_bytes(
     path: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let escaped_path = shell_escape(path);
+    let clean_path = path.trim();
+    if !clean_path.starts_with('/') || clean_path.len() > 4096
+        || clean_path.chars().any(|c| c.is_control())
+        || clean_path.rsplit('/').next().map(|n| n.is_empty() || n == "." || n == "..").unwrap_or(true)
+    {
+        return Err("Remote upload path must be a valid absolute file path.".into());
+    }
+    let escaped_path = shell_escape(clean_path);
     let b64 = to_base64(bytes);
+    let parent = clean_path.rsplit_once('/').map(|(p, _)| if p.is_empty() { "/" } else { p }).unwrap_or("/");
+    let tmp_name = format!(".sshdesktop-upload-{}", uuid::Uuid::new_v4().simple());
+    let local_tmp = format!("{}/{}", parent.trim_end_matches('/'), tmp_name);
+    let local_tmp = if parent == "/" { format!("/{}", tmp_name) } else { local_tmp };
+    let escaped_tmp = shell_escape(&local_tmp);
 
-    // 1. Direct write via base64 decode from stdin (fast path for user-owned paths)
-    let cmd = format!("umask 077 && base64 -d > '{}'", escaped_path);
-    let (stdout, code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &cmd, b64.as_bytes()).await;
+    // Write beside the destination, then atomically rename so a failed transfer
+    // never truncates or leaves a partially-written destination file.
+    let atomic_cmd = format!(
+        "umask 077 && base64 -d > '{}' && if [ -f '{}' ] && [ ! -L '{}' ]; then chmod --reference='{}' '{}'; fi && mv -f -- '{}' '{}'",
+        escaped_tmp, escaped_path, escaped_path, escaped_path, escaped_tmp, escaped_tmp, escaped_path
+    );
+    let (stdout, code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &atomic_cmd, b64.as_bytes()).await;
     if code == 0 {
-        log::info!("SSH Desktop: Saved remote file {} ({} bytes)", path, bytes.len());
+        log::info!("SSH Desktop: Atomically saved remote file {} ({} bytes)", clean_path, bytes.len());
         return Ok(());
     }
 
-    // 2. If direct write failed (e.g. Permission Denied in root/system directories like /var/www, /etc),
-    // write safely to /tmp first with regular user permissions, then elevate with sudo mv!
-    // This completely bypasses sudo stdin pipe issues while supporting both passwordless sudo (-n) and password sudo (-S).
-    let tmp_file = format!("/tmp/.cd_up_{}_{}", std::process::id(), uuid::Uuid::new_v4().simple());
-    let tmp_cmd = format!("umask 077 && base64 -d > '{}'", tmp_file);
-    let (_tmp_out, tmp_code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &tmp_cmd, b64.as_bytes()).await;
-    if tmp_code == 0 {
-        let mv_cmd = format!("mv -f '{}' '{}'", tmp_file, escaped_path);
-        let (s_out, s_code) = crate::ssh::exec::run_cmd_priv(state, conn_id, &mv_cmd).await;
-        if s_code == 0 {
-            // Preserve the temporary file's restrictive mode. Never force 0644:
-            // that could expose secrets and overwrite the destination's intended mode.
-            log::info!("SSH Desktop: Saved remote file with elevated privileges via sudo mv: {}", path);
-            return Ok(());
-        }
-        // Cleanup temp file if mv failed
-        let _ = crate::ssh::exec::run_cmd(state, conn_id, &format!("rm -f '{}'", tmp_file)).await;
-        return Err(format!("Failed to write remote file '{}': {}", path, s_out.trim()));
+    // If the destination directory is privileged, stage in /tmp and move with sudo.
+    let tmp_file = format!("/tmp/.sshdesktop-upload-{}", uuid::Uuid::new_v4().simple());
+    let escaped_tmp_file = shell_escape(&tmp_file);
+    let tmp_cmd = format!("umask 077 && base64 -d > '{}'", escaped_tmp_file);
+    let (tmp_out, tmp_code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &tmp_cmd, b64.as_bytes()).await;
+    if tmp_code != 0 {
+        let _ = crate::ssh::exec::run_cmd(state, conn_id, &format!("rm -f -- '{}'", escaped_tmp)).await;
+        return Err(format!("Failed to stage remote upload: {}", tmp_out.trim()));
     }
 
-    let detail = if !stdout.trim().is_empty() {
-        stdout.trim().to_string()
-    } else {
-        "Permission Denied: Administrator (sudo) privileges required to write to this file.".to_string()
-    };
-    Err(format!("Failed to write remote file '{}': {}", path, detail))
+    let mv_cmd = format!(
+        "if [ -f '{}' ] && [ ! -L '{}' ]; then chmod --reference='{}' '{}'; fi && mv -f -- '{}' '{}'",
+        escaped_path, escaped_path, escaped_path, escaped_tmp_file, escaped_tmp_file, escaped_path
+    );
+    let (move_out, move_code) = crate::ssh::exec::run_cmd_priv(state, conn_id, &mv_cmd).await;
+    if move_code == 0 {
+        log::info!("SSH Desktop: Atomically saved remote file with elevated privileges: {}", clean_path);
+        return Ok(());
+    }
+    let _ = crate::ssh::exec::run_cmd(state, conn_id, &format!("rm -f -- '{}' '{}'", escaped_tmp, escaped_tmp_file)).await;
+    Err(format!("Failed to replace remote file '{}': {}", clean_path, if move_out.trim().is_empty() { "Permission denied" } else { move_out.trim() }))
 }
 
 #[tauri::command]
