@@ -110,7 +110,7 @@ impl Drop for SshPasswordFile {
 }
 
 pub fn create_password_file(password: &str) -> Result<SshPasswordFile, String> {
-    if password.contains(['\\r', '\\n']) {
+    if password.contains('\\r') || password.contains('\\n') {
         return Err("SSH passwords containing newline characters cannot be passed safely to PuTTY".into());
     }
     let path = std::env::temp_dir().join(format!("sshdesktop-pw-{}.tmp", Uuid::new_v4()));
