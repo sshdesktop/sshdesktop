@@ -271,10 +271,11 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
     let mut verified = false;
     let mut last_error = String::new();
 
-    let is_ppk = config.private_key_path.as_deref().map(is_ppk_key).unwrap_or(false);
-
     let auth_method = config.auth_method.as_deref().unwrap_or("password");
-    let is_key_auth = auth_method == "key" || config.private_key_path.is_some();
+    let is_key_auth = auth_method == "key"
+        || (auth_method != "password" && config.private_key_path.is_some());
+    let selected_key_path = if is_key_auth { config.private_key_path.as_deref() } else { None };
+    let is_ppk = selected_key_path.map(is_ppk_key).unwrap_or(false);
 
     // 0. Primary Fast Path: Try establishing persistent in-memory SSH transport
     if !is_ppk {
@@ -283,7 +284,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
             config.port,
             user,
             if is_key_auth { None } else { config.password.as_deref() },
-            config.private_key_path.as_deref(),
+            selected_key_path,
             config.passphrase.as_deref(),
         ).await {
             verified = true;
