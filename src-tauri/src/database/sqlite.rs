@@ -65,8 +65,8 @@ pub async fn connect_sqlite(
                     .map_err(|e| format!("Failed to create local SQLite cache: {}", e))?;
             } else {
                 let download_cmd = format!(
-                    "base64 -w 0 '{}' 2>/dev/null || base64 '{}'",
-                    escaped, escaped
+                    "base64 '{}' | tr -d '\\n'",
+                    escaped
                 );
                 let (cmd_out, cmd_code) = crate::ssh::exec::run_cmd(app_state, &conn_id, &download_cmd).await;
                 if cmd_code != 0 {
@@ -80,7 +80,7 @@ pub async fn connect_sqlite(
 
             local_cache.to_string_lossy().to_string()
         } else {
-            raw_path.to_string()
+            return Err("Remote SQLite requires an application SSH state and an explicit SSH connection.".into());
         }
     } else {
         raw_path.to_string()
