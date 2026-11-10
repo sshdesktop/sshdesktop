@@ -72,12 +72,19 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         let state_sessions = state.sessions.clone();
         let cid = conn_id.to_string();
         tokio::spawn(async move {
-            if let Ok(handle) = crate::ssh::session::connect_session(
+            let is_key_auth = match conn_clone.config.auth_method.as_deref() {
+                Some("password") => false,
+                Some("key") => true,
+                _ => conn_clone.config.private_key_path.is_some(),
+            };
+            if let Ok(handle) = crate::ssh::session::connect_session_with_passphrase_auth(
                 &conn_clone.config.host,
                 conn_clone.config.port,
                 &conn_clone.config.username,
-                conn_clone.config.password.as_deref(),
-                conn_clone.config.private_key_path.as_deref(),
+                if is_key_auth { None } else { conn_clone.config.password.as_deref() },
+                if is_key_auth { conn_clone.config.private_key_path.as_deref() } else { None },
+                conn_clone.config.passphrase.as_deref(),
+                conn_clone.config.auth_method.as_deref() != Some("password"),
             ).await {
                 let mut map = state_sessions.lock().await;
                 let arc = std::sync::Arc::new(handle);
@@ -598,6 +605,9 @@ pub async fn run_cmd_with_stdin(
         .arg("-o").arg("BatchMode=yes")
         .arg("-o").arg("IdentitiesOnly=yes")
         .arg("-o").arg("ConnectTimeout=10");
+    if !is_key_auth {
+        ssh_cmd.arg("-o").arg("PubkeyAuthentication=no");
+    }
 
     if let Some(key_path) = selected_key_path {
         if crate::ssh::connection::resolve_key_path(key_path).is_some() {
