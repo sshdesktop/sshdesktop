@@ -1,3 +1,9 @@
+fn valid_username(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 32
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::ssh::exec::{run_cmd, run_cmd_priv};
@@ -127,7 +133,7 @@ pub async fn user_add(
     groups: Option<Vec<String>>,
 ) -> Result<(), String> {
     // Validate username
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_username(&username) {
         return Err("Invalid username. Use only alphanumeric characters, hyphens, and underscores.".into());
     }
 
@@ -192,7 +198,10 @@ pub async fn user_add(
 
     if let Some(pwd) = password.as_deref() {
         if !pwd.is_empty() {
-            let password_input = format!("{}:{}\\n", username, pwd);
+            if pwd.len() > 1024 || pwd.contains(':') || pwd.chars().any(|c| c == '\n' || c == '\r' || c == '\0') {
+                return Err("Password must be at most 1024 characters and cannot contain colon or line breaks.".into());
+            }
+            let password_input = format!("{}:{}\n", username, pwd);
             let (password_out, password_code) = crate::ssh::exec::run_cmd_priv_with_stdin(
                 &state, &conn_id, "chpasswd", password_input.as_bytes()
             ).await;
@@ -213,14 +222,17 @@ pub async fn user_set_password(
     username: String,
     password: String,
 ) -> Result<(), String> {
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
     if password.is_empty() {
         return Err("Password cannot be empty.".into());
     }
 
-    let password_input = format!("{}:{}\\n", username, password);
+    if password.len() > 1024 || password.contains(':') || password.chars().any(|c| c == '\n' || c == '\r' || c == '\0') {
+        return Err("Password must be at most 1024 characters and cannot contain colon or line breaks.".into());
+    }
+    let password_input = format!("{}:{}\n", username, password);
     let (stdout, code) = crate::ssh::exec::run_cmd_priv_with_stdin(
         &state,
         &conn_id,
@@ -244,7 +256,7 @@ pub async fn user_toggle_sudo(
     username: String,
     grant: bool,
 ) -> Result<(), String> {
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
     if username == "root" {
@@ -301,7 +313,7 @@ pub async fn user_delete(
     username: String,
     remove_home: bool,
 ) -> Result<(), String> {
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
     // Protect critical system users
@@ -379,7 +391,7 @@ pub async fn user_lock(
     conn_id: String,
     username: String,
 ) -> Result<(), String> {
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
     if username == "root" {
@@ -411,7 +423,7 @@ pub async fn user_unlock(
     conn_id: String,
     username: String,
 ) -> Result<(), String> {
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
 
@@ -551,7 +563,7 @@ pub async fn group_add_user(
     if group.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
         return Err("Invalid group name.".into());
     }
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
 
@@ -576,7 +588,7 @@ pub async fn group_remove_user(
     if group.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
         return Err("Invalid group name.".into());
     }
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
 
@@ -669,7 +681,7 @@ pub async fn user_lock(
     conn_id: String,
     username: String,
 ) -> Result<(), String> {
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
     if username == "root" {
@@ -701,7 +713,7 @@ pub async fn user_unlock(
     conn_id: String,
     username: String,
 ) -> Result<(), String> {
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
 
@@ -841,7 +853,7 @@ pub async fn group_add_user(
     if group.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
         return Err("Invalid group name.".into());
     }
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
 
@@ -866,7 +878,7 @@ pub async fn group_remove_user(
     if group.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
         return Err("Invalid group name.".into());
     }
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
 
