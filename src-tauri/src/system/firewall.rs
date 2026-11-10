@@ -3,10 +3,12 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn valid_firewall_port_or_service(value: &str) -> bool {
-    if value.is_empty() || value.len() > 64 || value.starts_with('-') {
-        return false;
+    if let Ok(port) = value.parse::<u16>() {
+        return (1..=65535).contains(&port);
     }
-    value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
+    !value.is_empty() && value.len() <= 64
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 fn valid_zone(value: &str) -> bool {
@@ -440,28 +442,37 @@ pub async fn firewall_add_rule_advanced(
 
     let cmd = match fw {
         "firewalld" => {
-            let zone_flag = if let Some(ref z) = payload.zone {
-                if !z.trim().is_empty() { format!("--zone={}", z.trim()) } else { String::new() }
-            } else {
-                String::new()
-            };
-
-            // Check if port is numeric / range vs service name
-            let is_numeric = port.chars().any(|c| c.is_ascii_digit());
-            if is_numeric {
-                let p_arg = if proto == "any" { format!("{}/tcp", port) } else { format!("{}/{}", port, proto) };
-                if action == "allow" {
+            if direction == "out" {
+                return Err("Outbound firewalld rich rules are not supported by this operation.".into());
+            }
+            let zone_flag = payload.zone.as_deref()
+                .filter(|z| !z.trim().is_empty())
+                .map(|z| format!("--zone={}", z.trim()))
+                .unwrap_or_default();
+            if action == "limit" {
+                return Err("The limit action is not supported by this firewalld rule builder.".into());
+            }
+            if action == "allow" {
+                if port.parse::<u16>().is_ok() {
+                    let p_arg = format!("{}/{}", port, if proto == "any" { "tcp" } else { proto });
                     format!("firewall-cmd --permanent {} --add-port={} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, p_arg)
                 } else {
-                    format!("firewall-cmd --permanent {} --remove-port={} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, p_arg)
+                    format!("firewall-cmd --permanent {} --add-service={} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, port)
                 }
             } else {
-                // Service name
-                if action == "allow" {
-                    format!("firewall-cmd --permanent {} --add-service={} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, port)
+                let family = if from_ip.contains(':') { "ipv6" } else { "ipv4" };
+                let source_clause = if from_ip.is_empty() || from_ip.eq_ignore_ascii_case("anywhere") || from_ip.eq_ignore_ascii_case("any") {
+                    String::new()
                 } else {
-                    format!("firewall-cmd --permanent {} --remove-service={} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, port)
-                }
+                    format!(" source address=\\"{}\\" ", from_ip)
+                };
+                let target = if action == "reject" { "reject" } else { "drop" };
+                let rule = if port.parse::<u16>().is_ok() {
+                    format!("rule family=\\"{}\\"{}port port=\\"{}\\" protocol=\\"{}\\" {}", family, source_clause, port, if proto == "any" { "tcp" } else { proto }, target)
+                } else {
+                    format!("rule family=\\"{}\\"{}service name=\\"{}\\" {}", family, source_clause, port, target)
+                };
+                format!("firewall-cmd --permanent {} --add-rich-rule={} 2>&1 && firewall-cmd --reload 2>&1", zone_flag, shell_quote(&rule))
             }
         }
         "ufw" => {
@@ -470,31 +481,36 @@ pub async fn firewall_add_rule_advanced(
                 ufw_cmd.push_str(" out");
             }
             if !from_ip.is_empty() && !from_ip.eq_ignore_ascii_case("anywhere") && !from_ip.eq_ignore_ascii_case("any") {
-                ufw_cmd.push_str(&format!(" from {} to any port {}", from_ip, port));
+                ufw_cmd.push_str(&format!(" from {} to any port {}", shell_quote(from_ip), shell_quote(port)));
                 if proto != "any" {
                     ufw_cmd.push_str(&format!(" proto {}", proto));
                 }
+            } else if proto != "any" {
+                ufw_cmd.push_str(&format!(" {}/{}", port, proto));
             } else {
-                if proto != "any" {
-                    ufw_cmd.push_str(&format!(" {}/{}", port, proto));
-                } else {
-                    ufw_cmd.push_str(&format!(" {}", port));
-                }
+                ufw_cmd.push_str(&format!(" {}", port));
             }
-            if let Some(ref c) = payload.comment {
-                if !c.trim().is_empty() {
-                    ufw_cmd.push_str(&format!(" comment {}", shell_quote(c.trim())));
+            if let Some(ref comment) = payload.comment {
+                if !comment.trim().is_empty() {
+                    ufw_cmd.push_str(&format!(" comment {}", shell_quote(comment.trim())));
                 }
             }
             format!("{} 2>&1", ufw_cmd)
         }
         _ => {
-            format!(
-                "iptables -A INPUT -p {} --dport {} -j {} 2>&1",
-                if proto == "any" { "tcp" } else { proto },
-                port,
-                if action == "allow" { "ACCEPT" } else { "DROP" }
-            )
+            let chain = if direction == "out" { "OUTPUT" } else { "INPUT" };
+            let protocol = if proto == "any" { "tcp" } else { proto };
+            let target = match action.as_str() {
+                "allow" => "ACCEPT",
+                "reject" => "REJECT",
+                "limit" => "ACCEPT",
+                _ => "DROP",
+            };
+            if action == "limit" {
+                format!("iptables -A {} -p {} --dport {} -m limit --limit 5/minute --limit-burst 10 -j {} 2>&1", chain, protocol, port, target)
+            } else {
+                format!("iptables -A {} -p {} --dport {} -j {} 2>&1", chain, protocol, port, target)
+            }
         }
     };
 
@@ -626,6 +642,9 @@ pub async fn firewall_toggle(
         return Err("No active SSH connection.".into());
     }
 
+    if code != 0 {
+        return Err(format!("Failed to {} firewall: {}", if enable { "enable" } else { "disable" }, stdout.trim()));
+    }
     let status = if enable { "enabled" } else { "disabled" };
     Ok(if !stdout.is_empty() { stdout } else { format!("Firewall is now {}.", status) })
 }
