@@ -299,7 +299,6 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
     if !verified && is_key_auth {
         if is_ppk {
             if let Some(key_path) = &config.private_key_path {
-                let password_file = create_password_file(pwd)?;
                 let plink_bin = get_plink_path();
                 let mut cmd = tokio::process::Command::new(plink_bin);
                 #[cfg(windows)]
@@ -409,6 +408,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
     if !verified && !is_key_auth {
         if let Some(pwd) = &config.password {
             if !pwd.is_empty() {
+                let password_file = create_password_file(pwd)?;
                 let plink_bin = get_plink_path();
                 let mut cmd = tokio::process::Command::new(plink_bin);
                 #[cfg(windows)]
