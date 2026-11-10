@@ -3,7 +3,7 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn valid_unit_name(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 256
+    !value.is_empty() && !value.starts_with('-') && value.len() <= 256
         && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | ':' | '-'))
 }
 
