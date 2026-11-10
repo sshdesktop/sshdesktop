@@ -238,8 +238,7 @@ pub async fn ssh_start_tunnel(
         let mut maybe_handle = {
             let lock = state.sessions.lock().await;
             lock.get(&conn_id).cloned()
-                .or_else(|| lock.get("default").cloned())
-                .or_else(|| lock.values().next().cloned())
+                .or_else(|| if conn_id == "default" { lock.get("default").cloned() } else { None })
         };
 
         if maybe_handle.is_none() {
@@ -391,7 +390,7 @@ pub async fn ssh_start_tunnel(
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
-        cmd.arg("-ssh")
+        cmd.arg("-batch").arg("-ssh")
             .arg("-N")
             .arg("-P").arg(&ssh_port)
             .arg("-l").arg(&user);
@@ -415,7 +414,7 @@ pub async fn ssh_start_tunnel(
         }
 
         cmd.arg(&host);
-        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::piped());
         cmd
@@ -423,40 +422,9 @@ pub async fn ssh_start_tunnel(
 
     if prefer_plink {
         used_plink_first = true;
-        // Pre-cache host key in PuTTY registry to prevent batch mode / host key rejection
-        #[cfg(windows)]
-        {
-            let mut probe = tokio::process::Command::new(plink_bin);
-            probe.creation_flags(0x08000000);
-            probe.arg("-ssh").arg("-P").arg(&ssh_port).arg("-l").arg(&user);
-            if let Some(pwd) = &conn.config.password {
-                if !pwd.is_empty() { probe.arg("-pw").arg(pwd); }
-            }
-            if let Some(key) = &conn.config.private_key_path {
-                if crate::ssh::connection::resolve_key_path(key).is_some() { probe.arg("-i").arg(key); }
-            }
-            probe.arg(&host).arg("echo sshdesktop-tunnel-ok");
-            probe.stdin(std::process::Stdio::piped());
-            probe.stdout(std::process::Stdio::piped());
-            probe.stderr(std::process::Stdio::piped());
-
-            if let Ok(mut ch) = probe.spawn() {
-                if let Some(mut stdin) = ch.stdin.take() {
-                    let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
-                }
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(3), ch.wait()).await;
-            }
-        }
-
         let mut cmd = make_plink_cmd();
         match cmd.spawn() {
             Ok(mut child) => {
-                if let Some(mut stdin) = child.stdin.take() {
-                    tokio::spawn(async move {
-                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
-                        let _ = tokio::io::AsyncWriteExt::flush(&mut stdin).await;
-                    });
-                }
                 child_handle = Some(child);
                 spawned = true;
             }
@@ -489,12 +457,6 @@ pub async fn ssh_start_tunnel(
         } else if plink_available && !is_pem_key {
             let mut cmd = make_plink_cmd();
             if let Ok(mut child) = cmd.spawn() {
-                if let Some(mut stdin) = child.stdin.take() {
-                    tokio::spawn(async move {
-                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
-                        let _ = tokio::io::AsyncWriteExt::flush(&mut stdin).await;
-                    });
-                }
                 child_handle = Some(child);
                 spawned = true;
             }
@@ -758,8 +720,7 @@ pub async fn ssh_start_socks5(
     let mut maybe_handle = {
         let lock = state.sessions.lock().await;
         lock.get(&conn_id).cloned()
-            .or_else(|| lock.get("default").cloned())
-            .or_else(|| lock.values().next().cloned())
+            .or_else(|| if conn_id == "default" { lock.get("default").cloned() } else { None })
     };
 
     if maybe_handle.is_none() {
@@ -919,12 +880,6 @@ pub async fn ssh_start_socks5(
         let mut cmd = make_plink_cmd();
         match cmd.spawn() {
             Ok(mut child) => {
-                if let Some(mut stdin) = child.stdin.take() {
-                    tokio::spawn(async move {
-                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
-                        let _ = tokio::io::AsyncWriteExt::flush(&mut stdin).await;
-                    });
-                }
                 child_handle = Some(child);
                 spawned = true;
             }
@@ -957,12 +912,6 @@ pub async fn ssh_start_socks5(
         } else if plink_available && !is_pem_key {
             let mut cmd = make_plink_cmd();
             if let Ok(mut child) = cmd.spawn() {
-                if let Some(mut stdin) = child.stdin.take() {
-                    tokio::spawn(async move {
-                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
-                        let _ = tokio::io::AsyncWriteExt::flush(&mut stdin).await;
-                    });
-                }
                 child_handle = Some(child);
                 spawned = true;
             }
