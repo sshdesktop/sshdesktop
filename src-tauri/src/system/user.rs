@@ -346,7 +346,7 @@ pub async fn user_modify(
     shell: Option<String>,
     groups: Option<Vec<String>>,
 ) -> Result<(), String> {
-    if username.is_empty() || !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
 
@@ -368,7 +368,7 @@ pub async fn user_modify(
     }
 
     if let Some(grps) = groups {
-        if grps.iter().any(|g| g.is_empty() || !g.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')) {
+        if grps.iter().any(|g| !valid_groupname(g)) {
             return Err("Invalid group name.".into());
         }
         if !grps.is_empty() {
@@ -435,14 +435,14 @@ pub async fn user_unlock(
     // 1. Clear expiration date -> re-enables login access
     // 2. Unlock password hash with usermod -U or passwd -u
     let cmd = format!(
-        "usermod -e '' '{}' 2>&1; usermod -U '{}' 2>/dev/null || passwd -u '{}' 2>/dev/null || true",
+        "usermod -e '' '{}' 2>&1 || exit $?; if usermod -U '{}' 2>/dev/null; then exit 0; elif passwd -u '{}' 2>&1; then exit 0; else echo 'Unable to unlock password hash with usermod or passwd' >&2; exit 1; fi",
         username, username, username
     );
     let (out, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !out.is_empty() {
+    if code != 0 {
         return Err(format!("Unlock user failed: {}", out.trim()));
     }
 
