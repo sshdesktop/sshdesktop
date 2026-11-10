@@ -256,7 +256,7 @@ pub async fn ssh_start_tunnel(
                     {
                         let mut lock = state.sessions.lock().await;
                         lock.insert(conn.id.clone(), arc_h.clone());
-                        lock.insert("default".to_string(), arc_h.clone());
+                        lock.entry("default".to_string()).or_insert_with(|| arc_h.clone());
                     }
                     maybe_handle = Some(arc_h);
                 }
@@ -744,7 +744,7 @@ pub async fn ssh_start_socks5(
                 {
                     let mut lock = state.sessions.lock().await;
                     lock.insert(conn.id.clone(), arc_h.clone());
-                    lock.insert("default".to_string(), arc_h.clone());
+                    lock.entry("default".to_string()).or_insert_with(|| arc_h.clone());
                 }
                 maybe_handle = Some(arc_h);
             }
