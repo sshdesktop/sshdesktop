@@ -130,6 +130,32 @@ pub async fn execute_query_mssql(
         let stmt_start = Instant::now();
         let normalized = stmt.trim_start().to_ascii_uppercase();
         let is_bounded_select = normalized.starts_with("SELECT") && !normalized.contains(" INTO ");
+        let is_mutation = !is_bounded_select
+            && !normalized.starts_with("WITH")
+            && !normalized.starts_with("EXEC")
+            && !normalized.starts_with("SHOW")
+            && !normalized.starts_with("DESCRIBE")
+            && !normalized.starts_with("EXPLAIN")
+            && !normalized.starts_with("VALUES");
+        if is_mutation {
+            let result = client.execute(stmt, &[]).await
+                .map_err(|e| format!("MSSQL execution error: {}", e))?;
+            let affected = result.total();
+            total_affected = total_affected.saturating_add(affected);
+            if statements.len() > 1 {
+                warnings.push(format!("Statement affected {} rows.", affected));
+            }
+            batch_results.push(BatchStatementResult {
+                statement: stmt.to_string(),
+                columns: Vec::new(),
+                rows: Vec::new(),
+                affected_rows: affected,
+                last_insert_id: None,
+                execution_time_ms: stmt_start.elapsed().as_secs_f64() * 1000.0,
+                error: None,
+            });
+            continue;
+        }
         if is_bounded_select {
             let row_cap = remaining_rows.saturating_add(1);
             client.simple_query(&format!("SET ROWCOUNT {}", row_cap))
