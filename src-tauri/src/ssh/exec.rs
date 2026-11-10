@@ -447,8 +447,10 @@ pub async fn run_cmd_with_stdin(
     {
         let handle_opt = {
             let sessions = state.sessions.lock().await;
-            if conn_id == "default" || conn_id.is_empty() {
-                sessions.get("default").cloned().or_else(|| sessions.values().next().cloned())
+            if conn_id == "default" {
+                sessions.get("default").cloned()
+            } else if conn_id.is_empty() {
+                None
             } else {
                 sessions.get(conn_id).cloned()
             }
