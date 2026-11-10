@@ -556,9 +556,10 @@ pub async fn package_remove(
     conn_id: String,
     name: String,
 ) -> Result<String, String> {
-    if name.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')')) {
+    if !valid_package_name(&name) {
         return Err("Invalid package name.".into());
     }
+    let package_arg = shell_quote(&name);
 
     let pm = detect_pkg_manager(&state, &conn_id).await;
     let lower = name.to_lowercase();
