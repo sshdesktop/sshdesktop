@@ -684,6 +684,13 @@ pub async fn run_cmd_priv_with_stdin(
     if n_code == 0 {
         return (n_out, n_code);
     }
+    let n_out_lower = n_out.to_ascii_lowercase();
+    let password_required = n_out_lower.contains("password is required")
+        || n_out_lower.contains("a password is required")
+        || n_out_lower.contains("no password was provided");
+    if !password_required {
+        return (n_out, n_code);
+    }
 
     if let Some(ref pwd) = conn.config.password {
         if !pwd.is_empty() {
