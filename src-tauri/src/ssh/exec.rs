@@ -403,7 +403,15 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
         return (msg, n_code);
     }
 
-    // 3B. User requires a password for sudo (sudo -S)
+    // Only retry with a password when sudo explicitly reports that one is required.
+    let password_required = lower_out.contains("password is required")
+        || lower_out.contains("a password is required")
+        || lower_out.contains("no password was provided");
+    if !password_required {
+        return (n_out, n_code);
+    }
+
+    // 3C. User requires a password for sudo (sudo -S)
     if let Some(ref pwd) = conn.config.password {
         if !pwd.is_empty() {
             let sudo_s_cmd = format!(
