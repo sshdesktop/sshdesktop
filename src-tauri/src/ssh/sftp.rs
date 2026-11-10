@@ -591,7 +591,7 @@ pub async fn sftp_read_file_base64(
     if code == -1 && stdout.is_empty() {
         return Err("No active SSH connection.".into());
     }
-    if code == 0 && !stdout.is_empty() {
+    if code == 0 {
         let clean_b64: String = stdout.chars().filter(|c| !c.is_whitespace()).collect();
         return Ok(clean_b64);
     }
