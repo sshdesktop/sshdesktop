@@ -515,7 +515,7 @@ pub async fn firewall_add_rule_advanced(
     };
 
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
-    if code != 0 && !stdout.contains("ALREADY_ENABLED") && !stdout.contains("Rule added") {
+    if code != 0 {
         return Err(format!("Failed to add rule (code {}): {}", code, stdout.trim()));
     }
 
@@ -587,7 +587,7 @@ pub async fn firewall_delete_rule_advanced(
             };
             if let Some(ref p) = port {
                 let proto = protocol.as_deref().unwrap_or("tcp");
-                if p.chars().any(|c| c.is_ascii_digit()) {
+                if p.parse::<u16>().is_ok() {
                     format!("firewall-cmd --permanent {} --remove-port={}/{} 2>&1; firewall-cmd --reload 2>&1", zone_flag, p, proto)
                 } else {
                     format!("firewall-cmd --permanent {} --remove-service={} 2>&1; firewall-cmd --reload 2>&1", zone_flag, p)
