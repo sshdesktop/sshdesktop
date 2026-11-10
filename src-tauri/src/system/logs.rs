@@ -148,12 +148,15 @@ pub async fn logs_stream_start(
     let handle = match handle {
         Some(handle) => handle,
         None => {
-            let new_handle = crate::ssh::session::connect_session(
+            let explicit_password_auth = conn.config.auth_method.as_deref() == Some("password");
+            let new_handle = crate::ssh::session::connect_session_with_passphrase_auth(
                 &conn.config.host,
                 conn.config.port,
                 &conn.config.username,
                 conn.config.password.as_deref(),
-                conn.config.private_key_path.as_deref(),
+                if explicit_password_auth { None } else { conn.config.private_key_path.as_deref() },
+                conn.config.passphrase.as_deref(),
+                !explicit_password_auth,
             ).await.map_err(|e| format!("Failed to open SSH log stream: {}", e))?;
             let handle = std::sync::Arc::new(new_handle);
             let mut sessions = state.sessions.lock().await;
