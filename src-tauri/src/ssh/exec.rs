@@ -104,7 +104,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
     let is_key_auth = match conn.config.auth_method.as_deref() {
         Some("password") => false,
         Some("key") => true,
-        _ => conn.config.private_key_path.is_some(),
+        _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
     };
     let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
     if let Some(key_path) = selected_key_path {
@@ -515,7 +515,7 @@ pub async fn run_cmd_with_stdin(
     let is_key_auth = match conn.config.auth_method.as_deref() {
         Some("password") => false,
         Some("key") => true,
-        _ => conn.config.private_key_path.is_some(),
+        _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
     };
     let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
     if let Some(key_path) = selected_key_path {
