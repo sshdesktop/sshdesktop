@@ -30,6 +30,20 @@ fn delete_connection_password(id: &str) {
     }
 }
 
+fn hydrate_connection_passwords(list: &mut [SavedConnection]) -> bool {
+    let mut migrated = false;
+    for connection in list {
+        if let Some(password) = connection.password.as_ref() {
+            if !password.is_empty() && store_connection_password(&connection.id, password).is_ok() {
+                migrated = true;
+            }
+        } else {
+            connection.password = load_connection_password(&connection.id);
+        }
+    }
+    migrated
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SavedConnection {
     pub id: String,
@@ -80,16 +94,7 @@ pub fn read_connections_from_disk() -> Vec<SavedConnection> {
     let path = get_storage_path();
     if let Ok(content) = fs::read_to_string(&path) {
         if let Ok(mut list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
-            let mut migrated_legacy_password = false;
-            for connection in &mut list {
-                if let Some(password) = connection.password.as_ref() {
-                    if !password.is_empty() && store_connection_password(&connection.id, password).is_ok() {
-                        migrated_legacy_password = true;
-                    }
-                } else {
-                    connection.password = load_connection_password(&connection.id);
-                }
-            }
+            let migrated_legacy_password = hydrate_connection_passwords(&mut list);
             if migrated_legacy_password {
                 // write_connections_to_disk serializes a sanitized copy, removing
                 // legacy plaintext password fields only after keyring storage succeeds.
@@ -104,6 +109,10 @@ pub fn read_connections_from_disk() -> Vec<SavedConnection> {
         if let Ok(content) = fs::read_to_string(legacy_home) {
             if let Ok(list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
                 let _ = fs::write(&path, &content);
+                let mut list = list;
+                if hydrate_connection_passwords(&mut list) {
+                    let _ = write_connections_to_disk(&list);
+                }
                 return list;
             }
         }
