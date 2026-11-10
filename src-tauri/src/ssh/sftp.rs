@@ -541,7 +541,8 @@ pub async fn sftp_download(
     // 1. Primary fast path: read remote file content directly via SSH stream
     if let Ok(bytes) = sftp_read_file(state.clone(), conn_id.clone(), remote_path.clone()).await {
         if let Some(parent) = std::path::Path::new(&local_path).parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
+            tokio::fs::create_dir_all(parent).await
+                .map_err(|e| format!("Failed to create local download directory: {}", e))?;
         }
         if let Ok(()) = tokio::fs::write(&local_path, &bytes).await {
             log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_path);
