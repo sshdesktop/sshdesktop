@@ -511,10 +511,11 @@ pub async fn firewall_add_rule_advanced(
             } else {
                 String::new()
             };
+            let iptables_bin = if from_ip.contains(':') { "ip6tables" } else { "iptables" };
             if action == "limit" {
-                format!("iptables -A {} {} -p {} --dport {} -m limit --limit 5/minute --limit-burst 10 -j {} 2>&1", chain, source_arg, protocol, port, target)
+                format!("{} -A {} {} -p {} --dport {} -m limit --limit 5/minute --limit-burst 10 -j {} 2>&1", iptables_bin, chain, source_arg, protocol, port, target)
             } else {
-                format!("iptables -A {} {} -p {} --dport {} -j {} 2>&1", chain, source_arg, protocol, port, target)
+                format!("{} -A {} {} -p {} --dport {} -j {} 2>&1", iptables_bin, chain, source_arg, protocol, port, target)
             }
         }
     };
