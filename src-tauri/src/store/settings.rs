@@ -1,3 +1,35 @@
+fn write_settings_file(path: &std::path::Path, content: &str) -> Result<(), String> {
+    let parent = path.parent().ok_or_else(|| "Settings path has no parent directory.".to_string())?;
+    fs::create_dir_all(parent).map_err(|e| format!("Failed to create settings directory: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let temp = parent.join(format!(".settings-{}.tmp", uuid::Uuid::new_v4().simple()));
+        let result = (|| -> Result<(), String> {
+            let mut file = fs::OpenOptions::new()
+                .write(true).create_new(true).mode(0o600).open(&temp)
+                .map_err(|e| format!("Failed to create temporary settings file: {}", e))?;
+            file.write_all(content.as_bytes()).map_err(|e| format!("Failed to write settings: {}", e))?;
+            file.sync_all().map_err(|e| format!("Failed to flush settings: {}", e))?;
+            fs::rename(&temp, path).map_err(|e| format!("Failed to replace settings file: {}", e))?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("Failed to secure settings file: {}", e))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        result
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(path, content).map_err(|e| format!("Failed to write settings: {}", e))
+    }
+}
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -112,8 +144,7 @@ pub async fn settings_get(_state: tauri::State<'_, AppState>) -> Result<AppSetti
         let legacy_home = base.home_dir().join(".clouddesk").join("settings.json");
         if let Ok(content) = fs::read_to_string(&legacy_home) {
             if let Ok(settings) = serde_json::from_str::<AppSettings>(&content) {
-                let _ = fs::write(&path, &content);
-                secure_settings_file(&path);
+                let _ = write_settings_file(&path, &content);
                 return Ok(settings);
             }
         }
@@ -128,8 +159,7 @@ pub async fn settings_get(_state: tauri::State<'_, AppState>) -> Result<AppSetti
     }
     let default_settings = AppSettings::default();
     if let Ok(serialized) = serde_json::to_string_pretty(&default_settings) {
-        let _ = fs::write(&path, serialized);
-        secure_settings_file(&path);
+        let _ = write_settings_file(&path, &serialized);
     }
     Ok(default_settings)
 }
@@ -138,7 +168,9 @@ pub async fn settings_get(_state: tauri::State<'_, AppState>) -> Result<AppSetti
 pub async fn settings_save(_state: tauri::State<'_, AppState>, settings: AppSettings) -> Result<(), String> {
     let path = get_settings_path();
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| e.to_string())?;
-    secure_settings_file(&path);
+    if json.len() > 4 * 1024 * 1024 {
+        return Err("Settings data exceeds the 4 MiB limit.".into());
+    }
+    write_settings_file(&path, &json)?;
     Ok(())
 }
