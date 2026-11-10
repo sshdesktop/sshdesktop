@@ -515,7 +515,11 @@ fn build_install_command(pm: &str, raw_name: &str) -> (String, Option<String>) {
         _ => format!("DEBIAN_FRONTEND=noninteractive apt-get install -y {} 2>&1", package_arg),
     };
 
-    let post = format!("if systemctl list-unit-files {} >/dev/null 2>&1; then systemctl enable --now {} 2>/dev/null || true; fi", shell_quote(&format!("{}.service", name)), package_arg);
+    let service_arg = shell_quote(&format!("{}.service", name));
+    let post = format!(
+        "if systemctl list-unit-files {} >/dev/null 2>&1; then systemctl enable --now {} 2>/dev/null || true; fi",
+        service_arg, service_arg
+    );
     (install_cmd, Some(post))
 }
 
