@@ -209,11 +209,10 @@ pub async fn docker_logs(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if !stdout.is_empty() {
-        return Ok(stdout);
+    if code != 0 {
+        return Err(format!("docker logs failed for '{}': {}", container_id, stdout.trim()));
     }
-
-    Err(format!("No logs returned for container '{}'", container_id))
+    Ok(stdout)
 }
 
 #[tauri::command]
@@ -227,8 +226,11 @@ pub async fn docker_images(
         "docker images --format '{{json .}}' 2>&1",
     ).await;
 
-    if code == -1 && stdout.is_empty() {
+    if code == -1 {
         return Err("No active SSH connection.".into());
+    }
+    if code != 0 {
+        return Err(format!("docker images failed: {}", stdout.trim()));
     }
     if stdout.contains("command not found") {
         return Err("Docker is not installed on the remote server.".into());
@@ -279,8 +281,8 @@ pub async fn docker_exec(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && stdout.is_empty() {
-        return Err(format!("docker exec failed for container '{}'", container_id));
+    if code != 0 {
+        return Err(format!("docker exec failed for container '{}': {}", container_id, stdout.trim()));
     }
     Ok(stdout)
 }
@@ -305,11 +307,14 @@ pub async fn docker_image_remove(
     let image_arg = shell_quote(&image_id);
 
     // Safety check: verify no active or stopped containers use this image
-    let (chk, _) = run_cmd(
+    let (chk, chk_code) = run_cmd(
         &state,
         &conn_id,
         &format!("docker ps -a --filter ancestor={} --format '{{{{.Names}}}} ({{{{.Status}}}})' 2>&1", image_arg),
     ).await;
+    if chk_code != 0 {
+        return Err(format!("Cannot safely check whether image is in use: {}", chk.trim()));
+    }
     let chk_trimmed = chk.trim();
     if !chk_trimmed.is_empty() && !chk_trimmed.contains("error") && !chk_trimmed.contains("unknown flag") {
         return Err(format!(
