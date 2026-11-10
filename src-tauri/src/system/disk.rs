@@ -410,20 +410,46 @@ pub async fn disk_unmount(
         return Err("Unmount target must be an absolute path or valid device identifier.".into());
     }
 
-    let mut umount_cmd = "umount".to_string();
+    let target_arg = shell_quote(clean_target);
+    let safety_check = format!(
+        r#"TARGET={}
+if [ -b "$TARGET" ]; then
+    if [ "{}" = "true" ] || [ "{}" = "true" ]; then
+        echo "Refusing force/lazy unmount by block-device path; use the exact mountpoint after verifying it is non-critical." >&2
+        exit 41
+    fi
+    MOUNT=$(findmnt -rn -o TARGET -S "$TARGET" 2>/dev/null || true)
+else
+    MOUNT=$(findmnt -rn -o TARGET --target "$TARGET" 2>/dev/null || true)
+fi
+case "$MOUNT" in
+    /|/boot|/boot/efi|/usr|/var|/etc|/dev|/proc|/sys)
+        if [ "{}" = "true" ] || [ "{}" = "true" ]; then
+            echo "Refusing force/lazy unmount of critical system mountpoint $MOUNT" >&2
+            exit 40
+        fi
+        ;;
+esac
+"#,
+        target_arg,
+        force,
+        lazy,
+        force,
+        lazy
+    );
+    let mut umount_cmd = format!("{}; umount", safety_check);
     if force {
         umount_cmd.push_str(" -f");
     }
     if lazy {
         umount_cmd.push_str(" -l");
     }
-    let target_arg = shell_quote(clean_target);
     umount_cmd.push_str(&format!(" {}", target_arg));
 
     if remove_from_fstab {
         let fstab_target_arg = shell_quote(&fstab_escape(clean_target));
         umount_cmd.push_str(&format!(
-            " && (tmp=$(mktemp /etc/fstab.XXXXXX) && awk -v target={} '$1 != target && $2 != target' /etc/fstab > \"$tmp\" && cat \"$tmp\" > /etc/fstab && rm -f \"$tmp\")",
+            " && (tmp=$(mktemp /etc/fstab.XXXXXX) && trap 'rm -f \"$tmp\"' EXIT && awk -v target={} '$1 != target && $2 != target' /etc/fstab > \"$tmp\" && chmod --reference=/etc/fstab \"$tmp\" && chown --reference=/etc/fstab \"$tmp\" && mv -f -- \"$tmp\" /etc/fstab)",
             fstab_target_arg
         ));
     }
@@ -1006,22 +1032,19 @@ pub async fn disk_format_filesystem(
     // Never format a device while it is mounted or active as swap, and protect critical system paths.
     let preflight = format!(
         r#"DEV={}
+[ -b "$DEV" ] || {{ echo "Refusing to format: target is not a block device" >&2; exit 50; }}
+command -v lsblk >/dev/null 2>&1 || {{ echo "lsblk is required for safe filesystem formatting" >&2; exit 127; }}
 command -v findmnt >/dev/null 2>&1 || {{ echo "findmnt is required for safe filesystem formatting" >&2; exit 127; }}
-MOUNT=$(findmnt -rn -o TARGET -S "$DEV" 2>/dev/null || true)
-if [ "$MOUNT" = "/" ] || [ "$MOUNT" = "/boot" ] || [ "$MOUNT" = "/boot/efi" ] || [ "$MOUNT" = "/etc" ] || [ "$MOUNT" = "/usr" ] || [ "$MOUNT" = "/var" ]; then
-    echo "CRITICAL SYSTEM PROTECTION: Refusing to format active system mountpoint '$MOUNT'" >&2
-    exit 1
-fi
-if grep -qF -- "$DEV " /proc/swaps 2>/dev/null; then
-    swapoff "$DEV" || {{ echo "Failed to disable active swap on $DEV" >&2; exit 1; }}
-fi
-if findmnt -rn -S "$DEV" >/dev/null 2>&1; then
-    umount "$DEV" || {{ echo "Failed to unmount $DEV; refusing to format" >&2; exit 1; }}
-fi
-if command -v findmnt >/dev/null 2>&1 && findmnt -rn -S "$DEV" >/dev/null 2>&1; then
-    echo "Device $DEV is still mounted; refusing to format" >&2
-    exit 1
-fi
+for NODE in $(lsblk -nrpo NAME "$DEV"); do
+    if findmnt -rn -S "$NODE" >/dev/null 2>&1; then
+        echo "Refusing to format: $NODE is mounted. Unmount it explicitly first." >&2
+        exit 51
+    fi
+    if swapon --noheadings --raw --show=NAME 2>/dev/null | grep -Fxq -- "$NODE"; then
+        echo "Refusing to format: $NODE is active swap. Disable it explicitly first." >&2
+        exit 52
+    fi
+done
 "#,
         dev_arg
     );
