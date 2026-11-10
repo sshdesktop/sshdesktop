@@ -45,34 +45,70 @@ pub fn format_host_pattern(host: &str, port: u16) -> String {
     }
 }
 
+/// Match an OpenSSH hashed host token (|1|salt|hmac) against a candidate host.
+fn matches_hashed_host(token: &str, candidate: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+
+    let mut fields = token.split('|');
+    if fields.next() != Some("") || fields.next() != Some("1") {
+        return false;
+    }
+    let (Some(salt_b64), Some(hash_b64), None) = (fields.next(), fields.next(), fields.next()) else {
+        return false;
+    };
+    let Ok(salt) = base64::engine::general_purpose::STANDARD.decode(salt_b64) else {
+        return false;
+    };
+    let Ok(expected) = base64::engine::general_purpose::STANDARD.decode(hash_b64) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<Sha1>::new_from_slice(&salt) else {
+        return false;
+    };
+    mac.update(candidate.as_bytes());
+    mac.verify_slice(&expected).is_ok()
+}
+
+/// Match only the exact host token, including OpenSSH's non-default-port form.
+/// Wildcards and negated patterns are deliberately not treated as exact trust.
+fn host_token_matches(token: &str, host: &str, port: u16) -> bool {
+    let normalized_host = host.to_lowercase();
+    let candidates = if port == 22 {
+        vec![normalized_host.clone(), format!("[{}]:{}", normalized_host, port)]
+    } else {
+        vec![format!("[{}]:{}", normalized_host, port)]
+    };
+
+    if token.starts_with("|1|") {
+        return candidates.iter().any(|candidate| matches_hashed_host(token, candidate));
+    }
+
+    let token = token.to_lowercase();
+    candidates.iter().any(|candidate| token == *candidate)
+}
+
 pub fn check_known_hosts(
     host: &str,
     port: u16,
     key_type: &str,
     key_b64: &str,
-) -> (String, String, Option<String>) { // (status, message, Option<known_b64>)
+) -> (String, String, Option<String>) {
     let path = match get_known_hosts_path() {
         Some(p) => p,
-        None => return ("not_found".into(), "known_hosts path could not be located".into(), None),
+        None => return ("failed".into(), "known_hosts path could not be located".into(), None),
     };
 
     if !path.exists() {
-        return (
-            "not_found".into(),
-            "Host key is not recorded in known_hosts (new host)".into(),
-            None,
-        );
+        return ("not_found".into(), "Host key is not recorded in known_hosts (new host)".into(), None);
     }
 
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(e) => return ("not_found".into(), format!("Could not read known_hosts: {}", e), None),
+        Err(e) => return ("failed".into(), format!("Could not read known_hosts: {}", e), None),
     };
 
-    let target_pattern_22 = host.to_lowercase();
-    let target_pattern_port = format!("[{}]:{}", host.to_lowercase(), port);
     let target_key = key_b64.trim();
-
     let mut found_previous_key: Option<String> = None;
 
     for line in content.lines() {
@@ -86,38 +122,35 @@ pub fn check_known_hosts(
             continue;
         }
 
-        let host_entry = parts[0].to_lowercase();
-        let entry_key_type = parts[1];
-        let entry_key_b64 = parts[2];
-
-        // Match host entry
-        let matches_host = if host_entry.starts_with('|') {
-            // Hashed host entry: cannot trivially reverse, but if key matches, consider trusted
-            entry_key_b64 == target_key
+        // OpenSSH known_hosts may prefix entries with @cert-authority or @revoked.
+        let (host_field, key_type_field, key_field) = if parts[0].starts_with('@') {
+            if parts.len() < 4 { continue; }
+            (parts[1], parts[2], parts[3])
         } else {
-            let hosts_list: Vec<&str> = host_entry.split(',').collect();
-            hosts_list.contains(&target_pattern_22.as_str())
-                || hosts_list.contains(&target_pattern_port.as_str())
+            (parts[0], parts[1], parts[2])
         };
 
-        if matches_host {
-            if entry_key_b64 == target_key {
-                return (
-                    "trusted".into(),
-                    "Host key verified in known_hosts".into(),
-                    None,
-                );
-            } else if entry_key_type == key_type {
-                found_previous_key = Some(entry_key_b64.to_string());
-            }
+        let host_matches = host_field.split(',').any(|token| {
+            !token.starts_with('!') && host_token_matches(token, host, port)
+        });
+        if !host_matches {
+            continue;
+        }
+
+        if key_field == target_key && key_type_field == key_type {
+            return ("trusted".into(), "Host key verified in known_hosts".into(), None);
+        }
+
+        if key_type_field == key_type {
+            found_previous_key = Some(key_field.to_string());
         }
     }
 
-    if let Some(prev) = found_previous_key {
+    if let Some(previous) = found_previous_key {
         (
             "changed".into(),
-            "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! Server sent a different key than recorded in known_hosts.".into(),
-            Some(prev),
+            "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! The server key differs from known_hosts.".into(),
+            Some(previous),
         )
     } else {
         (
@@ -213,69 +246,124 @@ pub async fn ssh_trust_host_key(
     key_type: String,
     public_key_b64: String,
 ) -> Result<(), String> {
+    use base64::Engine;
+
+    let host = host.trim();
+    let key_type = key_type.trim();
+    let public_key_b64 = public_key_b64.trim();
+
+    if host.is_empty()
+        || host.chars().any(|c| c.is_whitespace() || c.is_control() || c == ',' || c == '!')
+        || port == 0
+    {
+        return Err("Invalid host or port for known_hosts entry".into());
+    }
+    if key_type.is_empty()
+        || !key_type.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'@' || b == b'.')
+    {
+        return Err("Invalid SSH host key algorithm".into());
+    }
+
+    let decoded_key = base64::engine::general_purpose::STANDARD
+        .decode(public_key_b64)
+        .map_err(|_| "Invalid base64 SSH public key".to_string())?;
+    if decoded_key.is_empty() {
+        return Err("SSH public key cannot be empty".into());
+    }
+
+    // Do not silently replace a changed key. The user must verify it out-of-band,
+    // remove the old known_hosts entry with ssh-keygen -R, then reconnect.
+    let (status, message, _) = check_known_hosts(host, port, key_type, public_key_b64);
+    if status == "changed" {
+        return Err(format!(
+            "Host key changed for {}:{}; refusing automatic replacement. Verify the new fingerprint independently, then remove the old entry from known_hosts before trusting it.",
+            host, port
+        ));
+    }
+    if status == "trusted" {
+        return Ok(());
+    }
+    if status == "failed" {
+        return Err(format!("Cannot safely update known_hosts: {}", message));
+    }
+
     let ssh_dir = BaseDirs::new()
         .map(|dirs| dirs.home_dir().join(".ssh"))
         .ok_or_else(|| "Could not determine .ssh directory".to_string())?;
-
-    if !ssh_dir.exists() {
-        std::fs::create_dir_all(&ssh_dir)
-            .map_err(|e| format!("Failed to create .ssh directory: {}", e))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700));
-        }
-    }
-
-    let known_hosts_path = ssh_dir.join("known_hosts");
-    let pattern = format_host_pattern(&host, port);
-    let new_entry = format!("{} {} {}\n", pattern, key_type.trim(), public_key_b64.trim());
-
-    let mut filtered_lines: Vec<String> = Vec::new();
-    let target_p22 = host.to_lowercase();
-    let target_pport = format!("[{}]:{}", host.to_lowercase(), port);
-
-    if known_hosts_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&known_hosts_path) {
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let host_col = parts[0].to_lowercase();
-                    let hosts: Vec<&str> = host_col.split(',').collect();
-                    let matches_target = hosts.contains(&target_p22.as_str()) || hosts.contains(&target_pport.as_str());
-                    let matches_type = parts[1] == key_type.trim();
-                    // Drop conflicting previous entry for this host and key type
-                    if matches_target && matches_type {
-                        continue;
-                    }
-                }
-                filtered_lines.push(line.to_string());
-            }
-        }
-    }
-
-    filtered_lines.push(new_entry.trim_end().to_string());
-    let mut updated_content = filtered_lines.join("\n");
-    updated_content.push('\n');
-
-    std::fs::write(&known_hosts_path, updated_content.as_bytes())
-        .map_err(|e| format!("Failed to write {}: {}", known_hosts_path.display(), e))?;
+    std::fs::create_dir_all(&ssh_dir)
+        .map_err(|e| format!("Failed to create .ssh directory: {}", e))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&known_hosts_path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("Failed to secure .ssh directory permissions: {}", e))?;
+    }
+
+    let known_hosts_path = ssh_dir.join("known_hosts");
+    let pattern = format_host_pattern(host, port);
+    let new_entry = format!("{} {} {}\n", pattern, key_type, public_key_b64);
+    let existing = if known_hosts_path.exists() {
+        std::fs::read_to_string(&known_hosts_path)
+            .map_err(|e| format!("Failed to read known_hosts: {}", e))?
+    } else {
+        String::new()
+    };
+
+    // Remove only entries that exactly identify this host (including hashed entries).
+    // Preserve comments, other hosts, and unrelated key algorithms.
+    let mut retained = Vec::new();
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            retained.push(line.to_string());
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        let (host_field, entry_key_type) = if parts.first().map(|p| p.starts_with('@')).unwrap_or(false) {
+            if parts.len() < 4 {
+                retained.push(line.to_string());
+                continue;
+            }
+            (parts[1], parts[2])
+        } else if parts.len() >= 3 {
+            (parts[0], parts[1])
+        } else {
+            retained.push(line.to_string());
+            continue;
+        };
+        let same_host = host_field.split(',').any(|token| {
+            !token.starts_with('!') && host_token_matches(token, host, port)
+        });
+        if !(same_host && entry_key_type == key_type) {
+            retained.push(line.to_string());
+        }
+    }
+
+    retained.push(new_entry.trim_end().to_string());
+    let mut updated = retained.join("\n");
+    updated.push('\n');
+
+    let temp_path = ssh_dir.join(format!("known_hosts.{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&temp_path, updated.as_bytes())
+        .map_err(|e| format!("Failed to write temporary known_hosts: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed to secure known_hosts permissions: {}", e))?;
+    }
+
+    if let Err(e) = std::fs::rename(&temp_path, &known_hosts_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("Failed to replace known_hosts: {}", e));
     }
 
     log::info!(
-        "SSH Desktop: Saved verified host key for {} ({}) to {}",
+        "SSH Desktop: Saved explicitly approved host key for {} ({})",
         pattern,
-        key_type,
-        known_hosts_path.display()
+        key_type
     );
     Ok(())
 }
