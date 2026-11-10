@@ -256,11 +256,14 @@ pub async fn logs_dmesg(
         return Err("No active SSH connection.".into());
     }
 
+    if code != 0 {
+        return Err(format!("dmesg failed: {}", stdout.trim()));
+    }
     if !stdout.is_empty() {
         return Ok(stdout);
     }
 
-    Err("dmesg returned no output. This may require root privileges.".into())
+    Err("dmesg returned no output.".into())
 }
  | '(' | ')')) {
         return Err("Invalid path.".into());
