@@ -248,7 +248,7 @@ pub async fn ssh_start_tunnel(
                 let is_key_auth = match conn.config.auth_method.as_deref() {
                 Some("password") => false,
                 Some("key") => true,
-                _ => conn.config.private_key_path.is_some(),
+                _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
             };
             if let Ok(new_handle) = crate::ssh::session::connect_session_with_passphrase_auth(
                 &conn.config.host,
@@ -745,7 +745,7 @@ pub async fn ssh_start_socks5(
             let is_key_auth = match conn.config.auth_method.as_deref() {
                 Some("password") => false,
                 Some("key") => true,
-                _ => conn.config.private_key_path.is_some(),
+                _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
             };
             if let Ok(new_handle) = crate::ssh::session::connect_session_with_passphrase_auth(
                 &conn.config.host,
