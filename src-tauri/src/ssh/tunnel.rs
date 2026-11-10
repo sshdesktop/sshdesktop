@@ -455,7 +455,7 @@ pub async fn ssh_start_tunnel(
         used_plink_first = true;
         let mut cmd = make_plink_cmd();
         match cmd.spawn() {
-            Ok(mut child) => {
+            Ok(child) => {
                 child_handle = Some(child);
                 spawned = true;
             }
@@ -487,7 +487,7 @@ pub async fn ssh_start_tunnel(
             }
         } else if plink_available && !is_pem_key {
             let mut cmd = make_plink_cmd();
-            if let Ok(mut child) = cmd.spawn() {
+            if let Ok(child) = cmd.spawn() {
                 child_handle = Some(child);
                 spawned = true;
             }
@@ -736,7 +736,7 @@ pub async fn ssh_start_socks5(
     // 2. Resolve SSH connection configuration
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or_else(|| format!("No active SSH connection found for '{}'. Please connect to a server first.", conn_id))?;
-    if local_port == 0 {
+    if preferred_port == Some(0) {
         return Err("SOCKS5 local port must be between 1 and 65535.".into());
     }
     let is_key_auth = match conn.config.auth_method.as_deref() {
@@ -762,15 +762,7 @@ pub async fn ssh_start_socks5(
         effective_local_port, user, host, ssh_port
     );
 
-    // Fast Path: Native SOCKS5 proxy server via in-memory russh session
-    let mut maybe_handle = {
-        let lock = state.sessions.lock().await;
-        lock.get(&conn_id).cloned()
-            .or_else(|| if conn_id == "default" { lock.get("default").cloned() } else { None })
-    };
-
-    if maybe_handle.is_none() {
-        let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
     let plink_bin = crate::ssh::connection::get_plink_path();
     let plink_available = plink_bin != "plink" || std::path::Path::new(plink_bin).exists();
     let has_password = !is_key_auth && conn.config.password.as_deref().map(|p| !p.trim().is_empty()).unwrap_or(false);
@@ -853,7 +845,7 @@ pub async fn ssh_start_socks5(
         used_plink_first = true;
         let mut cmd = make_plink_cmd();
         match cmd.spawn() {
-            Ok(mut child) => {
+            Ok(child) => {
                 child_handle = Some(child);
                 spawned = true;
             }
@@ -885,7 +877,7 @@ pub async fn ssh_start_socks5(
             }
         } else if plink_available && !is_pem_key {
             let mut cmd = make_plink_cmd();
-            if let Ok(mut child) = cmd.spawn() {
+            if let Ok(child) = cmd.spawn() {
                 child_handle = Some(child);
                 spawned = true;
             }

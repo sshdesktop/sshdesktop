@@ -403,7 +403,7 @@ pub async fn open_pty_shell(
     cols: u32,
     rows: u32,
 ) -> Result<(tokio::io::ReadHalf<russh::ChannelStream<russh::client::Msg>>, tokio::io::WriteHalf<russh::ChannelStream<russh::client::Msg>>), Box<dyn std::error::Error + Send + Sync>> {
-    let mut channel = tokio::time::timeout(
+    let channel = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         handle.channel_open_session()
     ).await.map_err(|_| "Timed out opening terminal channel")??;

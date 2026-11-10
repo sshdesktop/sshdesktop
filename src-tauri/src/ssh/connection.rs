@@ -363,7 +363,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                     .stderr(std::process::Stdio::piped());
 
                 match cmd.spawn() {
-                    Ok(mut child) => {
+                    Ok(child) => {
                         match tokio::time::timeout(std::time::Duration::from_secs(12), child.wait_with_output()).await {
                             Ok(Ok(out)) => {
                                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -476,7 +476,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                     .stderr(std::process::Stdio::piped());
 
                 match cmd.spawn() {
-                    Ok(mut child) => {
+                    Ok(child) => {
                         match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait_with_output()).await {
                             Ok(Ok(out)) => {
                                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();

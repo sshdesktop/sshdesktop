@@ -520,7 +520,7 @@ pub async fn ssh_launch_putty(
 
     // PuTTY is launched interactively: let it prompt for a password rather than
     // exposing credentials in its process arguments.
-
+    let selected_key_path = conn.config.private_key_path.as_deref();
     if let Some(key) = selected_key_path {
         if !key.is_empty() {
             cmd.arg("-i").arg(key);

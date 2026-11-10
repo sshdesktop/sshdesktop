@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::Mutex;
+use tauri::Manager;
 
 mod ssh;
 mod system;
@@ -11,6 +12,7 @@ mod store;
 mod database;
 mod archive;
 mod api_client;
+mod app;
 
 pub struct AppState {
     pub connections: Arc<Mutex<HashMap<String, ssh::connection::SshConnection>>>,
@@ -332,7 +334,23 @@ fn main() {
 
             // Browser Reverse Proxy command
             store::proxy::browser_proxy_fetch,
+
+            // Centralized Lifecycle & Shutdown command
+            app::shutdown::app_request_shutdown,
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let app = window.app_handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        use tauri::Manager;
+                        let state = app.state::<AppState>();
+                        let _ = app::shutdown::app_request_shutdown(app.clone(), state).await;
+                    });
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

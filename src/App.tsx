@@ -88,6 +88,11 @@ export default function App() {
 
     // Global listener for SSH disconnect events dispatched by bridge
     const handleDisconnectEvent = (e: any) => {
+      // 0. If application is shutting down, NEVER open disconnect alert!
+      if (useConnectionStore.getState().isShuttingDown) {
+        return;
+      }
+
       const connId = e?.detail?.connId;
       const { activeConnectionId, connectedServers, isAlertDismissed, dismissedServerId } = useConnectionStore.getState();
 

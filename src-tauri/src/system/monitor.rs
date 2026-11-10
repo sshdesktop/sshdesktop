@@ -49,16 +49,14 @@ pub async fn system_get_stats(
     state: tauri::State<'_, AppState>,
     conn_id: String,
 ) -> Result<SystemStats, String> {
-    // Single consolidated probe with unequivocal section tags
+    // High-performance, low-overhead consolidated Linux telemetry probe (instantaneous kernel pseudo-fs reads, zero process-scanning overhead)
     let probe_cmd = r#"
 STAT1=$(grep '^cpu ' /proc/stat 2>/dev/null)
-sleep 0.3
+sleep 0.1
 STAT2=$(grep '^cpu ' /proc/stat 2>/dev/null)
 echo "===CPUDELTA==="
 echo "$STAT1"
 echo "$STAT2"
-echo "===TOPCPU==="
-top -bn1 2>/dev/null | grep -i '%cpu' | head -n 1 || true
 echo "===LOAD==="
 cat /proc/loadavg 2>/dev/null || uptime 2>/dev/null || true
 echo "===UPTIME==="
@@ -67,7 +65,7 @@ echo "===MEM==="
 cat /proc/meminfo 2>/dev/null || free -b 2>/dev/null || true
 echo "===CPUINFO==="
 nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo "1"
-grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed -e 's/^[ \t]*//' || lscpu 2>/dev/null | grep -m1 'Model name:' | cut -d: -f2 | sed -e 's/^[ \t]*//' || echo "Generic CPU"
+grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed -e 's/^[ \t]*//' || echo "ARM / Generic CPU"
 echo "===UNAME==="
 uname -n 2>/dev/null || echo "linux-server"
 uname -r 2>/dev/null || echo "Linux"

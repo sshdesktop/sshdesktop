@@ -272,7 +272,7 @@ export default function Desktop() {
       if (typeof document !== 'undefined' && !document.hidden) {
         loadDesktopFolder();
       }
-    }, 15000);
+    }, 30000);
     return () => {
       window.removeEventListener('sshdesktop:files-changed', handleFilesChanged);
       window.removeEventListener('clouddesk:files-changed', handleFilesChanged);
@@ -285,6 +285,8 @@ export default function Desktop() {
     if (!activeConnectionId) return;
     let isMounted = true;
     const fetchTelemetry = async () => {
+      // Guard: do not poll remote server when window/tab is blurred or hidden
+      if (typeof document !== 'undefined' && document.hidden) return;
       try {
         const stats = await systemGetStats(activeConnectionId).catch(() => null);
         const disks = await systemGetDisks(activeConnectionId).catch(() => null);
@@ -328,7 +330,7 @@ export default function Desktop() {
     };
 
     fetchTelemetry();
-    const interval = setInterval(fetchTelemetry, 8000);
+    const interval = setInterval(fetchTelemetry, 30000);
     return () => {
       isMounted = false;
       clearInterval(interval);

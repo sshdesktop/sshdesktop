@@ -41,7 +41,7 @@ fn is_public_ip(ip: std::net::IpAddr) -> bool {
                 && !ip.is_multicast()
                 && !ip.is_unique_local()
                 && !ip.is_unicast_link_local()
-                && ip.to_ipv4_mapped().map(is_public_ip).unwrap_or(true)
+                && ip.to_ipv4_mapped().map(|v4| is_public_ip(std::net::IpAddr::V4(v4))).unwrap_or(true)
         }
     }
 }

@@ -1895,3 +1895,22 @@ export async function sshAgentGetStatus(): Promise<SshAgentStatus> {
     message: 'SSH agent status unavailable',
   });
 }
+
+// ----------------- Centralized Application Lifecycle & Shutdown -----------------
+export async function appExitClean(): Promise<void> {
+  if (isTauri()) {
+    try {
+      await safeInvoke<void>('app_request_shutdown', {}, undefined);
+    } catch {
+      try {
+        const { exit } = await import('@tauri-apps/api/app');
+        await exit(0);
+      } catch {
+        window.close();
+      }
+    }
+  } else {
+    window.close();
+  }
+}
+

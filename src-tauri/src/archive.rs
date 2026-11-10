@@ -149,7 +149,7 @@ pub async fn sftp_extract_archive_pure(
     let escaped_dest = shell_escape(clean_dest);
 
     let lower = archive_path.to_lowercase();
-    let mut cmd = if lower.ends_with(".tar.gz") || lower.ends_with(".tgz")
+    let cmd = if lower.ends_with(".tar.gz") || lower.ends_with(".tgz")
         || lower.ends_with(".tar.bz2") || lower.ends_with(".tar.xz") || lower.ends_with(".tar") {
         format!(
             "mkdir -p '{}' && python3 -c '{}' '{}' '{}'",

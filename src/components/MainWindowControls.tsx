@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Minus, Square, X, LogOut, Power, AlertCircle, ExternalLink, CheckCircle2 } from 'lucide-react';
-import { isTauri, authLogout, clearStoredSession, sshDisconnect, markConnectionClosed } from '../lib/tauri-bridge';
+import { isTauri, authLogout, clearStoredSession, sshDisconnect, markConnectionClosed, appExitClean } from '../lib/tauri-bridge';
 import { useSettingsStore, useConnectionStore, useWindowStore } from '../lib/store';
 
 // Function to cleanly logout all login sessions across Web and Desktop modes
 export async function performAllSessionsLogout(): Promise<void> {
+  useConnectionStore.getState().setShuttingDown(true);
   const { connectedServers, activeConnectionId, disconnectedServerId, returnToServersList } = useConnectionStore.getState();
 
   // 1. Gather all active server sessions
@@ -101,12 +102,15 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
               unlisten();
             }
 
-            // Register native window close listener to log out sessions before closing
+            // Register native window close listener to log out sessions and cleanly exit
             try {
-              const unlistenClose = await appWin.onCloseRequested(async () => {
+              const unlistenClose = await appWin.onCloseRequested(async (event) => {
+                event.preventDefault();
+                useConnectionStore.getState().setShuttingDown(true);
                 try {
                   await performAllSessionsLogout();
                 } catch {}
+                await appExitClean();
               });
               if (mounted) {
                 unlistenCloseRef.current = unlistenClose;
@@ -271,16 +275,9 @@ export const MainWindowControls: React.FC<MainWindowControlsProps> = ({
       console.warn('[MainWindowControls] Error during session logout on close:', err);
     }
 
-    // 2. Then close window
+    // 2. Then cleanly terminate application across all platforms
     if (isTauri()) {
-      try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        await getCurrentWindow().close();
-      } catch (err) {
-        console.warn('[MainWindowControls] Tauri close error:', err);
-      } finally {
-        setIsClosing(false);
-      }
+      await appExitClean();
     } else {
       // Web Mode: Try closing browser tab directly first
       try {

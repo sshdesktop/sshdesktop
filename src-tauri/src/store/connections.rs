@@ -23,7 +23,23 @@ fn write_connections_file(path: &std::path::Path, content: &str) -> Result<(), S
     }
     #[cfg(not(unix))]
     {
-        fs::write(path, content).map_err(|e| e.to_string())
+        use std::io::Write;
+        let temp = parent.join(format!(".connections-{}.tmp", uuid::Uuid::new_v4().simple()));
+        let result = (|| -> Result<(), String> {
+            let mut file = fs::OpenOptions::new().write(true).create_new(true)
+                .open(&temp).map_err(|e| format!("Failed to create temporary connection file: {}", e))?;
+            file.write_all(content.as_bytes()).map_err(|e| format!("Failed to write connections: {}", e))?;
+            file.sync_all().map_err(|e| format!("Failed to flush connections: {}", e))?;
+            if path.exists() {
+                let _ = fs::remove_file(path);
+            }
+            fs::rename(&temp, path).map_err(|e| format!("Failed to replace connections file: {}", e))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        result
     }
 }
 

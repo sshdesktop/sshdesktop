@@ -467,17 +467,17 @@ pub async fn firewall_add_rule_advanced(
                 let source_clause = if from_ip.is_empty() || from_ip.eq_ignore_ascii_case("anywhere") || from_ip.eq_ignore_ascii_case("any") {
                     String::new()
                 } else {
-                    format!(" source address=\\"{}\\" ", from_ip)
+                    format!(" source address=\"{}\" ", from_ip)
                 };
                 let target = if action == "reject" { "reject" } else { "drop" };
                 let rules: Vec<String> = if port.parse::<u16>().is_ok() {
                     let protocols: Vec<&str> = if proto == "any" { vec!["tcp", "udp"] } else { vec![proto] };
                     protocols.iter().map(|p| format!(
-                        "rule family=\\"{}\\"{}port port=\\"{}\\" protocol=\\"{}\\" {}",
+                        "rule family=\"{}\"{}port port=\"{}\" protocol=\"{}\" {}",
                         family, source_clause, port, p, target
                     )).collect()
                 } else {
-                    vec![format!("rule family=\\"{}\\"{}service name=\\"{}\\" {}", family, source_clause, port, target)]
+                    vec![format!("rule family=\"{}\"{}service name=\"{}\" {}", family, source_clause, port, target)]
                 };
                 let add_rules = rules.iter()
                     .map(|rule| format!("firewall-cmd --permanent {} --add-rich-rule={} 2>&1", zone_flag, shell_quote(rule)))
@@ -509,7 +509,7 @@ pub async fn firewall_add_rule_advanced(
         }
         _ => {
             let chain = if direction == "out" { "OUTPUT" } else { "INPUT" };
-            let target = match action.as_str() {
+            let target = match action {
                 "allow" => "ACCEPT",
                 "reject" => "REJECT",
                 "limit" => "ACCEPT",

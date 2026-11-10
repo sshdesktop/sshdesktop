@@ -66,6 +66,11 @@
         "release": "1"
       }
     },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
     "macOS": {
       "frameworks": [],
       "minimumSystemVersion": "10.15"

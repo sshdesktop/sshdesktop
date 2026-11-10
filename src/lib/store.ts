@@ -31,6 +31,8 @@ interface ConnectionState {
   setDisconnected: (isDisconnected: boolean, reason?: string | null, serverId?: string | null) => void;
   isAlertDismissed: boolean;
   dismissedServerId: string | null;
+  isShuttingDown: boolean;
+  setShuttingDown: (val: boolean) => void;
   dismissDisconnectAlert: (serverId?: string | null) => void;
   triggerDisconnectAlert: (reason?: string, serverId?: string | null) => void;
   resetReconnectAttempts: () => void;
@@ -54,6 +56,8 @@ export const useConnectionStore = create<ConnectionState>()(
       disconnectReason: null,
       isAlertDismissed: false,
       dismissedServerId: null,
+      isShuttingDown: false,
+      setShuttingDown: (val) => set({ isShuttingDown: val }),
       isReconnecting: false,
       reconnectAttempts: 0,
       reconnectError: null,
@@ -209,6 +213,7 @@ export const useConnectionStore = create<ConnectionState>()(
         });
       },
       triggerDisconnectAlert: (reason, serverId) => {
+        if (get().isShuttingDown) return;
         const activeId = get().activeConnectionId;
         if (!activeId) return;
 

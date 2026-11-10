@@ -14,7 +14,7 @@ import {
   sshConfigReadHosts, sshConfigSaveHost, sshConfigGetPath,
   sshVerifyHostKey, sshTrustHostKey,
   sshGenerateKeyPair, sshListLocalKeys, sshInstallPublicKey,
-  sshAgentGetStatus,
+  sshAgentGetStatus, appExitClean,
   type SshConfigHost, type HostKeyVerification, type GeneratedKeyPair, type LocalKeyInfo, type SshAgentStatus
 } from '../lib/tauri-bridge';
 import { WALLPAPERS } from '../shell/Desktop';
@@ -1961,10 +1961,9 @@ export default function ConnectionScreen() {
           </button>
 
           <button
-            onClick={() => {
-              if (confirm('Close SSH Desktop?')) {
-                window.close();
-              }
+            onClick={async () => {
+              useConnectionStore.getState().setShuttingDown(true);
+              await appExitClean();
             }}
             className="flex items-center space-x-1 hover:text-rose-400 transition-colors"
           >
