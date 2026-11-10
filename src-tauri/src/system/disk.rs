@@ -280,7 +280,13 @@ pub async fn disk_smart(state: tauri::State<'_, AppState>, conn_id: String, devi
     let dev_path = if device.starts_with("/dev/") { device.clone() } else { format!("/dev/{}", device) };
     let dev_arg = shell_quote(&dev_path);
     let cmd = format!("smartctl -H -A {} 2>/dev/null || smartctl -H {} 2>/dev/null || echo 'SMART information unavailable'", dev_arg, dev_arg);
-    let (stdout, _) = run_sudo(&state, &conn_id, &cmd).await;
+    let (stdout, code) = run_sudo(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code >= 8 {
+        return Err(format!("Filesystem check failed (exit code {}): {}", code, stdout.trim()));
+    }
     Ok(stdout)
 }
 
@@ -1094,7 +1100,10 @@ pub async fn disk_get_swap_info(
         
         printf "%s|%s|%s|%s\n" "$TOTAL_B" "$USED_B" "$FREE_B" "$ACTIVE_FILE"
     "#;
-    let (stdout, _) = run_sudo(&state, &conn_id, script).await;
+    let (stdout, code) = run_sudo(&state, &conn_id, script).await;
+    if code != 0 {
+        return Err(format!("Failed to retrieve swap information: {}", stdout.trim()));
+    }
     let parts: Vec<&str> = stdout.trim().split('|').collect();
     let total_bytes: u64 = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
     let used_bytes: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -1122,6 +1131,9 @@ pub async fn disk_manage_swap(
 ) -> Result<String, String> {
     let act = action.trim().to_lowercase();
     let target_mb = size_mb.unwrap_or(2048);
+    if act == "set_size" && target_mb > 262144 {
+        return Err("Swap size cannot exceed 262144 MB (256 GiB).".into());
+    }
 
     let script = match act.as_str() {
         "disable" => r#"
@@ -1206,7 +1218,10 @@ pub async fn disk_get_tmp_info(
             echo "unknown|0|0|0|0|false"
         fi
     "#;
-    let (stdout, _) = run_sudo(&state, &conn_id, script).await;
+    let (stdout, code) = run_sudo(&state, &conn_id, script).await;
+    if code != 0 {
+        return Err(format!("Failed to retrieve /tmp information: {}", stdout.trim()));
+    }
     let parts: Vec<&str> = stdout.trim().split('|').collect();
     let fs = parts.get(0).unwrap_or(&"unknown").to_string();
     let total_bytes: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
