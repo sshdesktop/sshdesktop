@@ -363,33 +363,9 @@ pub async fn ssh_trust_host_key(
         String::new()
     };
 
-    // Remove only entries that exactly identify this host (including hashed entries).
-    // Preserve comments, other hosts, and unrelated key algorithms.
-    let mut retained = Vec::new();
-    for line in existing.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            retained.push(line.to_string());
-            continue;
-        }
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        let (host_field, entry_key_type) = if parts.first().map(|p| p.starts_with('@')).unwrap_or(false) {
-            if parts.len() < 4 {
-                retained.push(line.to_string());
-                continue;
-            }
-            (parts[1], parts[2])
-        } else if parts.len() >= 3 {
-            (parts[0], parts[1])
-        } else {
-            retained.push(line.to_string());
-            continue;
-        };
-        // Never rewrite existing records: a comma-separated host list may
-        // protect additional hosts, and @revoked/@cert-authority markers carry
-        // security semantics that must not be silently removed.
-        retained.push(line.to_string());
-    }
+    // Preserve every existing record. In particular, never delete a complete
+    // comma-separated host list or remove @revoked/@cert-authority directives.
+    let mut retained: Vec<String> = existing.lines().map(str::to_string).collect();
 
     retained.push(new_entry.trim_end().to_string());
     let mut updated = retained.join("\n");
