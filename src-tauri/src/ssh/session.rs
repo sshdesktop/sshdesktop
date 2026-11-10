@@ -72,7 +72,7 @@ pub async fn run_exec_channel(
                 }
                 ChannelMsg::ExtendedData { ref data, ext: 1 } => {
                     if stdout.len().saturating_add(data.len()) > MAX_OUTPUT_BYTES {
-                        return Err("Remote command output exceeded the 80 MiB safety limit.".into());
+                        return true;
                     }
                     stdout.extend_from_slice(data);
                 }
