@@ -6,7 +6,7 @@ use super::types::{
     ActiveDatabaseSession, BatchStatementResult, ColumnMeta, DatabaseConnectionConfig,
     DatabaseObject, DriverInstance, QueryResult, ServerCapabilities,
 };
-use super::serialization::split_sql_statements;
+use super::serialization::split_sql_statements_for_engine;
 
 pub async fn connect_mssql(
     effective_host: &str,
@@ -118,7 +118,7 @@ pub async fn execute_query_mssql(
         .await
         .map_err(|e| format!("MSSQL connect error: {}", e))?;
 
-    let statements = split_sql_statements(query);
+    let statements = split_sql_statements_for_engine(query, "mssql");
     let mut final_cols = Vec::new();
     let mut final_rows = Vec::new();
     let mut total_affected = 0u64;
