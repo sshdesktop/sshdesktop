@@ -453,7 +453,10 @@ pub async fn sftp_rename(
     conn_id: String,
     old_path: String,
     new_path: String,
-) -> Result<(), String> {
+ ) -> Result<(), String> {
+    if !valid_remote_path(&old_path) || !valid_remote_path(&new_path) {
+        return Err("Rename paths must be absolute and contain no traversal or control characters.".into());
+    }
     let old_escaped = shell_escape(&old_path);
     let new_escaped = shell_escape(&new_path);
     let (stdout, code) = run_cmd(&state, &conn_id, &format!("mv '{}' '{}' 2>&1", old_escaped, new_escaped)).await;
@@ -476,6 +479,9 @@ pub async fn sftp_chmod(
     path: String,
     mode: u32,
 ) -> Result<(), String> {
+    if !valid_remote_path(&path) || mode > 0o7777 {
+        return Err("Invalid remote path or permission mode.".into());
+    }
     let escaped = shell_escape(&path);
     let cmd = format!("chmod {:o} '{}'", mode, escaped);
     let (_stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
@@ -501,11 +507,16 @@ pub async fn sftp_chown(
     owner: String,
     group: String,
 ) -> Result<(), String> {
-    let target = if group.is_empty() {
-        owner
-    } else {
-        format!("{}:{}", owner, group)
-    };
+    let valid_owner = !owner.is_empty() && owner.len() <= 64
+        && owner.as_bytes()[0].is_ascii_alphanumeric()
+        && owner.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
+    let valid_group = group.is_empty() || (group.len() <= 64
+        && group.as_bytes()[0].is_ascii_alphanumeric()
+        && group.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')));
+    if !valid_remote_path(&path) || !valid_owner || !valid_group {
+        return Err("Invalid remote path, owner, or group.".into());
+    }
+    let target = if group.is_empty() { owner } else { format!("{}:{}", owner, group) };
     let escaped = shell_escape(&path);
     let cmd = format!("chown -R '{}' '{}'", target, escaped);
     let (_stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
@@ -529,6 +540,9 @@ pub async fn sftp_stat(
     conn_id: String,
     path: String,
 ) -> Result<FileEntry, String> {
+    if !valid_remote_path(&path) {
+        return Err("Invalid remote stat path.".into());
+    }
     let escaped = shell_escape(&path);
     let (stdout, code) = run_cmd(&state, &conn_id, &format!("stat -c \"%s %Y %A %U %G\" '{}'", escaped)).await;
     if code == -1 {
@@ -610,7 +624,7 @@ pub async fn sftp_read_file_base64(
     conn_id: String,
     path: String,
 ) -> Result<String, String> {
-    if path.trim().is_empty() || path.len() > 4096 || path.chars().any(|c| c.is_control()) {
+    if !valid_remote_path(&path) {
         return Err("Invalid remote file path.".into());
     }
     let escaped = shell_escape(&path);
@@ -684,6 +698,9 @@ pub async fn sftp_folder_size(
     conn_id: String,
     path: String,
 ) -> Result<String, String> {
+    if !valid_remote_path(&path) {
+        return Err("Invalid remote directory path.".into());
+    }
     let escaped = shell_escape(&path);
     let cmd = format!("du -sh '{}' 2>/dev/null | cut -f1", escaped);
     let (stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
