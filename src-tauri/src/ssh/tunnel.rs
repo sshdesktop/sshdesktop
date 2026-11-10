@@ -827,10 +827,8 @@ pub async fn ssh_start_socks5(
             cmd.arg("-pwfile").arg(password_file.path());
         }
 
-        if let Some(key) = &conn.config.private_key_path {
-            if crate::ssh::connection::resolve_key_path(key).is_some() {
-                cmd.arg("-i").arg(key);
-            }
+        if let Some(key) = selected_key_path {
+            cmd.arg("-i").arg(key);
         }
 
         cmd.arg(&host);
