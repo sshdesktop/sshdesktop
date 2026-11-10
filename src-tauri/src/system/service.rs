@@ -1,3 +1,13 @@
+fn valid_service_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | ':' | '-'))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::ssh::exec::{run_cmd, run_cmd_priv};
@@ -122,15 +132,15 @@ pub async fn service_action(
         _ => return Err(format!("Invalid service action: {}", action)),
     };
 
-    // Validate service name (no shell metacharacters)
-    if name.chars().any(|c| matches!(c, '&' | ';' | '|' | '`' | '$' | '(' | ')' | '<' | '>')) {
+    if !valid_service_name(&name) {
         return Err("Invalid service name.".into());
     }
+    let service_arg = shell_quote(&name);
 
     let (stdout, code) = run_cmd_priv(
         &state,
         &conn_id,
-        &format!("systemctl {} {} 2>&1", safe_action, name),
+        &format!("systemctl {} {} 2>&1", safe_action, service_arg),
     ).await;
 
     if code == -1 {
@@ -150,14 +160,15 @@ pub async fn service_status(
     conn_id: String,
     name: String,
 ) -> Result<String, String> {
-    if name.chars().any(|c| matches!(c, '&' | ';' | '|' | '`' | '$' | '(' | ')' | '<' | '>')) {
+    if !valid_service_name(&name) {
         return Err("Invalid service name.".into());
     }
+    let service_arg = shell_quote(&name);
 
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        &format!("systemctl status {} --no-pager 2>&1", name),
+        &format!("systemctl status {} --no-pager 2>&1", service_arg),
     ).await;
 
     if code == -1 {
@@ -186,7 +197,7 @@ pub async fn service_logs(
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        &format!("journalctl -u {} -n {} --no-pager 2>&1", name, lines.min(1000)),
+        &format!("journalctl -u {} -n {} --no-pager 2>&1", service_arg, lines.min(1000)),
     ).await;
 
     if code == -1 {
