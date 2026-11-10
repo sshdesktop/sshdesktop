@@ -190,9 +190,10 @@ pub async fn service_logs(
     name: String,
     lines: u32,
 ) -> Result<String, String> {
-    if name.chars().any(|c| matches!(c, '&' | ';' | '|' | '`' | '$' | '(' | ')' | '<' | '>')) {
+    if !valid_service_name(&name) {
         return Err("Invalid service name.".into());
     }
+    let service_arg = shell_quote(&name);
 
     let (stdout, code) = run_cmd(
         &state,
