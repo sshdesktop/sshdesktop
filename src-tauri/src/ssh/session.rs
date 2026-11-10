@@ -48,8 +48,8 @@ pub async fn run_exec_channel(
     cmd: &str,
 ) -> Result<(String, i32), Box<dyn std::error::Error + Send + Sync>> {
     let mut channel = handle.channel_open_session().await?;
-    // Request a pseudo-terminal (PTY) so sudo, PAM, systemctl, and TTY-requiring commands succeed without "a terminal is required" errors
-    let _ = channel.request_pty(false, "xterm-256color", 80, 24, 0, 0, &[]).await;
+    // Non-interactive commands must not allocate a PTY: PTYs transform line endings,
+    // merge streams, and can corrupt structured/binary command output.
     channel.exec(true, cmd).await?;
     let mut stdout = Vec::new();
     let mut exit_code = 0;
