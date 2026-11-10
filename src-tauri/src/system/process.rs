@@ -28,10 +28,10 @@ pub async fn process_list(
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        "ps -eo user:20,pid,ppid,pcpu,pmem,vsz,rss,stat,time,start_time,nlwp,args --sort=-%cpu --no-header 2>/dev/null | head -n 120",
+        "command -v ps >/dev/null 2>&1 || { echo 'ps utility not found' >&2; exit 127; }; ps -eo user:20,pid,ppid,pcpu,pmem,vsz,rss,stat,time,start_time,nlwp,args --sort=-%cpu --no-header 2>/dev/null | head -n 120",
     ).await;
 
-    if code == -1 && stdout.is_empty() {
+    if code == -1 {
         return Err("No active SSH connection.".into());
     }
 
@@ -64,8 +64,8 @@ pub async fn process_list(
         }
     }
 
-    if list.is_empty() && !stdout.is_empty() {
-        // Fallback: try the simpler ps aux
+    if list.is_empty() {
+        // Fallback: try the portable ps aux output when the preferred format is unavailable.
         return process_list_aux(&state, &conn_id).await;
     }
 
@@ -77,7 +77,13 @@ pub async fn process_list(
 }
 
 async fn process_list_aux(state: &AppState, conn_id: &str) -> Result<Vec<ProcessInfo>, String> {
-    let (stdout, _) = run_cmd(state, conn_id, "ps aux --sort=-%cpu 2>/dev/null | head -n 80").await;
+    let (stdout, code) = run_cmd(state, conn_id, "command -v ps >/dev/null 2>&1 || { echo 'ps utility not found' >&2; exit 127; }; ps aux --sort=-%cpu 2>/dev/null | head -n 80").await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 {
+        return Err(format!("Unable to list remote processes: {}", stdout.trim()));
+    }
     let mut list = Vec::new();
     for line in stdout.lines().skip(1) {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -144,14 +150,8 @@ pub async fn process_kill(
         return Ok(());
     }
 
-    // 3. If signal was KILL or TERM and still failed, try force kill with sudo kill -9
-    if safe_signal == "KILL" || safe_signal == "TERM" {
-        let (_, force_code) = run_cmd_priv(&state, &conn_id, &format!("kill -9 {}", pid)).await;
-        if force_code == 0 {
-            log::info!("SSH Desktop: Force-killed PID {} with sudo kill -9", pid);
-            return Ok(());
-        }
-    }
+    // Never escalate a user-selected TERM/HUP/INT signal to SIGKILL.
+    // The selected signal is the exact action the user requested.
 
     // Clean up plink/bash error messages (filter out "Server refused our key", "[sudo] password", etc.)
     let raw_err = if !priv_out.is_empty() { priv_out } else { stdout };
