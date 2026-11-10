@@ -47,10 +47,16 @@ pub async fn run_exec_channel(
     handle: &ClientHandle,
     cmd: &str,
 ) -> Result<(String, i32), Box<dyn std::error::Error + Send + Sync>> {
-    let mut channel = handle.channel_open_session().await?;
+    let mut channel = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        handle.channel_open_session()
+    ).await.map_err(|_| "Timed out opening SSH execution channel")??;
     // Non-interactive commands must not allocate a PTY: PTYs transform line endings,
     // merge streams, and can corrupt structured/binary command output.
-    channel.exec(true, cmd).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        channel.exec(true, cmd)
+    ).await.map_err(|_| "Timed out starting remote command")??;
     let mut stdout = Vec::new();
     let mut exit_code = -1;
 
@@ -85,43 +91,42 @@ pub async fn run_exec_channel_with_stdin(
     cmd: &str,
     stdin_data: &[u8],
 ) -> Result<(String, i32), Box<dyn std::error::Error + Send + Sync>> {
-    let mut channel = handle.channel_open_session().await?;
-    // Note: Do NOT request a PTY here. Stdin pipes (like base64 -d) require true channel EOF
-    // without terminal echoing, carriage return conversions, or pseudo-terminal blocking.
-    channel.exec(true, cmd).await?;
-    if !stdin_data.is_empty() {
-        channel.data(stdin_data).await?;
-    }
-    channel.eof().await?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+        let mut channel = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            handle.channel_open_session()
+        ).await.map_err(|_| "Timed out opening SSH input channel")??;
+        // Stdin pipes require a non-PTY channel and a real EOF.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            channel.exec(true, cmd)
+        ).await.map_err(|_| "Timed out starting remote input command")??;
 
-    let res = tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        // SSH channel packets are small; send large file payloads in bounded chunks.
+        for chunk in stdin_data.chunks(32 * 1024) {
+            channel.data(chunk).await?;
+        }
+        channel.eof().await?;
+
         let mut stdout = Vec::new();
         let mut exit_code = -1;
-
         while let Some(msg) = channel.wait().await {
             match msg {
-                ChannelMsg::Data { ref data } => {
-                    stdout.extend_from_slice(data);
-                }
-                ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                    stdout.extend_from_slice(data);
-                }
-                ChannelMsg::ExitStatus { exit_status } => {
-                    exit_code = exit_status as i32;
-                }
+                ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
+                ChannelMsg::ExtendedData { ref data, ext: 1 } => stdout.extend_from_slice(data),
+                ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status as i32,
                 _ => {}
             }
         }
-
         let clean_out = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
-        (clean_out, exit_code)
+        Ok::<(String, i32), Box<dyn std::error::Error + Send + Sync>>((clean_out, exit_code))
     }).await;
 
-    match res {
-        Ok((out, code)) => Ok((out, code)),
+    match result {
+        Ok(inner) => inner,
         Err(_) => {
-            log::warn!("SSH Desktop: run_exec_channel_with_stdin timed out after 25s for cmd: {}", cmd);
-            Err("Command timed out while processing input stream".into())
+            log::warn!("SSH Desktop: run_exec_channel_with_stdin timed out after 300s for cmd: {}", cmd);
+            Err("Command timed out while sending input or waiting for remote completion.".into())
         }
     }
 }
