@@ -730,7 +730,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
     }
 
     // 4. OpenSSH PEM probe
-    if !is_ppk && config.private_key_path.is_some() {
+    if !is_ppk && is_key_auth && config.private_key_path.is_some() {
         let mut cmd = tokio::process::Command::new("ssh");
     cmd.kill_on_drop(true);
         #[cfg(windows)]
