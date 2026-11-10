@@ -40,7 +40,8 @@ pub async fn ssh_generate_key_pair(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700));
+            std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("Could not secure SSH key directory permissions: {}", e))?;
         }
     }
 
@@ -93,7 +94,13 @@ pub async fn ssh_generate_key_pair(
     };
 
     if !success {
-        // Fallback: Generate via russh_keys
+        // Remove any partial output left by a failed ssh-keygen invocation.
+        let _ = std::fs::remove_file(&target_priv);
+        let _ = std::fs::remove_file(&target_pub);
+        if !pass.is_empty() {
+            return Err("Passphrase-protected key generation requires a working ssh-keygen binary; refusing to create an unencrypted fallback key".into());
+        }
+        // Fallback: Generate via russh_keys only when no passphrase was requested.
         let key_pair = russh_keys::key::KeyPair::generate_ed25519();
 
         let mut priv_pem = Vec::new();
@@ -112,8 +119,16 @@ pub async fn ssh_generate_key_pair(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&target_priv, std::fs::Permissions::from_mode(0o600));
-        let _ = std::fs::set_permissions(&target_pub, std::fs::Permissions::from_mode(0o644));
+        if let Err(error) = std::fs::set_permissions(&target_priv, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(&target_priv);
+            let _ = std::fs::remove_file(&target_pub);
+            return Err(format!("Could not secure generated private key permissions: {}", error));
+        }
+        if let Err(error) = std::fs::set_permissions(&target_pub, std::fs::Permissions::from_mode(0o644)) {
+            let _ = std::fs::remove_file(&target_priv);
+            let _ = std::fs::remove_file(&target_pub);
+            return Err(format!("Could not set generated public key permissions: {}", error));
+        }
     }
 
     let pub_content = std::fs::read_to_string(&target_pub)
