@@ -263,7 +263,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                 #[cfg(windows)]
                 cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
-                cmd.arg("-ssh")
+                cmd.arg("-batch").arg("-ssh")
                     .arg("-P")
                     .arg(&port)
                     .arg("-l")
@@ -272,15 +272,11 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                     .arg(key_path)
                     .arg(host)
                     .arg("echo sshdesktop-connected")
-                    .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
 
                 match cmd.spawn() {
                     Ok(mut child) => {
-                        if let Some(mut stdin) = child.stdin.take() {
-                            let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
-                        }
                         match tokio::time::timeout(std::time::Duration::from_secs(12), child.wait_with_output()).await {
                             Ok(Ok(out)) => {
                                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -391,9 +387,6 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
 
                 match cmd.spawn() {
                     Ok(mut child) => {
-                        if let Some(mut stdin) = child.stdin.take() {
-                            let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, b"y\r\ny\r\n").await;
-                        }
                         match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait_with_output()).await {
                             Ok(Ok(out)) => {
                                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
