@@ -465,7 +465,13 @@ async fn execute_local_tunneled_request(
     let tunneled_url = url::Url::parse(&tunneled_url_str)
         .map_err(|e| format!("Failed to parse tunneled URL: {}", e))?;
 
-    let mut direct_resp = execute_direct_request(req, &tunneled_url).await?;
+    let response = execute_direct_request(req, &tunneled_url).await;
+    // This tunnel exists only for this HTTP request; always release it, including
+    // when the local request fails or times out.
+    if let Err(stop_error) = crate::ssh::tunnel::ssh_stop_tunnel(local_tunnel_port.to_string()).await {
+        log::warn!("SSH Desktop: Failed to close temporary API tunnel on local port {}: {}", local_tunnel_port, stop_error);
+    }
+    let mut direct_resp = response?;
     direct_resp.tunnel_used = true;
     direct_resp.tunneled_target = Some(format!("127.0.0.1:{} (via local :{})", original_port, local_tunnel_port));
     direct_resp.effective_url = parsed_url.to_string();
