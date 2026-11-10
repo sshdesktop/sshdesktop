@@ -214,20 +214,23 @@ pub fn is_ppk_key(path_or_content: &str) -> bool {
 #[cfg(windows)]
 pub fn secure_windows_private_key(path: &std::path::Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
-    if let Ok(username) = std::env::var("USERNAME") {
-        let path_str = path.to_string_lossy();
-        let output = std::process::Command::new("icacls.exe")
-            .arg(&*path_str)
-            .arg("/inheritance:r")
-            .arg("/grant:r")
-            .arg(format!("{}:(F)", username))
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .output()
-            .map_err(|e| format!("Failed to invoke icacls: {}", e))?;
-        if !output.status.success() {
-            let err_msg = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("icacls failed: {}", err_msg.trim()));
-        }
+    let username = std::env::var("USERNAME")
+        .map_err(|_| "Could not determine the current Windows account; refusing to use an unsecured private key.".to_string())?;
+    if username.trim().is_empty() {
+        return Err("The current Windows account name is empty; refusing to use an unsecured private key.".into());
+    }
+    let path_str = path.to_string_lossy();
+    let output = std::process::Command::new("icacls.exe")
+        .arg(&*path_str)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(format!("{}:(F)", username))
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output()
+        .map_err(|e| format!("Failed to invoke icacls: {}", e))?;
+    if !output.status.success() {
+        let err_msg = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("icacls failed: {}", err_msg.trim()));
     }
     Ok(())
 }
@@ -284,7 +287,10 @@ pub fn resolve_key_path(key_input: &str) -> Option<String> {
 
     let path = std::path::Path::new(trimmed);
     if path.exists() && path.is_file() {
-        let _ = secure_private_key_permissions(path);
+        if secure_private_key_permissions(path).is_err() {
+            log::error!("SSH Desktop: Refusing to use private key because permissions could not be secured: {}", path.display());
+            return None;
+        }
         return Some(trimmed.to_string());
     }
 
@@ -292,6 +298,10 @@ pub fn resolve_key_path(key_input: &str) -> Option<String> {
     let migrated = trimmed.replace(".clouddesk", ".sshdesktop");
     let p_migrated = std::path::Path::new(&migrated);
     if p_migrated.exists() && p_migrated.is_file() {
+        if secure_private_key_permissions(p_migrated).is_err() {
+            log::error!("SSH Desktop: Refusing to use migrated private key because permissions could not be secured: {}", p_migrated.display());
+            return None;
+        }
         return Some(migrated);
     }
 
@@ -307,7 +317,10 @@ pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
     // 1. If it's already an existing file on disk, return its path
     let p = std::path::Path::new(trimmed);
     if p.exists() && p.is_file() {
-        let _ = secure_private_key_permissions(p);
+        if secure_private_key_permissions(p).is_err() {
+            log::error!("SSH Desktop: Refusing to use private key because permissions could not be secured: {}", p.display());
+            return None;
+        }
         return Some(trimmed.to_string());
     }
 
@@ -315,12 +328,16 @@ pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
     if trimmed.contains("PRIVATE KEY") || trimmed.contains("PuTTY-User-Key-File") || trimmed.lines().count() > 1 {
         if let Some(base) = directories::BaseDirs::new() {
             let keys_dir = base.home_dir().join(".sshdesktop").join("keys");
-            let _ = std::fs::create_dir_all(&keys_dir);
+            if std::fs::create_dir_all(&keys_dir).is_err() {
+                return None;
+            }
 
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&keys_dir, std::fs::Permissions::from_mode(0o700));
+                if std::fs::set_permissions(&keys_dir, std::fs::Permissions::from_mode(0o700)).is_err() {
+                    return None;
+                }
             }
 
             let is_ppk = is_ppk_key(trimmed);

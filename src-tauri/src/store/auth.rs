@@ -117,17 +117,17 @@ fn verify_password(password: &str, salt: &str, stored: &str) -> bool {
 }
 
 /// Loads or auto-initializes the default admin/admin configuration
-pub fn load_or_init_auth_config() -> (ServerAuthConfig, PathBuf) {
+pub fn load_or_init_auth_config() -> Result<(ServerAuthConfig, PathBuf), String> {
     let path = get_auth_file_path();
     if path.exists() {
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(config) = serde_json::from_str::<ServerAuthConfig>(&content) {
-                return (config, path);
-            }
-        }
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("Could not read authentication configuration {}: {}", path.display(), e))?;
+        let config = serde_json::from_str::<ServerAuthConfig>(&content)
+            .map_err(|e| format!("Authentication configuration {} is invalid; refusing to reset credentials: {}", path.display(), e))?;
+        return Ok((config, path));
     }
 
-    // Initialize default admin / admin credentials with mandatory change flag
+    // Initialize default admin / admin credentials only when no config exists.
     let salt = uuid::Uuid::new_v4().to_string();
     let default_config = ServerAuthConfig {
         username: "admin".to_string(),
@@ -138,21 +138,36 @@ pub fn load_or_init_auth_config() -> (ServerAuthConfig, PathBuf) {
         last_login_at: None,
     };
 
-    if let Ok(json) = serde_json::to_string_pretty(&default_config) {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(&path, json);
-        let _ = enforce_strict_permissions(&path);
-        log::info!("SSH Desktop: Initialized default web auth credentials in {:?}", path);
+    let json = serde_json::to_string_pretty(&default_config)
+        .map_err(|e| format!("Could not serialize initial authentication configuration: {}", e))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create authentication directory {}: {}", parent.display(), e))?;
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(parent) = path.parent() {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("Could not secure authentication directory: {}", e))?;
+        }
+    }
+    // create_new prevents racing initialization from truncating an existing file.
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&path)
+        .map_err(|e| format!("Could not create initial authentication configuration {}: {}", path.display(), e))?;
+    file.write_all(json.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|e| format!("Could not write initial authentication configuration: {}", e))?;
+    enforce_strict_permissions(&path)?;
+    log::info!("SSH Desktop: Initialized default web auth credentials in {:?}", path);
 
-    (default_config, path)
+    Ok((default_config, path))
 }
 
 #[tauri::command]
 pub async fn auth_get_status() -> Result<AuthStatusResponse, String> {
-    let (config, path) = load_or_init_auth_config();
+    let (config, path) = load_or_init_auth_config()?;
     let is_auth = IS_AUTHENTICATED.load(Ordering::SeqCst);
 
     Ok(AuthStatusResponse {
@@ -166,7 +181,7 @@ pub async fn auth_get_status() -> Result<AuthStatusResponse, String> {
 
 #[tauri::command]
 pub async fn auth_login(username: String, password: String) -> Result<AuthActionResult, String> {
-    let (mut config, path) = load_or_init_auth_config();
+    let (mut config, path) = load_or_init_auth_config()?;
     let trimmed_user = username.trim();
 
     if trimmed_user != config.username {
@@ -204,7 +219,7 @@ pub async fn auth_change_credentials(
     new_username: String,
     new_password: String,
 ) -> Result<AuthActionResult, String> {
-    let (mut config, path) = load_or_init_auth_config();
+    let (mut config, path) = load_or_init_auth_config()?;
 
     // Verify current password first
     if !verify_password(&current_password, &config.salt, &config.password_hash) {

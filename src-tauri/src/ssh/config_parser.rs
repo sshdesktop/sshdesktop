@@ -170,18 +170,20 @@ pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
     let ssh_dir = get_ssh_dir().ok_or_else(|| "Could not determine .ssh directory".to_string())?;
     let config_path = get_ssh_config_path().ok_or_else(|| "Could not determine .ssh/config path".to_string())?;
 
-    if !ssh_dir.exists() {
-        std::fs::create_dir_all(&ssh_dir)
-            .map_err(|e| format!("Failed to create .ssh directory: {}", e))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700));
-        }
+    std::fs::create_dir_all(&ssh_dir)
+        .map_err(|e| format!("Failed to create .ssh directory: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("Failed to secure .ssh directory permissions: {}", e))?;
     }
 
+    // Never treat an unreadable existing config as an empty file: doing so could
+    // overwrite a user's SSH configuration and silently remove their host entries.
     let existing_content = if config_path.exists() {
-        std::fs::read_to_string(&config_path).unwrap_or_default()
+        std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("Failed to read existing SSH config {}: {}", config_path.display(), e))?
     } else {
         String::new()
     };
@@ -250,7 +252,8 @@ pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed to secure SSH config permissions: {}", e))?;
     }
 
     log::info!("SSH Desktop: Successfully saved host '{}' to {}", entry.name, config_path.display());
