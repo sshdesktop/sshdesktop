@@ -603,9 +603,12 @@ pub async fn sftp_download_to_downloads(
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or_else(|| "No active SSH connection.".to_string())?;
 
-    let host = &conn.config.host;
-    let port = conn.config.port.to_string();
-    let user = &conn.config.username;
+    if !remote_path.starts_with('/') || remote_path.len() > 4096
+        || remote_path.chars().any(|ch| ch.is_control())
+        || remote_path.split('/').any(|part| part == "." || part == "..")
+    {
+        return Err("Remote download path must be an absolute path without traversal components.".into());
+    }
 
     let download_dir = directories::UserDirs::new()
         .and_then(|u| u.download_dir().map(|p| p.to_path_buf()))
@@ -634,72 +637,11 @@ pub async fn sftp_download_to_downloads(
     let local_dest = download_dir.join(filename);
     let local_dest_str = local_dest.to_string_lossy().to_string();
 
-    let has_pwd = conn.config.password.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
-
-    if has_pwd {
-        let pwd = conn.config.password.as_ref().unwrap();
-        let password_file = crate::ssh::connection::create_password_file(pwd)?;
-        let src = format!("{}@{}:{}", user, host, remote_path);
-        let mut cmd = tokio::process::Command::new("pscp");
-    cmd.kill_on_drop(true);
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000);
-        cmd.arg("-P").arg(&port)
-            .arg("-batch")
-            .arg("-pwfile").arg(password_file.path())
-            .arg(&src).arg(&local_dest_str)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        let res = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            cmd.output(),
-        ).await;
-
-        if let Ok(Ok(output)) = res {
-            if output.status.success() {
-                log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_dest_str);
-                return Ok(local_dest_str);
-            } else {
-                let err = String::from_utf8_lossy(&output.stderr);
-                log::warn!("SSH Desktop: pscp download failed: {}, falling back to scp", err);
-            }
-        }
-    }
-
-    let src = format!("{}@{}:{}", user, host, remote_path);
-    let mut cmd = tokio::process::Command::new("scp");
-    cmd.kill_on_drop(true);
-    #[cfg(windows)]
-    cmd.creation_flags(0x08000000);
-    cmd.arg("-P").arg(&port)
-        .arg("-o").arg("StrictHostKeyChecking=yes");
-
-    if let Some(key) = &conn.config.private_key_path {
-        if !key.is_empty() {
-            cmd.arg("-i").arg(key);
-        }
-    }
-    cmd.arg(&src).arg(&local_dest_str)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        cmd.output(),
-    ).await
-        .map_err(|_| "Download timed out after 300s".to_string())?
-        .map_err(|e| format!("Failed to run scp: {}", e))?;
-
-    if output.status.success() {
-        log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_dest_str);
-        Ok(local_dest_str)
-    } else {
-        let err = String::from_utf8_lossy(&output.stderr);
-        Err(format!("Download failed: {}", err.trim()))
-    }
+    tokio::fs::create_dir_all(&download_dir).await
+        .map_err(|e| format!("Failed to create Downloads directory: {}", e))?;
+    run_scp_transfer(&conn, &local_dest_str, &remote_path, false).await?;
+    log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_dest_str);
+    Ok(local_dest_str)
 }
 
 #[tauri::command]
