@@ -219,8 +219,15 @@ pub async fn ssh_install_public_key(
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(fields[1])
         .map_err(|_| "Invalid SSH public key base64 data".to_string())?;
-    if decoded.is_empty() {
-        return Err("SSH public key data is empty".into());
+    if decoded.len() < 4 {
+        return Err("SSH public key data is malformed".into());
+    }
+    let algorithm_len = u32::from_be_bytes([decoded[0], decoded[1], decoded[2], decoded[3]]) as usize;
+    if algorithm_len == 0
+        || algorithm_len > decoded.len().saturating_sub(4)
+        || decoded.get(4..4 + algorithm_len) != Some(fields[0].as_bytes())
+    {
+        return Err("SSH public key algorithm does not match its encoded key data".into());
     }
 
     let mut key_line = clean_key.to_string();
