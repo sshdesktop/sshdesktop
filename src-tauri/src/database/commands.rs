@@ -190,6 +190,9 @@ pub async fn db_execute_query(
     query: String,
     max_rows: Option<usize>,
 ) -> Result<QueryResult, String> {
+    if query.len() > 5 * 1024 * 1024 {
+        return Err("SQL query exceeds the 5 MiB input limit.".into());
+    }
     let mut lock = db_mgr.sessions.lock().await;
     let session = lock
         .get_mut(&connection_id)
@@ -210,7 +213,10 @@ pub async fn db_execute_query(
         let potentially_mutating = [
             " INTO ", " FOR UPDATE", " FOR SHARE", " LOCK IN SHARE MODE",
             " NEXTVAL(", " SETVAL(", " PG_ADVISORY", " LOAD_FILE(",
-            " SLEEP(", " BENCHMARK(",
+            " SLEEP(", " BENCHMARK(", " DBLINK_EXEC(", " PG_READ_FILE(",
+            " PG_READ_BINARY_FILE(", " PG_STAT_FILE(", " LO_IMPORT(", " LO_EXPORT(",
+            " PG_TERMINATE_BACKEND(", " PG_CANCEL_BACKEND(", " XP_CMDSHELL",
+            " SP_OACREATE", " OPENROWSET(", " OPENDATASOURCE(",
         ].iter().any(|needle| upper_compact.contains(needle.trim()));
         let semicolon_count = normalized.chars().filter(|c| *c == ';').count();
         let has_multiple_statements = semicolon_count > 1
