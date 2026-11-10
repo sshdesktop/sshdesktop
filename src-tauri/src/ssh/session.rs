@@ -52,7 +52,7 @@ pub async fn run_exec_channel(
     // merge streams, and can corrupt structured/binary command output.
     channel.exec(true, cmd).await?;
     let mut stdout = Vec::new();
-    let mut exit_code = 0;
+    let mut exit_code = -1;
 
     let completed = tokio::time::timeout(std::time::Duration::from_secs(120), async {
         while let Some(msg) = channel.wait().await {
@@ -96,7 +96,7 @@ pub async fn run_exec_channel_with_stdin(
 
     let res = tokio::time::timeout(std::time::Duration::from_secs(25), async {
         let mut stdout = Vec::new();
-        let mut exit_code = 0;
+        let mut exit_code = -1;
 
         while let Some(msg) = channel.wait().await {
             match msg {
@@ -135,7 +135,7 @@ pub async fn run_stream_channel(
     use tauri::Emitter;
     let mut channel = handle.channel_open_session().await?;
     channel.exec(true, cmd).await?;
-    let mut exit_code = 0;
+    let mut exit_code = -1;
 
     while let Some(msg) = channel.wait().await {
         match msg {
@@ -186,7 +186,7 @@ pub async fn run_log_stream_channel(
     use tauri::Emitter;
     let mut channel = handle.channel_open_session().await?;
     channel.exec(true, command).await?;
-    let mut exit_code = 0;
+    let mut exit_code = -1;
     while let Some(msg) = channel.wait().await {
         match msg {
             ChannelMsg::Data { ref data } => {
