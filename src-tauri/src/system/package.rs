@@ -183,6 +183,7 @@ pub async fn package_search(
 fn build_install_command(pm: &str, raw_name: &str) -> (String, Option<String>) {
     let name = raw_name.trim();
     let lower = name.to_lowercase();
+    let package_arg = shell_quote(name);
 
     // 1. MySQL / MariaDB Database Server & Client
     if lower == "mysql-server" || lower == "mysql" || lower == "mariadb-server" || lower == "mariadb" || lower == "mariadb105-server" || lower == "default-mysql-server" {
