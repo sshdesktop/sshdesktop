@@ -269,12 +269,17 @@ pub async fn sftp_delete(
 ) -> Result<(), String> {
     // Canonicalize on the remote host before applying protected-root checks.
     // This blocks traversal aliases such as /etc/../ and repeated separators.
+    if path.trim().is_empty() {
+        return Err("Remote path cannot be empty".into());
+    }
     let escaped = shell_escape(&path);
-    let (canonical, canonical_code) = run_cmd(
-        &state,
-        &conn_id,
-        &format!("realpath -m -- '{}' 2>/dev/null", escaped),
-    ).await;
+    // Resolve the parent but preserve the final path component. Full realpath()
+    // would follow a final symlink and could delete its target instead of the link.
+    let canonical_cmd = format!(
+        "target='{}'; parent=$(dirname -- \"$target\") || exit 1; base=$(basename -- \"$target\") || exit 1; canonical_parent=$(realpath -m -- \"$parent\") || exit 1; if [ \"$base\" = . ] || [ \"$base\" = .. ]; then realpath -m -- \"$target\"; elif [ \"$canonical_parent\" = / ]; then printf '/%s' \"$base\"; else printf '%s/%s' \"$canonical_parent\" \"$base\"; fi",
+        escaped
+    );
+    let (canonical, canonical_code) = run_cmd(&state, &conn_id, &canonical_cmd).await;
     if canonical_code != 0 {
         return Err(format!("Could not safely resolve remote path '{}': {}", path, canonical.trim()));
     }
