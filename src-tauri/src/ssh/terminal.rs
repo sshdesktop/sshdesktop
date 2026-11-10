@@ -258,6 +258,9 @@ pub async fn terminal_create(
     }
 
     // ── 2. Fallback Path: CLI PTY process (plink or openssh) ────────────────
+    if !is_key_auth && password.as_deref().map(|p| p.is_empty()).unwrap_or(true) {
+        return Err("Password authentication was selected, but no SSH password is configured.".into());
+    }
     let password_file = if !is_key_auth {
         match password.as_deref().filter(|p| !p.is_empty()) {
             Some(pwd) => Some(Arc::new(crate::ssh::connection::create_password_file(pwd)?)),
