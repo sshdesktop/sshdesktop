@@ -274,7 +274,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
     let is_key_auth = match config.auth_method.as_deref() {
         Some("password") => false,
         Some("key") => true,
-        _ => config.private_key_path.is_some(),
+        _ => config.private_key_path.is_some() || config.password.is_none(),
     };
     let selected_key_path = if is_key_auth { config.private_key_path.as_deref() } else { None };
     if let Some(key_path) = selected_key_path {
@@ -659,7 +659,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
     let is_key_auth = match config.auth_method.as_deref() {
         Some("password") => false,
         Some("key") => true,
-        _ => config.private_key_path.is_some(),
+        _ => config.private_key_path.is_some() || config.password.is_none(),
     };
     let selected_key_path = if is_key_auth { config.private_key_path.as_deref() } else { None };
     if let Some(key_path) = selected_key_path {
