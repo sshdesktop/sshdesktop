@@ -52,7 +52,12 @@ pub async fn sftp_create_zip_pure(
 
     let escaped_items = items
         .iter()
-        .map(|it| format!("'{}'", shell_escape(it)))
+        .map(|it| {
+            // A relative item beginning with '-' must not be interpreted as a
+            // tar/zip command-line option.
+            let safe_item = if it.starts_with('-') { format!("./{}", it) } else { it.clone() };
+            format!("'{}'", shell_escape(&safe_item))
+        })
         .collect::<Vec<_>>()
         .join(" ");
 
