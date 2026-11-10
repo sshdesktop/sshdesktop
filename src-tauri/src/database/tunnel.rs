@@ -20,8 +20,7 @@ pub async fn setup_ssh_tunnel(
     let mut maybe_handle = {
         let lock = app_state.sessions.lock().await;
         lock.get(&ssh_conn_id).cloned()
-            .or_else(|| lock.get("default").cloned())
-            .or_else(|| lock.values().next().cloned())
+            .or_else(|| if ssh_conn_id == "default" { lock.get("default").cloned() } else { None })
     };
 
     // 2. Resolve SSH connection configuration from memory or disk
