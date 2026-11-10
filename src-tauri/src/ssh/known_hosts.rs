@@ -368,9 +368,38 @@ pub async fn ssh_trust_host_key(
             .map_err(|e| format!("Failed to secure known_hosts permissions: {}", e))?;
     }
 
-    if let Err(e) = std::fs::rename(&temp_path, &known_hosts_path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(format!("Failed to replace known_hosts: {}", e));
+    #[cfg(windows)]
+    {
+        // Windows rename does not replace an existing destination. Move the old
+        // file aside first and restore it if installing the new file fails.
+        if known_hosts_path.exists() {
+            let backup_path = ssh_dir.join(format!("known_hosts.{}.bak", uuid::Uuid::new_v4()));
+            std::fs::rename(&known_hosts_path, &backup_path)
+                .map_err(|e| format!("Failed to stage existing known_hosts: {}", e))?;
+            if let Err(error) = std::fs::rename(&temp_path, &known_hosts_path) {
+                let restore_error = std::fs::rename(&backup_path, &known_hosts_path).err();
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(match restore_error {
+                    Some(restore) => format!(
+                        "Failed to install known_hosts: {}. Restoring the previous file also failed: {}",
+                        error, restore
+                    ),
+                    None => format!("Failed to install known_hosts; previous file restored: {}", error),
+                });
+            }
+            let _ = std::fs::remove_file(&backup_path);
+        } else if let Err(error) = std::fs::rename(&temp_path, &known_hosts_path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(format!("Failed to install known_hosts: {}", error));
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Err(error) = std::fs::rename(&temp_path, &known_hosts_path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(format!("Failed to replace known_hosts: {}", error));
+        }
     }
 
     log::info!(
