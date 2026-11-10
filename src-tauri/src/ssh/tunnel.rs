@@ -245,13 +245,20 @@ pub async fn ssh_start_tunnel(
         if maybe_handle.is_none() {
             let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
             if !is_ppk {
-                if let Ok(new_handle) = crate::ssh::session::connect_session(
-                    &conn.config.host,
-                    conn.config.port,
-                    &conn.config.username,
-                    conn.config.password.as_deref(),
-                    conn.config.private_key_path.as_deref(),
-                ).await {
+                let is_key_auth = match conn.config.auth_method.as_deref() {
+                Some("password") => false,
+                Some("key") => true,
+                _ => conn.config.private_key_path.is_some(),
+            };
+            if let Ok(new_handle) = crate::ssh::session::connect_session_with_passphrase_auth(
+                &conn.config.host,
+                conn.config.port,
+                &conn.config.username,
+                if is_key_auth { None } else { conn.config.password.as_deref() },
+                if is_key_auth { conn.config.private_key_path.as_deref() } else { None },
+                conn.config.passphrase.as_deref(),
+                conn.config.auth_method.as_deref() != Some("password"),
+            ).await {
                     let arc_h = Arc::new(new_handle);
                     {
                         let mut lock = state.sessions.lock().await;
@@ -735,12 +742,19 @@ pub async fn ssh_start_socks5(
     if maybe_handle.is_none() {
         let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
         if !is_ppk {
-            if let Ok(new_handle) = crate::ssh::session::connect_session(
+            let is_key_auth = match conn.config.auth_method.as_deref() {
+                Some("password") => false,
+                Some("key") => true,
+                _ => conn.config.private_key_path.is_some(),
+            };
+            if let Ok(new_handle) = crate::ssh::session::connect_session_with_passphrase_auth(
                 &conn.config.host,
                 conn.config.port,
                 &conn.config.username,
-                conn.config.password.as_deref(),
-                conn.config.private_key_path.as_deref(),
+                if is_key_auth { None } else { conn.config.password.as_deref() },
+                if is_key_auth { conn.config.private_key_path.as_deref() } else { None },
+                conn.config.passphrase.as_deref(),
+                conn.config.auth_method.as_deref() != Some("password"),
             ).await {
                 let arc_h = Arc::new(new_handle);
                 {
