@@ -122,12 +122,14 @@ pub fn check_known_hosts(
             continue;
         }
 
-        // OpenSSH known_hosts may prefix entries with @cert-authority or @revoked.
-        let (host_field, key_type_field, key_field) = if parts[0].starts_with('@') {
+        // OpenSSH markers have security semantics. A revoked key must never be
+        // accepted, and CA entries are not direct host keys (certificate validation
+        // is not implemented by this russh handler).
+        let (marker, host_field, key_type_field, key_field) = if parts[0].starts_with('@') {
             if parts.len() < 4 { continue; }
-            (parts[1], parts[2], parts[3])
+            (Some(parts[0]), parts[1], parts[2], parts[3])
         } else {
-            (parts[0], parts[1], parts[2])
+            (None, parts[0], parts[1], parts[2])
         };
 
         let host_matches = host_field.split(',').any(|token| {
@@ -137,11 +139,22 @@ pub fn check_known_hosts(
             continue;
         }
 
+        if marker == Some("@cert-authority") {
+            continue;
+        }
+
         if key_field == target_key && key_type_field == key_type {
+            if marker == Some("@revoked") {
+                return (
+                    "changed".into(),
+                    "The offered SSH host key is explicitly revoked in known_hosts.".into(),
+                    Some(key_field.to_string()),
+                );
+            }
             return ("trusted".into(), "Host key verified in known_hosts".into(), None);
         }
 
-        if key_type_field == key_type {
+        if key_type_field == key_type && marker != Some("@revoked") {
             found_previous_key = Some(key_field.to_string());
         }
     }
