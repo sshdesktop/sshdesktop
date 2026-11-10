@@ -365,17 +365,20 @@ pub async fn execute_operation_sqlite(
     session: &ActiveDatabaseSession,
     state: &crate::AppState,
 ) -> Result<u64, String> {
+    if session.config.read_only {
+        return Err("This SQLite connection is read-only.".into());
+    }
     let res = sqlx::raw_sql(sql).execute(pool).await.map_err(|e| e.to_string())?;
     if session.config.use_ssh {
-        if let Some(conn_id) = &session.config.ssh_connection_id {
-            let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database);
-            let cache_dir = std::env::temp_dir().join("sshdesktop_sqlite");
-            let safe_name = format!("{}_{}", session.config.id, raw_path.replace(|c: char| !c.is_alphanumeric(), "_"));
-            let local_cache = cache_dir.join(format!("{}.db", safe_name));
-            if let Ok(bytes) = std::fs::read(&local_cache) {
-                let _ = crate::ssh::sftp::sftp_write_bytes(state, conn_id, raw_path, &bytes).await;
-            }
-        }
+        let conn_id = session.config.ssh_connection_id.as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| "Remote SQLite operation has no explicit SSH connection ID.".to_string())?;
+        let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
+        let local_cache = sqlite_cache_path(&session.config, raw_path)?;
+        let bytes = std::fs::read(&local_cache)
+            .map_err(|e| format!("Failed to read updated local SQLite cache: {}", e))?;
+        crate::ssh::sftp::sftp_write_bytes(state, conn_id, raw_path, &bytes).await
+            .map_err(|e| format!("SQLite operation succeeded locally but remote sync failed: {}", e))?;
     }
     Ok(res.rows_affected())
 }
