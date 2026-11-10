@@ -142,7 +142,7 @@ pub async fn ssh_config_read_hosts() -> Result<Vec<SshConfigHost>, String> {
 pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
     // Values are written into an OpenSSH configuration file. Reject control
     // characters so user input cannot create additional directives/Host blocks.
-    let has_control = |value: &str| value.chars().any(|c| c == '\\n' || c == '\\r' || c == '\\0');
+    let has_control = |value: &str| value.chars().any(|c| c.is_control());
     if entry.name.trim().is_empty()
         || has_control(&entry.name)
         || !entry.name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
