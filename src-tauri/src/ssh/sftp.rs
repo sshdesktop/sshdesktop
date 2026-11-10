@@ -335,9 +335,13 @@ pub async fn sftp_write_bytes(
 
     // Write beside the destination, then atomically rename so a failed transfer
     // never truncates or leaves a partially-written destination file.
+    let preserve_mode = format!(
+        "if [ -f '{0}' ] && [ ! -L '{0}' ]; then mode=$(stat -c '%a' '{0}' 2>/dev/null || stat -f '%Lp' '{0}' 2>/dev/null) || exit 1; case \"$mode\" in *[!0-7]*|'') exit 1;; esac; chmod \"$mode\" '{1}'; fi",
+        escaped_path, escaped_tmp
+    );
     let atomic_cmd = format!(
-        "umask 077 && {} > '{}' && if [ -f '{}' ] && [ ! -L '{}' ]; then chmod --reference='{}' '{}'; fi && mv -f -- '{}' '{}'",
-        decode_base64, escaped_tmp, escaped_path, escaped_path, escaped_path, escaped_tmp, escaped_tmp, escaped_path
+        "umask 077 && {} > '{}' && {} && mv -f -- '{}' '{}'",
+        decode_base64, escaped_tmp, preserve_mode, escaped_tmp, escaped_path
     );
     let (stdout, code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &atomic_cmd, b64.as_bytes()).await;
     if code == 0 {
@@ -355,9 +359,13 @@ pub async fn sftp_write_bytes(
         return Err(format!("Failed to stage remote upload: {}", tmp_out.trim()));
     }
 
+    let preserve_tmp_mode = format!(
+        "if [ -f '{0}' ] && [ ! -L '{0}' ]; then mode=$(stat -c '%a' '{0}' 2>/dev/null || stat -f '%Lp' '{0}' 2>/dev/null) || exit 1; case \"$mode\" in *[!0-7]*|'') exit 1;; esac; chmod \"$mode\" '{1}'; fi",
+        escaped_path, escaped_tmp_file
+    );
     let mv_cmd = format!(
-        "if [ -f '{}' ] && [ ! -L '{}' ]; then chmod --reference='{}' '{}'; fi && mv -f -- '{}' '{}'",
-        escaped_path, escaped_path, escaped_path, escaped_tmp_file, escaped_tmp_file, escaped_path
+        "{} && mv -f -- '{}' '{}'",
+        preserve_tmp_mode, escaped_tmp_file, escaped_path
     );
     let (move_out, move_code) = crate::ssh::exec::run_cmd_priv(state, conn_id, &mv_cmd).await;
     if move_code == 0 {
