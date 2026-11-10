@@ -2770,18 +2770,24 @@ export default function ConnectionScreen() {
               >
                 Cancel
               </button>
-              <button
-                type="button"
-                onClick={handleTrustHostAndConnect}
-                className={`px-4 py-2 rounded-xl text-white font-medium transition-all text-xs flex items-center space-x-1.5 ${
-                  pendingHostVerification.verification.status === 'changed'
-                    ? 'bg-rose-600 hover:bg-rose-500 shadow-lg shadow-rose-600/30'
-                    : 'bg-blue-600 hover:bg-blue-500 shadow-lg shadow-blue-600/30'
-                }`}
-              >
-                <Check className="w-3.5 h-3.5" />
-                <span>{pendingHostVerification.verification.status === 'changed' ? 'Accept New Key & Proceed' : 'Trust & Connect'}</span>
-              </button>
+              {pendingHostVerification.verification.status === 'changed' ? (
+                <div className="text-[10px] text-rose-300 max-w-[190px] text-right">
+                  Key replacement is blocked. Verify the fingerprint independently, remove the old entry with ssh-keygen -R, then reconnect.
+                </div>
+              ) : pendingHostVerification.verification.status === 'failed' ? (
+                <div className="text-[10px] text-amber-300 max-w-[190px] text-right">
+                  Host key could not be verified. Check the address and network, then retry.
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleTrustHostAndConnect}
+                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium transition-all text-xs flex items-center space-x-1.5 shadow-lg shadow-blue-600/30"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Trust & Connect</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
