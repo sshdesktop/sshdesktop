@@ -3,6 +3,9 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn valid_device_path(value: &str) -> bool {
+    if value != value.trim() {
+        return false;
+    }
     let value = value.trim();
     let v = if let Some(path) = value.strip_prefix("/dev/") {
         path
