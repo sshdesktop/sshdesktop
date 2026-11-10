@@ -146,7 +146,7 @@ pub async fn service_action(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("systemctl {} {} failed: {}", safe_action, name, stdout.trim()));
     }
 
