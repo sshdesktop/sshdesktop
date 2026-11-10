@@ -1,3 +1,9 @@
+fn valid_groupname(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 fn valid_username(value: &str) -> bool {
     !value.is_empty() && value.len() <= 32
         && value.as_bytes()[0].is_ascii_alphanumeric()
@@ -487,7 +493,7 @@ pub async fn group_add(
     conn_id: String,
     name: String,
 ) -> Result<(), String> {
-    if name.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_groupname(&name) {
         return Err("Invalid group name.".into());
     }
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &format!("groupadd '{}' 2>&1", name)).await;
@@ -506,7 +512,7 @@ pub async fn group_delete(
     conn_id: String,
     name: String,
 ) -> Result<(), String> {
-    if name.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_groupname(&name) {
         return Err("Invalid group name.".into());
     }
     if matches!(name.as_str(), "root" | "sudo" | "wheel" | "daemon") {
@@ -558,7 +564,7 @@ pub async fn group_add_user(
     group: String,
     username: String,
 ) -> Result<(), String> {
-    if group.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_groupname(&group) {
         return Err("Invalid group name.".into());
     }
     if !valid_username(&username) {
@@ -583,7 +589,7 @@ pub async fn group_remove_user(
     group: String,
     username: String,
 ) -> Result<(), String> {
-    if group.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_groupname(&group) {
         return Err("Invalid group name.".into());
     }
     if !valid_username(&username) {
@@ -777,7 +783,7 @@ pub async fn group_add(
     conn_id: String,
     name: String,
 ) -> Result<(), String> {
-    if name.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_groupname(&name) {
         return Err("Invalid group name.".into());
     }
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &format!("groupadd '{}' 2>&1", name)).await;
@@ -796,7 +802,7 @@ pub async fn group_delete(
     conn_id: String,
     name: String,
 ) -> Result<(), String> {
-    if name.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_groupname(&name) {
         return Err("Invalid group name.".into());
     }
     if matches!(name.as_str(), "root" | "sudo" | "wheel" | "daemon") {
@@ -848,7 +854,7 @@ pub async fn group_add_user(
     group: String,
     username: String,
 ) -> Result<(), String> {
-    if group.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_groupname(&group) {
         return Err("Invalid group name.".into());
     }
     if !valid_username(&username) {
@@ -873,7 +879,7 @@ pub async fn group_remove_user(
     group: String,
     username: String,
 ) -> Result<(), String> {
-    if group.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if !valid_groupname(&group) {
         return Err("Invalid group name.".into());
     }
     if !valid_username(&username) {
