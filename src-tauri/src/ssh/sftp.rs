@@ -1,3 +1,9 @@
+fn valid_remote_path(path: &str) -> bool {
+    path.starts_with('/') && path.len() <= 4096
+        && !path.chars().any(|ch| ch.is_control())
+        && !path.split('/').any(|part| part == "." || part == "..")
+}
+
 async fn run_scp_transfer(
     conn: &crate::ssh::connection::SshConnection,
     local_path: &str,
@@ -127,6 +133,9 @@ pub async fn sftp_list_dir(
     conn_id: String,
     path: String,
 ) -> Result<Vec<FileEntry>, String> {
+    if !path.is_empty() && !valid_remote_path(&path) {
+        return Err("Remote directory path must be absolute and contain no traversal or control characters.".into());
+    }
     let clean_path = if path.is_empty() || path == "/" {
         "/"
     } else {
@@ -224,13 +233,12 @@ pub async fn sftp_read_file(
     conn_id: String,
     path: String,
 ) -> Result<Vec<u8>, String> {
-    if path.trim().is_empty() {
-        return Err("Remote file path cannot be empty".into());
+    if !valid_remote_path(&path) {
+        return Err("Remote file path must be absolute and contain no traversal or control characters.".into());
     }
     let escaped = shell_escape(&path);
-    // Keep the remote payload ASCII so run_cmd's UTF-8 decoding cannot corrupt
-    // arbitrary binary bytes (archives, images, database backups, executables).
-    let command = format!("base64 < '{}' | tr -d '\\n'", escaped);
+    // Check the remote size before encoding to avoid transferring an oversized file.
+    let command = format!("size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 50331648 ] || {{ echo 'File exceeds 48 MiB limit' >&2; exit 1; }}; base64 < '{}' | tr -d '\\n'", escaped, escaped);
     let (encoded, code) = run_cmd(&state, &conn_id, &command).await;
     if code == -1 && encoded.is_empty() {
         return Err("No active SSH connection.".into());
@@ -255,8 +263,12 @@ pub async fn sftp_read_text_file(
     conn_id: String,
     path: String,
 ) -> Result<String, String> {
+    if !valid_remote_path(&path) {
+        return Err("Remote text file path must be absolute and contain no traversal or control characters.".into());
+    }
     let escaped = shell_escape(&path);
-    let (stdout, code) = run_cmd(&state, &conn_id, &format!("cat '{}'", escaped)).await;
+    let cmd = format!("size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 8388608 ] || {{ echo 'Text file exceeds 8 MiB limit' >&2; exit 1; }}; cat '{}'", escaped, escaped);
+    let (stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
     if code == -1 && stdout.is_empty() {
         return Err("No active SSH connection.".into());
     }
@@ -376,6 +388,9 @@ pub async fn sftp_mkdir(
     conn_id: String,
     path: String,
 ) -> Result<(), String> {
+    if !valid_remote_path(&path) {
+        return Err("Remote directory path must be absolute and contain no traversal or control characters.".into());
+    }
     let escaped = shell_escape(&path);
     let (stdout, code) = run_cmd(&state, &conn_id, &format!("mkdir -p '{}' 2>&1", escaped)).await;
     if code == 0 {
@@ -398,8 +413,8 @@ pub async fn sftp_delete(
 ) -> Result<(), String> {
     // Canonicalize on the remote host before applying protected-root checks.
     // This blocks traversal aliases such as /etc/../ and repeated separators.
-    if path.trim().is_empty() {
-        return Err("Remote path cannot be empty".into());
+    if !valid_remote_path(&path) {
+        return Err("Remote delete path must be absolute and contain no traversal or control characters.".into());
     }
     let escaped = shell_escape(&path);
     // Resolve the parent but preserve the final path component. Full realpath()
