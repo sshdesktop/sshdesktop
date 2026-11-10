@@ -50,6 +50,11 @@ pub fn get_auth_file_path() -> PathBuf {
     if let Some(base) = directories::BaseDirs::new() {
         let home_dot_dir = base.home_dir().join(".sshdesktop");
         let _ = fs::create_dir_all(&home_dot_dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&home_dot_dir, fs::Permissions::from_mode(0o700));
+        }
         return home_dot_dir.join("auth.json");
     }
 
@@ -60,16 +65,14 @@ pub fn get_auth_file_path() -> PathBuf {
 }
 
 /// Sets strict POSIX permissions (chmod 600) on Unix systems
-pub fn enforce_strict_permissions(path: &PathBuf) {
+pub fn enforce_strict_permissions(path: &PathBuf) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = fs::metadata(path) {
-            let mut perms = metadata.permissions();
-            perms.set_mode(0o600); // Read/Write only by owner
-            let _ = fs::set_permissions(path, perms);
-        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Could not secure authentication file permissions: {}", e))?;
     }
+    Ok(())
 }
 
 /// Argon2id password hashing. The supplied per-user salt is encoded into the
@@ -130,7 +133,7 @@ pub fn load_or_init_auth_config() -> (ServerAuthConfig, PathBuf) {
             let _ = fs::create_dir_all(parent);
         }
         let _ = fs::write(&path, json);
-        enforce_strict_permissions(&path);
+        let _ = enforce_strict_permissions(&path);
         log::info!("SSH Desktop: Initialized default web auth credentials in {:?}", path);
     }
 
@@ -202,8 +205,8 @@ pub async fn auth_change_credentials(
     if clean_user.len() < 3 {
         return Err("New username must be at least 3 characters long.".to_string());
     }
-    if new_password.trim().len() < 6 {
-        return Err("New password must be at least 6 characters long.".to_string());
+    if new_password.trim().len() < 12 {
+        return Err("New password must be at least 12 characters long.".to_string());
     }
     if new_password.trim() == "admin" {
         return Err("New password cannot be the default 'admin'. Please choose a secure password.".to_string());
@@ -216,10 +219,9 @@ pub async fn auth_change_credentials(
     config.must_change_password = false;
     config.last_login_at = Some(chrono::Utc::now().timestamp());
 
-    if let Ok(json) = serde_json::to_string_pretty(&config) {
-        let _ = fs::write(&path, json);
-        enforce_strict_permissions(&path);
-    }
+    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| format!("Could not save new authentication credentials: {}", e))?;
+    enforce_strict_permissions(&path)?;
 
     IS_AUTHENTICATED.store(true, Ordering::SeqCst);
     log::info!("SSH Desktop: Successfully updated master web credentials. User: '{}', file: {:?}", config.username, path);
