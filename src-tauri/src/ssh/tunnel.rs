@@ -130,16 +130,19 @@ pub async fn ssh_start_tunnel(
     remote_port: u16,
     tunnel_type: Option<String>,
 ) -> Result<u16, String> {
-    let ftype = tunnel_type.as_deref().unwrap_or("local").to_lowercase();
+    let ftype = tunnel_type.as_deref().unwrap_or("local").trim().to_ascii_lowercase();
+    if !matches!(ftype.as_str(), "local" | "remote" | "reverse" | "-r" | "dynamic" | "socks" | "socks5") {
+        return Err("Tunnel type must be local, remote, or dynamic SOCKS5.".into());
+    }
     if ftype == "dynamic" || ftype == "socks" || ftype == "socks5" {
         return ssh_start_socks5(state, conn_id, Some(if local_port > 0 { local_port } else { 1080 })).await;
     }
 
     let is_remote_forward = ftype == "remote" || ftype == "reverse" || ftype == "-r";
     let tunnel_key = if is_remote_forward {
-        format!("{}:remote:{}:{}", conn_id, remote_port, local_port)
+        format!("{}:remote:{}:{}:{}", conn_id, remote_host, remote_port, local_port)
     } else {
-        format!("{}:{}:{}", conn_id, remote_host, remote_port)
+        format!("{}:local:{}:{}:{}", conn_id, local_port, remote_host, remote_port)
     };
 
     // 1. If an active tunnel for this server and remote port already exists, return its port
