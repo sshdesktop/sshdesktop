@@ -144,8 +144,8 @@ pub async fn terminal_create(
         let handle_opt = {
             let sessions = state.sessions.lock().await;
             sessions.get(&conn_id).cloned().or_else(|| {
-                if conn_id == "default" || conn_id.is_empty() {
-                    sessions.get("default").cloned().or_else(|| sessions.values().next().cloned())
+                if conn_id == "default" {
+                    sessions.get("default").cloned()
                 } else {
                     None
                 }
