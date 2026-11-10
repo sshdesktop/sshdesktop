@@ -43,6 +43,11 @@ fn get_storage_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."));
     dir.push(".sshdesktop");
     let _ = fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    }
     dir.push("connections.json");
     dir
 }
@@ -77,7 +82,21 @@ pub fn read_connections_from_disk() -> Vec<SavedConnection> {
 pub fn write_connections_to_disk(list: &[SavedConnection]) -> Result<(), String> {
     let path = get_storage_path();
     let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true).mode(0o600);
+        use std::io::Write;
+        let mut file = options.open(&path).map_err(|e| e.to_string())?;
+        file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&path, json).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn sanitize_connection_secrets(connection: &mut SavedConnection) {
