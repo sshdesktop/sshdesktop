@@ -1,5 +1,6 @@
 async fn terminate_existing_terminal(state: &AppState, terminal_id: &str) {
-    if let Some(previous) = state.terminals.lock().remove(terminal_id) {
+    let previous = { state.terminals.lock().remove(terminal_id) };
+    if let Some(previous) = previous {
         if let Some(pid) = previous.child_pid {
             #[cfg(windows)]
             {
