@@ -299,6 +299,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
     if !verified && is_key_auth {
         if is_ppk {
             if let Some(key_path) = &config.private_key_path {
+                let password_file = create_password_file(pwd)?;
                 let plink_bin = get_plink_path();
                 let mut cmd = tokio::process::Command::new(plink_bin);
                 #[cfg(windows)]
@@ -419,8 +420,8 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                     .arg(&port)
                     .arg("-l")
                     .arg(user)
-                    .arg("-pw")
-                    .arg(pwd)
+                    .arg("-pwfile")
+                    .arg(password_file.path())
                     .arg(host)
                     .arg("echo sshdesktop-connected")
                     .stdout(std::process::Stdio::piped())
@@ -702,6 +703,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
     // 3. Password probe via Plink
     if let Some(pwd) = &config.password {
         if !pwd.is_empty() {
+            let password_file = create_password_file(pwd)?;
             let plink_bin = get_plink_path();
             let mut cmd = tokio::process::Command::new(plink_bin);
             #[cfg(windows)]
@@ -710,7 +712,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
                 .arg("-batch")
                 .arg("-P").arg(&port)
                 .arg("-l").arg(user)
-                .arg("-pw").arg(pwd)
+                .arg("-pwfile").arg(password_file.path())
                 .arg(host)
                 .arg("echo sshdesktop-ok");
             if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await {
