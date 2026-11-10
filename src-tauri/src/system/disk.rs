@@ -3,7 +3,15 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn valid_device_path(value: &str) -> bool {
-    let v = value.strip_prefix("/dev/").unwrap_or(value);
+    let value = value.trim();
+    let v = if let Some(path) = value.strip_prefix("/dev/") {
+        path
+    } else if value.starts_with('/') {
+        // Never accept arbitrary absolute paths such as /etc/passwd as block devices.
+        return false;
+    } else {
+        value
+    };
     !v.is_empty() && v.len() <= 128
         && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
         && !v.split('/').any(|part| part.is_empty() || part == "." || part == "..")
