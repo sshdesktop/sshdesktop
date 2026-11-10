@@ -330,12 +330,14 @@ pub async fn sftp_write_bytes(
     let local_tmp = format!("{}/{}", parent.trim_end_matches('/'), tmp_name);
     let local_tmp = if parent == "/" { format!("/{}", tmp_name) } else { local_tmp };
     let escaped_tmp = shell_escape(&local_tmp);
+    // GNU/Linux uses -d/--decode; BSD/macOS base64 uses -D.
+    let decode_base64 = "(if base64 -d </dev/null >/dev/null 2>&1; then base64 -d; else base64 -D; fi)";
 
     // Write beside the destination, then atomically rename so a failed transfer
     // never truncates or leaves a partially-written destination file.
     let atomic_cmd = format!(
-        "umask 077 && base64 -d > '{}' && if [ -f '{}' ] && [ ! -L '{}' ]; then chmod --reference='{}' '{}'; fi && mv -f -- '{}' '{}'",
-        escaped_tmp, escaped_path, escaped_path, escaped_path, escaped_tmp, escaped_tmp, escaped_path
+        "umask 077 && {} > '{}' && if [ -f '{}' ] && [ ! -L '{}' ]; then chmod --reference='{}' '{}'; fi && mv -f -- '{}' '{}'",
+        decode_base64, escaped_tmp, escaped_path, escaped_path, escaped_path, escaped_tmp, escaped_tmp, escaped_path
     );
     let (stdout, code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &atomic_cmd, b64.as_bytes()).await;
     if code == 0 {
@@ -346,7 +348,7 @@ pub async fn sftp_write_bytes(
     // If the destination directory is privileged, stage in /tmp and move with sudo.
     let tmp_file = format!("/tmp/.sshdesktop-upload-{}", uuid::Uuid::new_v4().simple());
     let escaped_tmp_file = shell_escape(&tmp_file);
-    let tmp_cmd = format!("umask 077 && base64 -d > '{}'", escaped_tmp_file);
+    let tmp_cmd = format!("umask 077 && {} > '{}'", decode_base64, escaped_tmp_file);
     let (tmp_out, tmp_code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &tmp_cmd, b64.as_bytes()).await;
     if tmp_code != 0 {
         let _ = crate::ssh::exec::run_cmd(state, conn_id, &format!("rm -f -- '{}'", escaped_tmp)).await;
