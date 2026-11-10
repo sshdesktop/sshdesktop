@@ -22,78 +22,61 @@ pub async fn connect_sqlite(
     let effective_path = if should_use_ssh {
         if let Some(app_state) = state {
             let sessions_guard = app_state.sessions.lock().await;
-            let resolved_conn_id = if let Some(ref cid) = config.ssh_connection_id {
-                if sessions_guard.contains_key(cid) {
-                    Some(cid.clone())
-                } else {
-                    sessions_guard.keys().next().cloned()
-                }
-            } else {
-                sessions_guard.keys().next().cloned()
-            };
+            let resolved_conn_id = config.ssh_connection_id.as_deref()
+                .filter(|cid| sessions_guard.contains_key(*cid))
+                .map(str::to_string);
             drop(sessions_guard);
+            let conn_id = resolved_conn_id.ok_or_else(|| {
+                "Select an active SSH connection for this remote SQLite database; no other SSH session will be used implicitly.".to_string()
+            })?;
 
-            if let Some(conn_id) = resolved_conn_id {
-                let escaped = raw_path.replace('\'', "'\\''");
-                let (test_out, _code) = crate::ssh::exec::run_cmd(
-                    app_state,
-                    &conn_id,
-                    &format!("test -f '{}' && echo 'EXISTS' || echo 'MISSING'", escaped),
-                )
-                .await;
-
-                let cache_dir = std::env::temp_dir().join("sshdesktop_sqlite");
-                let _ = std::fs::create_dir_all(&cache_dir);
-                let safe_name = format!(
-                    "{}_{}",
-                    config.id,
-                    raw_path.replace(|c: char| !c.is_alphanumeric(), "_")
-                );
-                let local_cache = cache_dir.join(format!("{}.db", safe_name));
-
-                if test_out.contains("MISSING") {
-                    // Create empty remote file and touch local cache
-                    let _ = crate::ssh::exec::run_cmd(
-                        app_state,
-                        &conn_id,
-                        &format!("touch '{}'", escaped),
-                    )
-                    .await;
-                    let _ = std::fs::File::create(&local_cache);
-                } else {
-                    let download_cmd = format!(
-                        "echo '__CD_B64_START__' && (base64 -w 0 '{}' 2>/dev/null || base64 '{}') && echo '__CD_B64_END__'",
-                        escaped, escaped
-                    );
-                    let (cmd_out, cmd_code) = crate::ssh::exec::run_cmd(app_state, &conn_id, &download_cmd).await;
-
-                    if cmd_code == 0 && cmd_out.contains("__CD_B64_START__") && cmd_out.contains("__CD_B64_END__") {
-                        if let Some(start_idx) = cmd_out.find("__CD_B64_START__") {
-                            let after_start = &cmd_out[start_idx + "__CD_B64_START__".len()..];
-                            if let Some(end_idx) = after_start.find("__CD_B64_END__") {
-                                let b64_clean = after_start[..end_idx].trim();
-                                if let Some(bytes) = from_base64(b64_clean) {
-                                    let _ = std::fs::write(&local_cache, bytes);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if !local_cache.exists() {
-                    let _ = std::fs::File::create(&local_cache);
-                }
-
-                local_cache.to_string_lossy().to_string()
-            } else {
-                if is_unix_path && cfg!(target_os = "windows") {
-                    return Err(format!(
-                        "Path '{}' is a remote Linux path, but no active SSH connection was found in SSH Desktop. Please connect to your server via SSH first.",
-                        raw_path
-                    ));
-                }
-                raw_path.to_string()
+            let escaped = raw_path.replace('\'', "'\\''");
+            let (test_out, test_code) = crate::ssh::exec::run_cmd(
+                app_state,
+                &conn_id,
+                &format!("if [ -f '{}' ]; then echo EXISTS; elif [ ! -e '{}' ]; then echo MISSING; else echo INVALID; exit 2; fi", escaped, escaped),
+            ).await;
+            if test_code != 0 || (!test_out.contains("EXISTS") && !test_out.contains("MISSING")) {
+                return Err(format!("Could not inspect remote SQLite file '{}': {}", raw_path, test_out.trim()));
             }
+
+            let cache_dir = std::env::temp_dir().join("sshdesktop_sqlite");
+            std::fs::create_dir_all(&cache_dir)
+                .map_err(|e| format!("Failed to create local SQLite cache directory: {}", e))?;
+            let safe_id: String = config.id.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                .take(64).collect();
+            let safe_path: String = raw_path.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .take(100).collect();
+            let safe_name = format!("{}_{}", if safe_id.is_empty() { "connection" } else { &safe_id }, if safe_path.is_empty() { "database" } else { &safe_path });
+            let local_cache = cache_dir.join(format!("{}.db", safe_name));
+
+            if test_out.contains("MISSING") {
+                let (touch_out, touch_code) = crate::ssh::exec::run_cmd(
+                    app_state, &conn_id, &format!("umask 077 && touch '{}'", escaped)
+                ).await;
+                if touch_code != 0 {
+                    return Err(format!("Failed to create remote SQLite file '{}': {}", raw_path, touch_out.trim()));
+                }
+                std::fs::File::create(&local_cache)
+                    .map_err(|e| format!("Failed to create local SQLite cache: {}", e))?;
+            } else {
+                let download_cmd = format!(
+                    "base64 -w 0 '{}' 2>/dev/null || base64 '{}'",
+                    escaped, escaped
+                );
+                let (cmd_out, cmd_code) = crate::ssh::exec::run_cmd(app_state, &conn_id, &download_cmd).await;
+                if cmd_code != 0 {
+                    return Err(format!("Failed to download remote SQLite database '{}': {}", raw_path, cmd_out.trim()));
+                }
+                let bytes = from_base64(cmd_out.trim())
+                    .ok_or_else(|| "Remote SQLite download returned invalid base64 data.".to_string())?;
+                std::fs::write(&local_cache, bytes)
+                    .map_err(|e| format!("Failed to write local SQLite cache: {}", e))?;
+            }
+
+            local_cache.to_string_lossy().to_string()
         } else {
             raw_path.to_string()
         }
