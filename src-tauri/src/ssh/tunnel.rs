@@ -722,6 +722,17 @@ pub async fn ssh_start_socks5(
     // 2. Resolve SSH connection configuration
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or_else(|| format!("No active SSH connection found for '{}'. Please connect to a server first.", conn_id))?;
+    let is_key_auth = match conn.config.auth_method.as_deref() {
+        Some("password") => false,
+        Some("key") => true,
+        _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
+    };
+    let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
+    if let Some(key_path) = selected_key_path {
+        if crate::ssh::connection::resolve_key_path(key_path).is_none() {
+            return Err(format!("Selected SSH identity '{}' could not be found.", key_path));
+        }
+    }
 
     let preferred = preferred_port.unwrap_or(1080);
     let effective_local_port = find_available_port(if preferred >= 1024 { preferred } else { 10800 });
@@ -742,99 +753,17 @@ pub async fn ssh_start_socks5(
     };
 
     if maybe_handle.is_none() {
-        let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
-        if !is_ppk {
-            let is_key_auth = match conn.config.auth_method.as_deref() {
-                Some("password") => false,
-                Some("key") => true,
-                _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
-            };
-            if let Ok(new_handle) = crate::ssh::session::connect_session_with_passphrase_auth(
-                &conn.config.host,
-                conn.config.port,
-                &conn.config.username,
-                if is_key_auth { None } else { conn.config.password.as_deref() },
-                if is_key_auth { conn.config.private_key_path.as_deref() } else { None },
-                conn.config.passphrase.as_deref(),
-                conn.config.auth_method.as_deref() != Some("password"),
-            ).await {
-                let arc_h = Arc::new(new_handle);
-                {
-                    let mut lock = state.sessions.lock().await;
-                    lock.insert(conn.id.clone(), arc_h.clone());
-                    lock.entry("default".to_string()).or_insert_with(|| arc_h.clone());
-                }
-                maybe_handle = Some(arc_h);
-            }
-        }
-    }
-
-    if let Some(handle) = maybe_handle {
-        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", effective_local_port)).await {
-            Ok(l) => l,
-            Err(e) => {
-                return Err(format!("Failed to bind SOCKS5 proxy port {}: {}", effective_local_port, e));
-            }
-        };
-
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        let local_p = effective_local_port;
-
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown_rx => {
-                        log::info!("SSH SOCKS5 proxy on port {} stopped", local_p);
-                        break;
-                    }
-                    res = listener.accept() => {
-                        match res {
-                            Ok((mut stream, _)) => {
-                                let h = handle.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = handle_socks5_client(&mut stream, &h, local_p).await {
-                                        log::debug!("SOCKS5 client error: {}", e);
-                                    }
-                                });
-                            }
-                            Err(e) => {
-                                log::warn!("SOCKS5 listener error on port {}: {}", local_p, e);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        let tunnel_info = TunnelInfo {
-            tunnel_id: format!("socks5:{}", conn_id),
-            conn_id: conn_id.clone(),
-            local_port: effective_local_port,
-            remote_host: "0.0.0.0".to_string(),
-            remote_port: 0,
-            created_at: chrono::Utc::now().timestamp(),
-        };
-
-        {
-            let mut lock = ACTIVE_SOCKS5.lock();
-            lock.insert(conn_id.clone(), ActiveTunnel {
-                info: tunnel_info,
-                child: None,
-                shutdown_tx: Some(shutdown_tx),
-                password_file: None,
-            });
-        }
-
-        log::info!("SSH Desktop: Native SSH SOCKS5 Proxy active on 127.0.0.1:{}", effective_local_port);
-        return Ok(effective_local_port);
-    }
-
-    let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+        let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
     let plink_bin = crate::ssh::connection::get_plink_path();
     let plink_available = plink_bin != "plink" || std::path::Path::new(plink_bin).exists();
-    let has_password = conn.config.password.as_deref().map(|p| !p.trim().is_empty()).unwrap_or(false);
-    let is_pem_key = conn.config.private_key_path.as_deref().map(|k| !k.trim().is_empty() && !crate::ssh::connection::is_ppk_key(k)).unwrap_or(false);
+    let has_password = !is_key_auth && conn.config.password.as_deref().map(|p| !p.trim().is_empty()).unwrap_or(false);
+    let is_pem_key = selected_key_path.map(|k| !crate::ssh::connection::is_ppk_key(k)).unwrap_or(false);
+    if !is_key_auth && !has_password {
+        return Err("Password authentication was selected, but no SSH password is configured.".into());
+    }
+    if (is_ppk || has_password) && !plink_available {
+        return Err("PuTTY Plink is required for this SSH tunnel authentication method but was not found.".into());
+    }
     let prefer_plink = !is_pem_key && (is_ppk || has_password) && plink_available;
     let password_file = if has_password && plink_available && !is_pem_key {
         let password = conn.config.password.as_deref().unwrap_or_default();
@@ -864,10 +793,8 @@ pub async fn ssh_start_socks5(
             .arg("-o").arg("ServerAliveInterval=30")
             .arg("-o").arg("ServerAliveCountMax=3");
 
-        if let Some(key) = &conn.config.private_key_path {
-            if crate::ssh::connection::resolve_key_path(key).is_some() {
-                cmd.arg("-i").arg(key);
-            }
+        if let Some(key) = selected_key_path {
+            cmd.arg("-i").arg(key);
         }
 
         cmd.arg(format!("{}@{}", user, host));
