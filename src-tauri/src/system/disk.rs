@@ -14,6 +14,13 @@ fn valid_absolute_path(value: &str) -> bool {
         && !value.chars().any(|c| c.is_control())
 }
 
+fn fstab_escape(value: &str) -> String {
+    value.replace('\\', "\\\\134")
+        .replace(' ', "\\040")
+        .replace('\t', "\\011")
+        .replace('#', "\\043")
+}
+
 use serde::{Deserialize, Serialize};
 use crate::AppState;
 use super::monitor::DiskUsage;
@@ -349,11 +356,14 @@ pub async fn disk_mount(
     if persist_fstab {
         let fs_val = fstype.as_deref().unwrap_or("auto");
         let opts_val = options.as_deref().unwrap_or("defaults");
-        // Append to /etc/fstab if not already present
+        // fstab uses octal escapes for whitespace and special field characters.
+        // Match the mount-point field exactly rather than substring-searching the file.
+        let fstab_device_arg = shell_quote(&fstab_escape(clean_device));
+        let fstab_mount_arg = shell_quote(&fstab_escape(clean_mp));
         mount_cmd.push_str(&format!(
-            " && (grep -Fqs -- {mount_arg} /etc/fstab || printf '%s %s %s %s 0 2\\n' {device_arg} {mount_arg} {fs_arg} {opts_arg} >> /etc/fstab)",
-            mount_arg = mount_arg,
-            device_arg = device_arg,
+            " && (awk -v target={mount_arg} '$2 == target {{ found=1 }} END {{ exit !found }}' /etc/fstab || printf '%s %s %s %s 0 2\\n' {device_arg} {mount_arg} {fs_arg} {opts_arg} >> /etc/fstab)",
+            mount_arg = fstab_mount_arg,
+            device_arg = fstab_device_arg,
             fs_arg = shell_quote(fs_val),
             opts_arg = shell_quote(opts_val)
         ));
@@ -392,9 +402,10 @@ pub async fn disk_unmount(
     umount_cmd.push_str(&format!(" {}", target_arg));
 
     if remove_from_fstab {
+        let fstab_target_arg = shell_quote(&fstab_escape(clean_target));
         umount_cmd.push_str(&format!(
             " && (tmp=$(mktemp /etc/fstab.XXXXXX) && awk -v target={} '$1 != target && $2 != target' /etc/fstab > \"$tmp\" && cat \"$tmp\" > /etc/fstab && rm -f \"$tmp\")",
-            target_arg
+            fstab_target_arg
         ));
     }
 
