@@ -741,7 +741,6 @@ PDEV={pdev}
 if [ -b "$PDEV" ]; then
     swapoff "$PDEV" 2>/dev/null || true
     umount -f -l "$PDEV" 2>/dev/null || true
-    wipefs -a "$PDEV" 2>/dev/null || true
 fi
 
 if command -v parted >/dev/null 2>&1; then
