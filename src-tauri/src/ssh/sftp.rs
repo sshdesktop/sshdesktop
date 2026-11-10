@@ -130,7 +130,7 @@ pub async fn sftp_read_file(
     let escaped = shell_escape(&path);
     // Keep the remote payload ASCII so run_cmd's UTF-8 decoding cannot corrupt
     // arbitrary binary bytes (archives, images, database backups, executables).
-    let command = format!("base64 '{}' | tr -d '\\n'", escaped);
+    let command = format!("base64 < '{}' | tr -d '\\n'", escaped);
     let (encoded, code) = run_cmd(&state, &conn_id, &command).await;
     if code == -1 && encoded.is_empty() {
         return Err("No active SSH connection.".into());
