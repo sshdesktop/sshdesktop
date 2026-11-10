@@ -272,6 +272,21 @@ async fn execute_remote_ssh_request(
                 None
             }
         }
+        "form-data" => {
+            if has_content_type {
+                return Err("Do not set Content-Type manually for multipart form-data; curl generates the required boundary.".into());
+            }
+            if let Some(items) = &req.form_data {
+                for item in items.iter().filter(|item| item.enabled && !item.key.trim().is_empty()) {
+                    if item.item_type.eq_ignore_ascii_case("file") {
+                        return Err("Local file parts cannot be read by the remote SSH host. Disable SSH tunneling or use a text form field.".into());
+                    }
+                    let field = format!("{}={}", item.key, item.value);
+                    curl_args.push_str(&format!(" --form-string '{}'", shell_quote(&field)));
+                }
+            }
+            None
+        }
         "text" | "raw" => {
             if let Some(raw) = &req.raw_body {
                 if !has_content_type {
@@ -282,7 +297,8 @@ async fn execute_remote_ssh_request(
                 None
             }
         }
-        _ => None,
+        "none" | "" => None,
+        other => return Err(format!("Unsupported HTTP body type '{}'", other)),
     };
 
     curl_args.push_str(&format!(" '{}'", target_url_str.replace('\'', "'\\''")));
@@ -547,7 +563,16 @@ async fn execute_direct_request(
             if let Some(items) = &req.form_data {
                 let mut form = reqwest::multipart::Form::new();
                 for item in items.iter().filter(|i| i.enabled && !i.key.trim().is_empty()) {
-                    form = form.text(item.key.clone(), item.value.clone());
+                    if item.item_type.eq_ignore_ascii_case("file") {
+                        let bytes = tokio::fs::read(&item.value).await
+                            .map_err(|e| format!("Failed to read multipart file '{}': {}", item.value, e))?;
+                        let filename = std::path::Path::new(&item.value).file_name()
+                            .and_then(|name| name.to_str()).filter(|name| !name.is_empty())
+                            .unwrap_or("upload.bin").to_string();
+                        form = form.part(item.key.clone(), reqwest::multipart::Part::bytes(bytes).file_name(filename));
+                    } else {
+                        form = form.text(item.key.clone(), item.value.clone());
+                    }
                 }
                 req_builder = req_builder.multipart(form);
             }
@@ -560,7 +585,8 @@ async fn execute_direct_request(
                 req_builder = req_builder.body(raw.clone());
             }
         }
-        _ => {}
+        "none" | "" => {}
+        other => return Err(format!("Unsupported HTTP body type '{}'", other)),
     }
 
     let start_time = Instant::now();
