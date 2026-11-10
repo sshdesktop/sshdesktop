@@ -590,14 +590,7 @@ pub async fn ssh_disconnect(state: tauri::State<'_, AppState>, conn_id: String) 
                 sessions.remove("default");
             }
         }
-        if !sessions.contains_key("default") {
-            if let Some(next) = sessions.iter()
-                .find(|(id, _)| id.as_str() != "default")
-                .map(|(_, handle)| handle.clone())
-            {
-                sessions.insert("default".to_string(), next);
-            }
-        }
+        // Do not silently retarget the default alias to another server after disconnect.
     }
     {
         let mut map = state.connections.lock();
@@ -605,14 +598,7 @@ pub async fn ssh_disconnect(state: tauri::State<'_, AppState>, conn_id: String) 
         if conn_id == "default" || map.get("default").map(|c| c.id == conn_id).unwrap_or(false) {
             map.remove("default");
         }
-        if !map.contains_key("default") {
-            if let Some(next) = map.iter()
-                .find(|(id, conn)| id.as_str() != "default" && conn.connected)
-                .map(|(_, conn)| conn.clone())
-            {
-                map.insert("default".to_string(), next);
-            }
-        }
+        // The default alias stays unset until the user explicitly connects/selects a server.
     }
     {
         let mut priv_map = USER_PRIVILEGE_CACHE.lock();
