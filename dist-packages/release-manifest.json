@@ -1,7 +1,7 @@
 {
   "name": "SSH Desktop",
-  "version": "2.4.0",
-  "releaseDate": "2026-10-20T15:03:16.024Z",
+  "version": "2.4.2",
+  "releaseDate": "2026-11-10T15:03:16.024Z",
   "defaultPort": 2222,
   "webAuthGate": {
     "enabled": true,
@@ -10,24 +10,24 @@
   },
   "packages": {
     "debian": {
-      "file": "ssh-desktop_2.4.0_amd64.deb",
+      "file": "ssh-desktop_2.4.2_amd64.deb",
       "type": "Debian / Ubuntu DEB Package",
-      "command": "sudo dpkg -i ssh-desktop_2.4.0_amd64.deb || sudo apt-get install -f -y"
+      "command": "sudo dpkg -i ssh-desktop_2.4.2_amd64.deb || sudo apt-get install -f -y"
     },
     "redhat": {
-      "file": "ssh-desktop-2.4.0-1.x86_64.rpm",
+      "file": "ssh-desktop-2.4.2-1.x86_64.rpm",
       "type": "Fedora / RHEL / Rocky Linux RPM Package",
-      "command": "sudo rpm -Uvh ssh-desktop-2.4.0-1.x86_64.rpm || sudo dnf install ./ssh-desktop-2.4.0-1.x86_64.rpm"
+      "command": "sudo rpm -Uvh ssh-desktop-2.4.2-1.x86_64.rpm || sudo dnf install ./ssh-desktop-2.4.2-1.x86_64.rpm"
     },
     "portable": {
-      "file": "ssh-desktop-2.4.0-linux-x86_64.tar.gz",
+      "file": "ssh-desktop-2.4.2-linux-x86_64.tar.gz",
       "type": "Portable Standalone Archive",
-      "command": "tar -xzvf ssh-desktop-2.4.0-linux-x86_64.tar.gz && sudo bash sshdesktop/install.sh"
+      "command": "tar -xzvf ssh-desktop-2.4.2-linux-x86_64.tar.gz && sudo bash sshdesktop/install.sh"
     },
     "macos": {
-      "file": "SSHDesktop-2.4.0.dmg",
+      "file": "SSHDesktop-2.4.2.dmg",
       "type": "macOS Universal Disk Image",
-      "command": "hdiutil attach SSHDesktop-2.4.0.dmg && cp -R /Volumes/SSHDesktop/SSHDesktop.app /Applications/"
+      "command": "hdiutil attach SSHDesktop-2.4.2.dmg && cp -R /Volumes/SSHDesktop/SSHDesktop.app /Applications/"
     }
   }
 }

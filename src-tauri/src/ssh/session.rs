@@ -60,20 +60,20 @@ pub async fn run_exec_channel(
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut exit_code = -1;
-    const MAX_OUTPUT_BYTES: usize = 80 * 1024 * 1024;
+    const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
     let completed = tokio::time::timeout(std::time::Duration::from_secs(120), async {
         while let Some(msg) = channel.wait().await {
             match msg {
                 ChannelMsg::Data { ref data } => {
-                    if stdout.len().saturating_add(data.len()) <= MAX_OUTPUT_BYTES {
+                    if stdout.len() + stderr.len() + data.len() <= MAX_OUTPUT_BYTES {
                         stdout.extend_from_slice(data);
                     } else {
                         return true;
                     }
                 }
                 ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                    if stderr.len().saturating_add(data.len()) <= MAX_OUTPUT_BYTES {
+                    if stdout.len() + stderr.len() + data.len() <= MAX_OUTPUT_BYTES {
                         stderr.extend_from_slice(data);
                     } else {
                         return true;
@@ -90,7 +90,7 @@ pub async fn run_exec_channel(
 
     match completed {
         Err(_) => return Err("Remote command timed out after 120 seconds; SSH channel was closed.".into()),
-        Ok(true) => return Err("Remote command output exceeded the 80 MiB safety limit.".into()),
+        Ok(true) => return Err("Remote command output exceeded the 64 MiB safety limit.".into()),
         Ok(false) => {}
     }
 
@@ -122,27 +122,36 @@ pub async fn run_exec_channel_with_stdin(
         channel.eof().await?;
 
         let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
         let mut exit_code = -1;
         const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
         while let Some(msg) = channel.wait().await {
             match msg {
                 ChannelMsg::Data { ref data } => {
-                    if stdout.len().saturating_add(data.len()) > MAX_OUTPUT_BYTES {
+                    if stdout.len() + stderr.len() + data.len() > MAX_OUTPUT_BYTES {
                         return Err("Remote command output exceeded the 16 MiB safety limit.".into());
                     }
                     stdout.extend_from_slice(data);
                 }
                 ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                    if stdout.len().saturating_add(data.len()) > MAX_OUTPUT_BYTES {
+                    if stdout.len() + stderr.len() + data.len() > MAX_OUTPUT_BYTES {
                         return Err("Remote command output exceeded the 16 MiB safety limit.".into());
                     }
-                    stdout.extend_from_slice(data);
+                    stderr.extend_from_slice(data);
                 }
                 ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status as i32,
                 _ => {}
             }
         }
-        let clean_out = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
+        let clean_stdout = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
+        let clean_stderr = String::from_utf8_lossy(&stderr).replace("\r\n", "\n");
+        let clean_out = if !clean_stderr.is_empty() && !clean_stdout.is_empty() {
+            format!("{}\n{}", clean_stdout.trim_end(), clean_stderr.trim_start())
+        } else if !clean_stderr.is_empty() {
+            clean_stderr
+        } else {
+            clean_stdout
+        };
         Ok::<(String, i32), Box<dyn std::error::Error + Send + Sync>>((clean_out, exit_code))
     }).await;
 
@@ -187,7 +196,7 @@ pub async fn run_stream_channel(
                         exit_code: Some(1),
                     });
                     let _ = channel.eof().await;
-                    break;
+                    return Ok(1);
                 }
                 let text = String::from_utf8_lossy(data).to_string();
                 let _ = app.emit("exec-output", crate::ssh::exec::StreamChunk {
@@ -200,6 +209,17 @@ pub async fn run_stream_channel(
             }
             ChannelMsg::ExtendedData { ref data, ext: 1 } => {
                 total_streamed = total_streamed.saturating_add(data.len());
+                if total_streamed > MAX_STREAM_BYTES {
+                    let _ = app.emit("exec-output", crate::ssh::exec::StreamChunk {
+                        stream_id: stream_id.to_string(),
+                        data: "\r\n[Stream output exceeded maximum 64 MiB safety buffer]\r\n".into(),
+                        is_stderr: true,
+                        is_done: true,
+                        exit_code: Some(1),
+                    });
+                    let _ = channel.eof().await;
+                    return Ok(1);
+                }
                 let text = String::from_utf8_lossy(data).to_string();
                 let _ = app.emit("exec-output", crate::ssh::exec::StreamChunk {
                     stream_id: stream_id.to_string(),

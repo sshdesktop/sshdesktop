@@ -114,12 +114,16 @@ pub async fn execute_query_postgres(
     for (stmt_idx, stmt) in statements.iter().enumerate() {
         let stmt_start = Instant::now();
         let s_upper = stmt.trim().to_uppercase();
-        let is_mutation = !s_upper.starts_with("SELECT")
-            && !s_upper.starts_with("SHOW")
-            && !s_upper.starts_with("DESCRIBE")
-            && !s_upper.starts_with("EXPLAIN")
-            && !s_upper.starts_with("WITH")
-            && !s_upper.contains("RETURNING");
+        let is_write_query = s_upper.starts_with("INSERT")
+            || s_upper.starts_with("UPDATE")
+            || s_upper.starts_with("DELETE")
+            || s_upper.starts_with("REPLACE")
+            || s_upper.starts_with("CREATE")
+            || s_upper.starts_with("DROP")
+            || s_upper.starts_with("ALTER")
+            || (s_upper.starts_with("WITH") && (s_upper.contains("INSERT") || s_upper.contains("UPDATE") || s_upper.contains("DELETE")));
+
+        let is_mutation = is_write_query && !s_upper.contains("RETURNING");
 
         if is_mutation {
             let res = sqlx::raw_sql(stmt)
@@ -181,13 +185,14 @@ pub async fn execute_query_postgres(
                 final_cols = cols_meta.clone();
                 final_rows = json_rows.clone();
             }
-            total_affected += rows.len() as u64;
+            let stmt_affected = if is_write_query { rows.len() as u64 } else { 0 };
+            total_affected += stmt_affected;
 
             batch_results.push(BatchStatementResult {
                 statement: stmt.to_string(),
                 columns: cols_meta,
                 rows: json_rows,
-                affected_rows: rows.len() as u64,
+                affected_rows: stmt_affected,
                 last_insert_id: None,
                 execution_time_ms: stmt_start.elapsed().as_secs_f64() * 1000.0,
                 error: None,

@@ -256,13 +256,14 @@ pub async fn execute_query_sqlite(
                 final_cols = cols_meta.clone();
                 final_rows = json_rows.clone();
             }
-            total_affected += rows.len() as u64;
+            let stmt_affected = if is_write_query { rows.len() as u64 } else { 0 };
+            total_affected += stmt_affected;
 
             batch_results.push(BatchStatementResult {
                 statement: stmt.to_string(),
                 columns: cols_meta,
                 rows: json_rows,
-                affected_rows: rows.len() as u64,
+                affected_rows: stmt_affected,
                 last_insert_id: None,
                 execution_time_ms: stmt_start.elapsed().as_secs_f64() * 1000.0,
                 error: None,

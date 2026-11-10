@@ -41,6 +41,10 @@ async fn open_browser_window(
     }
 
     let parsed_url = url::Url::parse(&url).map_err(|e| format!("Invalid URL: {}", e))?;
+    let scheme = parsed_url.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err("Only http:// and https:// URLs can be opened in the browser window.".into());
+    }
 
     if let Some(existing) = app.get_webview_window(&window_label) {
         let _ = existing.show();
@@ -65,9 +69,12 @@ async fn open_browser_window(
     .center();
 
     if let Some(ref proxy_str) = proxy_url {
-        if let Ok(proxy) = url::Url::parse(proxy_str) {
-            builder = builder.proxy_url(proxy);
+        let proxy = url::Url::parse(proxy_str).map_err(|e| format!("Invalid proxy URL: {}", e))?;
+        let proxy_scheme = proxy.scheme();
+        if !matches!(proxy_scheme, "socks5" | "socks5h" | "http" | "https") {
+            return Err("Proxy scheme must be socks5, socks5h, http, or https.".into());
         }
+        builder = builder.proxy_url(proxy);
     }
 
     // Isolate User Data Folder for native browser windows.

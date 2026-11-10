@@ -263,6 +263,11 @@ free -h`,
 // ==========================================
 // VARIABLE INTERPOLATION
 // ==========================================
+function sanitizeShellVar(val: string): string {
+  if (typeof val !== 'string') return '';
+  return val.replace(/[\x00-\x1f\x7f;&|`$(){}<>\\'"\n\r]/g, '');
+}
+
 export function interpolateCommand(
   template: string,
   server: TargetServer,
@@ -270,17 +275,17 @@ export function interpolateCommand(
 ): string {
   let result = template;
 
-  // Built-in server variables
+  // Built-in server variables with shell sanitization to prevent injection
   const replacements: Record<string, string> = {
-    '{{SERVER_NAME}}': server.name || server.host,
-    '{{SERVER_HOST}}': server.host,
-    '{{SERVER_PORT}}': String(server.port || 22),
-    '{{SERVER_USER}}': server.username,
-    '{{SERVER_GROUP}}': server.group || 'default',
+    '{{SERVER_NAME}}': sanitizeShellVar(server.name || server.host),
+    '{{SERVER_HOST}}': sanitizeShellVar(server.host),
+    '{{SERVER_PORT}}': String(server.port || 22).replace(/[^0-9]/g, ''),
+    '{{SERVER_USER}}': sanitizeShellVar(server.username),
+    '{{SERVER_GROUP}}': sanitizeShellVar(server.group || 'default'),
     '{{DATE}}': new Date().toISOString().split('T')[0],
     '{{TIMESTAMP}}': String(Date.now()),
     ...Object.fromEntries(
-      Object.entries(customVars).map(([k, v]) => [`{{${k}}}`, v])
+      Object.entries(customVars).map(([k, v]) => [`{{${k}}}`, sanitizeShellVar(v)])
     ),
   };
 

@@ -29,62 +29,66 @@ async fn handle_socks5_client(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // 1. Negotiation
-    let mut header = [0u8; 2];
-    stream.read_exact(&mut header).await?;
-    if header[0] != 0x05 {
-        return Err("Not SOCKS5".into());
-    }
-    let nmethods = header[1] as usize;
-    let mut methods = vec![0u8; nmethods];
-    stream.read_exact(&mut methods).await?;
-    // RFC 1928: Verify client offered Method 0x00 (NO AUTHENTICATION REQUIRED)
-    if !methods.contains(&0x00) {
-        let _ = stream.write_all(&[0x05, 0xFF]).await; // 0xFF = NO ACCEPTABLE METHODS
-        return Err("SOCKS5 client did not offer unauthenticated mode (0x00)".into());
-    }
-    // Reply: Version 5, Method 0 (No authentication required)
-    stream.write_all(&[0x05, 0x00]).await?;
+    // Bound negotiation with 10-second timeout to prevent hung clients
+    let (target_host, target_port) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        // 1. Negotiation
+        let mut header = [0u8; 2];
+        stream.read_exact(&mut header).await?;
+        if header[0] != 0x05 {
+            return Err("Not SOCKS5".into());
+        }
+        let nmethods = header[1] as usize;
+        let mut methods = vec![0u8; nmethods];
+        stream.read_exact(&mut methods).await?;
+        // RFC 1928: Verify client offered Method 0x00 (NO AUTHENTICATION REQUIRED)
+        if !methods.contains(&0x00) {
+            let _ = stream.write_all(&[0x05, 0xFF]).await; // 0xFF = NO ACCEPTABLE METHODS
+            return Err("SOCKS5 client did not offer unauthenticated mode (0x00)".into());
+        }
+        // Reply: Version 5, Method 0 (No authentication required)
+        stream.write_all(&[0x05, 0x00]).await?;
 
-    // 2. Request
-    let mut req = [0u8; 4];
-    stream.read_exact(&mut req).await?;
-    if req[0] != 0x05 || req[1] != 0x01 { // 0x01 = CONNECT
-        let _ = stream.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
-        return Err("Only SOCKS5 CONNECT is supported".into());
-    }
+        // 2. Request
+        let mut req = [0u8; 4];
+        stream.read_exact(&mut req).await?;
+        if req[0] != 0x05 || req[1] != 0x01 { // 0x01 = CONNECT
+            let _ = stream.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+            return Err("Only SOCKS5 CONNECT is supported".into());
+        }
 
-    let target_host = match req[3] {
-        1 => {
-            // IPv4: 4 bytes
-            let mut ip = [0u8; 4];
-            stream.read_exact(&mut ip).await?;
-            format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
-        }
-        3 => {
-            // Domain: 1 byte len + domain string
-            let mut len = [0u8; 1];
-            stream.read_exact(&mut len).await?;
-            let mut domain = vec![0u8; len[0] as usize];
-            stream.read_exact(&mut domain).await?;
-            String::from_utf8_lossy(&domain).to_string()
-        }
-        4 => {
-            // IPv6: 16 bytes
-            let mut ip = [0u8; 16];
-            stream.read_exact(&mut ip).await?;
-            use std::net::Ipv6Addr;
-            Ipv6Addr::from(ip).to_string()
-        }
-        _ => {
-            let _ = stream.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
-            return Err("Address type not supported".into());
-        }
-    };
+        let target_host = match req[3] {
+            1 => {
+                // IPv4: 4 bytes
+                let mut ip = [0u8; 4];
+                stream.read_exact(&mut ip).await?;
+                format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+            }
+            3 => {
+                // Domain: 1 byte len + domain string
+                let mut len = [0u8; 1];
+                stream.read_exact(&mut len).await?;
+                let mut domain = vec![0u8; len[0] as usize];
+                stream.read_exact(&mut domain).await?;
+                String::from_utf8_lossy(&domain).to_string()
+            }
+            4 => {
+                // IPv6: 16 bytes
+                let mut ip = [0u8; 16];
+                stream.read_exact(&mut ip).await?;
+                use std::net::Ipv6Addr;
+                Ipv6Addr::from(ip).to_string()
+            }
+            _ => {
+                let _ = stream.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+                return Err("Address type not supported".into());
+            }
+        };
 
-    let mut port_buf = [0u8; 2];
-    stream.read_exact(&mut port_buf).await?;
-    let target_port = u16::from_be_bytes(port_buf);
+        let mut port_buf = [0u8; 2];
+        stream.read_exact(&mut port_buf).await?;
+        let target_port = u16::from_be_bytes(port_buf);
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((target_host, target_port))
+    }).await.map_err(|_| "SOCKS5 client handshake timed out")??;
 
     // 3. Connect via SSH channel_open_direct_tcpip
     match handle.channel_open_direct_tcpip(&target_host, target_port as u32, "127.0.0.1", local_port as u32).await {
@@ -310,6 +314,7 @@ pub async fn ssh_start_tunnel(
             let target_host = remote_target.clone();
             let target_port = remote_port;
             let local_p = effective_local_port;
+            let conn_sem = Arc::new(tokio::sync::Semaphore::new(128));
 
             tokio::spawn(async move {
                 loop {
@@ -321,9 +326,18 @@ pub async fn ssh_start_tunnel(
                         res = listener.accept() => {
                             match res {
                                 Ok((mut local_stream, _)) => {
+                                    let permit = match conn_sem.clone().try_acquire_owned() {
+                                        Ok(p) => p,
+                                        Err(_) => {
+                                            log::warn!("Max concurrent connections (128) reached for tunnel on port {}", local_p);
+                                            drop(local_stream);
+                                            continue;
+                                        }
+                                    };
                                     let h = handle.clone();
                                     let r_host = target_host.clone();
                                     tokio::spawn(async move {
+                                        let _permit = permit;
                                         match h.channel_open_direct_tcpip(&r_host, target_port as u32, "127.0.0.1", local_p as u32).await {
                                             Ok(channel) => {
                                                 let mut ssh_stream = channel.into_stream();

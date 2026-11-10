@@ -158,8 +158,12 @@ pub async fn sftp_list_dir(
     if let Some(handle) = handle_opt {
         if let Ok(sftp) = crate::ssh::session::open_sftp(&handle).await {
             if let Ok(dir_entries) = sftp.read_dir(clean_path).await {
+                const MAX_DIR_ENTRIES: usize = 10000;
                 let mut entries = Vec::new();
                 for entry in dir_entries {
+                    if entries.len() >= MAX_DIR_ENTRIES {
+                        break;
+                    }
                     let file_name = entry.file_name();
                     if file_name == "." || file_name == ".." {
                         continue;
@@ -181,8 +185,8 @@ pub async fn sftp_list_dir(
                         is_dir,
                         is_symlink,
                         permissions,
-                        owner: entry.metadata().uid.map(|u| u.to_string()).unwrap_or_else(|| "1000".to_string()),
-                        group: entry.metadata().gid.map(|g| g.to_string()).unwrap_or_else(|| "1000".to_string()),
+                        owner: entry.metadata().uid.map(|u| u.to_string()).unwrap_or_default(),
+                        group: entry.metadata().gid.map(|g| g.to_string()).unwrap_or_default(),
                         modified,
                     });
                 }
@@ -305,9 +309,17 @@ pub async fn sftp_read_file(
     if let Some(handle) = handle_opt {
         if let Ok(sftp) = crate::ssh::session::open_sftp(&handle).await {
             use tokio::io::AsyncReadExt;
-            if let Ok(mut file) = sftp.open(&path).await {
+            if let Ok(file) = sftp.open(&path).await {
                 let mut content = Vec::new();
-                if tokio::time::timeout(std::time::Duration::from_secs(60), file.read_to_end(&mut content)).await.is_ok() {
+                const MAX_READ_BYTES: u64 = 48 * 1024 * 1024; // 48 MiB safety limit
+                let read_res = tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    file.take(MAX_READ_BYTES + 1).read_to_end(&mut content)
+                ).await;
+                if let Ok(Ok(bytes_read)) = read_res {
+                    if bytes_read as u64 > MAX_READ_BYTES {
+                        return Err("File is too large for binary transfer (maximum 48 MiB).".into());
+                    }
                     return Ok(content);
                 }
             }
@@ -413,11 +425,22 @@ pub async fn sftp_write_bytes(
     if let Some(handle) = handle_opt {
         if let Ok(sftp) = crate::ssh::session::open_sftp(&handle).await {
             use tokio::io::AsyncWriteExt;
-            if let Ok(mut file) = sftp.create(clean_path).await {
-                if tokio::time::timeout(std::time::Duration::from_secs(60), file.write_all(bytes)).await.is_ok() {
-                    let _ = file.flush().await;
-                    return Ok(());
+            let parent = clean_path.rsplit_once('/').map(|(p, _)| if p.is_empty() { "/" } else { p }).unwrap_or("/");
+            let tmp_name = format!(".upload-{}.tmp", uuid::Uuid::new_v4().simple());
+            let tmp_path = if parent == "/" { format!("/{}", tmp_name) } else { format!("{}/{}", parent.trim_end_matches('/'), tmp_name) };
+
+            if let Ok(mut file) = sftp.create(&tmp_path).await {
+                let write_res = tokio::time::timeout(std::time::Duration::from_secs(60), file.write_all(bytes)).await;
+                let flush_res = file.flush().await;
+                if let Ok(Ok(())) = write_res {
+                    if flush_res.is_ok() {
+                        drop(file);
+                        if sftp.rename(&tmp_path, clean_path).await.is_ok() {
+                            return Ok(());
+                        }
+                    }
                 }
+                let _ = sftp.remove_file(&tmp_path).await;
             }
         }
     }

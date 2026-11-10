@@ -29,7 +29,7 @@ import { EMBEDDED_FILES } from './embedded-dist.js';
 const currentFile = typeof __filename !== 'undefined' ? __filename : (typeof process !== 'undefined' && process.argv ? process.argv[1] : process.cwd());
 const currentDir = typeof __dirname !== 'undefined' ? __dirname : (currentFile ? path.dirname(currentFile) : process.cwd());
 
-const VERSION = '2.4.0';
+const VERSION = '2.4.2';
 
 // Instant CLI Argument Checks (--version, -v, --help, -h)
 // Prevents standalone SEA binaries from starting long-running server during verification
@@ -211,7 +211,7 @@ function readJsonSafe(filePath, fallback = {}) {
   return fallback;
 }
 
-// Helper: Write JSON to file
+// Helper: Write JSON to file atomically with strict permissions
 function writeJsonSafe(filePath, data) {
   try {
     const dir = path.dirname(filePath);
@@ -219,7 +219,10 @@ function writeJsonSafe(filePath, data) {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       try { fs.chmodSync(dir, 0o700); } catch {}
     }
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
+    const tempPath = path.join(dir, `.${path.basename(filePath)}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
+    try { fs.chmodSync(tempPath, 0o600); } catch {}
+    fs.renameSync(tempPath, filePath);
     try { fs.chmodSync(filePath, 0o600); } catch {}
     return true;
   } catch (err) {
@@ -232,13 +235,37 @@ function writeJsonSafe(filePath, data) {
 // Secure First-Run Authentication
 // -------------------------------------------------------------
 
+const scryptAsync = util.promisify(crypto.scrypt);
+
+async function hashPasswordAsync(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const buf = await scryptAsync(password, salt, 64);
+  return {
+    password_salt: salt,
+    password_hash: buf.toString('hex')
+  };
+}
+
 function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-
   return {
     password_salt: salt,
     password_hash: hash
   };
+}
+
+async function verifyPasswordAsync(auth, password) {
+  if (typeof password !== 'string' || !password) {
+    return false;
+  }
+  if (auth.password_hash && auth.password_salt) {
+    const calculated = await scryptAsync(password, auth.password_salt, 64);
+    const stored = Buffer.from(auth.password_hash, 'hex');
+    return stored.length === calculated.length && crypto.timingSafeEqual(stored, calculated);
+  }
+  if (typeof auth.password === 'string') {
+    return crypto.timingSafeEqual(Buffer.from(password), Buffer.from(auth.password));
+  }
+  return false;
 }
 
 function verifyPassword(auth, password) {
@@ -352,14 +379,23 @@ initializeAuthentication();
 // -------------------------------------------------------------
 const SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour session expiration (3600 seconds)
 const activeSessions = new Map(); // token -> { token, username, createdAt, expiresAt }
+const hashedSessions = new Map(); // tokenHash -> { username, createdAt, expiresAt }
+
+function hashToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
 
 function loadSessions() {
   try {
     const saved = readJsonSafe(SESSIONS_FILE, {});
     const now = Date.now();
-    for (const [token, sess] of Object.entries(saved)) {
+    for (const [key, sess] of Object.entries(saved)) {
       if (sess && sess.expiresAt && sess.expiresAt > now) {
-        activeSessions.set(token, sess);
+        if (sess.token) {
+          activeSessions.set(sess.token, sess);
+        } else {
+          hashedSessions.set(key, sess);
+        }
       }
     }
   } catch {}
@@ -371,7 +407,13 @@ function persistSessions() {
   const now = Date.now();
   for (const [token, sess] of activeSessions.entries()) {
     if (sess.expiresAt > now) {
-      obj[token] = sess;
+      const h = hashToken(token);
+      obj[h] = { username: sess.username, createdAt: sess.createdAt, expiresAt: sess.expiresAt, tokenHash: h };
+    }
+  }
+  for (const [h, sess] of hashedSessions.entries()) {
+    if (sess.expiresAt > now && !obj[h]) {
+      obj[h] = sess;
     }
   }
   writeJsonSafe(SESSIONS_FILE, obj);
@@ -393,10 +435,19 @@ function createSession(username) {
 
 function getSession(token) {
   if (!token || typeof token !== 'string') return null;
-  const session = activeSessions.get(token);
+  let session = activeSessions.get(token);
+  if (!session) {
+    const h = hashToken(token);
+    const hashed = hashedSessions.get(h);
+    if (hashed) {
+      session = { token, username: hashed.username, createdAt: hashed.createdAt, expiresAt: hashed.expiresAt };
+      activeSessions.set(token, session);
+    }
+  }
   if (!session) return null;
   if (Date.now() >= session.expiresAt) {
     activeSessions.delete(token);
+    hashedSessions.delete(hashToken(token));
     persistSessions();
     return null;
   }
@@ -404,8 +455,9 @@ function getSession(token) {
 }
 
 function destroySession(token) {
-  if (token && activeSessions.has(token)) {
+  if (token) {
     activeSessions.delete(token);
+    hashedSessions.delete(hashToken(token));
     persistSessions();
     return true;
   }
@@ -441,8 +493,25 @@ function extractSessionToken(req, payload) {
   return null;
 }
 
-// In-memory brute-force protection
+// In-memory brute-force protection with memory leak prevention
 const loginAttempts = new Map(); // ip -> { count, lastAttempt, lockedUntil }
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, record] of loginAttempts.entries()) {
+    if (now - record.lastAttempt > 300000 && record.lockedUntil <= now) {
+      loginAttempts.delete(ip);
+    }
+  }
+}, 60 * 1000).unref?.();
+
+function getClientIp(req) {
+  const xff = req?.headers?.['x-forwarded-for'];
+  if (xff && typeof xff === 'string') {
+    const first = xff.split(',')[0].trim();
+    if (first) return first;
+  }
+  return req?.socket?.remoteAddress || '127.0.0.1';
+}
 
 // Background session pruner (every 60 seconds)
 setInterval(() => {
@@ -488,20 +557,14 @@ function getSftp(client) {
   });
 }
 
-// Execute command: remotely if SSH client exists, or locally on host if client is null/undefined
+// Execute command: remotely over active SSH connection. Never fallback to host execution!
 function runRemoteExec(client, command, timeoutMs = 60000) {
   if (!client) {
-    return new Promise((resolve) => {
-      const startTime = Date.now();
-      const shell = process.platform === 'win32' ? undefined : '/bin/bash';
-      child_process.exec(command, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, shell }, (err, stdout, stderr) => {
-        resolve({
-          stdout: stdout || '',
-          stderr: stderr || (err ? err.message : ''),
-          exit_code: err ? (err.code || 1) : 0,
-          duration_ms: Date.now() - startTime
-        });
-      });
+    return Promise.resolve({
+      stdout: '',
+      stderr: 'No active SSH connection available; refusing to execute remote command on host machine.',
+      exit_code: -1,
+      duration_ms: 0
     });
   }
 
@@ -510,9 +573,15 @@ function runRemoteExec(client, command, timeoutMs = 60000) {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let streamRef = null;
+    const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB total output cap
 
     const timer = setTimeout(() => {
       timedOut = true;
+      if (streamRef) {
+        try { streamRef.close(); } catch {}
+        try { streamRef.destroy(); } catch {}
+      }
       resolve({
         stdout,
         stderr: stderr || 'Execution timed out after ' + (timeoutMs / 1000) + 's',
@@ -532,12 +601,24 @@ function runRemoteExec(client, command, timeoutMs = 60000) {
         });
       }
 
+      streamRef = stream;
+
       stream.on('data', (chunk) => {
-        stdout += chunk.toString('utf8');
+        if (stdout.length + chunk.length <= MAX_OUTPUT_BYTES) {
+          stdout += chunk.toString('utf8');
+        } else if (!stdout.endsWith('[Output truncated: size limit reached]')) {
+          stdout += '\n[Output truncated: size limit reached]';
+          try { stream.close(); } catch {}
+        }
       });
 
       stream.stderr.on('data', (chunk) => {
-        stderr += chunk.toString('utf8');
+        if (stderr.length + chunk.length <= MAX_OUTPUT_BYTES) {
+          stderr += chunk.toString('utf8');
+        } else if (!stderr.endsWith('[Output truncated: size limit reached]')) {
+          stderr += '\n[Output truncated: size limit reached]';
+          try { stream.close(); } catch {}
+        }
       });
 
       stream.on('close', (code) => {
@@ -1420,9 +1501,10 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
         .trim()
         .toLowerCase();
 
+      const passwordMatches = await verifyPasswordAsync(auth, password);
       if (
         inputUser === validUser &&
-        verifyPassword(auth, password)
+        passwordMatches
       ) {
         loginAttempts.delete(clientIp);
         const session = createSession(auth.username);
@@ -1457,7 +1539,8 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
 
       const auth = readJsonSafe(AUTH_FILE, {});
 
-      if (!verifyPassword(auth, currentPassword)) {
+      const currentMatches = await verifyPasswordAsync(auth, currentPassword);
+      if (!currentMatches) {
         return {
           success: false,
           message: 'Current password incorrect.'
@@ -1483,7 +1566,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
         };
       }
 
-      const hashed = hashPassword(newPassword);
+      const hashed = await hashPasswordAsync(newPassword);
 
       auth.username = username;
       auth.password_hash = hashed.password_hash;
@@ -1827,6 +1910,14 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
     case 'ssh_exec': {
       const { command } = args || {};
       const cmdStr = (command || '').trim();
+      if (!entry || !entry.client) {
+        return {
+          stdout: '',
+          stderr: 'No active SSH connection available. Please connect to a server first.',
+          exit_code: -1,
+          duration_ms: 0
+        };
+      }
       const needsPriv = cmdStr.startsWith('sudo ') || cmdStr.includes(' sudo ') || cmdStr.includes('| sudo ');
       if (needsPriv && entry) {
         return await runRemotePrivExec(entry, cmdStr);
@@ -4048,7 +4139,11 @@ done
     case 'api_send_request': {
       const { req } = args || {};
       if (!req || !req.url) throw new Error('Missing URL');
+      if (!req.url.startsWith('http://') && !req.url.startsWith('https://')) {
+        throw new Error("Invalid URL scheme: only 'http://' and 'https://' are supported");
+      }
       const startTime = Date.now();
+      const MAX_API_RESPONSE = 10 * 1024 * 1024; // 10 MB limit
 
       // Safe POSIX shell argument escaper (prevents command substitution $() and backticks)
       const shellEscape = (val) => `'${String(val || '').replace(/'/g, "'\\''")}'`;
@@ -4077,12 +4172,24 @@ done
         const res = await runRemoteExec(entry.client, curlCmd, 30000);
         if (res.exit_code === 0 || res.stdout.includes('HTTP/')) {
           const rawOut = res.stdout;
-          const headerEnd = rawOut.indexOf('\r\n\r\n') !== -1 ? rawOut.indexOf('\r\n\r\n') : rawOut.indexOf('\n\n');
+          const blocks = rawOut.split(/\r?\n\r?\n/);
           let headerPart = '';
-          let bodyPart = rawOut;
-          if (headerEnd !== -1) {
-            headerPart = rawOut.slice(0, headerEnd);
-            bodyPart = rawOut.slice(headerEnd + (rawOut.indexOf('\r\n\r\n') !== -1 ? 4 : 2));
+          let bodyPart = '';
+          let lastHeaderIdx = -1;
+          for (let i = 0; i < blocks.length; i++) {
+            if (/^HTTP\/\S+\s+\d+/i.test(blocks[i].trim())) {
+              lastHeaderIdx = i;
+            }
+          }
+          if (lastHeaderIdx !== -1) {
+            headerPart = blocks[lastHeaderIdx];
+            bodyPart = blocks.slice(lastHeaderIdx + 1).join('\n\n');
+          } else {
+            bodyPart = rawOut;
+          }
+
+          if (bodyPart.length > MAX_API_RESPONSE) {
+            bodyPart = bodyPart.slice(0, MAX_API_RESPONSE) + '\n[Response truncated: 10 MB limit exceeded]';
           }
 
           const headerLines = headerPart.split(/\r?\n/);
@@ -4122,7 +4229,7 @@ done
         }
       }
 
-      // Direct HTTP fetch execution
+      // Direct HTTP fetch execution with bounded response size
       try {
         const fetchHeaders = {};
         if (Array.isArray(req.headers)) {
@@ -4135,7 +4242,27 @@ done
           fetchOptions.body = req.raw_body;
         }
         const response = await fetch(req.url, fetchOptions);
-        const bodyText = await response.text();
+        let bodyText = '';
+        if (response.body && typeof response.body.getReader === 'function') {
+          const reader = response.body.getReader();
+          let received = 0;
+          const decoder = new TextDecoder();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            received += value ? value.length : 0;
+            if (received > MAX_API_RESPONSE) {
+              if (value) bodyText += decoder.decode(value, { stream: false });
+              bodyText += '\n[Response truncated: maximum 10 MB limit exceeded]';
+              try { reader.cancel(); } catch {}
+              break;
+            }
+            if (value) bodyText += decoder.decode(value, { stream: true });
+          }
+        } else {
+          const full = await response.text();
+          bodyText = full.length > MAX_API_RESPONSE ? full.slice(0, MAX_API_RESPONSE) + '\n[Response truncated]' : full;
+        }
         const resHeaders = {};
         response.headers.forEach((v, k) => { resHeaders[k] = v; });
 
@@ -4184,8 +4311,29 @@ done
 // with isolated in-memory cookie jars.
 // -------------------------------------------------------------
 const browserSessionRegistry = new Map();
+const MAX_BROWSER_SESSIONS = 500;
+const BROWSER_SESSION_TTL = 4 * 60 * 60 * 1000; // 4 hours
+
+function pruneBrowserSessions() {
+  const now = Date.now();
+  for (const [id, sess] of browserSessionRegistry.entries()) {
+    if (now - sess.lastActiveAt > BROWSER_SESSION_TTL) {
+      browserSessionRegistry.delete(id);
+    }
+  }
+  if (browserSessionRegistry.size > MAX_BROWSER_SESSIONS) {
+    const sorted = Array.from(browserSessionRegistry.entries())
+      .sort((a, b) => a[1].lastActiveAt - b[1].lastActiveAt);
+    const toRemove = sorted.slice(0, browserSessionRegistry.size - MAX_BROWSER_SESSIONS);
+    for (const [id] of toRemove) {
+      browserSessionRegistry.delete(id);
+    }
+  }
+}
+setInterval(pruneBrowserSessions, 300000).unref?.();
 
 function getOrCreateBrowserSession(connId, proto, host, port) {
+  pruneBrowserSessions();
   connId = connId || 'default';
   proto = (proto || 'http').toLowerCase();
   port = Number(port) || (proto === 'https' ? 443 : 80);
@@ -4350,35 +4498,28 @@ function handleBrowserGatewayUpgrade(req, socket, head) {
   let entry = null;
   if (connId && connId !== 'default' && connId !== 'local' && activeConnections.has(connId)) {
     entry = activeConnections.get(connId);
-  } else if (activeConnections.size > 0) {
-    entry = activeConnections.values().next().value;
+  }
+
+  if (!entry || !entry.client) {
+    try { socket.destroy(); } catch {}
+    return;
   }
 
   const connectTarget = (cb) => {
-    if (entry && entry.client) {
-      const destHost = host === 'localhost' ? '127.0.0.1' : host;
-      entry.client.forwardOut('127.0.0.1', 0, destHost, port, (err, stream) => {
-        if (err) return cb(err);
-        if (proto === 'https') {
-          const tlsSocket = tls.connect({
-            socket: stream,
-            servername: host,
-            rejectUnauthorized: false
-          }, () => cb(null, tlsSocket));
-          tlsSocket.on('error', e => cb(e));
-        } else {
-          cb(null, stream);
-        }
-      });
-    } else {
+    const destHost = host === 'localhost' ? '127.0.0.1' : host;
+    entry.client.forwardOut('127.0.0.1', 0, destHost, port, (err, stream) => {
+      if (err) return cb(err);
       if (proto === 'https') {
-        const tlsSocket = tls.connect(port, host, { servername: host, rejectUnauthorized: false }, () => cb(null, tlsSocket));
+        const tlsSocket = tls.connect({
+          socket: stream,
+          servername: host,
+          rejectUnauthorized: strictTls
+        }, () => cb(null, tlsSocket));
         tlsSocket.on('error', e => cb(e));
       } else {
-        const netSocket = net.connect(port, host, () => cb(null, netSocket));
-        netSocket.on('error', e => cb(e));
+        cb(null, stream);
       }
-    }
+    });
   };
 
   connectTarget((err, targetStream) => {
@@ -5370,7 +5511,7 @@ const backendServer = http.createServer({ maxHeaderSize: 1048576 }, async (req, 
     res.end(JSON.stringify({
       status: 'ok',
       service: 'sshdesktop-backend',
-      version: '2.4.0',
+      version: '2.4.2',
       backendPort: BACKEND_PORT,
       frontendPort: FRONTEND_PORT,
       activeConnections: activeConnections.size,
@@ -5391,9 +5532,11 @@ const backendServer = http.createServer({ maxHeaderSize: 1048576 }, async (req, 
       rawBody += chunk;
       if (rawBody.length > MAX_INVOKE_BODY) {
         bodyOverflow = true;
-        res.writeHead(413, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Payload Too Large: Maximum request body is 10 MB' }));
-        req.destroy();
+        res.writeHead(413, { 'Content-Type': 'application/json', 'Connection': 'close' });
+        res.end(JSON.stringify({ error: 'Payload Too Large: Maximum request body is 10 MB' }), () => {
+          try { req.socket.destroy(); } catch {}
+        });
+        req.pause();
       }
     });
 
@@ -5404,7 +5547,7 @@ const backendServer = http.createServer({ maxHeaderSize: 1048576 }, async (req, 
         const { cmd, args } = payload;
         const token = extractSessionToken(req, payload);
         const session = getSession(token);
-        const clientIp = req?.socket?.remoteAddress || '127.0.0.1';
+        const clientIp = getClientIp(req);
 
         // Public auth commands do not require an active session
         const isPublicAuthCmd = cmd === 'auth_login' || cmd === 'auth_get_status';
@@ -5434,6 +5577,11 @@ const backendServer = http.createServer({ maxHeaderSize: 1048576 }, async (req, 
   res.end(JSON.stringify({ error: 'Endpoint not found' }));
 });
 
+// Set slow-client and request timeouts
+backendServer.headersTimeout = 60000;
+backendServer.requestTimeout = 120000;
+backendServer.keepAliveTimeout = 5000;
+
 // WebSocket Server attached directly to Backend Server
 const wss = new WebSocketServer({ noServer: true });
 
@@ -5442,7 +5590,7 @@ function handleWsConnection(ws, req) {
   const cookieMatch = req.headers.cookie ? req.headers.cookie.match(/(?:^|;\s*)sshdesktop_session=([^;]+)/) : null;
   const cookieToken = cookieMatch ? decodeURIComponent(cookieMatch[1].trim()) : null;
   const secProtoToken = req.headers['sec-websocket-protocol'] ? req.headers['sec-websocket-protocol'].split(',')[0].trim() : null;
-  const token = secProtoToken || cookieToken || urlObj.searchParams.get('token') || req.headers['x-session-token'];
+  const token = secProtoToken || cookieToken || req.headers['x-session-token'] || urlObj.searchParams.get('token');
   const session = getSession(token);
   if (!session) {
     ws.close(1008, 'Session expired or unauthorized (1 hour limit)');
@@ -5459,6 +5607,10 @@ function handleWsConnection(ws, req) {
     return;
   }
 
+  const existingClient = activeWsClients.get(termId);
+  if (existingClient && existingClient !== ws) {
+    try { existingClient.close(1000, 'Replaced by newer connection'); } catch {}
+  }
   activeWsClients.set(termId, ws);
 
   if (!activeTerminals.has(termId) && connId) {
@@ -5495,16 +5647,40 @@ function handleWsConnection(ws, req) {
   });
 
   ws.on('close', () => {
-    activeWsClients.delete(termId);
+    if (activeWsClients.get(termId) === ws) {
+      activeWsClients.delete(termId);
+    }
   });
 }
 
 backendServer.on('upgrade', (req, socket, head) => {
+  const origin = req.headers['origin'];
+  const host = req.headers['host'];
+  if (origin) {
+    try {
+      const u = new URL(origin);
+      if (u.hostname !== 'localhost' && u.hostname !== '127.0.0.1' && host && u.host !== host) {
+        socket.destroy();
+        return;
+      }
+    } catch {
+      socket.destroy();
+      return;
+    }
+  }
+
   if (req.url.startsWith('/ws/terminal')) {
     wss.handleUpgrade(req, socket, head, ws => {
       handleWsConnection(ws, req);
     });
   } else if (req.url.startsWith('/s/') || req.url.startsWith('/api/browser/gateway/')) {
+    const token = extractSessionToken(req, null);
+    const session = getSession(token);
+    if (!session) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     handleBrowserGatewayUpgrade(req, socket, head);
   } else {
     socket.destroy();
@@ -5532,7 +5708,11 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
       port: BACKEND_PORT,
       path: req.url,
       method: req.method,
-      headers: { ...req.headers, host: `127.0.0.1:${BACKEND_PORT}` },
+      headers: {
+        ...req.headers,
+        host: `127.0.0.1:${BACKEND_PORT}`,
+        'x-forwarded-for': req.headers['x-forwarded-for'] || req.socket.remoteAddress
+      },
       maxHeaderSize: 1048576
     }, proxyRes => {
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
@@ -5612,7 +5792,14 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
 
   if (isCoreAsset || isRootDashboard) {
     const assetPath = isRootDashboard ? '/index.html' : reqPath;
-    const diskPath = path.join(DIST_DIR, assetPath);
+    const resolvedDist = path.resolve(DIST_DIR);
+    const safeDiskPath = path.resolve(resolvedDist, '.' + (assetPath.startsWith('/') ? assetPath : '/' + assetPath));
+    if (!safeDiskPath.startsWith(resolvedDist)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      res.end('Access Denied: Path traversal detected.');
+      return;
+    }
+    const diskPath = safeDiskPath;
     if (fs.existsSync(diskPath)) {
       try {
         const stats = fs.statSync(diskPath);
@@ -5722,13 +5909,40 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
 </html>`);
 });
 
-// Forward WebSocket upgrades on port 2222 directly to backend WebSocket handler
+// Set slow-client and request timeouts for frontend server
+frontendServer.headersTimeout = 60000;
+frontendServer.requestTimeout = 120000;
+frontendServer.keepAliveTimeout = 5000;
+
+// Forward WebSocket upgrades on port 2222 directly to backend WebSocket handler with origin & session validation
 frontendServer.on('upgrade', (req, socket, head) => {
+  const origin = req.headers['origin'];
+  const host = req.headers['host'];
+  if (origin) {
+    try {
+      const u = new URL(origin);
+      if (u.hostname !== 'localhost' && u.hostname !== '127.0.0.1' && host && u.host !== host) {
+        socket.destroy();
+        return;
+      }
+    } catch {
+      socket.destroy();
+      return;
+    }
+  }
+
   if (req.url.startsWith('/ws/terminal')) {
     wss.handleUpgrade(req, socket, head, ws => {
       handleWsConnection(ws, req);
     });
   } else if (req.url.startsWith('/s/') || req.url.startsWith('/api/browser/gateway/')) {
+    const token = extractSessionToken(req, null);
+    const session = getSession(token);
+    if (!session) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     handleBrowserGatewayUpgrade(req, socket, head);
   } else {
     let savedGw = null;

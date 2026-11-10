@@ -19,7 +19,8 @@
     "tauri": "tauri",
     "tauri:fast": "tauri build --debug --no-bundle",
     "tauri:dev": "tauri dev",
-    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
+    "lint": "eslint . --max-warnings 0",
+    "test": "npm run lint && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

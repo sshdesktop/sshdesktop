@@ -36,7 +36,33 @@ pub fn expand_tilde(path_str: &str) -> String {
     trimmed.to_string()
 }
 
-pub fn parse_ssh_config_content(content: &str) -> Vec<SshConfigHost> {
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+    if !text.starts_with(parts[0]) || !text.ends_with(parts[parts.len() - 1]) {
+        return false;
+    }
+    let mut current_idx = parts[0].len();
+    for part in &parts[1..parts.len() - 1] {
+        if part.is_empty() {
+            continue;
+        }
+        match text[current_idx..].find(part) {
+            Some(idx) => current_idx += idx + part.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
+fn parse_ssh_config_internal(
+    content: &str,
+    base_dir: Option<&Path>,
+    depth: usize,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) -> Vec<SshConfigHost> {
     let mut hosts = Vec::new();
     let mut current_aliases: Vec<String> = Vec::new();
     let mut current_template: Option<SshConfigHost> = None;
@@ -121,23 +147,49 @@ pub fn parse_ssh_config_content(content: &str) -> Vec<SshConfigHost> {
                 _ => {}
             }
         } else if key == "include" {
-            let expanded_inc = expand_tilde(&value);
-            let inc_path = std::path::Path::new(&expanded_inc);
-            if inc_path.is_file() {
-                if let Ok(included_content) = std::fs::read_to_string(inc_path) {
-                    let inc_hosts = parse_ssh_config_content(&included_content);
-                    hosts.extend(inc_hosts);
-                }
-            } else if let Some(parent) = inc_path.parent() {
-                if let Some(file_pattern) = inc_path.file_name().and_then(|n| n.to_str()) {
-                    if file_pattern.contains('*') && parent.is_dir() {
-                        if let Ok(entries) = std::fs::read_dir(parent) {
-                            for entry in entries.flatten() {
-                                let p = entry.path();
-                                if p.is_file() {
-                                    if let Ok(inc_content) = std::fs::read_to_string(&p) {
-                                        let inc_hosts = parse_ssh_config_content(&inc_content);
-                                        hosts.extend(inc_hosts);
+            if depth < 5 {
+                let expanded_inc = expand_tilde(&value);
+                let raw_path = std::path::Path::new(&expanded_inc);
+                let inc_path = if raw_path.is_relative() {
+                    if let Some(base) = base_dir {
+                        base.join(raw_path)
+                    } else if let Some(ssh_dir) = get_ssh_dir() {
+                        ssh_dir.join(raw_path)
+                    } else {
+                        raw_path.to_path_buf()
+                    }
+                } else {
+                    raw_path.to_path_buf()
+                };
+
+                if inc_path.is_file() {
+                    let norm_path = inc_path.canonicalize().unwrap_or_else(|_| inc_path.clone());
+                    if visited.insert(norm_path.clone()) {
+                        if let Ok(included_content) = std::fs::read_to_string(&norm_path) {
+                            let next_base = norm_path.parent();
+                            let inc_hosts = parse_ssh_config_internal(&included_content, next_base, depth + 1, visited);
+                            hosts.extend(inc_hosts);
+                        }
+                    }
+                } else if let Some(parent) = inc_path.parent() {
+                    if let Some(file_pattern) = inc_path.file_name().and_then(|n| n.to_str()) {
+                        if file_pattern.contains('*') && parent.is_dir() {
+                            if let Ok(entries) = std::fs::read_dir(parent) {
+                                for entry in entries.flatten() {
+                                    let p = entry.path();
+                                    if p.is_file() {
+                                        if let Some(fname) = p.file_name().and_then(|n| n.to_str()) {
+                                            if wildcard_match(file_pattern, fname) {
+                                                let norm_path = p.canonicalize().unwrap_or_else(|_| p.clone());
+                                                if visited.insert(norm_path.clone()) {
+                                                    if let Ok(inc_content) = std::fs::read_to_string(&norm_path) {
+                                                        let next_base = norm_path.parent();
+                                                        let inc_hosts = parse_ssh_config_internal(&inc_content, next_base, depth + 1, visited);
+                                                        hosts.extend(inc_hosts);
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -154,6 +206,12 @@ pub fn parse_ssh_config_content(content: &str) -> Vec<SshConfigHost> {
     flush_aliases(&current_template, &current_aliases, &mut hosts);
 
     hosts
+}
+
+pub fn parse_ssh_config_content(content: &str) -> Vec<SshConfigHost> {
+    let mut visited = std::collections::HashSet::new();
+    let ssh_dir = get_ssh_dir();
+    parse_ssh_config_internal(content, ssh_dir.as_deref(), 0, &mut visited)
 }
 
 #[tauri::command]
@@ -177,7 +235,14 @@ pub async fn ssh_config_read_hosts() -> Result<Vec<SshConfigHost>, String> {
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-    Ok(parse_ssh_config_content(&content))
+    let mut visited = std::collections::HashSet::new();
+    if let Ok(norm) = path.canonicalize() {
+        visited.insert(norm);
+    } else {
+        visited.insert(path.clone());
+    }
+
+    Ok(parse_ssh_config_internal(&content, path.parent(), 0, &mut visited))
 }
 
 #[tauri::command]

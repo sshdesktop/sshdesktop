@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# SSH Desktop 2.4.0 - All-in-One Linux Installer (Port 2222)
+# SSH Desktop 2.4.2 - All-in-One Linux Installer (Port 2222)
 set -e
-echo "🚀 Installing SSH Desktop v2.4.0 on Linux..."
+echo "🚀 Installing SSH Desktop v2.4.2 on Linux..."
 PORT="${PORT:-2222}"
 mkdir -p /opt/sshdesktop
 cp -r ./dist /opt/sshdesktop/ 2>/dev/null || true

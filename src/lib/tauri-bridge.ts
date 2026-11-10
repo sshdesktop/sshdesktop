@@ -1473,21 +1473,21 @@ export async function dbGetObjectDefinition(
 
 export async function dbGetCapabilities(connectionId: string): Promise<ServerCapabilities> {
   return safeInvoke<ServerCapabilities>('db_get_capabilities', { connectionId }, {
-    engine: 'mysql',
+    engine: 'unknown',
     server_version: '',
-    supports_transactions: true,
+    supports_transactions: false,
     supports_schemas: false,
-    supports_procedures: true,
-    supports_functions: true,
-    supports_triggers: true,
-    supports_views: true,
-    supports_indexes: true,
-    supports_foreign_keys: true,
-    supports_explain: true,
-    supports_process_list: true,
-    read_only: false,
-    supports_rename_table: true,
-    supports_alter_column: true,
+    supports_procedures: false,
+    supports_functions: false,
+    supports_triggers: false,
+    supports_views: false,
+    supports_indexes: false,
+    supports_foreign_keys: false,
+    supports_explain: false,
+    supports_process_list: false,
+    read_only: true,
+    supports_rename_table: false,
+    supports_alter_column: false,
   });
 }
 

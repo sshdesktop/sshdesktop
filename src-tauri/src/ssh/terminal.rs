@@ -44,7 +44,7 @@ pub struct TerminalSession {
     pub cols: u16,
     pub created_at: i64,
     pub tx: Option<UnboundedSender<Vec<u8>>>,
-    pub action_tx: Option<UnboundedSender<TerminalAction>>,
+    pub action_tx: Option<tokio::sync::mpsc::Sender<TerminalAction>>,
     pub child_pid: Option<u32>,
     pub password_file: Option<Arc<crate::ssh::connection::SshPasswordFile>>,
 }
@@ -188,9 +188,14 @@ pub async fn terminal_create(
         let handle = match handle_opt {
             Some(h) => Some(h),
             None => {
-                // Deduplicate concurrent on-demand session handshakes
-                static HANDSHAKE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-                let _lock = HANDSHAKE_LOCK.lock().await;
+                // Deduplicate concurrent on-demand session handshakes per connection
+                static HANDSHAKE_LOCKS: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+                    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+                let conn_lock = {
+                    let mut locks = HANDSHAKE_LOCKS.lock();
+                    locks.entry(conn_id.clone()).or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(()))).clone()
+                };
+                let _lock = conn_lock.lock().await;
 
                 // Re-check if session was established while waiting for lock
                 let recheck = {
@@ -237,7 +242,7 @@ pub async fn terminal_create(
             match crate::ssh::session::open_pty_channel(&h, "xterm-256color", cols as u32, rows as u32).await {
                 Ok(mut channel) => {
                     log::info!("SSH Desktop: Native russh interactive PTY shell opened for {}@{}:{}", user, host, port);
-                    let (action_tx, mut action_rx) = unbounded_channel::<TerminalAction>();
+                    let (action_tx, mut action_rx) = tokio::sync::mpsc::channel::<TerminalAction>(2048);
 
                     let app_out = app.clone();
                     let term_id_out = term_id.clone();
@@ -487,7 +492,7 @@ pub async fn terminal_write(
     };
 
     if let Some(action_tx) = action_tx_opt {
-        action_tx.send(TerminalAction::Data(data)).map_err(|e| format!("Failed to send data to terminal: {}", e))?;
+        action_tx.try_send(TerminalAction::Data(data)).map_err(|e| format!("Failed to send data to terminal: {}", e))?;
         Ok(())
     } else if let Some(tx) = tx_opt {
         tx.send(data).map_err(|e| format!("Failed to send data to terminal: {}", e))?;
@@ -513,7 +518,7 @@ pub async fn terminal_resize(
     term.rows = rows;
     term.cols = cols;
     if let Some(ref action_tx) = term.action_tx {
-        let _ = action_tx.send(TerminalAction::Resize { rows, cols });
+        let _ = action_tx.try_send(TerminalAction::Resize { rows, cols });
     }
     Ok(())
 }
@@ -525,7 +530,7 @@ pub async fn terminal_close(
 ) -> Result<(), String> {
     if let Some(session) = state.terminals.lock().remove(&terminal_id) {
         if let Some(ref action_tx) = session.action_tx {
-            let _ = action_tx.send(TerminalAction::Close);
+            let _ = action_tx.try_send(TerminalAction::Close);
         }
         if let Some(pid) = session.child_pid {
             #[cfg(windows)]
