@@ -172,6 +172,11 @@ pub async fn ssh_start_tunnel(
     // 2. Resolve SSH connection configuration
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or_else(|| format!("No active SSH connection found for '{}'. Please connect to a server first.", conn_id))?;
+    if local_port == 0 {
+        return Err("Local tunnel port must be between 1 and 65535.".into());
+    }
+    crate::ssh::connection::validate_ssh_target(&remote_host, remote_port, &conn.config.username)
+        .map_err(|e| format!("Invalid tunnel destination: {}", e))?;
     let is_key_auth = match conn.config.auth_method.as_deref() {
         Some("password") => false,
         Some("key") => true,
@@ -728,6 +733,9 @@ pub async fn ssh_start_socks5(
     // 2. Resolve SSH connection configuration
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or_else(|| format!("No active SSH connection found for '{}'. Please connect to a server first.", conn_id))?;
+    if local_port == 0 {
+        return Err("SOCKS5 local port must be between 1 and 65535.".into());
+    }
     let is_key_auth = match conn.config.auth_method.as_deref() {
         Some("password") => false,
         Some("key") => true,
