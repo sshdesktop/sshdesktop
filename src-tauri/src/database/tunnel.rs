@@ -121,7 +121,7 @@ pub async fn setup_ssh_tunnel(
     }
 
     // ── PATH B: System SSH / PuTTY Plink Port Forwarding Fallback ────────────
-    if let Some(conn) = maybe_conn {
+    if let Some(conn) = maybe_conn.as_ref() {
         let local_port = {
             let l = TcpListener::bind("127.0.0.1:0")
                 .await
