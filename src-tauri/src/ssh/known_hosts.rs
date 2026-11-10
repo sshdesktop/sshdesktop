@@ -468,4 +468,16 @@ mod tests {
         assert!(host_token_matches("[server.example.com]:2222", "server.example.com", 2222));
         assert!(!host_token_matches("[server.example.com]:2222", "server.example.com", 22));
     }
+
+    #[test]
+    fn supports_openssh_wildcard_patterns() {
+        assert!(host_token_matches("*.example.com", "db.example.com", 22));
+        assert!(!host_token_matches("*.example.com", "example.net", 22));
+    }
+
+    #[test]
+    fn negated_host_pattern_overrides_positive_match() {
+        assert!(host_field_matches("*.example.com,!blocked.example.com", "db.example.com", 22));
+        assert!(!host_field_matches("*.example.com,!blocked.example.com", "blocked.example.com", 22));
+    }
 }
