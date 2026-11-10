@@ -514,17 +514,27 @@ pub async fn disk_create_partition(
     let clean_end = if end.trim().is_empty() { "100%" } else { end.trim() };
     let fs_val = fstype.as_deref().unwrap_or("").trim().to_lowercase();
     let lbl_val = label.as_deref().unwrap_or("").trim();
+    if !valid_device_path(&dev_path)
+        || !matches!(clean_type, "primary" | "extended" | "logical")
+        || clean_start.len() > 32 || clean_end.len() > 32
+        || !clean_start.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '%'))
+        || !clean_end.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '%'))
+        || (!fs_val.is_empty() && !matches!(fs_val.as_str(), "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "fat32" | "linux-swap"))
+        || lbl_val.len() > 64 || !lbl_val.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.'))
+    {
+        return Err("Invalid device, partition type, boundary, filesystem, or label.".into());
+    }
 
     let script = format!(
         r#"{ensure_parted}
 set -e
 
-DEV='{dev}'
-PART_TYPE='{ptype}'
-USER_START='{start}'
-USER_END='{end}'
-FS='{fs}'
-LABEL='{label}'
+DEV={dev}
+PART_TYPE={ptype}
+USER_START={start}
+USER_END={end}
+FS={fs}
+LABEL={label}
 
 if [ ! -b "$DEV" ]; then
     echo "Block device '$DEV' does not exist." >&2
@@ -662,12 +672,12 @@ partprobe "$DEV" 2>/dev/null || true
 echo "$NEW_PART"
 "#,
         ensure_parted = ensure_parted_script(),
-        dev = dev_path,
-        ptype = clean_type,
-        start = clean_start,
-        end = clean_end,
-        fs = fs_val,
-        label = lbl_val,
+        dev = shell_quote(&dev_path),
+        ptype = shell_quote(clean_type),
+        start = shell_quote(clean_start),
+        end = shell_quote(clean_end),
+        fs = shell_quote(&fs_val),
+        label = shell_quote(lbl_val),
     );
 
     let (stdout, code) = run_sudo(&state, &conn_id, &script).await;
