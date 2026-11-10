@@ -301,6 +301,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
             if let Some(key_path) = &config.private_key_path {
                 let plink_bin = get_plink_path();
                 let mut cmd = tokio::process::Command::new(plink_bin);
+    cmd.kill_on_drop(true);
                 #[cfg(windows)]
                 cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
@@ -356,6 +357,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
         } else {
             // OpenSSH auth (for PEM keys)
             let mut ssh_test = tokio::process::Command::new("ssh");
+    ssh_test.kill_on_drop(true);
             #[cfg(windows)]
             ssh_test.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
@@ -411,6 +413,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                 let password_file = create_password_file(pwd)?;
                 let plink_bin = get_plink_path();
                 let mut cmd = tokio::process::Command::new(plink_bin);
+    cmd.kill_on_drop(true);
                 #[cfg(windows)]
                 cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
@@ -672,6 +675,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
         if let Some(key_path) = &config.private_key_path {
             let plink_bin = get_plink_path();
             let mut cmd = tokio::process::Command::new(plink_bin);
+    cmd.kill_on_drop(true);
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
             cmd.arg("-batch")
@@ -695,6 +699,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
             let password_file = create_password_file(pwd)?;
             let plink_bin = get_plink_path();
             let mut cmd = tokio::process::Command::new(plink_bin);
+    cmd.kill_on_drop(true);
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
             cmd.arg("-ssh")
@@ -715,6 +720,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
     // 4. OpenSSH PEM probe
     if !is_ppk && config.private_key_path.is_some() {
         let mut cmd = tokio::process::Command::new("ssh");
+    cmd.kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000);
         cmd.arg("-p").arg(&port)
