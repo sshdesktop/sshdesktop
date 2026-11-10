@@ -634,8 +634,9 @@ pub async fn sftp_download_to_downloads(
         .unwrap_or("downloaded_file");
     if filename == "." || filename == ".."
         || filename.contains('/') || filename.contains('\\')
+        || filename.ends_with('.') || filename.ends_with(' ')
         || filename.chars().any(|c| c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
-        || matches!(filename.to_ascii_uppercase().as_str(), "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9")
+        || matches!(filename.split('.').next().unwrap_or(filename).to_ascii_uppercase().as_str(), "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9")
     {
         return Err("Remote filename is not safe to use as a local download name".into());
     }
