@@ -151,7 +151,7 @@ pub async fn logs_stream_start(
             let is_key_auth = match conn.config.auth_method.as_deref() {
                 Some("password") => false,
                 Some("key") => true,
-                _ => conn.config.private_key_path.is_some(),
+                _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
             };
             let new_handle = crate::ssh::session::connect_session_with_passphrase_auth(
                 &conn.config.host,
