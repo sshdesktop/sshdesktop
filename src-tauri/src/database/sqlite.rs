@@ -1,8 +1,24 @@
+fn secure_sqlite_cache_file(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed to secure SQLite cache file: {}", e))?;
+    }
+    Ok(())
+}
+
 fn sqlite_cache_path(config: &DatabaseConnectionConfig, remote_path: &str) -> Result<std::path::PathBuf, String> {
     use sha2::{Digest, Sha256};
     let cache_dir = std::env::temp_dir().join("sshdesktop_sqlite");
     std::fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("Failed to create SQLite cache directory: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("Failed to secure SQLite cache directory: {}", e))?;
+    }
     let mut hasher = Sha256::new();
     hasher.update(config.id.as_bytes());
     hasher.update([0]);
@@ -66,6 +82,7 @@ pub async fn connect_sqlite(
                 }
                 std::fs::File::create(&local_cache)
                     .map_err(|e| format!("Failed to create local SQLite cache: {}", e))?;
+                secure_sqlite_cache_file(&local_cache)?;
             } else {
                 let download_cmd = format!(
                     "size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 268435456 ] || {{ echo 'Remote SQLite database exceeds the 256 MiB cache limit' >&2; exit 1; }}; base64 '{}' | tr -d '\\n'",
@@ -79,6 +96,7 @@ pub async fn connect_sqlite(
                     .ok_or_else(|| "Remote SQLite download returned invalid base64 data.".to_string())?;
                 std::fs::write(&local_cache, bytes)
                     .map_err(|e| format!("Failed to write local SQLite cache: {}", e))?;
+                secure_sqlite_cache_file(&local_cache)?;
             }
 
             local_cache.to_string_lossy().to_string()
