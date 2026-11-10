@@ -27,7 +27,7 @@ pub async fn send_desktop_notification(
     _title: String,
     _body: String,
 ) -> Result<(), String> {
-    Ok(())
+    Err("Desktop notifications are not implemented in this build.".into())
 }
 
 #[tauri::command]
