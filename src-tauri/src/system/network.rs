@@ -307,6 +307,7 @@ PORT={port}
 PROTO="{proto}"
 SIG="{sig}"
 PID="{pid_target}"
+command -v ss >/dev/null 2>&1 || { echo 'ss utility is required to verify port status' >&2; exit 1; }
 
 # 1. Kill by PID if provided
 if [ "$PID" != "none" ] && [ "$PID" -gt 0 ] 2>/dev/null; then
