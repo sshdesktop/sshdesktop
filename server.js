@@ -5792,14 +5792,33 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
 
   if (isCoreAsset || isRootDashboard) {
     const assetPath = isRootDashboard ? '/index.html' : reqPath;
-    const resolvedDist = path.resolve(DIST_DIR);
-    const safeDiskPath = path.resolve(resolvedDist, '.' + (assetPath.startsWith('/') ? assetPath : '/' + assetPath));
-    if (!safeDiskPath.startsWith(resolvedDist)) {
-      res.writeHead(403, { 'Content-Type': 'text/plain' });
-      res.end('Access Denied: Path traversal detected.');
-      return;
+    let diskPath;
+    try {
+      const resolvedDist = fs.realpathSync(DIST_DIR);
+      const candidatePath = path.resolve(resolvedDist, '.' + (assetPath.startsWith('/') ? assetPath : '/' + assetPath));
+      const relativePath = path.relative(resolvedDist, candidatePath);
+      if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('Access Denied: Path traversal detected.');
+        return;
+      }
+      // Resolve symlinks as well: lexical containment alone does not prevent
+      // an asset inside dist from pointing outside the distribution directory.
+      diskPath = fs.realpathSync(candidatePath);
+      const realRelativePath = path.relative(resolvedDist, diskPath);
+      if (realRelativePath.startsWith('..') || path.isAbsolute(realRelativePath)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('Access Denied: Path traversal detected.');
+        return;
+      }
+    } catch (error) {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not Found');
+        return;
+      }
+      throw error;
     }
-    const diskPath = safeDiskPath;
     if (fs.existsSync(diskPath)) {
       try {
         const stats = fs.statSync(diskPath);
@@ -5968,7 +5987,10 @@ frontendServer.on('upgrade', (req, socket, head) => {
         if (refMatch) savedGw = refMatch[1];
       }
     }
-    if (savedGw) {
+    // A Referer is attacker-controlled and is not an authorization credential.
+    // Only allow fallback gateway upgrades when the referenced opaque gateway
+    // session still exists in the in-memory registry.
+    if (savedGw && resolveSessionFromRequest(savedGw)) {
       req.url = `${savedGw}${req.url.startsWith('/') ? req.url : '/' + req.url}`;
       handleBrowserGatewayUpgrade(req, socket, head);
     } else {
