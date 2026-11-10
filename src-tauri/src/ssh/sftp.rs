@@ -585,13 +585,14 @@ pub async fn sftp_download_to_downloads(
 
     if has_pwd {
         let pwd = conn.config.password.as_ref().unwrap();
+        let password_file = crate::ssh::connection::create_password_file(pwd)?;
         let src = format!("{}@{}:{}", user, host, remote_path);
         let mut cmd = tokio::process::Command::new("pscp");
         #[cfg(windows)]
         cmd.creation_flags(0x08000000);
         cmd.arg("-P").arg(&port)
             .arg("-batch")
-            .arg("-pw").arg(pwd)
+            .arg("-pwfile").arg(password_file.path())
             .arg(&src).arg(&local_dest_str)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
