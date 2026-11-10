@@ -203,8 +203,8 @@ pub async fn sftp_write_bytes(
         let mv_cmd = format!("mv -f '{}' '{}'", tmp_file, escaped_path);
         let (s_out, s_code) = crate::ssh::exec::run_cmd_priv(state, conn_id, &mv_cmd).await;
         if s_code == 0 {
-            // Ensure readable permissions on system files (e.g. 644 for configs like /etc/nginx/nginx.conf)
-            let _ = crate::ssh::exec::run_cmd_priv(state, conn_id, &format!("chmod 644 '{}'", escaped_path)).await;
+            // Preserve the temporary file's restrictive mode. Never force 0644:
+            // that could expose secrets and overwrite the destination's intended mode.
             log::info!("SSH Desktop: Saved remote file with elevated privileges via sudo mv: {}", path);
             return Ok(());
         }
@@ -267,11 +267,23 @@ pub async fn sftp_delete(
     conn_id: String,
     path: String,
 ) -> Result<(), String> {
-    // Prevent deleting root or protected system roots by mistake
-    if path == "/" || path == "/home" || path == "/etc" || path == "/usr" || path == "/boot" || path == "/sys" {
-        return Err(format!("System protection active: Refusing to delete protected path '{}'", path));
-    }
+    // Canonicalize on the remote host before applying protected-root checks.
+    // This blocks traversal aliases such as /etc/../ and repeated separators.
     let escaped = shell_escape(&path);
+    let (canonical, canonical_code) = run_cmd(
+        &state,
+        &conn_id,
+        &format!("realpath -m -- '{}' 2>/dev/null", escaped),
+    ).await;
+    if canonical_code != 0 {
+        return Err(format!("Could not safely resolve remote path '{}': {}", path, canonical.trim()));
+    }
+    let canonical = canonical.trim().trim_end_matches('/');
+    let protected = ["/", "/home", "/etc", "/usr", "/boot", "/sys", "/proc", "/dev", "/bin", "/sbin", "/lib", "/lib64", "/var"];
+    if protected.iter().any(|root| canonical == *root) {
+        return Err(format!("System protection active: Refusing to delete protected path '{}'", canonical));
+    }
+    let escaped = shell_escape(canonical);
     let (stdout, code) = run_cmd(&state, &conn_id, &format!("rm -rf '{}' 2>&1", escaped)).await;
     if code == 0 {
         return Ok(());
