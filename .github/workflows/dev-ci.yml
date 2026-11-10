@@ -9,10 +9,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: sshdesktop-dev-ci-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   rust:
     name: Rust checks (${{ matrix.os }})
