@@ -326,7 +326,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                 .arg("-p")
                 .arg(&port)
                 .arg("-o")
-                .arg("StrictHostKeyChecking=accept-new")
+                .arg("StrictHostKeyChecking=yes")
                 .arg("-o")
                 .arg("BatchMode=yes")
                 .arg("-o")
@@ -674,8 +674,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
         #[cfg(windows)]
         cmd.creation_flags(0x08000000);
         cmd.arg("-p").arg(&port)
-            .arg("-o").arg("StrictHostKeyChecking=no")
-            .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
+            .arg("-o").arg("StrictHostKeyChecking=yes")
             .arg("-o").arg("BatchMode=yes")
             .arg("-o").arg("ConnectTimeout=6");
         if let Some(k) = &config.private_key_path {
@@ -691,7 +690,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
         }
     }
 
-    Ok(true)
+    Ok(false)
 }
 
 #[tauri::command]

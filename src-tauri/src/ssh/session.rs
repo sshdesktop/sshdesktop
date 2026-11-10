@@ -20,7 +20,11 @@ impl client::Handler for ClientHandler {
         let key_type = server_public_key.name().to_string();
         let b64 = server_public_key.public_key_base64();
 
-        let (status, msg) = crate::ssh::known_hosts::check_known_hosts(&self.host, self.port, &key_type, &b64);
+        let (status, msg, _) = crate::ssh::known_hosts::check_known_hosts(&self.host, self.port, &key_type, &b64);
+        if status == "trusted" {
+            return Ok(true);
+        }
+
         if status == "changed" {
             log::error!(
                 "SECURITY ALERT: Remote host identification for {}:{} has changed! {}",
@@ -29,12 +33,11 @@ impl client::Handler for ClientHandler {
             return Ok(false);
         }
 
-        if status == "not_found" {
-            // Automatically trust on user-initiated connection
-            let _ = crate::ssh::known_hosts::ssh_trust_host_key(self.host.clone(), self.port, key_type, b64).await;
-        }
-
-        Ok(true)
+        log::warn!(
+            "Host {}:{} is not verified in known_hosts (status: {}). Connection rejected until host key is explicitly verified and trusted by user.",
+            self.host, self.port, status
+        );
+        Ok(false)
     }
 }
 

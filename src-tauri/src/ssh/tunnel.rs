@@ -366,9 +366,7 @@ pub async fn ssh_start_tunnel(
         }
 
         cmd.arg("-p").arg(&ssh_port)
-            .arg("-o").arg("StrictHostKeyChecking=no")
-            .arg("-o").arg("UserKnownHostsFile=/dev/null")
-            .arg("-o").arg("GlobalKnownHostsFile=/dev/null")
+            .arg("-o").arg("StrictHostKeyChecking=yes")
             .arg("-o").arg("ExitOnForwardFailure=yes")
             .arg("-o").arg("ConnectTimeout=10")
             .arg("-o").arg("ServerAliveInterval=30")
@@ -866,9 +864,7 @@ pub async fn ssh_start_socks5(
         cmd.arg("-N")
             .arg("-D").arg(format!("127.0.0.1:{}", effective_local_port))
             .arg("-p").arg(&ssh_port)
-            .arg("-o").arg("StrictHostKeyChecking=no")
-            .arg("-o").arg("UserKnownHostsFile=/dev/null")
-            .arg("-o").arg("GlobalKnownHostsFile=/dev/null")
+            .arg("-o").arg("StrictHostKeyChecking=yes")
             .arg("-o").arg("ExitOnForwardFailure=yes")
             .arg("-o").arg("ConnectTimeout=10")
             .arg("-o").arg("ServerAliveInterval=30")

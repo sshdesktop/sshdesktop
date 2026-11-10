@@ -1793,7 +1793,7 @@ export interface SshConfigHost {
 }
 
 export interface HostKeyVerification {
-  status: 'trusted' | 'not_found' | 'changed' | 'error';
+  status: 'trusted' | 'not_found' | 'changed' | 'failed' | 'error';
   key_type?: string;
   fingerprint_sha256?: string;
   raw_public_key_b64?: string;
@@ -1844,8 +1844,8 @@ export async function sshConfigSaveHost(host: SshConfigHost): Promise<void> {
 
 export async function sshVerifyHostKey(host: string, port: number = 22): Promise<HostKeyVerification> {
   return safeInvoke<HostKeyVerification>('ssh_verify_host_key', { host, port }, {
-    status: 'trusted',
-    message: 'Host key verified',
+    status: 'failed',
+    message: 'Host key verification failed or unavailable',
   });
 }
 

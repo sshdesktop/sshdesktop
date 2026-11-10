@@ -234,7 +234,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
 
     ssh_cmd
         .arg("-p").arg(&port)
-        .arg("-o").arg("StrictHostKeyChecking=no")
+        .arg("-o").arg("StrictHostKeyChecking=yes")
         .arg("-o").arg("BatchMode=yes")
         .arg("-o").arg("IdentitiesOnly=yes")
         .arg("-o").arg("ConnectTimeout=8")
@@ -556,7 +556,7 @@ pub async fn run_cmd_with_stdin(
     ssh_cmd.creation_flags(0x08000000);
     ssh_cmd
         .arg("-p").arg(&port)
-        .arg("-o").arg("StrictHostKeyChecking=no")
+        .arg("-o").arg("StrictHostKeyChecking=yes")
         .arg("-o").arg("BatchMode=yes")
         .arg("-o").arg("IdentitiesOnly=yes")
         .arg("-o").arg("ConnectTimeout=10");

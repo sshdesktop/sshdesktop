@@ -428,7 +428,7 @@ pub async fn sftp_download(
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     cmd.arg("-P").arg(&port)
-        .arg("-o").arg("StrictHostKeyChecking=no")
+        .arg("-o").arg("StrictHostKeyChecking=yes")
         .arg("-o").arg("IdentitiesOnly=yes");
 
     if let Some(key) = &conn.config.private_key_path {
@@ -481,7 +481,7 @@ pub async fn sftp_upload(
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     cmd.arg("-P").arg(&port)
-        .arg("-o").arg("StrictHostKeyChecking=no")
+        .arg("-o").arg("StrictHostKeyChecking=yes")
         .arg("-o").arg("IdentitiesOnly=yes");
 
     if let Some(key) = &conn.config.private_key_path {
@@ -599,7 +599,7 @@ pub async fn sftp_download_to_downloads(
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     cmd.arg("-P").arg(&port)
-        .arg("-o").arg("StrictHostKeyChecking=no");
+        .arg("-o").arg("StrictHostKeyChecking=yes");
 
     if let Some(key) = &conn.config.private_key_path {
         if !key.is_empty() {

@@ -529,10 +529,17 @@ export default function ConnectionScreen() {
 
       // Standard OpenSSH host authentication (known_hosts)
       if (!skipHostCheck) {
+        setConnectingStep('Verifying server host identity in ~/.ssh/known_hosts...');
+        setConnectingProgress(25);
         try {
-          setConnectingStep('Verifying server host identity in ~/.ssh/known_hosts...');
-          setConnectingProgress(25);
           const verification = await sshVerifyHostKey(targetHost, targetPort);
+          if (verification.status === 'failed' || verification.status === 'error') {
+            setErrorMsg(`Host verification failed: ${verification.message || 'Remote server host key could not be probed or verified.'}`);
+            setShake(true);
+            setTimeout(() => setShake(false), 500);
+            setIsConnecting(false);
+            return;
+          }
           if (verification.status === 'not_found' || verification.status === 'changed') {
             setPendingHostVerification({
               verification,
@@ -544,8 +551,12 @@ export default function ConnectionScreen() {
             setIsConnecting(false);
             return;
           }
-        } catch (verifyErr) {
-          console.warn('[Host verification skipped on non-fatal error]:', verifyErr);
+        } catch (verifyErr: any) {
+          setErrorMsg(`Host verification check failed: ${verifyErr?.message || verifyErr}`);
+          setShake(true);
+          setTimeout(() => setShake(false), 500);
+          setIsConnecting(false);
+          return;
         }
       }
 

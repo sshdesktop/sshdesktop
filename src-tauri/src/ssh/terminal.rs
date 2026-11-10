@@ -257,8 +257,7 @@ pub async fn terminal_create(
             let mut c = tokio::process::Command::new("ssh");
             c.arg("-tt")
                 .arg("-p").arg(&port)
-                .arg("-o").arg("StrictHostKeyChecking=no")
-                .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
+                .arg("-o").arg("StrictHostKeyChecking=yes")
                 .arg("-o").arg("IdentitiesOnly=yes")
                 .arg("-o").arg("ConnectTimeout=10");
             if let Some(ref k) = resolved_key_path {
@@ -280,8 +279,7 @@ pub async fn terminal_create(
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-tt")
             .arg("-p").arg(&port)
-            .arg("-o").arg("StrictHostKeyChecking=no")
-            .arg("-o").arg(if cfg!(windows) { "UserKnownHostsFile=NUL" } else { "UserKnownHostsFile=/dev/null" })
+            .arg("-o").arg("StrictHostKeyChecking=yes")
             .arg("-o").arg("ConnectTimeout=10");
         c.arg(format!("{}@{}", user, host));
         c
