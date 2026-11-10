@@ -196,6 +196,9 @@ pub async fn sftp_write_bytes(
     path: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
+    if bytes.len() > 256 * 1024 * 1024 {
+        return Err("Remote file upload is limited to 256 MiB per operation.".into());
+    }
     let clean_path = path.trim();
     if !clean_path.starts_with('/') || clean_path.len() > 4096
         || clean_path.chars().any(|c| c.is_control())
