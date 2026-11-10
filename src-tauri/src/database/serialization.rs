@@ -447,7 +447,653 @@ pub fn split_sql_statements_for_engine(input: &str, engine: &str) -> Vec<String>
             i += 1;
             continue;
         }
+        // PostgreSQL dollar-quoted function bodies may contain semicolons.
         if ch == '
+        if is_at_start {
+            let remaining: String = chars[i..].iter().collect();
+            let upper = remaining.to_uppercase();
+            if upper.starts_with("DELIMITER ") || upper.starts_with("DELIMITER\t") {
+                let after_kw = &remaining["DELIMITER".len()..];
+                let trimmed_after = after_kw.trim_start();
+                let delim_token: String = trimmed_after
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != '\n' && *c != '\r')
+                    .collect();
+                if !delim_token.is_empty() {
+                    current_delimiter = delim_token.clone();
+                    let skip_len = "DELIMITER".len() + (after_kw.len() - trimmed_after.len()) + delim_token.len();
+                    i += skip_len;
+                    while i < len && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\r') {
+                        i += 1;
+                    }
+                    if i < len && chars[i] == '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Check for delimiter match
+        let delim_len = current_delimiter.chars().count();
+        if i + delim_len <= len {
+            let slice: String = chars[i..i + delim_len].iter().collect();
+            if slice == current_delimiter {
+                let should_split = if current_delimiter == ";" {
+                    begin_end_depth == 0
+                } else {
+                    true
+                };
+
+                if should_split {
+                    let stmt_trimmed = current_stmt.trim();
+                    if !stmt_trimmed.is_empty() {
+                        statements.push(stmt_trimmed.to_string());
+                    }
+                    current_stmt.clear();
+                    begin_end_depth = 0;
+                    i += delim_len;
+                    continue;
+                }
+            }
+        }
+
+        // Track BEGIN ... END depth if default delimiter is used
+        if current_delimiter == ";" {
+            let prev_is_boundary = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_');
+            if prev_is_boundary {
+                let remaining: String = chars[i..].iter().take(10).collect();
+                let upper = remaining.to_uppercase();
+                if upper.starts_with("BEGIN") && (i + 5 >= len || (!chars[i + 5].is_alphanumeric() && chars[i + 5] != '_')) {
+                    let after_begin: String = chars[i + 5..].iter().take(20).collect();
+                    let upper_after = after_begin.trim_start().to_uppercase();
+                    if !upper_after.starts_with("TRAN") && !upper_after.starts_with("WORK") {
+                        begin_end_depth += 1;
+                    }
+                } else if upper.starts_with("END") && (i + 3 >= len || (!chars[i + 3].is_alphanumeric() && chars[i + 3] != '_')) {
+                    begin_end_depth = begin_end_depth.saturating_sub(1);
+                }
+            }
+        }
+
+        current_stmt.push(ch);
+        i += 1;
+    }
+
+    let rem = current_stmt.trim();
+    if !rem.is_empty() {
+        let final_stmt = if rem.ends_with(&current_delimiter) {
+            rem[..rem.len() - current_delimiter.len()].trim()
+        } else {
+            rem
+        };
+        if !final_stmt.is_empty() {
+            statements.push(final_stmt.to_string());
+        }
+    }
+
+    statements
+}
+ {
+            let mut j = i + 1;
+            while j < len && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                j += 1;
+            }
+            if j < len && chars[j] == '
+        let is_at_start = current_stmt.trim().is_empty();
+        if is_at_start {
+            let remaining: String = chars[i..].iter().collect();
+            let upper = remaining.to_uppercase();
+            if upper.starts_with("DELIMITER ") || upper.starts_with("DELIMITER\t") {
+                let after_kw = &remaining["DELIMITER".len()..];
+                let trimmed_after = after_kw.trim_start();
+                let delim_token: String = trimmed_after
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != '\n' && *c != '\r')
+                    .collect();
+                if !delim_token.is_empty() {
+                    current_delimiter = delim_token.clone();
+                    let skip_len = "DELIMITER".len() + (after_kw.len() - trimmed_after.len()) + delim_token.len();
+                    i += skip_len;
+                    while i < len && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\r') {
+                        i += 1;
+                    }
+                    if i < len && chars[i] == '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Check for delimiter match
+        let delim_len = current_delimiter.chars().count();
+        if i + delim_len <= len {
+            let slice: String = chars[i..i + delim_len].iter().collect();
+            if slice == current_delimiter {
+                let should_split = if current_delimiter == ";" {
+                    begin_end_depth == 0
+                } else {
+                    true
+                };
+
+                if should_split {
+                    let stmt_trimmed = current_stmt.trim();
+                    if !stmt_trimmed.is_empty() {
+                        statements.push(stmt_trimmed.to_string());
+                    }
+                    current_stmt.clear();
+                    begin_end_depth = 0;
+                    i += delim_len;
+                    continue;
+                }
+            }
+        }
+
+        // Track BEGIN ... END depth if default delimiter is used
+        if current_delimiter == ";" {
+            let prev_is_boundary = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_');
+            if prev_is_boundary {
+                let remaining: String = chars[i..].iter().take(10).collect();
+                let upper = remaining.to_uppercase();
+                if upper.starts_with("BEGIN") && (i + 5 >= len || (!chars[i + 5].is_alphanumeric() && chars[i + 5] != '_')) {
+                    let after_begin: String = chars[i + 5..].iter().take(20).collect();
+                    let upper_after = after_begin.trim_start().to_uppercase();
+                    if !upper_after.starts_with("TRAN") && !upper_after.starts_with("WORK") {
+                        begin_end_depth += 1;
+                    }
+                } else if upper.starts_with("END") && (i + 3 >= len || (!chars[i + 3].is_alphanumeric() && chars[i + 3] != '_')) {
+                    begin_end_depth = begin_end_depth.saturating_sub(1);
+                }
+            }
+        }
+
+        current_stmt.push(ch);
+        i += 1;
+    }
+
+    let rem = current_stmt.trim();
+    if !rem.is_empty() {
+        let final_stmt = if rem.ends_with(&current_delimiter) {
+            rem[..rem.len() - current_delimiter.len()].trim()
+        } else {
+            rem
+        };
+        if !final_stmt.is_empty() {
+            statements.push(final_stmt.to_string());
+        }
+    }
+
+    statements
+}
+ {
+                let tag: String = chars[i..=j].iter().collect();
+                current_stmt.push_str(&tag);
+                i = j + 1;
+                dollar_quote = Some(tag);
+                continue;
+            }
+        }
+
+        // Check for DELIMITER keyword
+        let is_at_start = current_stmt.trim().is_empty();
+        if is_at_start {
+            let remaining: String = chars[i..].iter().collect();
+            let upper = remaining.to_uppercase();
+            if upper.starts_with("DELIMITER ") || upper.starts_with("DELIMITER\t") {
+                let after_kw = &remaining["DELIMITER".len()..];
+                let trimmed_after = after_kw.trim_start();
+                let delim_token: String = trimmed_after
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != '\n' && *c != '\r')
+                    .collect();
+                if !delim_token.is_empty() {
+                    current_delimiter = delim_token.clone();
+                    let skip_len = "DELIMITER".len() + (after_kw.len() - trimmed_after.len()) + delim_token.len();
+                    i += skip_len;
+                    while i < len && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\r') {
+                        i += 1;
+                    }
+                    if i < len && chars[i] == '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Check for delimiter match
+        let delim_len = current_delimiter.chars().count();
+        if i + delim_len <= len {
+            let slice: String = chars[i..i + delim_len].iter().collect();
+            if slice == current_delimiter {
+                let should_split = if current_delimiter == ";" {
+                    begin_end_depth == 0
+                } else {
+                    true
+                };
+
+                if should_split {
+                    let stmt_trimmed = current_stmt.trim();
+                    if !stmt_trimmed.is_empty() {
+                        statements.push(stmt_trimmed.to_string());
+                    }
+                    current_stmt.clear();
+                    begin_end_depth = 0;
+                    i += delim_len;
+                    continue;
+                }
+            }
+        }
+
+        // Track BEGIN ... END depth if default delimiter is used
+        if current_delimiter == ";" {
+            let prev_is_boundary = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_');
+            if prev_is_boundary {
+                let remaining: String = chars[i..].iter().take(10).collect();
+                let upper = remaining.to_uppercase();
+                if upper.starts_with("BEGIN") && (i + 5 >= len || (!chars[i + 5].is_alphanumeric() && chars[i + 5] != '_')) {
+                    let after_begin: String = chars[i + 5..].iter().take(20).collect();
+                    let upper_after = after_begin.trim_start().to_uppercase();
+                    if !upper_after.starts_with("TRAN") && !upper_after.starts_with("WORK") {
+                        begin_end_depth += 1;
+                    }
+                } else if upper.starts_with("END") && (i + 3 >= len || (!chars[i + 3].is_alphanumeric() && chars[i + 3] != '_')) {
+                    begin_end_depth = begin_end_depth.saturating_sub(1);
+                }
+            }
+        }
+
+        current_stmt.push(ch);
+        i += 1;
+    }
+
+    let rem = current_stmt.trim();
+    if !rem.is_empty() {
+        let final_stmt = if rem.ends_with(&current_delimiter) {
+            rem[..rem.len() - current_delimiter.len()].trim()
+        } else {
+            rem
+        };
+        if !final_stmt.is_empty() {
+            statements.push(final_stmt.to_string());
+        }
+    }
+
+    statements
+}
+
+
+#[cfg(test)]
+mod dialect_splitter_tests {
+    use super::split_sql_statements_for_engine;
+
+    #[test]
+    fn postgres_json_hash_operators_are_not_comments() {
+        let statements = split_sql_statements_for_engine(
+            "SELECT payload #> '{items}' FROM docs; SELECT 2;",
+            "postgres",
+        );
+        assert_eq!(statements.len(), 2);
+    }
+
+    #[test]
+    fn sql_server_temp_table_names_are_not_comments() {
+        let statements = split_sql_statements_for_engine(
+            "CREATE TABLE #temp (id INT); SELECT * FROM #temp;",
+            "mssql",
+        );
+        assert_eq!(statements.len(), 2);
+    }
+
+    #[test]
+    fn mysql_hash_comments_work_without_a_space() {
+        let statements = split_sql_statements_for_engine(
+            "SELECT 1;#comment without leading space\nSELECT 2;",
+            "mysql",
+        );
+        assert_eq!(statements.len(), 2);
+    }
+
+    #[test]
+    fn postgres_dollar_quoted_semicolons_do_not_split() {
+        let statements = split_sql_statements_for_engine(
+            "DO $$ BEGIN PERFORM 1; PERFORM 2; END $$; SELECT 3;",
+            "postgres",
+        );
+        assert_eq!(statements.len(), 2);
+    }
+}
+ && matches!(engine.to_ascii_lowercase().as_str(), "postgres" | "postgresql") {
+            let mut end = i + 1;
+            while end < len && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            if end < len && chars[end] == '
+        if is_at_start {
+            let remaining: String = chars[i..].iter().collect();
+            let upper = remaining.to_uppercase();
+            if upper.starts_with("DELIMITER ") || upper.starts_with("DELIMITER\t") {
+                let after_kw = &remaining["DELIMITER".len()..];
+                let trimmed_after = after_kw.trim_start();
+                let delim_token: String = trimmed_after
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != '\n' && *c != '\r')
+                    .collect();
+                if !delim_token.is_empty() {
+                    current_delimiter = delim_token.clone();
+                    let skip_len = "DELIMITER".len() + (after_kw.len() - trimmed_after.len()) + delim_token.len();
+                    i += skip_len;
+                    while i < len && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\r') {
+                        i += 1;
+                    }
+                    if i < len && chars[i] == '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Check for delimiter match
+        let delim_len = current_delimiter.chars().count();
+        if i + delim_len <= len {
+            let slice: String = chars[i..i + delim_len].iter().collect();
+            if slice == current_delimiter {
+                let should_split = if current_delimiter == ";" {
+                    begin_end_depth == 0
+                } else {
+                    true
+                };
+
+                if should_split {
+                    let stmt_trimmed = current_stmt.trim();
+                    if !stmt_trimmed.is_empty() {
+                        statements.push(stmt_trimmed.to_string());
+                    }
+                    current_stmt.clear();
+                    begin_end_depth = 0;
+                    i += delim_len;
+                    continue;
+                }
+            }
+        }
+
+        // Track BEGIN ... END depth if default delimiter is used
+        if current_delimiter == ";" {
+            let prev_is_boundary = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_');
+            if prev_is_boundary {
+                let remaining: String = chars[i..].iter().take(10).collect();
+                let upper = remaining.to_uppercase();
+                if upper.starts_with("BEGIN") && (i + 5 >= len || (!chars[i + 5].is_alphanumeric() && chars[i + 5] != '_')) {
+                    let after_begin: String = chars[i + 5..].iter().take(20).collect();
+                    let upper_after = after_begin.trim_start().to_uppercase();
+                    if !upper_after.starts_with("TRAN") && !upper_after.starts_with("WORK") {
+                        begin_end_depth += 1;
+                    }
+                } else if upper.starts_with("END") && (i + 3 >= len || (!chars[i + 3].is_alphanumeric() && chars[i + 3] != '_')) {
+                    begin_end_depth = begin_end_depth.saturating_sub(1);
+                }
+            }
+        }
+
+        current_stmt.push(ch);
+        i += 1;
+    }
+
+    let rem = current_stmt.trim();
+    if !rem.is_empty() {
+        let final_stmt = if rem.ends_with(&current_delimiter) {
+            rem[..rem.len() - current_delimiter.len()].trim()
+        } else {
+            rem
+        };
+        if !final_stmt.is_empty() {
+            statements.push(final_stmt.to_string());
+        }
+    }
+
+    statements
+}
+ {
+            let mut j = i + 1;
+            while j < len && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                j += 1;
+            }
+            if j < len && chars[j] == '
+        let is_at_start = current_stmt.trim().is_empty();
+        if is_at_start {
+            let remaining: String = chars[i..].iter().collect();
+            let upper = remaining.to_uppercase();
+            if upper.starts_with("DELIMITER ") || upper.starts_with("DELIMITER\t") {
+                let after_kw = &remaining["DELIMITER".len()..];
+                let trimmed_after = after_kw.trim_start();
+                let delim_token: String = trimmed_after
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != '\n' && *c != '\r')
+                    .collect();
+                if !delim_token.is_empty() {
+                    current_delimiter = delim_token.clone();
+                    let skip_len = "DELIMITER".len() + (after_kw.len() - trimmed_after.len()) + delim_token.len();
+                    i += skip_len;
+                    while i < len && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\r') {
+                        i += 1;
+                    }
+                    if i < len && chars[i] == '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Check for delimiter match
+        let delim_len = current_delimiter.chars().count();
+        if i + delim_len <= len {
+            let slice: String = chars[i..i + delim_len].iter().collect();
+            if slice == current_delimiter {
+                let should_split = if current_delimiter == ";" {
+                    begin_end_depth == 0
+                } else {
+                    true
+                };
+
+                if should_split {
+                    let stmt_trimmed = current_stmt.trim();
+                    if !stmt_trimmed.is_empty() {
+                        statements.push(stmt_trimmed.to_string());
+                    }
+                    current_stmt.clear();
+                    begin_end_depth = 0;
+                    i += delim_len;
+                    continue;
+                }
+            }
+        }
+
+        // Track BEGIN ... END depth if default delimiter is used
+        if current_delimiter == ";" {
+            let prev_is_boundary = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_');
+            if prev_is_boundary {
+                let remaining: String = chars[i..].iter().take(10).collect();
+                let upper = remaining.to_uppercase();
+                if upper.starts_with("BEGIN") && (i + 5 >= len || (!chars[i + 5].is_alphanumeric() && chars[i + 5] != '_')) {
+                    let after_begin: String = chars[i + 5..].iter().take(20).collect();
+                    let upper_after = after_begin.trim_start().to_uppercase();
+                    if !upper_after.starts_with("TRAN") && !upper_after.starts_with("WORK") {
+                        begin_end_depth += 1;
+                    }
+                } else if upper.starts_with("END") && (i + 3 >= len || (!chars[i + 3].is_alphanumeric() && chars[i + 3] != '_')) {
+                    begin_end_depth = begin_end_depth.saturating_sub(1);
+                }
+            }
+        }
+
+        current_stmt.push(ch);
+        i += 1;
+    }
+
+    let rem = current_stmt.trim();
+    if !rem.is_empty() {
+        let final_stmt = if rem.ends_with(&current_delimiter) {
+            rem[..rem.len() - current_delimiter.len()].trim()
+        } else {
+            rem
+        };
+        if !final_stmt.is_empty() {
+            statements.push(final_stmt.to_string());
+        }
+    }
+
+    statements
+}
+ {
+                let tag: String = chars[i..=j].iter().collect();
+                current_stmt.push_str(&tag);
+                i = j + 1;
+                dollar_quote = Some(tag);
+                continue;
+            }
+        }
+
+        // Check for DELIMITER keyword
+        let is_at_start = current_stmt.trim().is_empty();
+        if is_at_start {
+            let remaining: String = chars[i..].iter().collect();
+            let upper = remaining.to_uppercase();
+            if upper.starts_with("DELIMITER ") || upper.starts_with("DELIMITER\t") {
+                let after_kw = &remaining["DELIMITER".len()..];
+                let trimmed_after = after_kw.trim_start();
+                let delim_token: String = trimmed_after
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != '\n' && *c != '\r')
+                    .collect();
+                if !delim_token.is_empty() {
+                    current_delimiter = delim_token.clone();
+                    let skip_len = "DELIMITER".len() + (after_kw.len() - trimmed_after.len()) + delim_token.len();
+                    i += skip_len;
+                    while i < len && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\r') {
+                        i += 1;
+                    }
+                    if i < len && chars[i] == '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Check for delimiter match
+        let delim_len = current_delimiter.chars().count();
+        if i + delim_len <= len {
+            let slice: String = chars[i..i + delim_len].iter().collect();
+            if slice == current_delimiter {
+                let should_split = if current_delimiter == ";" {
+                    begin_end_depth == 0
+                } else {
+                    true
+                };
+
+                if should_split {
+                    let stmt_trimmed = current_stmt.trim();
+                    if !stmt_trimmed.is_empty() {
+                        statements.push(stmt_trimmed.to_string());
+                    }
+                    current_stmt.clear();
+                    begin_end_depth = 0;
+                    i += delim_len;
+                    continue;
+                }
+            }
+        }
+
+        // Track BEGIN ... END depth if default delimiter is used
+        if current_delimiter == ";" {
+            let prev_is_boundary = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_');
+            if prev_is_boundary {
+                let remaining: String = chars[i..].iter().take(10).collect();
+                let upper = remaining.to_uppercase();
+                if upper.starts_with("BEGIN") && (i + 5 >= len || (!chars[i + 5].is_alphanumeric() && chars[i + 5] != '_')) {
+                    let after_begin: String = chars[i + 5..].iter().take(20).collect();
+                    let upper_after = after_begin.trim_start().to_uppercase();
+                    if !upper_after.starts_with("TRAN") && !upper_after.starts_with("WORK") {
+                        begin_end_depth += 1;
+                    }
+                } else if upper.starts_with("END") && (i + 3 >= len || (!chars[i + 3].is_alphanumeric() && chars[i + 3] != '_')) {
+                    begin_end_depth = begin_end_depth.saturating_sub(1);
+                }
+            }
+        }
+
+        current_stmt.push(ch);
+        i += 1;
+    }
+
+    let rem = current_stmt.trim();
+    if !rem.is_empty() {
+        let final_stmt = if rem.ends_with(&current_delimiter) {
+            rem[..rem.len() - current_delimiter.len()].trim()
+        } else {
+            rem
+        };
+        if !final_stmt.is_empty() {
+            statements.push(final_stmt.to_string());
+        }
+    }
+
+    statements
+}
+
+
+#[cfg(test)]
+mod dialect_splitter_tests {
+    use super::split_sql_statements_for_engine;
+
+    #[test]
+    fn postgres_json_hash_operators_are_not_comments() {
+        let statements = split_sql_statements_for_engine(
+            "SELECT payload #> '{items}' FROM docs; SELECT 2;",
+            "postgres",
+        );
+        assert_eq!(statements.len(), 2);
+    }
+
+    #[test]
+    fn sql_server_temp_table_names_are_not_comments() {
+        let statements = split_sql_statements_for_engine(
+            "CREATE TABLE #temp (id INT); SELECT * FROM #temp;",
+            "mssql",
+        );
+        assert_eq!(statements.len(), 2);
+    }
+
+    #[test]
+    fn mysql_hash_comments_work_without_a_space() {
+        let statements = split_sql_statements_for_engine(
+            "SELECT 1;#comment without leading space\nSELECT 2;",
+            "mysql",
+        );
+        assert_eq!(statements.len(), 2);
+    }
+
+    #[test]
+    fn postgres_dollar_quoted_semicolons_do_not_split() {
+        let statements = split_sql_statements_for_engine(
+            "DO $$ BEGIN PERFORM 1; PERFORM 2; END $$; SELECT 3;",
+            "postgres",
+        );
+        assert_eq!(statements.len(), 2);
+    }
+}
+ {
+                let tag: String = chars[i..=end].iter().collect();
+                current_stmt.push_str(&tag);
+                dollar_quote = Some(tag);
+                i = end + 1;
+                continue;
+            }
+        }
+
         let is_at_start = current_stmt.trim().is_empty();
         if is_at_start {
             let remaining: String = chars[i..].iter().collect();
