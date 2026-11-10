@@ -336,6 +336,10 @@ pub async fn redis_set_value(
         .get(&connection_id)
         .ok_or_else(|| "Database connection not active".to_string())?;
 
+    if session.config.read_only {
+        return Err("Database session is in read-only mode".to_string());
+    }
+
     if let DriverInstance::Redis(client) = &session.driver {
         let mut con = client.get_multiplexed_tokio_connection().await.map_err(|e| e.to_string())?;
         if let Some(t) = ttl {
@@ -361,6 +365,10 @@ pub async fn redis_delete_key(
     let session = lock
         .get(&connection_id)
         .ok_or_else(|| "Database connection not active".to_string())?;
+
+    if session.config.read_only {
+        return Err("Database session is in read-only mode".to_string());
+    }
 
     if let DriverInstance::Redis(client) = &session.driver {
         let mut con = client.get_multiplexed_tokio_connection().await.map_err(|e| e.to_string())?;
