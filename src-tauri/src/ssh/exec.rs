@@ -67,7 +67,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                 let mut map = state_sessions.lock().await;
                 let arc = std::sync::Arc::new(handle);
                 map.insert(cid, arc.clone());
-                map.insert("default".to_string(), arc);
+                map.entry("default".to_string()).or_insert_with(|| arc.clone());
                 log::info!("SSH Desktop: Lazily established persistent SSH transport for {}", conn_clone.config.host);
             }
         });
