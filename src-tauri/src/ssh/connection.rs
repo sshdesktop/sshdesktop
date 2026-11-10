@@ -281,13 +281,14 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
 
     // 0. Primary Fast Path: Try establishing persistent in-memory SSH transport
     if !is_ppk {
-        if let Ok(handle) = crate::ssh::session::connect_session_with_passphrase(
+        if let Ok(handle) = crate::ssh::session::connect_session_with_passphrase_auth(
             host,
             config.port,
             user,
             if is_key_auth { None } else { config.password.as_deref() },
             selected_key_path,
             config.passphrase.as_deref(),
+            config.auth_method.as_deref() != Some("password"),
         ).await {
             verified = true;
             let mut sessions = state.sessions.lock().await;
@@ -660,12 +661,14 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
 
     // 1. In-memory persistent probe (for PEM keys / password)
     if !is_ppk {
-        if let Ok(handle) = crate::ssh::session::connect_session(
+        if let Ok(handle) = crate::ssh::session::connect_session_with_passphrase_auth(
             &config.host,
             config.port,
             &config.username,
             if is_key_auth { None } else { config.password.as_deref() },
             selected_key_path,
+            None,
+            config.auth_method.as_deref() != Some("password"),
         ).await {
             if let Ok((out, code)) = crate::ssh::session::run_exec_channel(&handle, "echo sshdesktop-ok").await {
                 if code == 0 && (out.contains("sshdesktop-ok") || out.contains("clouddesk-ok")) {
