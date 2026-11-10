@@ -21,6 +21,11 @@ async fn run_scp_transfer(
     }
 
     let use_putty = !is_key_auth || selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    let host_spec = if conn.config.host.contains(':') && !conn.config.host.starts_with('[') {
+        format!("[{}]", conn.config.host)
+    } else {
+        conn.config.host.clone()
+    };
     let mut cmd = if use_putty {
         let mut command = tokio::process::Command::new("pscp");
         command.kill_on_drop(true);
@@ -29,7 +34,7 @@ async fn run_scp_transfer(
             let password_file = crate::ssh::connection::create_password_file(pwd)?;
             command.arg("-pwfile").arg(password_file.path());
             // Keep the temporary credential file alive until pscp exits.
-            let remote_spec = format!("{}@{}:'{}'", conn.config.username, conn.config.host, shell_escape(remote_path));
+            let remote_spec = format!("{}@{}:{}", conn.config.username, host_spec, remote_path);
             if upload {
                 command.arg("-r").arg(local_path).arg(&remote_spec);
             } else {
@@ -51,7 +56,8 @@ async fn run_scp_transfer(
     } else {
         let mut command = tokio::process::Command::new("scp");
         command.kill_on_drop(true);
-        command.arg("-P").arg(conn.config.port.to_string())
+        command.arg("-O")
+            .arg("-P").arg(conn.config.port.to_string())
             .arg("-o").arg("StrictHostKeyChecking=yes")
             .arg("-o").arg("IdentitiesOnly=yes");
         if let Some(key) = selected_key_path {
@@ -60,7 +66,7 @@ async fn run_scp_transfer(
         command
     };
 
-    let remote_spec = format!("{}@{}:'{}'", conn.config.username, conn.config.host, shell_escape(remote_path));
+    let remote_spec = format!("{}@{}:'{}'", conn.config.username, host_spec, shell_escape(remote_path));
     if upload {
         cmd.arg(local_path).arg(&remote_spec);
     } else {
