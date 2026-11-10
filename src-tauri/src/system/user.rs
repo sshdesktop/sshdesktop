@@ -325,7 +325,7 @@ pub async fn user_delete(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("userdel failed: {}", stdout.trim()));
     }
     log::info!("SSH Desktop: Deleted user {}", username);
@@ -494,7 +494,7 @@ pub async fn group_add(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("groupadd failed: {}", stdout.trim()));
     }
     Ok(())
@@ -545,7 +545,7 @@ pub async fn group_delete(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("groupdel failed: {}", stdout.trim()));
     }
     Ok(())
@@ -570,7 +570,7 @@ pub async fn group_add_user(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("Failed to add user '{}' to group '{}': {}", username, group, stdout.trim()));
     }
     Ok(())
@@ -595,7 +595,7 @@ pub async fn group_remove_user(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("Failed to remove user '{}' from group '{}': {}", username, group, stdout.trim()));
     }
     Ok(())
@@ -784,7 +784,7 @@ pub async fn group_add(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("groupadd failed: {}", stdout.trim()));
     }
     Ok(())
@@ -835,7 +835,7 @@ pub async fn group_delete(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("groupdel failed: {}", stdout.trim()));
     }
     Ok(())
@@ -860,7 +860,7 @@ pub async fn group_add_user(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("Failed to add user '{}' to group '{}': {}", username, group, stdout.trim()));
     }
     Ok(())
@@ -885,7 +885,7 @@ pub async fn group_remove_user(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("Failed to remove user '{}' from group '{}': {}", username, group, stdout.trim()));
     }
     Ok(())
