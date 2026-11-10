@@ -4,6 +4,17 @@ async fn run_scp_transfer(
     remote_path: &str,
     upload: bool,
 ) -> Result<(), String> {
+    if local_path.trim().is_empty() || local_path.len() > 4096
+        || local_path.chars().any(|ch| ch.is_control())
+    {
+        return Err("Invalid local transfer path.".into());
+    }
+    if !remote_path.starts_with('/') || remote_path.len() > 4096
+        || remote_path.chars().any(|ch| ch.is_control())
+        || remote_path.split('/').any(|part| part == "." || part == "..")
+    {
+        return Err("Remote transfer path must be absolute and cannot contain traversal components.".into());
+    }
     let is_key_auth = match conn.config.auth_method.as_deref() {
         Some("password") => false,
         Some("key") => true,
