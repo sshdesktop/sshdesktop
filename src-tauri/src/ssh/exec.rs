@@ -107,6 +107,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                 };
                 for attempt in 0..2 {
                 let mut cmd = tokio::process::Command::new("plink");
+            cmd.kill_on_drop(true);
                 #[cfg(windows)]
                 cmd.creation_flags(0x08000000);
 
@@ -185,6 +186,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         let plink_bin = crate::ssh::connection::get_plink_path();
         for attempt in 0..2 {
             let mut cmd = tokio::process::Command::new(plink_bin);
+        cmd.kill_on_drop(true);
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
 
@@ -248,6 +250,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
 
     // ── 3. PEM / OpenSSH key auth via OpenSSH ──────────────────────────────
     let mut ssh_cmd = tokio::process::Command::new("ssh");
+    ssh_cmd.kill_on_drop(true);
     #[cfg(windows)]
     ssh_cmd.creation_flags(0x08000000);
 
@@ -505,6 +508,7 @@ pub async fn run_cmd_with_stdin(
                 Err(error) => return (error, -1),
             };
             let mut cmd = tokio::process::Command::new("plink");
+            cmd.kill_on_drop(true);
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
             cmd.arg("-ssh")
@@ -541,6 +545,7 @@ pub async fn run_cmd_with_stdin(
     if is_ppk {
         let plink_bin = crate::ssh::connection::get_plink_path();
         let mut cmd = tokio::process::Command::new(plink_bin);
+        cmd.kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000);
         cmd.arg("-ssh")
@@ -576,6 +581,7 @@ pub async fn run_cmd_with_stdin(
 
     // 3. PEM Key auth via OpenSSH
     let mut ssh_cmd = tokio::process::Command::new("ssh");
+    ssh_cmd.kill_on_drop(true);
     #[cfg(windows)]
     ssh_cmd.creation_flags(0x08000000);
     ssh_cmd
