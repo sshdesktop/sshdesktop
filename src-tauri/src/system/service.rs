@@ -34,13 +34,21 @@ pub async fn service_list(
         "systemctl list-units --type=service --all --no-pager --plain 2>&1; echo '---FILES---'; systemctl list-unit-files --type=service --all --no-pager --plain 2>&1",
     ).await;
 
-    if code == -1 && combined_out.is_empty() {
+    if code == -1 {
         return Err("No active SSH connection.".into());
     }
 
     // Check if systemctl is actually available
     if combined_out.contains("command not found") || combined_out.contains("systemctl: not found") {
         return Err("systemd not found on remote server. This feature requires a systemd-based Linux.".into());
+    }
+    if combined_out.contains("Failed to connect to bus")
+        || combined_out.contains("System has not been booted with systemd")
+    {
+        return Err(format!("Remote host is not running a usable systemd manager: {}", combined_out.trim()));
+    }
+    if code != 0 {
+        return Err(format!("Failed to list systemd services: {}", combined_out.trim()));
     }
 
     let mut parts_split = combined_out.split("---FILES---");
