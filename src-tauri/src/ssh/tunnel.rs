@@ -1010,6 +1010,7 @@ pub async fn ssh_start_socks5(
             info: tunnel_info,
             child: child_handle,
             shutdown_tx: None,
+            password_file: password_file.clone(),
         });
     }
 
