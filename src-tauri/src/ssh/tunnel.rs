@@ -172,6 +172,17 @@ pub async fn ssh_start_tunnel(
     // 2. Resolve SSH connection configuration
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or_else(|| format!("No active SSH connection found for '{}'. Please connect to a server first.", conn_id))?;
+    let is_key_auth = match conn.config.auth_method.as_deref() {
+        Some("password") => false,
+        Some("key") => true,
+        _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
+    };
+    let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
+    if let Some(key_path) = selected_key_path {
+        if crate::ssh::connection::resolve_key_path(key_path).is_none() {
+            return Err(format!("Selected SSH identity '{}' could not be found.", key_path));
+        }
+    }
 
     let effective_local_port = if is_remote_forward {
         if local_port > 0 { local_port } else { 3000 }
@@ -243,19 +254,14 @@ pub async fn ssh_start_tunnel(
         };
 
         if maybe_handle.is_none() {
-            let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+            let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
             if !is_ppk {
-                let is_key_auth = match conn.config.auth_method.as_deref() {
-                Some("password") => false,
-                Some("key") => true,
-                _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
-            };
             if let Ok(new_handle) = crate::ssh::session::connect_session_with_passphrase_auth(
                 &conn.config.host,
                 conn.config.port,
                 &conn.config.username,
                 if is_key_auth { None } else { conn.config.password.as_deref() },
-                if is_key_auth { conn.config.private_key_path.as_deref() } else { None },
+                selected_key_path,
                 conn.config.passphrase.as_deref(),
                 conn.config.auth_method.as_deref() != Some("password"),
             ).await {
@@ -341,11 +347,11 @@ pub async fn ssh_start_tunnel(
         }
     }
 
-    let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
     let plink_bin = crate::ssh::connection::get_plink_path();
     let plink_available = plink_bin != "plink" || std::path::Path::new(plink_bin).exists();
-    let has_password = conn.config.password.as_deref().map(|p| !p.trim().is_empty()).unwrap_or(false);
-    let is_pem_key = conn.config.private_key_path.as_deref().map(|k| !k.trim().is_empty() && !crate::ssh::connection::is_ppk_key(k)).unwrap_or(false);
+    let has_password = !is_key_auth && conn.config.password.as_deref().map(|p| !p.trim().is_empty()).unwrap_or(false);
+    let is_pem_key = selected_key_path.map(|k| !crate::ssh::connection::is_ppk_key(k)).unwrap_or(false);
     // Never use Plink for PEM keys (Plink only supports PuTTY .ppk keys)
     let prefer_plink = !is_pem_key && (is_ppk || has_password) && plink_available;
     let password_file = if has_password && plink_available && !is_pem_key {
@@ -387,10 +393,8 @@ pub async fn ssh_start_tunnel(
             .arg("-o").arg("ServerAliveInterval=30")
             .arg("-o").arg("ServerAliveCountMax=3");
 
-        if let Some(key) = &conn.config.private_key_path {
-            if crate::ssh::connection::resolve_key_path(key).is_some() {
-                cmd.arg("-i").arg(key);
-            }
+        if let Some(key) = selected_key_path {
+            cmd.arg("-i").arg(key);
         }
 
         cmd.arg(format!("{}@{}", user, host));
@@ -422,10 +426,8 @@ pub async fn ssh_start_tunnel(
             cmd.arg("-pwfile").arg(password_file.path());
         }
 
-        if let Some(key) = &conn.config.private_key_path {
-            if crate::ssh::connection::resolve_key_path(key).is_some() {
-                cmd.arg("-i").arg(key);
-            }
+        if let Some(key) = selected_key_path {
+            cmd.arg("-i").arg(key);
         }
 
         cmd.arg(&host);
