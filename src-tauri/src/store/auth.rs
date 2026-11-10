@@ -43,6 +43,11 @@ pub fn get_auth_file_path() -> PathBuf {
     // 1. Check if /etc/sshdesktop is writable or exists (Linux server daemon)
     let etc_dir = PathBuf::from("/etc/sshdesktop");
     if etc_dir.exists() || (cfg!(unix) && fs::create_dir_all(&etc_dir).is_ok()) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&etc_dir, fs::Permissions::from_mode(0o700));
+        }
         return etc_dir.join("auth.json");
     }
 
@@ -61,6 +66,11 @@ pub fn get_auth_file_path() -> PathBuf {
     // 3. Fallback to local .sshdesktop/auth.json
     let local = PathBuf::from(".sshdesktop");
     let _ = fs::create_dir_all(&local);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&local, fs::Permissions::from_mode(0o700));
+    }
     local.join("auth.json")
 }
 
