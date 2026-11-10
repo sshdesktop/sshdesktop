@@ -526,11 +526,9 @@ setInterval(() => {
 }, 60 * 1000).unref?.();
 
 function getClientIp(req) {
-  const xff = req?.headers?.['x-forwarded-for'];
-  if (xff && typeof xff === 'string') {
-    const first = xff.split(',')[0].trim();
-    if (first) return first;
-  }
+  // Do not trust client-supplied X-Forwarded-For. Unless a deployment has
+  // an explicit trusted-proxy allowlist, this header is trivially spoofable
+  // and must not be used for login throttling or security decisions.
   return req?.socket?.remoteAddress || '127.0.0.1';
 }
 
