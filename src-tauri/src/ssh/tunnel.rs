@@ -864,7 +864,7 @@ pub async fn ssh_start_socks5(
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
-        cmd.arg("-ssh")
+        cmd.arg("-batch").arg("-ssh")
             .arg("-N")
             .arg("-P").arg(&ssh_port)
             .arg("-l").arg(&user)
