@@ -1,3 +1,30 @@
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn valid_firewall_port_or_service(value: &str) -> bool {
+    if value.is_empty() || value.len() > 64 || value.starts_with('-') {
+        return false;
+    }
+    value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
+}
+
+fn valid_zone(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+fn valid_ip_or_cidr(value: &str) -> bool {
+    let (ip, prefix) = value.split_once('/').unwrap_or((value, ""));
+    if ip.parse::<std::net::IpAddr>().is_err() {
+        return false;
+    }
+    if prefix.is_empty() {
+        return !value.contains('/');
+    }
+    prefix.parse::<u8>().map(|p| p <= if ip.contains(':') { 128 } else { 32 }).unwrap_or(false)
+}
+
 use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::ssh::exec::{run_cmd, run_cmd_priv};
@@ -362,14 +389,15 @@ pub async fn firewall_add_rule_advanced(
     payload: AddRulePayload,
 ) -> Result<String, String> {
     let port = payload.port.trim();
-    if port.is_empty() {
-        return Err("Port or service cannot be empty.".to_string());
+    if !valid_firewall_port_or_service(port) {
+        return Err("Invalid port or service name.".into());
     }
 
     let proto = match payload.protocol.to_lowercase().as_str() {
         "tcp" => "tcp",
         "udp" => "udp",
-        _ => "any",
+        "any" => "any",
+        _ => return Err("Protocol must be tcp, udp, or any.".into()),
     };
 
     let action = match payload.action.to_lowercase().as_str() {
@@ -377,11 +405,27 @@ pub async fn firewall_add_rule_advanced(
         "deny" | "block" => "deny",
         "reject" => "reject",
         "limit" => "limit",
-        _ => "allow",
+        _ => return Err("Invalid firewall action.".into()),
     };
 
     let direction = payload.direction.as_deref().unwrap_or("in").to_lowercase();
+    if direction != "in" && direction != "out" {
+        return Err("Direction must be in or out.".into());
+    }
     let from_ip = payload.from_ip.as_deref().unwrap_or("").trim();
+    if !from_ip.is_empty() && !from_ip.eq_ignore_ascii_case("anywhere") && !from_ip.eq_ignore_ascii_case("any") && !valid_ip_or_cidr(from_ip) {
+        return Err("Source must be a valid IP address or CIDR range.".into());
+    }
+    if let Some(zone) = payload.zone.as_deref() {
+        if !zone.trim().is_empty() && !valid_zone(zone.trim()) {
+            return Err("Invalid firewalld zone.".into());
+        }
+    }
+    if let Some(comment) = payload.comment.as_deref() {
+        if comment.len() > 128 || comment.chars().any(|ch| ch.is_control()) {
+            return Err("Firewall comments must be at most 128 printable characters.".into());
+        }
+    }
     let backend_choice = payload.backend.as_deref();
     let fw = if let Some(b) = backend_choice {
         if b == "firewalld" { "firewalld" } else { "ufw" }
@@ -434,7 +478,7 @@ pub async fn firewall_add_rule_advanced(
             }
             if let Some(ref c) = payload.comment {
                 if !c.trim().is_empty() {
-                    ufw_cmd.push_str(&format!(" comment '{}'", c.trim().replace('\'', "")));
+                    ufw_cmd.push_str(&format!(" comment {}", shell_quote(c.trim())));
                 }
             }
             format!("{} 2>&1", ufw_cmd)
@@ -450,7 +494,7 @@ pub async fn firewall_add_rule_advanced(
     };
 
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
-    if code != 0 && !stdout.is_empty() && !stdout.contains("ALREADY_ENABLED") && !stdout.contains("Rule added") {
+    if code != 0 && !stdout.contains("ALREADY_ENABLED") && !stdout.contains("Rule added") {
         return Err(format!("Failed to add rule (code {}): {}", code, stdout.trim()));
     }
 
@@ -487,8 +531,28 @@ pub async fn firewall_delete_rule_advanced(
     backend: Option<String>,
     zone: Option<String>,
 ) -> Result<String, String> {
+    if rule_number == 0 {
+        return Err("Invalid firewall rule number.".into());
+    }
+    if let Some(ref z) = zone {
+        if !z.trim().is_empty() && !valid_zone(z.trim()) {
+            return Err("Invalid firewalld zone.".into());
+        }
+    }
+    if let Some(ref p) = port {
+        if !valid_firewall_port_or_service(p.trim()) {
+            return Err("Invalid port or service name.".into());
+        }
+    }
+    if let Some(ref p) = protocol {
+        if !matches!(p.to_lowercase().as_str(), "tcp" | "udp" | "any") {
+            return Err("Invalid firewall protocol.".into());
+        }
+    }
     let fw = if let Some(b) = backend {
-        if b == "firewalld" { "firewalld" } else { "ufw" }
+        if b == "firewalld" { "firewalld" } else if b == "ufw" || b == "iptables" { "ufw" } else {
+            return Err("Unsupported firewall backend.".into());
+        }
     } else {
         detect_firewall(&state, &conn_id).await
     };
@@ -520,7 +584,7 @@ pub async fn firewall_delete_rule_advanced(
     };
 
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("Rule delete failed: {}", stdout.trim()));
     }
 
