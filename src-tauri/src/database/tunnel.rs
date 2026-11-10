@@ -31,14 +31,22 @@ pub async fn setup_ssh_tunnel(
     // 3. Try lazy in-memory persistent SSH session establishment if not already active
     if maybe_handle.is_none() {
         if let Some(ref conn) = maybe_conn {
-            let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+            let is_key_auth = match conn.config.auth_method.as_deref() {
+                Some("password") => false,
+                Some("key") => true,
+                _ => conn.config.private_key_path.is_some(),
+            };
+            let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
+            let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
             if !is_ppk {
-                if let Ok(new_handle) = crate::ssh::session::connect_session(
+                if let Ok(new_handle) = crate::ssh::session::connect_session_with_passphrase_auth(
                     &conn.config.host,
                     conn.config.port,
                     &conn.config.username,
-                    conn.config.password.as_deref(),
-                    conn.config.private_key_path.as_deref(),
+                    if is_key_auth { None } else { conn.config.password.as_deref() },
+                    selected_key_path,
+                    conn.config.passphrase.as_deref(),
+                    conn.config.auth_method.as_deref() != Some("password"),
                 ).await {
                     let arc_h = Arc::new(new_handle);
                     {
