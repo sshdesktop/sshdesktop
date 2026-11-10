@@ -2846,6 +2846,10 @@ pub async fn mongodb_insert_document(
         .get(&connection_id)
         .ok_or_else(|| "Database connection not active".to_string())?;
 
+    if session.config.read_only {
+        return Err("Database session is in read-only mode".to_string());
+    }
+
     if let DriverInstance::Mongo(client) = &session.driver {
         let db = client.database(get_effective_mongo_db(&session.config.database));
         let coll = db.collection::<mongodb::bson::Document>(&collection);
