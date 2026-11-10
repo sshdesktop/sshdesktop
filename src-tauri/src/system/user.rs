@@ -137,6 +137,12 @@ pub async fn user_add(
         return Err("Invalid username. Use only alphanumeric characters, hyphens, and underscores.".into());
     }
 
+    if let Some(pwd) = password.as_deref() {
+        if pwd.len() > 1024 || pwd.contains(':') || pwd.chars().any(|c| c == '\n' || c == '\r' || c == '\0') {
+            return Err("Password must be at most 1024 characters and cannot contain colon or line breaks.".into());
+        }
+    }
+
     let sh = shell.unwrap_or_else(|| "/bin/bash".into());
     if !sh.starts_with('/') || !sh.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.')) {
         return Err("Invalid login shell path.".into());
@@ -198,9 +204,6 @@ pub async fn user_add(
 
     if let Some(pwd) = password.as_deref() {
         if !pwd.is_empty() {
-            if pwd.len() > 1024 || pwd.contains(':') || pwd.chars().any(|c| c == '\n' || c == '\r' || c == '\0') {
-                return Err("Password must be at most 1024 characters and cannot contain colon or line breaks.".into());
-            }
             let password_input = format!("{}:{}\n", username, pwd);
             let (password_out, password_code) = crate::ssh::exec::run_cmd_priv_with_stdin(
                 &state, &conn_id, "chpasswd", password_input.as_bytes()
