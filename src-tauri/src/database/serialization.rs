@@ -722,3 +722,45 @@ pub fn split_sql_statements_for_engine(input: &str, engine: &str) -> Vec<String>
 
     statements
 }
+
+
+#[cfg(test)]
+mod dialect_splitter_tests {
+    use super::split_sql_statements_for_engine;
+
+    #[test]
+    fn postgres_json_hash_operators_are_not_comments() {
+        let statements = split_sql_statements_for_engine(
+            "SELECT payload #> '{\\"items\\"}' FROM docs; SELECT 2;",
+            "postgres",
+        );
+        assert_eq!(statements.len(), 2);
+    }
+
+    #[test]
+    fn sql_server_temp_table_names_are_not_comments() {
+        let statements = split_sql_statements_for_engine(
+            "CREATE TABLE #temp (id INT); SELECT * FROM #temp;",
+            "mssql",
+        );
+        assert_eq!(statements.len(), 2);
+    }
+
+    #[test]
+    fn mysql_hash_comments_work_without_a_space() {
+        let statements = split_sql_statements_for_engine(
+            "SELECT 1;#comment without leading space\\nSELECT 2;",
+            "mysql",
+        );
+        assert_eq!(statements.len(), 2);
+    }
+
+    #[test]
+    fn postgres_dollar_quoted_semicolons_do_not_split() {
+        let statements = split_sql_statements_for_engine(
+            "DO $$ BEGIN PERFORM 1; PERFORM 2; END $$; SELECT 3;",
+            "postgres",
+        );
+        assert_eq!(statements.len(), 2);
+    }
+}
