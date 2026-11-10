@@ -124,15 +124,29 @@ pub async fn sftp_read_file(
     conn_id: String,
     path: String,
 ) -> Result<Vec<u8>, String> {
+    if path.trim().is_empty() {
+        return Err("Remote file path cannot be empty".into());
+    }
     let escaped = shell_escape(&path);
-    let (stdout, code) = run_cmd(&state, &conn_id, &format!("cat '{}'", escaped)).await;
-    if code == -1 && stdout.is_empty() {
+    // Keep the remote payload ASCII so run_cmd's UTF-8 decoding cannot corrupt
+    // arbitrary binary bytes (archives, images, database backups, executables).
+    let command = format!("base64 '{}' | tr -d '\\n'", escaped);
+    let (encoded, code) = run_cmd(&state, &conn_id, &command).await;
+    if code == -1 && encoded.is_empty() {
         return Err("No active SSH connection.".into());
     }
-    if code == 0 {
-        return Ok(stdout.into_bytes());
+    if code != 0 {
+        return Err(format!("Failed to read file '{}': {}", path, encoded.trim()));
     }
-    Err(format!("Failed to read file '{}': {}", path, stdout.trim()))
+    // Bound memory use: 48 MiB decoded file maximum for this command-based path.
+    const MAX_ENCODED: usize = 64 * 1024 * 1024;
+    if encoded.len() > MAX_ENCODED {
+        return Err("File is too large for the command-based binary transfer (maximum 48 MiB).".into());
+    }
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .map_err(|e| format!("Remote file transfer returned invalid base64 data: {}", e))
 }
 
 #[tauri::command]
