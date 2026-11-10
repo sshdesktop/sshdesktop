@@ -352,6 +352,12 @@ pub async fn ssh_start_tunnel(
     let plink_available = plink_bin != "plink" || std::path::Path::new(plink_bin).exists();
     let has_password = !is_key_auth && conn.config.password.as_deref().map(|p| !p.trim().is_empty()).unwrap_or(false);
     let is_pem_key = selected_key_path.map(|k| !crate::ssh::connection::is_ppk_key(k)).unwrap_or(false);
+    if !is_key_auth && !has_password {
+        return Err("Password authentication was selected, but no SSH password is configured.".into());
+    }
+    if (is_ppk || has_password) && !plink_available {
+        return Err("PuTTY Plink is required for this SSH tunnel authentication method but was not found.".into());
+    }
     // Never use Plink for PEM keys (Plink only supports PuTTY .ppk keys)
     let prefer_plink = !is_pem_key && (is_ppk || has_password) && plink_available;
     let password_file = if has_password && plink_available && !is_pem_key {
