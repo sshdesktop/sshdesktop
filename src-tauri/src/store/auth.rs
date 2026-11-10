@@ -102,7 +102,7 @@ fn verify_password(password: &str, salt: &str, stored: &str) -> bool {
     // Constant-time comparison for legacy SHA-256 hashes during migration.
     let candidate = legacy_sha256_password(password, salt);
     if candidate.len() != stored.len() { return false; }
-    candidate.as_bytes().iter().zip(stored.as_bytes()).fold(0u8, |diff, (a, b)| diff | (a ^ b)) == 0
+    candidate.as_bytes().iter().zip(stored.as_bytes()).fold(0u8, |diff, (a, b)| diff | (*a ^ *b)) == 0
 }
 
 /// Loads or auto-initializes the default admin/admin configuration
