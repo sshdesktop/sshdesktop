@@ -464,6 +464,9 @@ pub async fn disk_create_label(
 ) -> Result<String, String> {
     let clean_dev = device.trim();
     let clean_lbl = label_type.trim().to_lowercase();
+    if !valid_device_path(clean_dev) {
+        return Err("Invalid block device path.".into());
+    }
     if clean_lbl != "gpt" && clean_lbl != "msdos" {
         return Err("Partition table type must be 'gpt' or 'msdos' (MBR).".to_string());
     }
@@ -471,9 +474,9 @@ pub async fn disk_create_label(
     let cmd = format!(
         r#"{ensure_parted}
 if command -v parted >/dev/null 2>&1; then
-    parted -s '{dev}' mklabel {lbl}
+    parted -s {dev} mklabel {lbl}
 elif command -v sfdisk >/dev/null 2>&1; then
-    echo "label: {lbl}" | sfdisk '{dev}'
+    echo "label: {lbl}" | sfdisk {dev}
 else
     echo "Error: Neither parted nor sfdisk command found." >&2
     exit 127
@@ -481,7 +484,7 @@ fi
 partprobe {dev} 2>/dev/null || true
 "#,
         ensure_parted = ensure_parted_script(),
-        dev = clean_dev,
+        dev = shell_quote(clean_dev),
         lbl = clean_lbl
     );
     let (stdout, code) = run_sudo(&state, &conn_id, &cmd).await;
@@ -900,7 +903,7 @@ pub async fn disk_set_partition_flag(
 if command -v parted >/dev/null 2>&1; then
     parted -s {dev} set {num} {flag} {st}
 fi
-partprobe '{dev}' 2>/dev/null || true
+partprobe {dev} 2>/dev/null || true
 "#,
         ensure_parted = ensure_parted_script(),
         dev = shell_quote(&dev_path),
