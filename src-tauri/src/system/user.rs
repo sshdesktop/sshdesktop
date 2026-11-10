@@ -343,14 +343,21 @@ pub async fn user_modify(
     shell: Option<String>,
     groups: Option<Vec<String>>,
 ) -> Result<(), String> {
-    if username.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
+    if username.is_empty() || !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
         return Err("Invalid username.".into());
     }
 
     if let Some(sh) = shell {
-        // Login shells must be absolute executable paths, not shell fragments.
         if !sh.starts_with('/') || !sh.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.')) {
             return Err("Invalid login shell path.".into());
+        }
+        let (out, code) = run_cmd_priv(
+            &state,
+            &conn_id,
+            &format!("usermod -s '{}' '{}' 2>&1", sh, username),
+        ).await;
+        if code == -1 {
+            return Err("No active SSH connection.".into());
         }
         if code != 0 {
             return Err(format!("usermod shell change failed: {}", out.trim()));
@@ -367,7 +374,10 @@ pub async fn user_modify(
                 &conn_id,
                 &format!("usermod -aG '{}' '{}' 2>&1", grps.join(","), username),
             ).await;
-            if code != 0 && code != -1 && !out.is_empty() {
+            if code == -1 {
+                return Err("No active SSH connection.".into());
+            }
+            if code != 0 {
                 return Err(format!("usermod groups change failed: {}", out.trim()));
             }
         }
@@ -376,7 +386,6 @@ pub async fn user_modify(
     log::info!("SSH Desktop: Modified user {}", username);
     Ok(())
 }
-
 #[tauri::command]
 pub async fn user_lock(
     state: tauri::State<'_, AppState>,
