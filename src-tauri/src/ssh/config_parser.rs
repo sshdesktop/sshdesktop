@@ -120,6 +120,31 @@ pub fn parse_ssh_config_content(content: &str) -> Vec<SshConfigHost> {
                 }
                 _ => {}
             }
+        } else if key == "include" {
+            let expanded_inc = expand_tilde(&value);
+            let inc_path = std::path::Path::new(&expanded_inc);
+            if inc_path.is_file() {
+                if let Ok(included_content) = std::fs::read_to_string(inc_path) {
+                    let inc_hosts = parse_ssh_config_content(&included_content);
+                    hosts.extend(inc_hosts);
+                }
+            } else if let Some(parent) = inc_path.parent() {
+                if let Some(file_pattern) = inc_path.file_name().and_then(|n| n.to_str()) {
+                    if file_pattern.contains('*') && parent.is_dir() {
+                        if let Ok(entries) = std::fs::read_dir(parent) {
+                            for entry in entries.flatten() {
+                                let p = entry.path();
+                                if p.is_file() {
+                                    if let Ok(inc_content) = std::fs::read_to_string(&p) {
+                                        let inc_hosts = parse_ssh_config_content(&inc_content);
+                                        hosts.extend(inc_hosts);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         } else {
             // Outside of a specific host block: global defaults
             global_defaults.insert(key, value);

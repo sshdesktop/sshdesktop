@@ -150,19 +150,28 @@ pub async fn ssh_start_tunnel(
         format!("{}:local:{}:{}:{}", conn_id, local_port, remote_host, remote_port)
     };
 
-    // 1. If an active tunnel for this server and remote port already exists, return its port
+    // 1. If an active tunnel for this server and remote port already exists, verify actual process/task health
     let mut stale_child_to_kill = None;
     let mut stale_shutdown_to_send = None;
     {
         let mut lock = ACTIVE_TUNNELS.lock();
-        if let Some(active) = lock.get(&tunnel_key) {
-            if is_remote_forward {
-                return Ok(active.info.local_port);
-            } else if std::net::TcpStream::connect(("127.0.0.1", active.info.local_port)).is_ok() {
+        if let Some(active) = lock.get_mut(&tunnel_key) {
+            let is_alive = if let Some(ref mut child) = active.child {
+                match child.try_wait() {
+                    Ok(None) => true,
+                    _ => false,
+                }
+            } else if active.shutdown_tx.is_some() {
+                true
+            } else {
+                false
+            };
+
+            if is_alive {
                 log::info!("SSH Desktop: Reusing active SSH tunnel for {}:{} on local port {}", remote_host, remote_port, active.info.local_port);
                 return Ok(active.info.local_port);
             } else {
-                // Stale tunnel that is not listening, clean it up so we can recreate it
+                // Stale tunnel that has exited or closed, clean it up so we can recreate it
                 if let Some(mut stale) = lock.remove(&tunnel_key) {
                     stale_child_to_kill = stale.child.take();
                     stale_shutdown_to_send = stale.shutdown_tx.take();

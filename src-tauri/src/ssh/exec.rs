@@ -51,8 +51,9 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         };
         if let Some(handle) = handle_opt {
             match crate::ssh::session::run_exec_channel(&handle, command).await {
-                Ok((stdout, code)) => {
-                    return (stdout, code);
+                Ok((stdout, stderr, code)) => {
+                    let out = if !stderr.is_empty() && stdout.is_empty() { stderr } else { stdout };
+                    return (out, code);
                 }
                 Err(e) => {
                     log::warn!("SSH Desktop: Persistent channel failed for cmd '{}': {}, falling back...", command, e);
@@ -767,50 +768,73 @@ pub async fn ssh_exec(
 
     // If command explicitly starts with sudo or contains sudo in pipeline, execute via run_cmd_priv
     let needs_priv = trimmed.starts_with("sudo ") || trimmed.contains(" sudo ") || trimmed.contains("| sudo ");
-    let (stdout, exit_code) = if needs_priv {
-        run_cmd_priv(&state, &conn_id, trimmed).await
+    let (stdout, stderr, exit_code) = if needs_priv {
+        let (out, code) = run_cmd_priv(&state, &conn_id, trimmed).await;
+        (out, String::new(), code)
     } else {
-        // Run direct command first
-        let (direct_out, direct_code) = run_cmd(&state, &conn_id, &command).await;
-
-        // Smart auto-elevation: if direct execution failed with permission/polkit error
-        let is_permission_denial = direct_code != 0 && (
-            direct_out.contains("Interactive authentication required")
-            || direct_out.contains("Permission denied")
-            || direct_out.contains("Access denied")
-            || direct_out.contains("Operation not permitted")
-            || direct_out.contains("must be root")
-            || direct_out.contains("You need to be root")
-            || direct_out.contains("a terminal is required")
-        );
-
-        if is_permission_denial {
-            let can_elevate = crate::ssh::connection::get_cached_user_privilege(&conn_id)
-                .map(|p| p.has_sudo || p.is_root)
-                .unwrap_or(true);
-
-            if can_elevate {
-                log::info!("SSH Desktop: Detected permission denial for '{}', attempting auto-elevation", command);
-                let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &command).await;
-                if priv_code == 0 || !priv_out.is_empty() {
-                    (priv_out, priv_code)
-                } else {
-                    (direct_out, direct_code)
-                }
+        // Fast path: try persistent native channel with split stdout/stderr
+        let handle_opt = {
+            let sessions = state.sessions.lock().await;
+            if conn_id == "default" {
+                sessions.get("default").cloned()
+            } else if conn_id.is_empty() {
+                None
             } else {
-                (direct_out, direct_code)
+                sessions.get(&conn_id).cloned()
+            }
+        };
+
+        if let Some(handle) = handle_opt {
+            match crate::ssh::session::run_exec_channel(&handle, &command).await {
+                Ok((s_out, s_err, s_code)) => (s_out, s_err, s_code),
+                Err(_) => {
+                    let (direct_out, direct_code) = run_cmd(&state, &conn_id, &command).await;
+                    (direct_out, String::new(), direct_code)
+                }
             }
         } else {
-            (direct_out, direct_code)
+            // Run direct command
+            let (direct_out, direct_code) = run_cmd(&state, &conn_id, &command).await;
+
+            // Smart auto-elevation: if direct execution failed with permission/polkit error
+            let is_permission_denial = direct_code != 0 && (
+                direct_out.contains("Interactive authentication required")
+                || direct_out.contains("Permission denied")
+                || direct_out.contains("Access denied")
+                || direct_out.contains("Operation not permitted")
+                || direct_out.contains("must be root")
+                || direct_out.contains("You need to be root")
+                || direct_out.contains("a terminal is required")
+            );
+
+            if is_permission_denial {
+                let can_elevate = crate::ssh::connection::get_cached_user_privilege(&conn_id)
+                    .map(|p| p.has_sudo || p.is_root)
+                    .unwrap_or(true);
+
+                if can_elevate {
+                    log::info!("SSH Desktop: Detected permission denial for '{}', attempting auto-elevation", command);
+                    let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &command).await;
+                    if priv_code == 0 || !priv_out.is_empty() {
+                        (priv_out, String::new(), priv_code)
+                    } else {
+                        (direct_out, String::new(), direct_code)
+                    }
+                } else {
+                    (direct_out, String::new(), direct_code)
+                }
+            } else {
+                (direct_out, String::new(), direct_code)
+            }
         }
     };
 
-    if exit_code == -1 && stdout.is_empty() {
+    if exit_code == -1 && stdout.is_empty() && stderr.is_empty() {
         return Err("Remote command execution timed out or failed on server.".to_string());
     }
 
     Ok(CommandResult {
-        stderr: String::new(),
+        stderr,
         stdout,
         exit_code,
         duration_ms: start.elapsed().as_millis() as u64,

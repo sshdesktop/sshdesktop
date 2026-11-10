@@ -1,6 +1,38 @@
+struct FileLockGuard(std::path::PathBuf);
+impl Drop for FileLockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn acquire_cross_process_lock(parent: &std::path::Path) -> Result<FileLockGuard, String> {
+    let lock_path = parent.join(".connections.lock");
+    let start = std::time::Instant::now();
+    loop {
+        match fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+            Ok(_) => return Ok(FileLockGuard(lock_path)),
+            Err(_) => {
+                // Break stale locks left by killed processes (> 10s old)
+                if let Ok(meta) = fs::metadata(&lock_path) {
+                    if let Ok(elapsed) = meta.modified().and_then(|m| m.elapsed().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))) {
+                        if elapsed.as_secs() > 10 {
+                            let _ = fs::remove_file(&lock_path);
+                        }
+                    }
+                }
+                if start.elapsed().as_millis() > 3000 {
+                    return Err("Timed out acquiring cross-process connection storage lock.".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
 fn write_connections_file(path: &std::path::Path, content: &str) -> Result<(), String> {
     let parent = path.parent().ok_or_else(|| "Connection storage path has no parent directory.".to_string())?;
     fs::create_dir_all(parent).map_err(|e| format!("Failed to create connection storage directory: {}", e))?;
+    let _lock = acquire_cross_process_lock(parent)?;
     #[cfg(unix)]
     {
         use std::io::Write;

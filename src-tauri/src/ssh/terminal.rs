@@ -30,6 +30,13 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use crate::AppState;
 
 #[derive(Clone)]
+pub enum TerminalAction {
+    Data(Vec<u8>),
+    Resize { rows: u16, cols: u16 },
+    Close,
+}
+
+#[derive(Clone)]
 pub struct TerminalSession {
     pub id: String,
     pub conn_id: String,
@@ -37,6 +44,7 @@ pub struct TerminalSession {
     pub cols: u16,
     pub created_at: i64,
     pub tx: Option<UnboundedSender<Vec<u8>>>,
+    pub action_tx: Option<UnboundedSender<TerminalAction>>,
     pub child_pid: Option<u32>,
     pub password_file: Option<Arc<crate::ssh::connection::SshPasswordFile>>,
 }
@@ -180,63 +188,100 @@ pub async fn terminal_create(
         let handle = match handle_opt {
             Some(h) => Some(h),
             None => {
-                let key_str = resolved_key_path.as_deref().or(selected_key_path);
-                match crate::ssh::session::connect_session_with_passphrase_auth(
-                    &host,
-                    conn.config.port,
-                    &user,
-                    if is_key_auth { None } else { password.as_deref() },
-                    if is_key_auth { key_str } else { None },
-                    conn.config.passphrase.as_deref(),
-                    conn.config.auth_method.as_deref() != Some("password"),
-                ).await {
-                    Ok(new_handle) => {
-                        let arc_h = std::sync::Arc::new(new_handle);
-                        let mut sessions = state.sessions.lock().await;
-                        sessions.insert(conn_id.clone(), arc_h.clone());
-                        sessions.entry("default".to_string()).or_insert_with(|| arc_h.clone());
-                        Some(arc_h)
-                    }
-                    Err(e) => {
-                        log::warn!("SSH Desktop: russh on-demand connect failed for {}: {}", host, e);
-                        None
+                // Deduplicate concurrent on-demand session handshakes
+                static HANDSHAKE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+                let _lock = HANDSHAKE_LOCK.lock().await;
+
+                // Re-check if session was established while waiting for lock
+                let recheck = {
+                    let sessions = state.sessions.lock().await;
+                    sessions.get(&conn_id).cloned().or_else(|| {
+                        if conn_id == "default" {
+                            sessions.get("default").cloned()
+                        } else {
+                            None
+                        }
+                    })
+                };
+
+                if let Some(h) = recheck {
+                    Some(h)
+                } else {
+                    let key_str = resolved_key_path.as_deref().or(selected_key_path);
+                    match crate::ssh::session::connect_session_with_passphrase_auth(
+                        &host,
+                        conn.config.port,
+                        &user,
+                        if is_key_auth { None } else { password.as_deref() },
+                        if is_key_auth { key_str } else { None },
+                        conn.config.passphrase.as_deref(),
+                        conn.config.auth_method.as_deref() != Some("password"),
+                    ).await {
+                        Ok(new_handle) => {
+                            let arc_h = std::sync::Arc::new(new_handle);
+                            let mut sessions = state.sessions.lock().await;
+                            sessions.insert(conn_id.clone(), arc_h.clone());
+                            sessions.entry("default".to_string()).or_insert_with(|| arc_h.clone());
+                            Some(arc_h)
+                        }
+                        Err(e) => {
+                            log::warn!("SSH Desktop: russh on-demand connect failed for {}: {}", host, e);
+                            None
+                        }
                     }
                 }
             }
         };
 
         if let Some(h) = handle {
-            match crate::ssh::session::open_pty_shell(&h, "xterm-256color", cols as u32, rows as u32).await {
-                Ok((mut reader, mut writer)) => {
+            match crate::ssh::session::open_pty_channel(&h, "xterm-256color", cols as u32, rows as u32).await {
+                Ok(mut channel) => {
                     log::info!("SSH Desktop: Native russh interactive PTY shell opened for {}@{}:{}", user, host, port);
-                    let (tx, mut rx) = unbounded_channel::<Vec<u8>>();
+                    let (action_tx, mut action_rx) = unbounded_channel::<TerminalAction>();
 
-                    // Stdin / Writer Pump
-                    tokio::spawn(async move {
-                        while let Some(data) = rx.recv().await {
-                            if writer.write_all(&data).await.is_err() {
-                                break;
-                            }
-                            let _ = writer.flush().await;
-                        }
-                    });
-
-                    // Stdout / Reader Pump
                     let app_out = app.clone();
                     let term_id_out = term_id.clone();
                     tokio::spawn(async move {
-                        let mut buf = [0u8; 4096];
                         loop {
-                            match reader.read(&mut buf).await {
-                                Ok(0) => break,
-                                Ok(n) => {
-                                    let _ = app_out.emit("terminal-output", TerminalOutput {
-                                        terminal_id: term_id_out.clone(),
-                                        data: buf[..n].to_vec(),
-                                        text: None,
-                                    });
+                            tokio::select! {
+                                Some(action) = action_rx.recv() => {
+                                    match action {
+                                        TerminalAction::Data(data) => {
+                                            if channel.data(&data[..]).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        TerminalAction::Resize { rows, cols } => {
+                                            let _ = channel.window_change(cols as u32, rows as u32, 0, 0).await;
+                                        }
+                                        TerminalAction::Close => {
+                                            let _ = channel.eof().await;
+                                            break;
+                                        }
+                                    }
                                 }
-                                Err(_) => break,
+                                msg_opt = channel.wait() => {
+                                    match msg_opt {
+                                        Some(russh::ChannelMsg::Data { ref data }) => {
+                                            let _ = app_out.emit("terminal-output", TerminalOutput {
+                                                terminal_id: term_id_out.clone(),
+                                                data: data.to_vec(),
+                                                text: None,
+                                            });
+                                        }
+                                        Some(russh::ChannelMsg::ExtendedData { ref data, .. }) => {
+                                            let _ = app_out.emit("terminal-output", TerminalOutput {
+                                                terminal_id: term_id_out.clone(),
+                                                data: data.to_vec(),
+                                                text: None,
+                                            });
+                                        }
+                                        Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => {
+                                            break;
+                                        }
+                                        _ => {}
+                                    }
+                                }
                             }
                         }
                         let exit_msg = "\r\n\x1b[33m[Session disconnected]\x1b[0m\r\n";
@@ -253,7 +298,8 @@ pub async fn terminal_create(
                         rows,
                         cols,
                         created_at: chrono::Utc::now().timestamp(),
-                        tx: Some(tx),
+                        tx: None,
+                        action_tx: Some(action_tx),
                         child_pid: None,
                         password_file: None,
                     };
@@ -413,6 +459,7 @@ pub async fn terminal_create(
         cols,
         created_at: chrono::Utc::now().timestamp(),
         tx: Some(tx),
+        action_tx: None,
         child_pid,
         password_file,
     };
@@ -433,12 +480,16 @@ pub async fn terminal_write(
     if data.len() > 1024 * 1024 {
         return Err("Terminal input chunk cannot exceed 1 MiB.".into());
     }
-    let tx_opt = {
+    let (action_tx_opt, tx_opt) = {
         let terms = state.terminals.lock();
-        terms.get(&terminal_id).and_then(|s| s.tx.clone())
+        let s = terms.get(&terminal_id);
+        (s.and_then(|s| s.action_tx.clone()), s.and_then(|s| s.tx.clone()))
     };
 
-    if let Some(tx) = tx_opt {
+    if let Some(action_tx) = action_tx_opt {
+        action_tx.send(TerminalAction::Data(data)).map_err(|e| format!("Failed to send data to terminal: {}", e))?;
+        Ok(())
+    } else if let Some(tx) = tx_opt {
         tx.send(data).map_err(|e| format!("Failed to send data to terminal: {}", e))?;
         Ok(())
     } else {
@@ -461,7 +512,9 @@ pub async fn terminal_resize(
         .ok_or_else(|| format!("Terminal session '{}' not found.", terminal_id))?;
     term.rows = rows;
     term.cols = cols;
-    // The channel-stream transport does not currently expose window_change after into_stream().
+    if let Some(ref action_tx) = term.action_tx {
+        let _ = action_tx.send(TerminalAction::Resize { rows, cols });
+    }
     Ok(())
 }
 
@@ -471,6 +524,9 @@ pub async fn terminal_close(
     terminal_id: String,
 ) -> Result<(), String> {
     if let Some(session) = state.terminals.lock().remove(&terminal_id) {
+        if let Some(ref action_tx) = session.action_tx {
+            let _ = action_tx.send(TerminalAction::Close);
+        }
         if let Some(pid) = session.child_pid {
             #[cfg(windows)]
             {

@@ -142,6 +142,55 @@ pub async fn sftp_list_dir(
         let p = path.trim_end_matches('/');
         if p.is_empty() { "/" } else { p }
     };
+
+    // Fast Path: Native SFTP directory listing via russh-sftp (binary clean, handles all legal filenames)
+    let handle_opt = {
+        let sessions = state.sessions.lock().await;
+        if conn_id == "default" {
+            sessions.get("default").cloned()
+        } else if conn_id.is_empty() {
+            None
+        } else {
+            sessions.get(&conn_id).cloned()
+        }
+    };
+
+    if let Some(handle) = handle_opt {
+        if let Ok(sftp) = crate::ssh::session::open_sftp(&handle).await {
+            if let Ok(dir_entries) = sftp.read_dir(clean_path).await {
+                let mut entries = Vec::new();
+                for entry in dir_entries {
+                    let file_name = entry.file_name();
+                    if file_name == "." || file_name == ".." {
+                        continue;
+                    }
+                    let is_dir = entry.metadata().is_dir();
+                    let is_symlink = entry.metadata().is_symlink();
+                    let size = entry.metadata().size.unwrap_or(0);
+                    let modified = entry.metadata().mtime.unwrap_or(0) as i64;
+                    let permissions = format!("{:o}", entry.metadata().permissions.unwrap_or(0) & 0o777);
+                    let full_path = if clean_path == "/" {
+                        format!("/{}", file_name)
+                    } else {
+                        format!("{}/{}", clean_path, file_name)
+                    };
+                    entries.push(FileEntry {
+                        name: file_name,
+                        path: full_path,
+                        size,
+                        is_dir,
+                        is_symlink,
+                        permissions,
+                        owner: entry.metadata().uid.map(|u| u.to_string()).unwrap_or_else(|| "1000".to_string()),
+                        group: entry.metadata().gid.map(|g| g.to_string()).unwrap_or_else(|| "1000".to_string()),
+                        modified,
+                    });
+                }
+                return Ok(entries);
+            }
+        }
+    }
+
     let escaped = shell_escape(clean_path);
     // --time-style=+%s gives a Unix epoch timestamp; -N (--literal) prevents ls from quoting filenames with spaces
     let cmd = format!(
@@ -240,6 +289,31 @@ pub async fn sftp_read_file(
     if !valid_remote_path(&path) {
         return Err("Remote file path must be absolute and contain no traversal or control characters.".into());
     }
+
+    // Fast Path: Native SFTP binary read via russh-sftp
+    let handle_opt = {
+        let sessions = state.sessions.lock().await;
+        if conn_id == "default" {
+            sessions.get("default").cloned()
+        } else if conn_id.is_empty() {
+            None
+        } else {
+            sessions.get(&conn_id).cloned()
+        }
+    };
+
+    if let Some(handle) = handle_opt {
+        if let Ok(sftp) = crate::ssh::session::open_sftp(&handle).await {
+            use tokio::io::AsyncReadExt;
+            if let Ok(mut file) = sftp.open(&path).await {
+                let mut content = Vec::new();
+                if tokio::time::timeout(std::time::Duration::from_secs(60), file.read_to_end(&mut content)).await.is_ok() {
+                    return Ok(content);
+                }
+            }
+        }
+    }
+
     let escaped = shell_escape(&path);
     // Check the remote size before encoding to avoid transferring an oversized file.
     let command = format!("size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 50331648 ] || {{ echo 'File exceeds 48 MiB limit' >&2; exit 1; }}; base64 < '{}' | tr -d '\\n'", escaped, escaped);
@@ -323,6 +397,31 @@ pub async fn sftp_write_bytes(
     {
         return Err("Remote upload path must be a valid absolute file path.".into());
     }
+
+    // Fast Path: Native SFTP binary upload via russh-sftp
+    let handle_opt = {
+        let sessions = state.sessions.lock().await;
+        if conn_id == "default" {
+            sessions.get("default").cloned()
+        } else if conn_id.is_empty() {
+            None
+        } else {
+            sessions.get(conn_id).cloned()
+        }
+    };
+
+    if let Some(handle) = handle_opt {
+        if let Ok(sftp) = crate::ssh::session::open_sftp(&handle).await {
+            use tokio::io::AsyncWriteExt;
+            if let Ok(mut file) = sftp.create(clean_path).await {
+                if tokio::time::timeout(std::time::Duration::from_secs(60), file.write_all(bytes)).await.is_ok() {
+                    let _ = file.flush().await;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     let escaped_path = shell_escape(clean_path);
     let b64 = to_base64(bytes);
     let parent = clean_path.rsplit_once('/').map(|(p, _)| if p.is_empty() { "/" } else { p }).unwrap_or("/");

@@ -4630,11 +4630,23 @@ function handleBrowserGatewayRequest(req, res) {
   const clientReq = httpModule.request(requestOptions, (targetRes) => {
     const outHeaders = { ...targetRes.headers };
 
+    // Retain upstream Content-Security-Policy rules (script-src, object-src, default-src),
+    // adjusting frame-ancestors to allow embedding in the application workspace rather than
+    // stripping all XSS and injection safeguards.
+    if (outHeaders['content-security-policy']) {
+      outHeaders['content-security-policy'] = String(outHeaders['content-security-policy'])
+        .replace(/frame-ancestors\s+[^;]+/i, "frame-ancestors 'self' *")
+        .replace(/frame-ancestors\s*;/i, "frame-ancestors 'self' *;");
+    }
     delete outHeaders['x-frame-options'];
-    delete outHeaders['content-security-policy'];
-    delete outHeaders['content-security-policy-report-only'];
 
-    outHeaders['access-control-allow-origin'] = '*';
+    const origin = req.headers['origin'];
+    if (origin) {
+      outHeaders['access-control-allow-origin'] = origin;
+      outHeaders['access-control-allow-credentials'] = 'true';
+    } else {
+      outHeaders['access-control-allow-origin'] = '*';
+    }
     outHeaders['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH';
     outHeaders['access-control-allow-headers'] = '*';
 

@@ -220,11 +220,22 @@ pub fn secure_windows_private_key(path: &std::path::Path) -> Result<(), String> 
         return Err("The current Windows account name is empty; refusing to use an unsecured private key.".into());
     }
     let path_str = path.to_string_lossy();
+    // Strip pre-existing inherited and explicit ACEs before applying owner-only DACL
+    let _ = std::process::Command::new("icacls.exe")
+        .arg(&*path_str)
+        .arg("/reset")
+        .creation_flags(0x08000000)
+        .output();
+
     let output = std::process::Command::new("icacls.exe")
         .arg(&*path_str)
         .arg("/inheritance:r")
         .arg("/grant:r")
         .arg(format!("{}:(F)", username))
+        .arg("/remove:g")
+        .arg("Users")
+        .arg("/remove:g")
+        .arg("Authenticated Users")
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .output()
         .map_err(|e| format!("Failed to invoke icacls: {}", e))?;
@@ -845,7 +856,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
             None,
             config.auth_method.as_deref() != Some("password"),
         ).await {
-            if let Ok((out, code)) = crate::ssh::session::run_exec_channel(&handle, "echo sshdesktop-ok").await {
+            if let Ok((out, _err, code)) = crate::ssh::session::run_exec_channel(&handle, "echo sshdesktop-ok").await {
                 if code == 0 && (out.contains("sshdesktop-ok") || out.contains("clouddesk-ok")) {
                     return Ok(true);
                 }

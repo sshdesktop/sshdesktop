@@ -46,7 +46,7 @@ pub type ClientHandle = russh::client::Handle<ClientHandler>;
 pub async fn run_exec_channel(
     handle: &ClientHandle,
     cmd: &str,
-) -> Result<(String, i32), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(String, String, i32), Box<dyn std::error::Error + Send + Sync>> {
     let mut channel = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         handle.channel_open_session()
@@ -58,6 +58,7 @@ pub async fn run_exec_channel(
         channel.exec(true, cmd)
     ).await.map_err(|_| "Timed out starting remote command")??;
     let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
     let mut exit_code = -1;
     const MAX_OUTPUT_BYTES: usize = 80 * 1024 * 1024;
 
@@ -65,16 +66,18 @@ pub async fn run_exec_channel(
         while let Some(msg) = channel.wait().await {
             match msg {
                 ChannelMsg::Data { ref data } => {
-                    if stdout.len().saturating_add(data.len()) > MAX_OUTPUT_BYTES {
+                    if stdout.len().saturating_add(data.len()) <= MAX_OUTPUT_BYTES {
+                        stdout.extend_from_slice(data);
+                    } else {
                         return true;
                     }
-                    stdout.extend_from_slice(data);
                 }
                 ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                    if stdout.len().saturating_add(data.len()) > MAX_OUTPUT_BYTES {
+                    if stderr.len().saturating_add(data.len()) <= MAX_OUTPUT_BYTES {
+                        stderr.extend_from_slice(data);
+                    } else {
                         return true;
                     }
-                    stdout.extend_from_slice(data);
                 }
                 ChannelMsg::ExitStatus { exit_status } => {
                     exit_code = exit_status as i32;
@@ -91,8 +94,9 @@ pub async fn run_exec_channel(
         Ok(false) => {}
     }
 
-    let clean_out = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
-    Ok((clean_out, exit_code))
+    let clean_stdout = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
+    let clean_stderr = String::from_utf8_lossy(&stderr).replace("\r\n", "\n");
+    Ok((clean_stdout, clean_stderr, exit_code))
 }
 
 pub async fn run_exec_channel_with_stdin(
@@ -167,10 +171,24 @@ pub async fn run_stream_channel(
         channel.exec(true, cmd)
     ).await.map_err(|_| "Timed out starting remote command")??;
     let mut exit_code = -1;
+    let mut total_streamed: usize = 0;
+    const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
 
     while let Some(msg) = channel.wait().await {
         match msg {
             ChannelMsg::Data { ref data } => {
+                total_streamed = total_streamed.saturating_add(data.len());
+                if total_streamed > MAX_STREAM_BYTES {
+                    let _ = app.emit("exec-output", crate::ssh::exec::StreamChunk {
+                        stream_id: stream_id.to_string(),
+                        data: "\r\n[Stream output exceeded maximum 64 MiB safety buffer]\r\n".into(),
+                        is_stderr: true,
+                        is_done: true,
+                        exit_code: Some(1),
+                    });
+                    let _ = channel.eof().await;
+                    break;
+                }
                 let text = String::from_utf8_lossy(data).to_string();
                 let _ = app.emit("exec-output", crate::ssh::exec::StreamChunk {
                     stream_id: stream_id.to_string(),
@@ -181,6 +199,7 @@ pub async fn run_stream_channel(
                 });
             }
             ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                total_streamed = total_streamed.saturating_add(data.len());
                 let text = String::from_utf8_lossy(data).to_string();
                 let _ = app.emit("exec-output", crate::ssh::exec::StreamChunk {
                     stream_id: stream_id.to_string(),
@@ -192,6 +211,9 @@ pub async fn run_stream_channel(
             }
             ChannelMsg::ExitStatus { exit_status } => {
                 exit_code = exit_status as i32;
+            }
+            ChannelMsg::Eof | ChannelMsg::Close => {
+                break;
             }
             _ => {}
         }
@@ -395,6 +417,27 @@ pub async fn open_sftp(
         russh_sftp::client::SftpSession::new(channel.into_stream())
     ).await.map_err(|_| "Timed out initializing SFTP")??;
     Ok(sftp)
+}
+
+pub async fn open_pty_channel(
+    handle: &ClientHandle,
+    term: &str,
+    cols: u32,
+    rows: u32,
+) -> Result<russh::Channel<russh::client::Msg>, Box<dyn std::error::Error + Send + Sync>> {
+    let channel = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        handle.channel_open_session()
+    ).await.map_err(|_| "Timed out opening terminal channel")??;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        channel.request_pty(false, term, cols, rows, 0, 0, &[])
+    ).await.map_err(|_| "Timed out requesting terminal PTY")??;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        channel.request_shell(true)
+    ).await.map_err(|_| "Timed out starting remote shell")??;
+    Ok(channel)
 }
 
 pub async fn open_pty_shell(

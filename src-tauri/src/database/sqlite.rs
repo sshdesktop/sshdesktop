@@ -20,7 +20,10 @@ fn sqlite_cache_path(config: &DatabaseConnectionConfig, remote_path: &str) -> Re
             .map_err(|e| format!("Failed to secure SQLite cache directory: {}", e))?;
     }
     let mut hasher = Sha256::new();
-    hasher.update(config.id.as_bytes());
+    // Key by the remote target server and file path rather than connection instance ID,
+    // ensuring concurrent sessions to the same database share a coherent local cache.
+    let target_key = config.ssh_connection_id.as_deref().unwrap_or(&config.host);
+    hasher.update(target_key.as_bytes());
     hasher.update([0]);
     hasher.update(remote_path.as_bytes());
     let digest = format!("{:x}", hasher.finalize());

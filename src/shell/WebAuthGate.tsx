@@ -117,8 +117,8 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
       setChangeError('New username must be at least 3 characters.');
       return;
     }
-    if (newPassword.trim().length < 6) {
-      setChangeError('New password must be at least 6 characters.');
+    if (newPassword.trim().length < 12) {
+      setChangeError('New password must contain at least 12 characters.');
       return;
     }
     if (newPassword.trim() === 'admin' || newPassword.trim() === 'sshdesktop') {

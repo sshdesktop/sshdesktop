@@ -719,7 +719,17 @@ pub async fn firewall_set_default_policy(
     {
         return Err("Default policy must use incoming/outgoing/routed and allow/deny/reject.".into());
     }
-    let cmd = format!("ufw default {} {} 2>&1", pol, dir);
+
+    // Safety guard: if setting incoming policy to deny/reject, ensure active SSH port rule is in place
+    let conn = crate::ssh::connection::resolve_connection(&state, &conn_id);
+    let port = conn.map(|c| c.config.port).unwrap_or(22);
+
+    let cmd = if dir == "incoming" && (pol == "deny" || pol == "reject") {
+        format!("ufw allow {}/tcp 2>&1 && ufw default {} {} 2>&1", port, pol, dir)
+    } else {
+        format!("ufw default {} {} 2>&1", pol, dir)
+    };
+
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
     if code != 0 {
         return Err(format!("Failed to set default policy: {}", stdout.trim()));
@@ -732,12 +742,16 @@ pub async fn firewall_reset(
     state: tauri::State<'_, AppState>,
     conn_id: String,
 ) -> Result<String, String> {
-    let cmd = "echo y | ufw reset 2>&1";
-    let (stdout, code) = run_cmd_priv(&state, &conn_id, cmd).await;
+    // Safety guard: ensure active SSH port is immediately restored so the session is not severed
+    let conn = crate::ssh::connection::resolve_connection(&state, &conn_id);
+    let port = conn.map(|c| c.config.port).unwrap_or(22);
+
+    let cmd = format!("echo y | ufw reset 2>&1 && ufw allow {}/tcp 2>&1", port);
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
     if code != 0 {
         return Err(format!("Failed to reset firewall: {}", stdout.trim()));
     }
-    Ok("Firewall reset to default state.".to_string())
+    Ok(format!("Firewall reset to default state; SSH port {} preserved.", port))
 }
 
 #[tauri::command]
