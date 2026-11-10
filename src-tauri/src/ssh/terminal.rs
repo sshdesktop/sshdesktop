@@ -76,16 +76,23 @@ pub async fn terminal_create(
         "plink"
     };
 
-    let auth_method = conn.config.auth_method.as_deref().unwrap_or("password");
-    let is_key_auth = auth_method == "key" || private_key.is_some();
-    let is_ppk = private_key.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    let is_key_auth = match conn.config.auth_method.as_deref() {
+        Some("password") => false,
+        Some("key") => true,
+        _ => private_key.is_some() || password.is_none(),
+    };
+    let selected_key_path = if is_key_auth { private_key.as_deref() } else { None };
+    let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
 
-    // Ensure key file exists on disk
-    let resolved_key_path = if let Some(ref k) = private_key {
-        crate::ssh::connection::ensure_key_file(&conn_id, k)
+    // Only resolve the identity selected by the configured auth method.
+    let resolved_key_path = if let Some(key) = selected_key_path {
+        crate::ssh::connection::ensure_key_file(&conn_id, key)
     } else {
         None
     };
+    if selected_key_path.is_some() && resolved_key_path.is_none() {
+        return Err("The selected SSH identity could not be found.".into());
+    }
 
     // ── 0. Fast TCP Connectivity Probe (3.5s timeout) ─────────────────────────
     // Avoid misleading "Connected" messages when port 22 is unreachable or offline
@@ -163,12 +170,7 @@ pub async fn terminal_create(
         let handle = match handle_opt {
             Some(h) => Some(h),
             None => {
-                let key_str = resolved_key_path.as_deref().or(private_key.as_deref());
-                let is_key_auth = match conn.config.auth_method.as_deref() {
-                    Some("password") => false,
-                    Some("key") => true,
-                    _ => key_str.is_some() || password.is_none(),
-                };
+                let key_str = resolved_key_path.as_deref().or(selected_key_path);
                 match crate::ssh::session::connect_session_with_passphrase_auth(
                     &host,
                     conn.config.port,
@@ -493,7 +495,7 @@ pub async fn ssh_launch_putty(
     // PuTTY is launched interactively: let it prompt for a password rather than
     // exposing credentials in its process arguments.
 
-    if let Some(ref key) = conn.config.private_key_path {
+    if let Some(key) = selected_key_path {
         if !key.is_empty() {
             cmd.arg("-i").arg(key);
         }
