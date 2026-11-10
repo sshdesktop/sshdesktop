@@ -280,7 +280,7 @@ pub async fn sftp_delete(
     }
     let canonical = canonical.trim();
     let canonical = if canonical.len() > 1 { canonical.trim_end_matches('/') } else { canonical };
-    let protected = ["/", "/home", "/etc", "/usr", "/boot", "/sys", "/proc", "/dev", "/bin", "/sbin", "/lib", "/lib64", "/var"];
+    let protected = ["/", "/home", "/root", "/etc", "/usr", "/boot", "/sys", "/proc", "/dev", "/bin", "/sbin", "/lib", "/lib64", "/var", "/run"];
     if protected.iter().any(|root| canonical == *root) {
         return Err(format!("System protection active: Refusing to delete protected path '{}'", canonical));
     }
@@ -571,6 +571,12 @@ pub async fn sftp_download_to_downloads(
         .filter(|s| !s.is_empty())
         .last()
         .unwrap_or("downloaded_file");
+    if filename == "." || filename == ".."
+        || filename.contains('/') || filename.contains('\\')
+        || filename.chars().any(|c| c.is_control())
+    {
+        return Err("Remote filename is not safe to use as a local download name".into());
+    }
 
     let local_dest = download_dir.join(filename);
     let local_dest_str = local_dest.to_string_lossy().to_string();
