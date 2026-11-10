@@ -94,9 +94,11 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
     let user = conn.config.username.clone();
     let destination = format!("{}@{}", user, host);
 
-    let auth_method = conn.config.auth_method.as_deref().unwrap_or("password");
-    let is_key_auth = auth_method == "key"
-        || (auth_method != "password" && conn.config.private_key_path.is_some());
+    let is_key_auth = match conn.config.auth_method.as_deref() {
+        Some("password") => false,
+        Some("key") => true,
+        _ => conn.config.private_key_path.is_some(),
+    };
     let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
 
     // ── 1. Password auth via plink (only if not key auth) ───────────────────
@@ -498,9 +500,11 @@ pub async fn run_cmd_with_stdin(
     let user = conn.config.username.clone();
     let destination = format!("{}@{}", user, host);
 
-    let auth_method = conn.config.auth_method.as_deref().unwrap_or("password");
-    let is_key_auth = auth_method == "key"
-        || (auth_method != "password" && conn.config.private_key_path.is_some());
+    let is_key_auth = match conn.config.auth_method.as_deref() {
+        Some("password") => false,
+        Some("key") => true,
+        _ => conn.config.private_key_path.is_some(),
+    };
     let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
 
     // 1. Password auth via plink (only if not key auth)
