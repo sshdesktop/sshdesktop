@@ -212,8 +212,9 @@ pub async fn store_list_connections(_state: tauri::State<'_, AppState>) -> Resul
 pub async fn store_delete_connection(_state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     let mut list = read_connections_from_disk();
     list.retain(|c| c.id != id);
+    write_connections_to_disk(&list)?;
     delete_connection_password(&id);
-    write_connections_to_disk(&list)
+    Ok(())
 }
 
 #[tauri::command]
