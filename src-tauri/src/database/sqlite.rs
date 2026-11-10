@@ -55,6 +55,9 @@ pub async fn connect_sqlite(
             let local_cache = sqlite_cache_path(config, raw_path)?;
 
             if test_out.contains("MISSING") {
+                if config.read_only {
+                    return Err("Read-only SQLite connection cannot create a missing remote database file.".into());
+                }
                 let (touch_out, touch_code) = crate::ssh::exec::run_cmd(
                     app_state, &conn_id, &format!("umask 077 && touch '{}'", escaped)
                 ).await;
@@ -88,7 +91,8 @@ pub async fn connect_sqlite(
 
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&effective_path)
-        .create_if_missing(true);
+        .create_if_missing(!config.read_only)
+        .read_only(config.read_only);
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(5)
         .connect_with(options)
@@ -244,7 +248,7 @@ pub async fn execute_query_sqlite(
     // If SQLite is on remote host and mutation occurred, sync cache back via SFTP
     if had_mutation && session.config.use_ssh {
         if let Some(conn_id) = &session.config.ssh_connection_id {
-            let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database);
+            let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
             let local_cache = sqlite_cache_path(&session.config, raw_path)?;
             let bytes = std::fs::read(&local_cache)
                 .map_err(|e| format!("Failed to read updated local SQLite cache: {}", e))?;
