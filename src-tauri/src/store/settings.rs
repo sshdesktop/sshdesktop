@@ -65,15 +65,33 @@ pub fn get_sshdesktop_dir() -> PathBuf {
     if let Some(base) = directories::BaseDirs::new() {
         let home_dot_dir = base.home_dir().join(".sshdesktop");
         let _ = fs::create_dir_all(&home_dot_dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&home_dot_dir, fs::Permissions::from_mode(0o700));
+        }
         return home_dot_dir;
     }
     let local = PathBuf::from(".sshdesktop");
     let _ = fs::create_dir_all(&local);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&local, fs::Permissions::from_mode(0o700));
+    }
     local
 }
 
 pub fn get_clouddesk_dir() -> PathBuf {
     get_sshdesktop_dir()
+}
+
+fn secure_settings_file(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
 }
 
 fn get_settings_path() -> PathBuf {
@@ -95,6 +113,7 @@ pub async fn settings_get(_state: tauri::State<'_, AppState>) -> Result<AppSetti
         if let Ok(content) = fs::read_to_string(&legacy_home) {
             if let Ok(settings) = serde_json::from_str::<AppSettings>(&content) {
                 let _ = fs::write(&path, &content);
+                secure_settings_file(&path);
                 return Ok(settings);
             }
         }
@@ -102,6 +121,7 @@ pub async fn settings_get(_state: tauri::State<'_, AppState>) -> Result<AppSetti
         if let Ok(content) = fs::read_to_string(legacy) {
             if let Ok(settings) = serde_json::from_str::<AppSettings>(&content) {
                 let _ = fs::write(&path, &content);
+                secure_settings_file(&path);
                 return Ok(settings);
             }
         }
@@ -109,6 +129,7 @@ pub async fn settings_get(_state: tauri::State<'_, AppState>) -> Result<AppSetti
     let default_settings = AppSettings::default();
     if let Ok(serialized) = serde_json::to_string_pretty(&default_settings) {
         let _ = fs::write(&path, serialized);
+        secure_settings_file(&path);
     }
     Ok(default_settings)
 }
@@ -117,5 +138,7 @@ pub async fn settings_get(_state: tauri::State<'_, AppState>) -> Result<AppSetti
 pub async fn settings_save(_state: tauri::State<'_, AppState>, settings: AppSettings) -> Result<(), String> {
     let path = get_settings_path();
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())
+    fs::write(&path, json).map_err(|e| e.to_string())?;
+    secure_settings_file(&path);
+    Ok(())
 }
