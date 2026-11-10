@@ -86,6 +86,10 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
     if !is_key_auth {
         if let Some(pwd) = &conn.config.password {
             if !pwd.is_empty() {
+                let password_file = match crate::ssh::connection::create_password_file(pwd) {
+                    Ok(file) => file,
+                    Err(error) => return (error, -1),
+                };
                 for attempt in 0..2 {
                 let mut cmd = tokio::process::Command::new("plink");
                 #[cfg(windows)]
@@ -95,7 +99,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                     .arg("-batch")          // never prompt for host key
                     .arg("-P").arg(&port)
                     .arg("-l").arg(&user)
-                    .arg("-pw").arg(pwd)
+                    .arg("-pwfile").arg(password_file.path())
                     .arg(&host)
                     .arg(command)
                     .stdin(std::process::Stdio::null())
@@ -480,6 +484,10 @@ pub async fn run_cmd_with_stdin(
     if !is_key_auth {
         if let Some(pwd) = &conn.config.password {
             if !pwd.is_empty() {
+            let password_file = match crate::ssh::connection::create_password_file(pwd) {
+                Ok(file) => file,
+                Err(error) => return (error, -1),
+            };
             let mut cmd = tokio::process::Command::new("plink");
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
@@ -487,7 +495,7 @@ pub async fn run_cmd_with_stdin(
                 .arg("-batch")
                 .arg("-P").arg(&port)
                 .arg("-l").arg(&user)
-                .arg("-pw").arg(pwd)
+                .arg("-pwfile").arg(password_file.path())
                 .arg(&host)
                 .arg(command)
                 .stdin(std::process::Stdio::piped())
