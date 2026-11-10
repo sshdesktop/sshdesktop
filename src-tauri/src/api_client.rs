@@ -90,8 +90,21 @@ pub async fn api_send_request(
     state: tauri::State<'_, AppState>,
     req: ApiRequest,
 ) -> Result<ApiResponse, String> {
-    if req.url.trim().is_empty() {
-        return Err("Target URL cannot be empty".to_string());
+    if req.url.trim().is_empty() || req.url.len() > 8192 {
+        return Err("Target URL must be between 1 and 8192 characters.".to_string());
+    }
+    if req.headers.len() > 100 || req.query_params.len() > 200 {
+        return Err("A request may contain at most 100 headers and 200 query parameters.".into());
+    }
+    if req.headers.iter().filter(|h| h.enabled).any(|h| h.key.len() > 256 || h.value.len() > 8192)
+        || req.query_params.iter().filter(|q| q.enabled).any(|q| q.key.len() > 2048 || q.value.len() > 8192)
+    {
+        return Err("A request header or query parameter exceeds the supported size limit.".into());
+    }
+    if req.raw_body.as_ref().map(|b| b.len() > 10 * 1024 * 1024).unwrap_or(false)
+        || req.form_data.as_ref().map(|items| items.iter().filter(|i| i.enabled).map(|i| i.key.len() + i.value.len()).sum::<usize>() > 10 * 1024 * 1024).unwrap_or(false)
+    {
+        return Err("HTTP request body cannot exceed 10 MiB.".into());
     }
 
     let raw_url = req.url.trim();
@@ -110,6 +123,9 @@ pub async fn api_send_request(
     }
     if parsed_url.host_str().is_none() {
         return Err("Target URL must include a valid host".to_string());
+    }
+    if !parsed_url.username().is_empty() || parsed_url.password().is_some() {
+        return Err("Credentials in the URL are not supported; use the Authorization header instead.".into());
     }
     let original_host = parsed_url.host_str().unwrap().to_string();
     let default_port = if scheme == "https" { 443 } else { 80 };
