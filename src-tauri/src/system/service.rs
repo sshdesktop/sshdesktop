@@ -1,5 +1,6 @@
 fn valid_service_name(value: &str) -> bool {
     !value.is_empty()
+        && !value.starts_with('-')
         && value.len() <= 256
         && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | ':' | '-'))
 }
@@ -30,7 +31,7 @@ pub async fn service_list(
     let (combined_out, code) = run_cmd(
         &state,
         &conn_id,
-        "systemctl daemon-reload 2>/dev/null; systemctl list-units --type=service --all --no-pager --plain 2>/dev/null; echo '---FILES---'; systemctl list-unit-files --type=service --all --no-pager --plain 2>/dev/null",
+        "systemctl list-units --type=service --all --no-pager --plain 2>&1; echo '---FILES---'; systemctl list-unit-files --type=service --all --no-pager --plain 2>&1",
     ).await;
 
     if code == -1 && combined_out.is_empty() {
@@ -38,7 +39,7 @@ pub async fn service_list(
     }
 
     // Check if systemctl is actually available
-    if combined_out.contains("command not found") || combined_out.contains("not found") {
+    if combined_out.contains("command not found") || combined_out.contains("systemctl: not found") {
         return Err("systemd not found on remote server. This feature requires a systemd-based Linux.".into());
     }
 
