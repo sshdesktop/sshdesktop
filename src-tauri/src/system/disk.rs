@@ -424,16 +424,12 @@ else
 fi
 case "$MOUNT" in
     /|/boot|/boot/efi|/usr|/var|/etc|/dev|/proc|/sys)
-        if [ "{}" = "true" ] || [ "{}" = "true" ]; then
-            echo "Refusing force/lazy unmount of critical system mountpoint $MOUNT" >&2
-            exit 40
-        fi
+        echo "Refusing to unmount critical system mountpoint $MOUNT" >&2
+        exit 40
         ;;
 esac
 "#,
         target_arg,
-        force,
-        lazy,
         force,
         lazy
     );
