@@ -543,8 +543,10 @@ pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnecti
             return Some(c);
         }
         if conn_id == "default" || conn_id.is_empty() {
-            if let Some(c) = lock.get("default").cloned().or_else(|| lock.values().next().cloned()) {
-                return Some(c);
+            if conn_id == "default" {
+                if let Some(c) = lock.get("default").cloned() {
+                    return Some(c);
+                }
             }
         }
     }
@@ -554,8 +556,9 @@ pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnecti
         let restored = SshConnection {
             id: saved.id.clone(),
             config: saved.into(),
-            connected: true,
-            connected_at: chrono::Utc::now().timestamp(),
+            // Restoring saved configuration is not proof of a live SSH transport.
+            connected: false,
+            connected_at: 0,
         };
         let mut lock = state.connections.lock();
         lock.insert(restored.id.clone(), restored.clone());
@@ -567,9 +570,9 @@ pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnecti
     }
 
     // 3. Fallback ONLY if conn_id is explicitly "default" or empty
-    if conn_id == "default" || conn_id.is_empty() {
+    if conn_id == "default" {
         let lock = state.connections.lock();
-        lock.values().next().cloned()
+        lock.get("default").cloned()
     } else {
         None
     }
