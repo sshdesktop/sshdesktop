@@ -428,7 +428,7 @@ pub async fn firewall_add_rule_advanced(
     }
     let backend_choice = payload.backend.as_deref();
     let fw = if let Some(b) = backend_choice {
-        match b.as_str() {
+        match b {
             "firewalld" => "firewalld",
             "ufw" => "ufw",
             "iptables" => "iptables",
