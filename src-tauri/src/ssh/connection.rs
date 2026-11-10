@@ -829,11 +829,12 @@ pub async fn ssh_get_user_privilege(
 
     if let Some(pwd) = &conn.config.password {
         if !pwd.is_empty() {
-            let test_pwd_cmd = format!(
-                "printf '%s\\n' '{}' | sudo -S -k -p '' true 2>&1",
-                pwd.replace('\'', r"'\''")
-            );
-            let (_pwd_out, pwd_code) = crate::ssh::exec::run_cmd(&state, &conn_id, &test_pwd_cmd).await;
+            let test_pwd_cmd = "sudo -S -k -p '' true 2>&1";
+            let mut password_input = pwd.as_bytes().to_vec();
+            password_input.push(b'\n');
+            let (_pwd_out, pwd_code) = crate::ssh::exec::run_cmd_with_stdin(
+                &state, &conn_id, test_pwd_cmd, &password_input
+            ).await;
             if pwd_code == 0 {
                 has_sudo = true;
                 sudo_type = "password".to_string();
