@@ -564,6 +564,11 @@ async fn execute_direct_request(
                 let mut form = reqwest::multipart::Form::new();
                 for item in items.iter().filter(|i| i.enabled && !i.key.trim().is_empty()) {
                     if item.item_type.eq_ignore_ascii_case("file") {
+                        let metadata = tokio::fs::metadata(&item.value).await
+                            .map_err(|e| format!("Failed to inspect multipart file '{}': {}", item.value, e))?;
+                        if !metadata.is_file() || metadata.len() > 10 * 1024 * 1024 {
+                            return Err("Multipart file parts must be regular files no larger than 10 MiB.".into());
+                        }
                         let bytes = tokio::fs::read(&item.value).await
                             .map_err(|e| format!("Failed to read multipart file '{}': {}", item.value, e))?;
                         let filename = std::path::Path::new(&item.value).file_name()
