@@ -209,14 +209,27 @@ pub async fn logs_stream_start(
 
 #[tauri::command]
 pub async fn logs_stream_stop(
+    app: tauri::AppHandle,
     _state: tauri::State<'_, AppState>,
     stream_id: String,
 ) -> Result<(), String> {
+    if stream_id.trim().is_empty() {
+        return Err("Log stream ID cannot be empty.".into());
+    }
     if let Some(handle) = ACTIVE_STREAMS.lock().remove(&stream_id) {
         handle.abort();
+        use tauri::Emitter;
+        let _ = app.emit("log-stream-data", serde_json::json!({
+            "stream_id": stream_id,
+            "data": "",
+            "done": true,
+            "cancelled": true
+        }));
+        log::info!("SSH Desktop: Log stream {} stopped", stream_id);
+        Ok(())
+    } else {
+        Err(format!("Log stream '{}' is not running.", stream_id))
     }
-    log::info!("SSH Desktop: Log stream {} stopped", stream_id);
-    Ok(())
 }
 
 #[tauri::command]
