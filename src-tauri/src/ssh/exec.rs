@@ -372,14 +372,13 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
     // 3B. User requires a password for sudo (sudo -S)
     if let Some(ref pwd) = conn.config.password {
         if !pwd.is_empty() {
-            let escaped_pwd = pwd.replace('\'', r"'\''");
-            // Use printf to pipe the password securely to sudo -S
             let sudo_s_cmd = format!(
-                "printf '%s\\n' '{}' | sudo -S -p '' -- sh -c '{}' 2>&1",
-                escaped_pwd,
+                "sudo -S -p '' -- sh -c '{}' 2>&1",
                 escaped_raw
             );
-            let (s_out, s_code) = run_cmd(state, conn_id, &sudo_s_cmd).await;
+            let mut password_input = pwd.as_bytes().to_vec();
+            password_input.push(b'\n');
+            let (s_out, s_code) = run_cmd_with_stdin(state, conn_id, &sudo_s_cmd, &password_input).await;
 
             if s_code == 0 {
                 return (s_out, s_code);
