@@ -264,12 +264,18 @@ pub async fn connect_session_with_passphrase_auth(
         if !trimmed_key.is_empty() {
             // 1. Try loading from file path
             if let Ok(key) = russh_keys::load_secret_key(trimmed_key, passphrase) {
-                authenticated = handle.authenticate_publickey(user, Arc::new(key)).await.unwrap_or(false);
+                authenticated = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    handle.authenticate_publickey(user, Arc::new(key))
+                ).await.ok().and_then(Result::ok).unwrap_or(false);
             }
             // 2. Try decoding directly as PEM string
             if !authenticated {
                 if let Ok(key) = russh_keys::decode_secret_key(trimmed_key, passphrase) {
-                    authenticated = handle.authenticate_publickey(user, Arc::new(key)).await.unwrap_or(false);
+                    authenticated = tokio::time::timeout(
+                        std::time::Duration::from_secs(15),
+                        handle.authenticate_publickey(user, Arc::new(key))
+                    ).await.ok().and_then(Result::ok).unwrap_or(false);
                 }
             }
             // 3. Try reading file on disk then decoding content
@@ -300,7 +306,10 @@ pub async fn connect_session_with_passphrase_auth(
                 let candidate = ssh_dir.join(key_name);
                 if candidate.exists() {
                     if let Ok(key) = russh_keys::load_secret_key(&candidate, passphrase) {
-                        if handle.authenticate_publickey(user, Arc::new(key)).await.unwrap_or(false) {
+                        if tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            handle.authenticate_publickey(user, Arc::new(key))
+                        ).await.ok().and_then(Result::ok).unwrap_or(false) {
                             log::info!("SSH Desktop: Authenticated successfully using default key ~/.ssh/{}", key_name);
                             authenticated = true;
                             break;
@@ -315,7 +324,10 @@ pub async fn connect_session_with_passphrase_auth(
     if !authenticated {
         if let Some(pwd) = password {
             if !pwd.is_empty() {
-                authenticated = handle.authenticate_password(user, pwd).await?;
+                authenticated = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    handle.authenticate_password(user, pwd)
+                ).await.map_err(|_| "SSH password authentication timed out")??;
             }
         }
     }
@@ -330,9 +342,18 @@ pub async fn connect_session_with_passphrase_auth(
 pub async fn open_sftp(
     handle: &ClientHandle,
 ) -> Result<russh_sftp::client::SftpSession, Box<dyn std::error::Error + Send + Sync>> {
-    let channel = handle.channel_open_session().await?;
-    channel.request_subsystem(true, "sftp").await?;
-    let sftp = russh_sftp::client::SftpSession::new(channel.into_stream()).await?;
+    let channel = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        handle.channel_open_session()
+    ).await.map_err(|_| "Timed out opening SFTP channel")??;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        channel.request_subsystem(true, "sftp")
+    ).await.map_err(|_| "Timed out requesting the SFTP subsystem")??;
+    let sftp = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        russh_sftp::client::SftpSession::new(channel.into_stream())
+    ).await.map_err(|_| "Timed out initializing SFTP")??;
     Ok(sftp)
 }
 
