@@ -140,6 +140,33 @@ pub async fn ssh_config_read_hosts() -> Result<Vec<SshConfigHost>, String> {
 
 #[tauri::command]
 pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
+    // Values are written into an OpenSSH configuration file. Reject control
+    // characters so user input cannot create additional directives/Host blocks.
+    let has_control = |value: &str| value.chars().any(|c| c == '\\n' || c == '\\r' || c == '\\0');
+    if entry.name.trim().is_empty()
+        || has_control(&entry.name)
+        || !entry.name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err("Invalid SSH host alias. Use only letters, numbers, dots, underscores, and hyphens.".into());
+    }
+    if entry.hostname.trim().is_empty() || has_control(&entry.hostname) || entry.hostname.chars().any(char::is_whitespace) {
+        return Err("Invalid SSH hostname.".into());
+    }
+    if entry.user.as_deref().map(|v| v.trim().is_empty() || has_control(v) || v.chars().any(char::is_whitespace)).unwrap_or(false) {
+        return Err("Invalid SSH username.".into());
+    }
+    if entry.raw_identity_file.as_deref().or(entry.identity_file.as_deref())
+        .map(|v| v.trim().is_empty() || has_control(v)).unwrap_or(false)
+    {
+        return Err("Invalid SSH identity file path.".into());
+    }
+    if entry.proxy_jump.as_deref()
+        .map(|v| v.trim().is_empty() || has_control(v) || v.chars().any(char::is_whitespace))
+        .unwrap_or(false)
+    {
+        return Err("Invalid ProxyJump value.".into());
+    }
+
     let ssh_dir = get_ssh_dir().ok_or_else(|| "Could not determine .ssh directory".to_string())?;
     let config_path = get_ssh_config_path().ok_or_else(|| "Could not determine .ssh/config path".to_string())?;
 
