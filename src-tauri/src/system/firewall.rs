@@ -506,10 +506,15 @@ pub async fn firewall_add_rule_advanced(
                 "limit" => "ACCEPT",
                 _ => "DROP",
             };
-            if action == "limit" {
-                format!("iptables -A {} -p {} --dport {} -m limit --limit 5/minute --limit-burst 10 -j {} 2>&1", chain, protocol, port, target)
+            let source_arg = if !from_ip.is_empty() && !from_ip.eq_ignore_ascii_case("anywhere") && !from_ip.eq_ignore_ascii_case("any") {
+                format!("-s {} ", shell_quote(from_ip))
             } else {
-                format!("iptables -A {} -p {} --dport {} -j {} 2>&1", chain, protocol, port, target)
+                String::new()
+            };
+            if action == "limit" {
+                format!("iptables -A {} {} -p {} --dport {} -m limit --limit 5/minute --limit-burst 10 -j {} 2>&1", chain, source_arg, protocol, port, target)
+            } else {
+                format!("iptables -A {} {} -p {} --dport {} -j {} 2>&1", chain, source_arg, protocol, port, target)
             }
         }
     };
