@@ -916,13 +916,23 @@ pub async fn ssh_exec_stream(
 }
 
 #[tauri::command]
-pub async fn ssh_exec_stop(_state: tauri::State<'_, AppState>, stream_id: String) -> Result<(), String> {
+pub async fn ssh_exec_stop(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, AppState>,
+    stream_id: String,
+) -> Result<(), String> {
     if stream_id.trim().is_empty() {
         return Err("Execution stream ID cannot be empty.".into());
     }
-    let handle = EXEC_STREAMS.lock().remove(&stream_id);
-    if let Some(handle) = handle {
+    if let Some(handle) = EXEC_STREAMS.lock().remove(&stream_id) {
         handle.abort();
+        let _ = app.emit("exec-output", StreamChunk {
+            stream_id: stream_id.clone(),
+            data: "[Execution cancelled]".into(),
+            is_stderr: false,
+            is_done: true,
+            exit_code: Some(-1),
+        });
         log::info!("SSH Desktop: Cancelled execution stream {}", stream_id);
         Ok(())
     } else {
