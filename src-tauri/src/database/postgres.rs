@@ -110,6 +110,7 @@ pub async fn execute_query_postgres(
     let mut batch_results = Vec::new();
     let num_stmts = statements.len();
 
+    let mut remaining_rows = limit;
     for (stmt_idx, stmt) in statements.iter().enumerate() {
         let stmt_start = Instant::now();
         let s_upper = stmt.trim().to_uppercase();
@@ -142,19 +143,19 @@ pub async fn execute_query_postgres(
             });
         } else {
             let mut row_stream = sqlx::raw_sql(stmt).fetch(pool);
-            let mut rows = Vec::with_capacity(limit.min(1024));
+            let mut rows = Vec::with_capacity(remaining_rows.min(1024));
             while let Some(row) = row_stream.try_next().await
                 .map_err(|e| format!("PostgreSQL error (statement {}/{}): {}", stmt_idx + 1, num_stmts, e))?
             {
                 rows.push(row);
-                if rows.len() > limit {
+                if rows.len() > remaining_rows {
                     break;
                 }
             }
-            let truncated = rows.len() > limit;
+            let truncated = rows.len() > remaining_rows;
             if truncated {
-                rows.truncate(limit);
-                warnings.push(format!("Statement {}/{}: result truncated to {} rows", stmt_idx + 1, num_stmts, limit));
+                rows.truncate(remaining_rows);
+                warnings.push(format!("Statement {}/{}: result truncated to {} rows", stmt_idx + 1, num_stmts, remaining_rows));
             }
 
             let mut cols_meta = Vec::new();
@@ -171,6 +172,7 @@ pub async fn execute_query_postgres(
                 json_rows.push(val);
             }
 
+            remaining_rows = remaining_rows.saturating_sub(rows.len());
             if num_stmts > 1 {
                 warnings.push(format!("Statement {}/{}: {} rows returned", stmt_idx + 1, num_stmts, rows.len()));
             }
