@@ -26,7 +26,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::{channel, Sender};
 use crate::AppState;
 
 #[derive(Clone)]
@@ -43,7 +43,7 @@ pub struct TerminalSession {
     pub rows: u16,
     pub cols: u16,
     pub created_at: i64,
-    pub tx: Option<UnboundedSender<Vec<u8>>>,
+    pub tx: Option<Sender<Vec<u8>>>,
     pub action_tx: Option<tokio::sync::mpsc::Sender<TerminalAction>>,
     pub child_pid: Option<u32>,
     pub password_file: Option<Arc<crate::ssh::connection::SshPasswordFile>>,
@@ -242,7 +242,7 @@ pub async fn terminal_create(
             match crate::ssh::session::open_pty_channel(&h, "xterm-256color", cols as u32, rows as u32).await {
                 Ok(mut channel) => {
                     log::info!("SSH Desktop: Native russh interactive PTY shell opened for {}@{}:{}", user, host, port);
-                    let (action_tx, mut action_rx) = tokio::sync::mpsc::channel::<TerminalAction>(2048);
+                    let (action_tx, mut action_rx) = tokio::sync::mpsc::channel::<TerminalAction>(64);
 
                     let app_out = app.clone();
                     let term_id_out = term_id.clone();
@@ -397,7 +397,7 @@ pub async fn terminal_create(
     let mut stdout = child.stdout.take().ok_or("Failed to open child stdout")?;
     let mut stderr = child.stderr.take().ok_or("Failed to open child stderr")?;
 
-    let (tx, mut rx) = unbounded_channel::<Vec<u8>>();
+    let (tx, mut rx) = channel::<Vec<u8>>(64);
 
     // Stdin Pump
     tokio::spawn(async move {
@@ -482,8 +482,8 @@ pub async fn terminal_write(
     terminal_id: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
-    if data.len() > 1024 * 1024 {
-        return Err("Terminal input chunk cannot exceed 1 MiB.".into());
+    if data.len() > 64 * 1024 {
+        return Err("Terminal input chunk cannot exceed 64 KiB.".into());
     }
     let (action_tx_opt, tx_opt) = {
         let terms = state.terminals.lock();
@@ -495,7 +495,7 @@ pub async fn terminal_write(
         action_tx.try_send(TerminalAction::Data(data)).map_err(|e| format!("Failed to send data to terminal: {}", e))?;
         Ok(())
     } else if let Some(tx) = tx_opt {
-        tx.send(data).map_err(|e| format!("Failed to send data to terminal: {}", e))?;
+        tx.try_send(data).map_err(|e| format!("Terminal input queue is full or closed: {}", e))?;
         Ok(())
     } else {
         Err(format!("Terminal session {} not found or closed", terminal_id))
