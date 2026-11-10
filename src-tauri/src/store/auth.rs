@@ -188,21 +188,34 @@ pub async fn auth_login(username: String, password: String) -> Result<AuthAction
         return Err("Invalid username or password.".to_string());
     }
 
-    if !verify_password(&password, &config.salt, &config.password_hash) {
+    let verify_password_value = password.clone();
+    let verify_salt = config.salt.clone();
+    let verify_hash = config.password_hash.clone();
+    let password_valid = tokio::task::spawn_blocking(move || {
+        verify_password(&verify_password_value, &verify_salt, &verify_hash)
+    }).await.map_err(|e| format!("Password verification task failed: {}", e))?;
+    if !password_valid {
         return Err("Invalid username or password.".to_string());
     }
-    // Transparently upgrade legacy fast hashes after a successful login.
+
+    // Transparently upgrade legacy fast hashes without blocking the async
+    // runtime worker on CPU-intensive password hashing.
     if !config.password_hash.starts_with("$argon2") {
         config.salt = uuid::Uuid::new_v4().to_string();
-        config.password_hash = hash_password(&password, &config.salt);
+        let password_for_hash = password.clone();
+        let salt_for_hash = config.salt.clone();
+        config.password_hash = tokio::task::spawn_blocking(move || {
+            hash_password(&password_for_hash, &salt_for_hash)
+        }).await.map_err(|e| format!("Password migration task failed: {}", e))?;
     }
 
-    IS_AUTHENTICATED.store(true, Ordering::SeqCst);
     config.last_login_at = Some(chrono::Utc::now().timestamp());
-    if let Ok(json) = serde_json::to_string_pretty(&config) {
-        let _ = fs::write(&path, json);
-        let _ = enforce_strict_permissions(&path);
-    }
+    let json = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Could not serialize authentication configuration: {}", e))?;
+    fs::write(&path, json)
+        .map_err(|e| format!("Could not update authentication configuration: {}", e))?;
+    enforce_strict_permissions(&path)?;
+    IS_AUTHENTICATED.store(true, Ordering::SeqCst);
 
     log::info!("SSH Desktop: Web session authenticated for user '{}'", config.username);
     Ok(AuthActionResult {
@@ -221,8 +234,15 @@ pub async fn auth_change_credentials(
 ) -> Result<AuthActionResult, String> {
     let (mut config, path) = load_or_init_auth_config()?;
 
-    // Verify current password first
-    if !verify_password(&current_password, &config.salt, &config.password_hash) {
+    // Verify the current password on the blocking pool so Argon2 work does
+    // not stall Tokio's async executor.
+    let current_password_value = current_password.clone();
+    let verify_salt = config.salt.clone();
+    let verify_hash = config.password_hash.clone();
+    let current_password_valid = tokio::task::spawn_blocking(move || {
+        verify_password(&current_password_value, &verify_salt, &verify_hash)
+    }).await.map_err(|e| format!("Password verification task failed: {}", e))?;
+    if !current_password_valid {
         return Err("Current password verification failed. Please check your current password.".to_string());
     }
 
@@ -238,8 +258,13 @@ pub async fn auth_change_credentials(
     }
 
     let new_salt = uuid::Uuid::new_v4().to_string();
+    let password_for_hash = new_password.clone();
+    let salt_for_hash = new_salt.clone();
+    let new_hash = tokio::task::spawn_blocking(move || {
+        hash_password(&password_for_hash, &salt_for_hash)
+    }).await.map_err(|e| format!("Password hashing task failed: {}", e))?;
     config.username = clean_user.to_string();
-    config.password_hash = hash_password(&new_password, &new_salt);
+    config.password_hash = new_hash;
     config.salt = new_salt;
     config.must_change_password = false;
     config.last_login_at = Some(chrono::Utc::now().timestamp());
