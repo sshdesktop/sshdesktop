@@ -27,16 +27,25 @@ pub async fn setup_ssh_tunnel(
 
     // 2. Resolve SSH connection configuration from memory or disk
     let maybe_conn = crate::ssh::connection::resolve_connection(app_state, &ssh_conn_id);
+    let conn = maybe_conn.as_ref().ok_or_else(|| format!("SSH connection '{}' could not be resolved.", ssh_conn_id))?;
+    let is_key_auth = match conn.config.auth_method.as_deref() {
+        Some("password") => false,
+        Some("key") => true,
+        _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
+    };
+    let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
+    if let Some(key_path) = selected_key_path {
+        if crate::ssh::connection::resolve_key_path(key_path).is_none() {
+            return Err(format!("Selected SSH identity '{}' could not be found.", key_path));
+        }
+    }
+    if !is_key_auth && conn.config.password.as_deref().map(|p| p.is_empty()).unwrap_or(true) {
+        return Err("Password authentication was selected, but no SSH password is configured.".into());
+    }
 
     // 3. Try lazy in-memory persistent SSH session establishment if not already active
     if maybe_handle.is_none() {
         if let Some(ref conn) = maybe_conn {
-            let is_key_auth = match conn.config.auth_method.as_deref() {
-                Some("password") => false,
-                Some("key") => true,
-                _ => conn.config.private_key_path.is_some(),
-            };
-            let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
             let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
             if !is_ppk {
                 if let Ok(new_handle) = crate::ssh::session::connect_session_with_passphrase_auth(
@@ -120,13 +129,21 @@ pub async fn setup_ssh_tunnel(
             l.local_addr().map_err(|e| e.to_string())?.port()
         };
 
-        let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+        let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
         let plink_bin = crate::ssh::connection::get_plink_path();
-
-        let password_file = conn.config.password.as_deref()
-            .filter(|password| !password.is_empty())
-            .map(crate::ssh::connection::create_password_file)
-            .transpose()?;
+        let plink_available = plink_bin != "plink" || std::path::Path::new(plink_bin).exists();
+        let password_file = if !is_key_auth {
+            if !plink_available {
+                return Err("PuTTY Plink is required for password-authenticated database tunnels but was not found.".into());
+            }
+            conn.config.password.as_deref().filter(|p| !p.is_empty())
+                .map(crate::ssh::connection::create_password_file).transpose()?
+        } else {
+            None
+        };
+        if is_ppk && !plink_available {
+            return Err("PuTTY Plink is required for this PPK database tunnel but was not found.".into());
+        }
 
         let mut cmd = if is_ppk || password_file.is_some() {
             let mut c = tokio::process::Command::new(plink_bin);
@@ -139,7 +156,7 @@ pub async fn setup_ssh_tunnel(
              .arg("-P").arg(conn.config.port.to_string())
              .arg("-L").arg(format!("{}:{}:{}", local_port, target_host, target_port))
              .arg("-l").arg(&conn.config.username);
-            if let Some(ref ppk) = conn.config.private_key_path {
+            if let Some(ppk) = selected_key_path {
                 c.arg("-i").arg(ppk);
             }
             if let Some(ref password_file) = password_file {
@@ -158,10 +175,8 @@ pub async fn setup_ssh_tunnel(
              .arg("-o").arg("StrictHostKeyChecking=yes")
              .arg("-o").arg("IdentitiesOnly=yes")
              .arg("-o").arg("ExitOnForwardFailure=yes");
-            if let Some(ref key) = conn.config.private_key_path {
-                if crate::ssh::connection::resolve_key_path(key).is_some() {
-                    c.arg("-i").arg(key);
-                }
+            if let Some(key) = selected_key_path {
+                c.arg("-i").arg(key);
             }
             c.arg(format!("{}@{}", conn.config.username, conn.config.host));
             c
