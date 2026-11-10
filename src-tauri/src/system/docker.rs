@@ -1,3 +1,17 @@
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn valid_container_ref(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 255 && !value.starts_with('-')
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+fn valid_image_ref(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 512 && !value.starts_with('-')
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/' | ':' | '@'))
+}
+
 use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::ssh::exec::run_cmd;
@@ -151,16 +165,16 @@ pub async fn docker_action(
         _ => return Err(format!("Invalid docker action: {}", action)),
     };
 
-    // Sanitize container id (hex or name)
-    if container_id.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')' | ' ' | '\n' | '\r')) {
-        return Err("Invalid container ID.".into());
+    if !valid_container_ref(&container_id) {
+        return Err("Invalid container ID or name.".into());
     }
+    let container_arg = shell_quote(&container_id);
 
     let force = if safe_action == "rm" { " -f" } else { "" };
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        &format!("docker {}{} '{}' 2>&1", safe_action, force, container_id.replace('\'', "")),
+        &format!("docker {}{} {} 2>&1", safe_action, force, container_arg),
     ).await;
 
     if code == -1 {
@@ -181,14 +195,15 @@ pub async fn docker_logs(
     container_id: String,
     lines: u32,
 ) -> Result<String, String> {
-    if container_id.chars().any(|c| c == ';' || c == '&' || c == '`' || c == '$') {
-        return Err("Invalid container ID.".into());
+    if !valid_container_ref(&container_id) {
+        return Err("Invalid container ID or name.".into());
     }
+    let container_arg = shell_quote(&container_id);
 
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        &format!("docker logs --tail {} {} 2>&1", lines.min(2000), container_id),
+        &format!("docker logs --tail {} {} 2>&1", lines.min(2000), container_arg),
     ).await;
 
     if code == -1 {
@@ -257,7 +272,7 @@ pub async fn docker_exec(
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        &format!("docker exec {} sh -c '{}' 2>&1", container_id, command.replace('\'', r"'\''")),
+        &format!("docker exec {} sh -c {} 2>&1", container_arg, shell_quote(&command)),
     ).await;
 
     if code == -1 {
@@ -283,15 +298,16 @@ pub async fn docker_image_remove(
     conn_id: String,
     image_id: String,
 ) -> Result<String, String> {
-    if image_id.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')')) {
-        return Err("Invalid image ID.".into());
+    if !valid_image_ref(&image_id) {
+        return Err("Invalid image identifier.".into());
     }
+    let image_arg = shell_quote(&image_id);
 
     // Safety check: verify no active or stopped containers use this image
     let (chk, _) = run_cmd(
         &state,
         &conn_id,
-        &format!("docker ps -a --filter ancestor='{}' --format '{{{{.Names}}}} ({{{{.Status}}}})' 2>&1", image_id),
+        &format!("docker ps -a --filter ancestor={} --format '{{{{.Names}}}} ({{{{.Status}}}})' 2>&1", image_arg),
     ).await;
     let chk_trimmed = chk.trim();
     if !chk_trimmed.is_empty() && !chk_trimmed.contains("error") && !chk_trimmed.contains("unknown flag") {
@@ -305,7 +321,7 @@ pub async fn docker_image_remove(
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        &format!("docker rmi '{}' 2>&1", image_id),
+        &format!("docker rmi {} 2>&1", image_arg),
     ).await;
 
     if code == -1 {
