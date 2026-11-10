@@ -33,7 +33,7 @@ use super::types::{
     ActiveDatabaseSession, BatchStatementResult, ColumnMeta, DatabaseConnectionConfig,
     DatabaseObject, DriverInstance, QueryResult, ServerCapabilities,
 };
-use super::serialization::{serialize_sqlite_row, split_sql_statements};
+use super::serialization::{serialize_sqlite_row, split_sql_statements_for_engine};
 use super::tunnel::from_base64;
 
 pub async fn connect_sqlite(
@@ -154,7 +154,7 @@ pub async fn execute_query_sqlite(
     state: &crate::AppState,
     start: Instant,
 ) -> Result<QueryResult, String> {
-    let statements = split_sql_statements(query);
+    let statements = split_sql_statements_for_engine(query, "sqlite");
     if statements.is_empty() {
         return Err("Query string is empty".to_string());
     }
