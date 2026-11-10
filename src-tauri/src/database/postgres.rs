@@ -1,3 +1,4 @@
+use futures::TryStreamExt;
 use std::time::Instant;
 use super::types::{
     ActiveDatabaseSession, BatchStatementResult, ColumnMeta, DatabaseConnectionConfig,
@@ -140,10 +141,21 @@ pub async fn execute_query_postgres(
                 error: None,
             });
         } else {
-            let rows = sqlx::raw_sql(stmt)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| format!("PostgreSQL error (statement {}/{}): {}", stmt_idx + 1, num_stmts, e))?;
+            let mut row_stream = sqlx::raw_sql(stmt).fetch(pool);
+            let mut rows = Vec::with_capacity(limit.min(1024));
+            while let Some(row) = row_stream.try_next().await
+                .map_err(|e| format!("PostgreSQL error (statement {}/{}): {}", stmt_idx + 1, num_stmts, e))?
+            {
+                rows.push(row);
+                if rows.len() > limit {
+                    break;
+                }
+            }
+            let truncated = rows.len() > limit;
+            if truncated {
+                rows.truncate(limit);
+                warnings.push(format!("Statement {}/{}: result truncated to {} rows", stmt_idx + 1, num_stmts, limit));
+            }
 
             let mut cols_meta = Vec::new();
             let mut json_rows = Vec::new();
