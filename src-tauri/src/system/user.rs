@@ -402,12 +402,11 @@ pub async fn user_lock(
         return Err("Cannot lock the root superuser account.".into());
     }
 
-    // Comprehensive lock:
-    // 1. Set expiration date to 1 (day after epoch) -> disables all SSH key and password logins
-    // 2. Lock password hash with usermod -L or passwd -l
+    // An expired account blocks password and public-key login. Do not fall
+    // back to password-hash locking alone, which would still permit SSH keys.
     let cmd = format!(
-        "usermod -L -e 1 '{}' 2>&1 || (usermod -L '{}' 2>&1; usermod -e 1 '{}' 2>&1) || passwd -l '{}' 2>&1",
-        username, username, username, username
+        "if usermod -L -e 1970-01-02 '{}' 2>&1; then exit 0; fi; if chage -E 1970-01-02 '{}' 2>&1; then passwd -l '{}' 2>/dev/null || true; exit 0; fi; echo 'Unable to set account expiration; account was not fully locked' >&2; exit 1",
+        username, username, username
     );
     let (out, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
     if code == -1 {
