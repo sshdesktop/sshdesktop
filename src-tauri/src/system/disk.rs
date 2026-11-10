@@ -768,10 +768,27 @@ DEV={dev}
 NUM={num}
 PDEV={pdev}
 
-if [ -b "$PDEV" ]; then
-    swapoff "$PDEV" 2>/dev/null || true
-    umount -f -l "$PDEV" 2>/dev/null || true
+# Fail closed before destructive partition-table changes.
+[ -b "$DEV" ] || { echo "Refusing partition deletion: target disk is not a block device." >&2; exit 20; }
+[ -b "$PDEV" ] || { echo "Refusing partition deletion: target partition is not a block device." >&2; exit 21; }
+DEV_REAL=$(readlink -f -- "$DEV") || exit 22
+PDEV_REAL=$(readlink -f -- "$PDEV") || exit 23
+if ! lsblk -nrpo NAME "$DEV_REAL" | while IFS= read -r NODE; do
+    [ "$(readlink -f -- "$NODE" 2>/dev/null)" = "$PDEV_REAL" ] && exit 0
+done; then
+    echo "Refusing partition deletion: selected partition does not belong to the selected disk." >&2
+    exit 25
 fi
+for NODE in $(lsblk -nrpo NAME "$DEV_REAL") $(lsblk -s -nrpo NAME "$DEV_REAL"); do
+    if findmnt -rn -S "$NODE" >/dev/null 2>&1; then
+        echo "Refusing partition deletion: $NODE is mounted. Unmount it explicitly first." >&2
+        exit 26
+    fi
+    if swapon --noheadings --raw --show=NAME 2>/dev/null | grep -Fxq -- "$NODE"; then
+        echo "Refusing partition deletion: $NODE is active swap. Disable it explicitly first." >&2
+        exit 27
+    fi
+done
 
 if command -v parted >/dev/null 2>&1; then
     parted -s "$DEV" rm "$NUM"
