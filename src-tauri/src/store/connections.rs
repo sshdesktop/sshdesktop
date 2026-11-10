@@ -92,6 +92,11 @@ fn get_storage_path() -> PathBuf {
 
 pub fn read_connections_from_disk() -> Vec<SavedConnection> {
     let path = get_storage_path();
+    #[cfg(unix)]
+    if path.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
     if let Ok(content) = fs::read_to_string(&path) {
         if let Ok(mut list) = serde_json::from_str::<Vec<SavedConnection>>(&content) {
             let migrated_legacy_password = hydrate_connection_passwords(&mut list);
