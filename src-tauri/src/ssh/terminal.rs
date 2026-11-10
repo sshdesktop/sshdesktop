@@ -14,6 +14,7 @@ pub struct TerminalSession {
     pub created_at: i64,
     pub tx: Option<UnboundedSender<Vec<u8>>>,
     pub child_pid: Option<u32>,
+    pub password_file: Option<Arc<crate::ssh::connection::SshPasswordFile>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -227,6 +228,7 @@ pub async fn terminal_create(
                         created_at: chrono::Utc::now().timestamp(),
                         tx: Some(tx),
                         child_pid: None,
+                        password_file: None,
                     };
                     state.terminals.lock().insert(term_id.clone(), session);
                     return Ok(term_id);
@@ -239,7 +241,14 @@ pub async fn terminal_create(
     }
 
     // ── 2. Fallback Path: CLI PTY process (plink or openssh) ────────────────
-    crate::ssh::connection::cleanup_putty_host_key(&host, &port);
+    let password_file = if !is_key_auth {
+        match password.as_deref().filter(|p| !p.is_empty()) {
+            Some(pwd) => Some(Arc::new(crate::ssh::connection::create_password_file(pwd)?)),
+            None => None,
+        }
+    } else {
+        None
+    };
 
     let mut cmd = if is_key_auth {
         if is_ppk {
@@ -272,7 +281,7 @@ pub async fn terminal_create(
             .arg("-t") // Force pseudo-terminal
             .arg("-P").arg(&port)
             .arg("-l").arg(&user)
-            .arg("-pw").arg(password.as_ref().unwrap())
+            .arg("-pwfile").arg(password_file.as_ref().ok_or_else(|| "Password file unavailable".to_string())?.path())
             .arg(&host);
         c
     } else {
@@ -374,6 +383,7 @@ pub async fn terminal_create(
         created_at: chrono::Utc::now().timestamp(),
         tx: Some(tx),
         child_pid,
+        password_file,
     };
 
     state.terminals.lock().insert(term_id.clone(), session);
@@ -460,11 +470,8 @@ pub async fn ssh_launch_putty(
         .arg("-l")
         .arg(&conn.config.username);
 
-    if let Some(ref pwd) = conn.config.password {
-        if !pwd.is_empty() {
-            cmd.arg("-pw").arg(pwd);
-        }
-    }
+    // PuTTY is launched interactively: let it prompt for a password rather than
+    // exposing credentials in its process arguments.
 
     if let Some(ref key) = conn.config.private_key_path {
         if !key.is_empty() {
