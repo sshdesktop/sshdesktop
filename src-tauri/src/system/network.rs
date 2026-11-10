@@ -116,7 +116,13 @@ pub async fn network_ports(
 
     if list.is_empty() {
         // Fallback: netstat -tunlp
-        let (n_out, _) = run_cmd(&state, &conn_id, "netstat -tunlp 2>/dev/null").await;
+        let (n_out, n_code) = run_cmd(&state, &conn_id, "netstat -tunlp 2>/dev/null").await;
+        if n_code == -1 {
+            return Err("No active SSH connection.".into());
+        }
+        if n_code != 0 && n_out.is_empty() {
+            return Err("Unable to inspect listening ports: neither ss nor netstat is available.".into());
+        }
         for line in n_out.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 6 && (parts[0].starts_with("tcp") || parts[0].starts_with("udp")) {
@@ -178,8 +184,11 @@ pub async fn network_connections(
 ) -> Result<Vec<ActiveConnection>, String> {
     let (stdout, code) = run_cmd(&state, &conn_id, "ss -tnp state established 2>/dev/null").await;
 
-    if code == -1 && stdout.is_empty() {
+    if code == -1 {
         return Err("No active SSH connection.".into());
+    }
+    if code != 0 && stdout.is_empty() {
+        return Err("Unable to inspect established connections: ss is unavailable or failed.".into());
     }
 
     let mut list = Vec::new();
@@ -232,11 +241,14 @@ pub async fn network_ping(
         return Err("No active SSH connection.".into());
     }
 
+    if code != 0 {
+        return Err(format!("Ping to '{}' failed: {}", host, stdout.trim()));
+    }
     if !stdout.is_empty() {
         return Ok(stdout);
     }
 
-    Err(format!("ping to '{}' returned no output.", host))
+    Err(format!("Ping to '{}' returned no output.", host))
 }
 
 #[tauri::command]
