@@ -19,6 +19,7 @@ pub struct ActiveTunnel {
     pub info: TunnelInfo,
     pub child: Option<tokio::process::Child>,
     pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    pub password_file: Option<Arc<crate::ssh::connection::SshPasswordFile>>,
 }
 
 async fn handle_socks5_client(
@@ -324,6 +325,7 @@ pub async fn ssh_start_tunnel(
                     info: tunnel_info,
                     child: None,
                     shutdown_tx: Some(shutdown_tx),
+                    password_file: None,
                 });
             }
 
@@ -339,6 +341,12 @@ pub async fn ssh_start_tunnel(
     let is_pem_key = conn.config.private_key_path.as_deref().map(|k| !k.trim().is_empty() && !crate::ssh::connection::is_ppk_key(k)).unwrap_or(false);
     // Never use Plink for PEM keys (Plink only supports PuTTY .ppk keys)
     let prefer_plink = !is_pem_key && (is_ppk || has_password) && plink_available;
+    let password_file = if has_password && plink_available && !is_pem_key {
+        let password = conn.config.password.as_deref().unwrap_or_default();
+        Some(Arc::new(crate::ssh::connection::create_password_file(password)?))
+    } else {
+        None
+    };
 
     let mut spawned = false;
     let mut child_handle: Option<tokio::process::Child> = None;
@@ -401,10 +409,8 @@ pub async fn ssh_start_tunnel(
             cmd.arg("-L").arg(&forward_arg);
         }
 
-        if let Some(pwd) = &conn.config.password {
-            if !pwd.is_empty() {
-                cmd.arg("-pw").arg(pwd);
-            }
+        if let Some(password_file) = &password_file {
+            cmd.arg("-pwfile").arg(password_file.path());
         }
 
         if let Some(key) = &conn.config.private_key_path {
@@ -578,6 +584,7 @@ pub async fn ssh_start_tunnel(
             info: tunnel_info,
             child: child_handle,
             shutdown_tx: None,
+            password_file: password_file.clone(),
         });
     }
 
@@ -797,6 +804,7 @@ pub async fn ssh_start_socks5(
                 info: tunnel_info,
                 child: None,
                 shutdown_tx: Some(shutdown_tx),
+                password_file: None,
             });
         }
 
@@ -810,6 +818,12 @@ pub async fn ssh_start_socks5(
     let has_password = conn.config.password.as_deref().map(|p| !p.trim().is_empty()).unwrap_or(false);
     let is_pem_key = conn.config.private_key_path.as_deref().map(|k| !k.trim().is_empty() && !crate::ssh::connection::is_ppk_key(k)).unwrap_or(false);
     let prefer_plink = !is_pem_key && (is_ppk || has_password) && plink_available;
+    let password_file = if has_password && plink_available && !is_pem_key {
+        let password = conn.config.password.as_deref().unwrap_or_default();
+        Some(Arc::new(crate::ssh::connection::create_password_file(password)?))
+    } else {
+        None
+    };
 
     let mut spawned = false;
     let mut child_handle: Option<tokio::process::Child> = None;
@@ -856,10 +870,8 @@ pub async fn ssh_start_socks5(
             .arg("-l").arg(&user)
             .arg("-D").arg(format!("127.0.0.1:{}", effective_local_port));
 
-        if let Some(pwd) = &conn.config.password {
-            if !pwd.is_empty() {
-                cmd.arg("-pw").arg(pwd);
-            }
+        if let Some(password_file) = &password_file {
+            cmd.arg("-pwfile").arg(password_file.path());
         }
 
         if let Some(key) = &conn.config.private_key_path {
