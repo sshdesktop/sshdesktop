@@ -1,3 +1,14 @@
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn valid_package_name(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && value.len() <= 200
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '_' | ':' | '@' | '=' | '-'))
+}
+
 use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::ssh::exec::{run_cmd, run_cmd_priv};
@@ -105,9 +116,10 @@ pub async fn package_search(
     query: String,
 ) -> Result<Vec<PackageInfo>, String> {
     // Validate query
-    if query.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')')) {
-        return Err("Invalid search query.".into());
+    if query.trim().is_empty() || query.len() > 128 || query.chars().any(|c| c.is_control()) {
+        return Err("Search query must be 1–128 characters and contain no control characters.".into());
     }
+    let query_arg = shell_quote(query.trim());
 
     let pm = detect_pkg_manager(&state, &conn_id).await;
 
@@ -115,17 +127,17 @@ pub async fn package_search(
         "apt" => run_cmd(
             &state,
             &conn_id,
-            &format!("apt-cache search '{}' 2>/dev/null | head -n 20", query),
+            &format!("apt-cache search {} 2>/dev/null | head -n 20", query_arg),
         ).await,
         "dnf" => run_cmd(
             &state,
             &conn_id,
-            &format!("dnf search '{}' 2>/dev/null | grep -v '^=\\|^Last' | head -n 20", query),
+            &format!("dnf search {} 2>/dev/null | grep -v '^=\\|^Last' | head -n 20", query_arg),
         ).await,
         "yum" => run_cmd(
             &state,
             &conn_id,
-            &format!("yum search '{}' 2>/dev/null | head -n 20", query),
+            &format!("yum search {} 2>/dev/null | head -n 20", query_arg),
         ).await,
         _ => return Err("No supported package manager found.".into()),
     };
@@ -494,15 +506,15 @@ fn build_install_command(pm: &str, raw_name: &str) -> (String, Option<String>) {
 
     // Generic fallback for any other package name
     let install_cmd = match pm {
-        "dnf" => format!("dnf install -y '{}' 2>&1", name),
-        "yum" => format!("yum install -y '{}' 2>&1", name),
-        "pacman" => format!("pacman -S --noconfirm '{}' 2>&1", name),
-        "zypper" => format!("zypper --non-interactive in '{}' 2>&1", name),
-        "apk" => format!("apk add --no-cache '{}' 2>&1", name),
-        _ => format!("DEBIAN_FRONTEND=noninteractive apt-get install -y '{}' 2>&1", name),
+        "dnf" => format!("dnf install -y {} 2>&1", package_arg),
+        "yum" => format!("yum install -y {} 2>&1", package_arg),
+        "pacman" => format!("pacman -S --noconfirm {} 2>&1", package_arg),
+        "zypper" => format!("zypper --non-interactive in {} 2>&1", package_arg),
+        "apk" => format!("apk add --no-cache {} 2>&1", package_arg),
+        _ => format!("DEBIAN_FRONTEND=noninteractive apt-get install -y {} 2>&1", package_arg),
     };
 
-    let post = format!("if systemctl list-unit-files '{name}.service' >/dev/null 2>&1; then systemctl enable --now '{name}' 2>/dev/null || true; fi", name = name);
+    let post = format!("if systemctl list-unit-files {} >/dev/null 2>&1; then systemctl enable --now {} 2>/dev/null || true; fi", shell_quote(&format!("{}.service", name)), package_arg);
     (install_cmd, Some(post))
 }
 
@@ -512,9 +524,10 @@ pub async fn package_install(
     conn_id: String,
     name: String,
 ) -> Result<String, String> {
-    if name.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')')) {
-        return Err("Invalid package name.".into());
+    if !valid_package_name(&name) {
+        return Err("Invalid package name. Use letters, numbers, '.', '+', '_', ':', '@', '=' or '-'.".into());
     }
+    let package_arg = shell_quote(&name);
 
     let pm = detect_pkg_manager(&state, &conn_id).await;
     let (install_cmd, post_setup) = build_install_command(&pm, &name);
@@ -556,32 +569,32 @@ pub async fn package_remove(
             if is_mysql {
                 "DEBIAN_FRONTEND=noninteractive apt-get remove -y mysql-server default-mysql-server mariadb-server 2>&1 && (systemctl daemon-reload 2>/dev/null || true)".to_string()
             } else {
-                format!("DEBIAN_FRONTEND=noninteractive apt-get remove -y '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name)
+                format!("DEBIAN_FRONTEND=noninteractive apt-get remove -y {} 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", package_arg)
             }
         },
         "dnf" => {
             if is_mysql {
                 "dnf remove -y mysql-server mariadb-server mariadb105-server mariadb 2>&1 && (systemctl daemon-reload 2>/dev/null || true)".to_string()
             } else {
-                format!("dnf remove -y '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name)
+                format!("dnf remove -y {} 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", package_arg)
             }
         },
         "yum" => {
             if is_mysql {
                 "yum remove -y mysql-server mariadb-server mariadb 2>&1 && (systemctl daemon-reload 2>/dev/null || true)".to_string()
             } else {
-                format!("yum remove -y '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name)
+                format!("yum remove -y {} 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", package_arg)
             }
         },
         "pacman" => {
             if is_mysql {
                 "pacman -R --noconfirm mariadb mariadb-clients mysql 2>&1 && (systemctl daemon-reload 2>/dev/null || true)".to_string()
             } else {
-                format!("pacman -R --noconfirm '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name)
+                format!("pacman -R --noconfirm {} 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", package_arg)
             }
         },
-        "zypper" => format!("zypper --non-interactive rm '{}' 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", name),
-        "apk" => format!("apk del '{}' 2>&1", name),
+        "zypper" => format!("zypper --non-interactive rm {} 2>&1 && (systemctl daemon-reload 2>/dev/null || true)", package_arg),
+        "apk" => format!("apk del {} 2>&1", package_arg),
         _ => return Err("No supported package manager found.".into()),
     };
 
