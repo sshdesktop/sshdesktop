@@ -1,3 +1,13 @@
+fn valid_http_header_name(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+    })
+}
+
+fn valid_http_header_value(value: &str) -> bool {
+    value.bytes().all(|b| b == b'\t' || (b >= 0x20 && b != 0x7f))
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -102,6 +112,11 @@ pub async fn api_send_request(
     {
         return Err("A request header or query parameter exceeds the supported size limit.".into());
     }
+    for header in req.headers.iter().filter(|h| h.enabled && !h.key.trim().is_empty()) {
+        if !valid_http_header_name(header.key.trim()) || !valid_http_header_value(&header.value) {
+            return Err("Invalid HTTP header name or value.".into());
+        }
+    }
     if req.raw_body.as_ref().map(|b| b.len() > 10 * 1024 * 1024).unwrap_or(false)
         || req.form_data.as_ref().map(|items| items.iter().filter(|i| i.enabled).fold(0usize, |total, i| total.saturating_add(i.key.len()).saturating_add(i.value.len())) > 10 * 1024 * 1024).unwrap_or(false)
     {
@@ -199,7 +214,7 @@ async fn execute_remote_ssh_request(
         return Err(format!("Unsupported HTTP method '{}'", req.method));
     }
     let timeout_secs = req.timeout_seconds.unwrap_or(30).clamp(1, 300);
-    let mut curl_args = format!("-s -S -i -X {} --max-time {} --max-filesize 10485760", method, timeout_secs);
+    let mut curl_args = format!("-s -S -i --globoff --proto =http,https --proto-redir =http,https -X {} --max-time {} --max-filesize 10485760", method, timeout_secs);
 
     if req.follow_redirects.unwrap_or(true) {
         curl_args.push_str(" -L");
