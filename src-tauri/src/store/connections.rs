@@ -1,3 +1,32 @@
+fn write_connections_file(path: &std::path::Path, content: &str) -> Result<(), String> {
+    let parent = path.parent().ok_or_else(|| "Connection storage path has no parent directory.".to_string())?;
+    fs::create_dir_all(parent).map_err(|e| format!("Failed to create connection storage directory: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let temp = parent.join(format!(".connections-{}.tmp", uuid::Uuid::new_v4().simple()));
+        let result = (|| -> Result<(), String> {
+            let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+                .open(&temp).map_err(|e| format!("Failed to create temporary connection file: {}", e))?;
+            file.write_all(content.as_bytes()).map_err(|e| format!("Failed to write connections: {}", e))?;
+            file.sync_all().map_err(|e| format!("Failed to flush connections: {}", e))?;
+            fs::rename(&temp, path).map_err(|e| format!("Failed to replace connections file: {}", e))?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("Failed to secure connections file: {}", e))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        result
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, content).map_err(|e| e.to_string())
+    }
+}
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -144,21 +173,10 @@ pub fn write_connections_to_disk(list: &[SavedConnection]) -> Result<(), String>
         connection.password = None;
     }
     let json = serde_json::to_string_pretty(&sanitized).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true).mode(0o600);
-        use std::io::Write;
-        let mut file = options.open(&path).map_err(|e| e.to_string())?;
-        file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
+    if json.len() > 8 * 1024 * 1024 {
+        return Err("Connection storage exceeds the 8 MiB limit.".into());
     }
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, json).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    write_connections_file(&path, &json)
 }
 
 fn sanitize_connection_secrets(connection: &mut SavedConnection) {
