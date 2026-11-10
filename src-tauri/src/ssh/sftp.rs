@@ -468,6 +468,7 @@ pub async fn sftp_download(
     let src = format!("{}@{}:{}", user, host, remote_path);
 
     let mut cmd = tokio::process::Command::new("scp");
+    cmd.kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     cmd.arg("-P").arg(&port)
@@ -521,6 +522,7 @@ pub async fn sftp_upload(
     let dst = format!("{}@{}:{}", user, host, remote_path);
 
     let mut cmd = tokio::process::Command::new("scp");
+    cmd.kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     cmd.arg("-P").arg(&port)
@@ -618,6 +620,7 @@ pub async fn sftp_download_to_downloads(
         let password_file = crate::ssh::connection::create_password_file(pwd)?;
         let src = format!("{}@{}:{}", user, host, remote_path);
         let mut cmd = tokio::process::Command::new("pscp");
+    cmd.kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000);
         cmd.arg("-P").arg(&port)
@@ -646,6 +649,7 @@ pub async fn sftp_download_to_downloads(
 
     let src = format!("{}@{}:{}", user, host, remote_path);
     let mut cmd = tokio::process::Command::new("scp");
+    cmd.kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     cmd.arg("-P").arg(&port)
