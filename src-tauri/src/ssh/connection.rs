@@ -259,27 +259,62 @@ pub fn write_secure_private_key(path: &std::path::Path, data: &[u8]) -> Result<(
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|e| format!("Failed to create private key file with mode 0600: {}", e))?;
-        file.write_all(data)
-            .map_err(|e| format!("Failed to write private key data: {}", e))?;
-        // OpenOptionsExt::mode only applies when the file is newly created.
-        // Existing key files must also be chmod'd after truncation.
-        secure_private_key_permissions(path)?;
-        file.sync_all()
-            .map_err(|e| format!("Failed to flush private key data: {}", e))?;
-        Ok(())
+        let parent = path.parent().ok_or_else(|| "Private key path has no parent directory.".to_string())?;
+        let temp = parent.join(format!(".sshdesktop-key-{}.tmp", Uuid::new_v4().simple()));
+        let result = (|| -> Result<(), String> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp)
+                .map_err(|e| format!("Failed to create protected temporary private key: {}", e))?;
+            file.write_all(data).map_err(|e| format!("Failed to write private key data: {}", e))?;
+            file.sync_all().map_err(|e| format!("Failed to flush private key data: {}", e))?;
+            std::fs::rename(&temp, path)
+                .map_err(|e| format!("Failed to atomically replace private key: {}", e))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        result
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        std::fs::write(path, data)
-            .map_err(|e| format!("Failed to write private key: {}", e))?;
-        secure_private_key_permissions(path)?;
+        use std::io::Write;
+        use std::os::windows::ffi::OsStrExt;
+        let parent = path.parent().ok_or_else(|| "Private key path has no parent directory.".to_string())?;
+        let temp = parent.join(format!(".sshdesktop-key-{}.tmp", Uuid::new_v4().simple()));
+        let result = (|| -> Result<(), String> {
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)
+                .map_err(|e| format!("Failed to create temporary private key: {}", e))?;
+            secure_private_key_permissions(&temp)?;
+            file.write_all(data).map_err(|e| format!("Failed to write private key: {}", e))?;
+            file.sync_all().map_err(|e| format!("Failed to flush private key: {}", e))?;
+            #[link(name = "Kernel32")]
+            extern "system" {
+                fn MoveFileExW(existing_name: *const u16, new_name: *const u16, flags: u32) -> i32;
+            }
+            const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+            const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+            let source: Vec<u16> = temp.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+            let destination: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+            let replaced = unsafe {
+                MoveFileExW(source.as_ptr(), destination.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+            };
+            if replaced == 0 {
+                return Err(format!("Failed to atomically replace private key: {}", std::io::Error::last_os_error()));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        result
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::fs::write(path, data).map_err(|e| format!("Failed to write private key: {}", e))?;
         Ok(())
     }
 }

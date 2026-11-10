@@ -30,9 +30,25 @@ fn write_connections_file(path: &std::path::Path, content: &str) -> Result<(), S
                 .open(&temp).map_err(|e| format!("Failed to create temporary connection file: {}", e))?;
             file.write_all(content.as_bytes()).map_err(|e| format!("Failed to write connections: {}", e))?;
             file.sync_all().map_err(|e| format!("Failed to flush connections: {}", e))?;
-            if path.exists() {
-                let _ = fs::remove_file(path);
+            #[cfg(windows)]
+            {
+                use std::os::windows::ffi::OsStrExt;
+                #[link(name = "Kernel32")]
+                extern "system" {
+                    fn MoveFileExW(existing_name: *const u16, new_name: *const u16, flags: u32) -> i32;
+                }
+                const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+                const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+                let source: Vec<u16> = temp.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+                let destination: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+                let replaced = unsafe {
+                    MoveFileExW(source.as_ptr(), destination.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+                };
+                if replaced == 0 {
+                    return Err(format!("Failed to atomically replace connections file: {}", std::io::Error::last_os_error()));
+                }
             }
+            #[cfg(not(windows))]
             fs::rename(&temp, path).map_err(|e| format!("Failed to replace connections file: {}", e))?;
             Ok(())
         })();

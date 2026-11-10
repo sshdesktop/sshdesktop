@@ -807,11 +807,11 @@ pub async fn ssh_exec_stream(
     if conn_id.trim().is_empty() || command.len() > 1024 * 1024 {
         return Err("A connection ID and command (maximum 1 MiB) are required.".into());
     }
-    {
-        let streams = EXEC_STREAMS.lock();
-        if streams.contains_key(&stream_id) {
-            return Err("An execution stream with this ID is already running.".into());
-        }
+    // Reserve the ID under one lock from duplicate check through insertion.
+    // The task waits on a oneshot until its abort handle has been registered.
+    let mut streams = EXEC_STREAMS.lock();
+    if streams.contains_key(&stream_id) {
+        return Err("An execution stream with this ID is already running.".into());
     }
 
     let app_clone = app.clone();
@@ -910,7 +910,8 @@ pub async fn ssh_exec_stream(
         let _ = app_clone.emit("exec-output", chunk);
     });
 
-    EXEC_STREAMS.lock().insert(stream_id.clone(), task.abort_handle());
+    streams.insert(stream_id.clone(), task.abort_handle());
+    drop(streams);
     let _ = start_tx.send(());
     Ok(())
 }
