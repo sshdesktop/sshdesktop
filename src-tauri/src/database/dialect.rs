@@ -1,22 +1,50 @@
 fn validate_sql_type(value: &str) -> Result<String, String> {
     let ty = value.trim().to_ascii_uppercase();
-    if ty.is_empty() || ty.len() > 80
-        || !ty.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, ' ' | '_' | '(' | ')' | ',' | '[' | ']'))
-        || !ty.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false)
-    {
+    const TYPES: &[&str] = &[
+        "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT",
+        "SERIAL", "BIGSERIAL", "SMALLSERIAL", "DECIMAL", "NUMERIC", "NUMBER",
+        "REAL", "FLOAT", "DOUBLE", "DOUBLE PRECISION", "BIT", "BOOLEAN", "BOOL",
+        "CHAR", "CHARACTER", "VARCHAR", "VARCHAR2", "NCHAR", "NVARCHAR", "NVARCHAR2",
+        "CHARACTER VARYING", "NATIONAL CHARACTER", "NATIONAL CHARACTER VARYING",
+        "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "CLOB", "NCLOB", "DBCLOB",
+        "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "BYTEA", "BINARY",
+        "VARBINARY", "IMAGE", "RAW", "LONG", "LONG RAW", "GRAPHIC", "VARGRAPHIC",
+        "DATE", "TIME", "TIMESTAMP", "DATETIME", "DATETIME2", "SMALLDATETIME",
+        "DATETIMEOFFSET", "YEAR", "UUID", "UNIQUEIDENTIFIER", "JSON", "JSONB",
+        "XML", "MONEY", "SMALLMONEY", "INET", "CIDR", "MACADDR", "INTERVAL",
+        "GEOMETRY", "GEOGRAPHY", "POINT", "LINESTRING", "POLYGON", "DECFLOAT",
+    ];
+    if ty.is_empty() || ty.len() > 80 || ty.chars().any(|ch| ch.is_control()) {
         return Err("Invalid SQL data type.".into());
     }
-    let mut depth = 0i32;
-    for ch in ty.chars() {
-        match ch {
-            '(' => depth += 1,
-            ')' => { depth -= 1; if depth < 0 { return Err("Invalid SQL data type.".into()); } }
-            _ => {}
+
+    let (base, params, suffix) = if let Some(open) = ty.find('(') {
+        let close = ty[open + 1..].find(')').map(|i| open + 1 + i)
+            .ok_or_else(|| "Invalid SQL data type parameters.".to_string())?;
+        if ty[close + 1..].contains(['(', ')']) {
+            return Err("Invalid SQL data type parameters.".into());
         }
-        if depth > 1 { return Err("Invalid SQL data type.".into()); }
+        (&ty[..open], Some(&ty[open + 1..close]), ty[close + 1..].trim())
+    } else {
+        if ty.contains(')') {
+            return Err("Invalid SQL data type parameters.".into());
+        }
+        (ty.as_str(), None, "")
+    };
+    let base = base.trim();
+    if !TYPES.contains(&base) {
+        return Err("Unsupported SQL data type. Use a standard database type name.".into());
     }
-    if depth != 0 || ty.contains(";;") {
-        return Err("Invalid SQL data type.".into());
+    if let Some(params) = params {
+        if params.is_empty() || !params.split(',').all(|part| {
+            let part = part.trim();
+            part.eq_ignore_ascii_case("MAX") || (!part.is_empty() && part.len() <= 6 && part.bytes().all(|b| b.is_ascii_digit()))
+        }) {
+            return Err("SQL data type parameters must be numeric (or MAX where supported).".into());
+        }
+    }
+    if !matches!(suffix, "" | "UNSIGNED" | "ZEROFILL" | "UNSIGNED ZEROFILL" | "WITH TIME ZONE" | "WITHOUT TIME ZONE") {
+        return Err("Unsupported SQL data type modifier.".into());
     }
     Ok(ty)
 }
@@ -51,7 +79,7 @@ pub fn quote_ident(engine: &str, ident: &str) -> String {
         "mysql" | "mariadb" => format!("`{}`", clean.replace('`', "``")),
         "postgres" | "postgresql" | "sqlite" => format!("\"{}\"", clean.replace('"', "\"\"")),
         "mssql" => format!("[{}]", clean.replace(']', "]]")),
-        _ => clean.to_string(),
+        _ => format!("\"{}\"", clean.replace('"', "\"\"")),
     }
 }
 
