@@ -46,6 +46,9 @@ pub async fn sftp_create_zip_pure(
     {
         return Err("Archive directory, filename, or selected item path is invalid.".into());
     }
+    if items.iter().any(|item| item == &output_filename) {
+        return Err("The output archive cannot also be included in its own input selection.".into());
+    }
 
     let clean_dir = if base_dir == "/" { "/" } else { base_dir.trim_end_matches('/') };
     let archive_path = format!("{}/{}", clean_dir, output_filename);
