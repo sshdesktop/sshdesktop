@@ -175,12 +175,13 @@ pub async fn service_status(
         return Err("No active SSH connection.".into());
     }
 
-    // systemctl status returns exit 3 for inactive services — still valid output
-    if !stdout.is_empty() {
+    // systemctl status uses 3 for inactive/dead units; other non-zero
+    // statuses indicate an actual lookup or execution failure.
+    if code == 0 || code == 3 {
         return Ok(stdout);
     }
 
-    Err(format!("Could not get status for service '{}'", name))
+    Err(format!("Could not get status for service '{}': {}", name, stdout.trim()))
 }
 
 #[tauri::command]
@@ -205,6 +206,9 @@ pub async fn service_logs(
         return Err("No active SSH connection.".into());
     }
 
+    if code != 0 {
+        return Err(format!("Failed to read journal logs for service '{}': {}", name, stdout.trim()));
+    }
     if !stdout.is_empty() {
         return Ok(stdout);
     }
