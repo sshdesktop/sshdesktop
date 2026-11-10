@@ -210,14 +210,18 @@ pub async fn db_execute_query(
                 .unwrap_or(false)
         });
         let upper_compact = upper.split_whitespace().collect::<Vec<_>>().join(" ");
+        let upper_no_ws: String = upper.chars().filter(|c| !c.is_whitespace()).collect();
         let potentially_mutating = [
-            " INTO ", " FOR UPDATE", " FOR SHARE", " LOCK IN SHARE MODE",
-            " NEXTVAL(", " SETVAL(", " PG_ADVISORY", " LOAD_FILE(",
-            " SLEEP(", " BENCHMARK(", " DBLINK_EXEC(", " PG_READ_FILE(",
-            " PG_READ_BINARY_FILE(", " PG_STAT_FILE(", " LO_IMPORT(", " LO_EXPORT(",
-            " PG_TERMINATE_BACKEND(", " PG_CANCEL_BACKEND(", " XP_CMDSHELL",
-            " SP_OACREATE", " OPENROWSET(", " OPENDATASOURCE(",
-        ].iter().any(|needle| upper_compact.contains(needle.trim()));
+            "INTO", "FORUPDATE", "FORSHARE", "LOCKINSHAREMODE",
+            "NEXTVAL(", "SETVAL(", "PG_ADVISORY", "LOAD_FILE(",
+            "SLEEP(", "BENCHMARK(", "DBLINK_EXEC(", "PG_READ_FILE(",
+            "PG_READ_BINARY_FILE(", "PG_STAT_FILE(", "LO_IMPORT(", "LO_EXPORT(",
+            "PG_TERMINATE_BACKEND(", "PG_CANCEL_BACKEND(", "XP_CMDSHELL",
+            "SP_OACREATE", "OPENROWSET(", "OPENDATASOURCE(",
+            "GET_LOCK(", "RELEASE_LOCK(", "PG_SLEEP(", "PG_LS_DIR(",
+            "DBMS_LOCK.", "DBMS_SCHEDULER.",
+        ].iter().any(|needle| upper_no_ws.contains(needle))
+            || upper_compact.contains("LOCK IN SHARE MODE");
         let semicolon_count = normalized.chars().filter(|c| *c == ';').count();
         let has_multiple_statements = semicolon_count > 1
             || (semicolon_count == 1 && !normalized.trim_end().ends_with(';'));
