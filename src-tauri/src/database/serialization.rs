@@ -731,7 +731,7 @@ mod dialect_splitter_tests {
     #[test]
     fn postgres_json_hash_operators_are_not_comments() {
         let statements = split_sql_statements_for_engine(
-            "SELECT payload #> '{\\"items\\"}' FROM docs; SELECT 2;",
+            "SELECT payload #> '{items}' FROM docs; SELECT 2;",
             "postgres",
         );
         assert_eq!(statements.len(), 2);
@@ -749,7 +749,7 @@ mod dialect_splitter_tests {
     #[test]
     fn mysql_hash_comments_work_without_a_space() {
         let statements = split_sql_statements_for_engine(
-            "SELECT 1;#comment without leading space\\nSELECT 2;",
+            "SELECT 1;#comment without leading space\nSELECT 2;",
             "mysql",
         );
         assert_eq!(statements.len(), 2);
