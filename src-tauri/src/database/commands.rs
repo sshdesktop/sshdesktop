@@ -200,12 +200,21 @@ pub async fn db_execute_query(
     if session.config.read_only {
         let normalized = query.trim();
         let upper = normalized.to_ascii_uppercase();
-        let allowed = ["SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "PRAGMA"];
+        let allowed = ["SELECT", "SHOW", "DESCRIBE", "DESC"];
         let is_read = allowed.iter().any(|prefix| {
             upper == *prefix || upper.starts_with(&format!("{} ", prefix)) || upper.starts_with(&format!("{}\\n", prefix))
         });
-        if !is_read || normalized.contains(';') && normalized.trim_end_matches(';').contains(';') {
-            return Err("Read-only session: only a single read/query statement is allowed".to_string());
+        let upper_compact = upper.split_whitespace().collect::<Vec<_>>().join(" ");
+        let potentially_mutating = [
+            " INTO ", " FOR UPDATE", " FOR SHARE", " LOCK IN SHARE MODE",
+            " NEXTVAL(", " SETVAL(", " PG_ADVISORY", " LOAD_FILE(",
+            " SLEEP(", " BENCHMARK(",
+        ].iter().any(|needle| upper_compact.contains(needle.trim()));
+        let semicolon_count = normalized.chars().filter(|c| *c == ';').count();
+        let has_multiple_statements = semicolon_count > 1
+            || (semicolon_count == 1 && !normalized.trim_end().ends_with(';'));
+        if !is_read || potentially_mutating || has_multiple_statements {
+            return Err("Read-only session: only one conservative read/query statement is allowed".to_string());
         }
         // Redis and Mongo use command/query languages where a textual prefix
         // allow-list cannot reliably guarantee read-only semantics.
