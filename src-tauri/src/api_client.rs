@@ -562,12 +562,17 @@ async fn execute_direct_request(
         "form-data" => {
             if let Some(items) = &req.form_data {
                 let mut form = reqwest::multipart::Form::new();
+                let mut total_file_bytes = 0u64;
                 for item in items.iter().filter(|i| i.enabled && !i.key.trim().is_empty()) {
                     if item.item_type.eq_ignore_ascii_case("file") {
                         let metadata = tokio::fs::metadata(&item.value).await
                             .map_err(|e| format!("Failed to inspect multipart file '{}': {}", item.value, e))?;
-                        if !metadata.is_file() || metadata.len() > 10 * 1024 * 1024 {
-                            return Err("Multipart file parts must be regular files no larger than 10 MiB.".into());
+                        if !metadata.is_file() {
+                            return Err("Multipart file parts must be regular files.".into());
+                        }
+                        total_file_bytes = total_file_bytes.saturating_add(metadata.len());
+                        if total_file_bytes > 10 * 1024 * 1024 {
+                            return Err("Combined multipart file data cannot exceed 10 MiB.".into());
                         }
                         let bytes = tokio::fs::read(&item.value).await
                             .map_err(|e| format!("Failed to read multipart file '{}': {}", item.value, e))?;
