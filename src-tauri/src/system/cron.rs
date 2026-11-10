@@ -1,3 +1,29 @@
+fn split_cron_fields_and_command(line: &str, field_count: usize) -> Option<(Vec<&str>, &str)> {
+    let bytes = line.as_bytes();
+    let mut cursor = 0usize;
+    let mut fields = Vec::with_capacity(field_count);
+    while fields.len() < field_count {
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            return None;
+        }
+        let start = cursor;
+        while cursor < bytes.len() && !bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        fields.push(&line[start..cursor]);
+    }
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+    if cursor >= bytes.len() {
+        return None;
+    }
+    Some((fields, &line[cursor..]))
+}
+
 use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::ssh::exec::run_cmd;
@@ -40,13 +66,11 @@ pub async fn cron_list(
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        if parts.len() >= 6 {
-            let schedule = parts[0..5].join(" ");
-            let command  = parts[5..].join(" ");
+        if let Some((fields, command)) = split_cron_fields_and_command(trimmed, 5) {
+            let schedule = fields.join(" ");
             list.push(CronJob {
                 schedule,
-                command,
+                command: command.to_string(),
                 user: "current".into(),
                 line_number: line_num,
             });
@@ -91,15 +115,15 @@ pub async fn cron_list_all(
             continue;
         }
 
-        let parts: Vec<&str> = entry.split_whitespace().collect();
-        // /etc/crontab and cron.d files have: min hr dom mon dow user command
-        // User crontab has: min hr dom mon dow command
-        let (schedule, user, command) = if source.contains("/etc") && parts.len() >= 7 {
-            (parts[0..5].join(" "), parts[5].to_string(), parts[6..].join(" "))
-        } else if parts.len() >= 6 {
-            (parts[0..5].join(" "), "current".to_string(), parts[5..].join(" "))
+        // /etc/crontab and cron.d files include a user field after the schedule.
+        // Preserve the command text exactly; joining split_whitespace() would
+        // silently collapse spaces inside quoted arguments.
+        let (schedule, user, command) = if source.contains("/etc") {
+            let Some((fields, command)) = split_cron_fields_and_command(entry, 6) else { continue; };
+            (fields[..5].join(" "), fields[5].to_string(), command.to_string())
         } else {
-            continue;
+            let Some((fields, command)) = split_cron_fields_and_command(entry, 5) else { continue; };
+            (fields.join(" "), "current".to_string(), command.to_string())
         };
 
         list.push(CronJob { schedule, command, user, line_number: line_num });
