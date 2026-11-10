@@ -931,60 +931,67 @@ pub async fn disk_format_filesystem(
     let clean_dev = device.trim().to_string();
     let dev_path = if clean_dev.starts_with('/') { clean_dev } else { format!("/dev/{}", clean_dev) };
     let clean_fs = fstype.trim().to_lowercase();
+    if !valid_device_path(&dev_path) || !matches!(clean_fs.as_str(), "ext4" | "ext3" | "xfs" | "btrfs" | "vfat" | "fat32" | "ntfs" | "swap") {
+        return Err("Invalid device or unsupported filesystem type.".into());
+    }
+    let lbl = label.as_deref().unwrap_or("").trim();
+    if lbl.len() > 64 || !lbl.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.')) {
+        return Err("Invalid filesystem label.".into());
+    }
+    let dev_arg = shell_quote(&dev_path);
+    let label_arg = shell_quote(lbl);
 
     // Safely unmount partition if mounted
-    let _ = run_sudo(&state, &conn_id, &format!("swapoff '{}' 2>/dev/null || true; umount -f -l '{}' 2>/dev/null || true", dev_path, dev_path)).await;
-
-    let lbl = label.as_deref().unwrap_or("").trim();
+    let _ = run_sudo(&state, &conn_id, &format!("swapoff {0} 2>/dev/null || true; umount -f -l {0} 2>/dev/null || true", dev_arg)).await;
     let format_cmd = match clean_fs.as_str() {
         "ext4" => {
             if !lbl.is_empty() {
-                format!("mkfs.ext4 -F -L '{}' '{}'", lbl, dev_path)
+                format!("mkfs.ext4 -F -L {} {}", label_arg, dev_arg)
             } else {
-                format!("mkfs.ext4 -F '{}'", dev_path)
+                format!("mkfs.ext4 -F {}", dev_arg)
             }
         }
         "ext3" => {
             if !lbl.is_empty() {
-                format!("mkfs.ext3 -F -L '{}' '{}'", lbl, dev_path)
+                format!("mkfs.ext3 -F -L {} {}", label_arg, dev_arg)
             } else {
-                format!("mkfs.ext3 -F '{}'", dev_path)
+                format!("mkfs.ext3 -F {}", dev_arg)
             }
         }
         "xfs" => {
             if !lbl.is_empty() {
-                format!("mkfs.xfs -f -L '{}' '{}'", lbl, dev_path)
+                format!("mkfs.xfs -f -L {} {}", label_arg, dev_arg)
             } else {
-                format!("mkfs.xfs -f '{}'", dev_path)
+                format!("mkfs.xfs -f {}", dev_arg)
             }
         }
         "btrfs" => {
             if !lbl.is_empty() {
-                format!("mkfs.btrfs -f -L '{}' '{}'", lbl, dev_path)
+                format!("mkfs.btrfs -f -L {} {}", label_arg, dev_arg)
             } else {
-                format!("mkfs.btrfs -f '{}'", dev_path)
+                format!("mkfs.btrfs -f {}", dev_arg)
             }
         }
         "vfat" | "fat32" => {
             if !lbl.is_empty() {
-                format!("mkfs.vfat -F 32 -n '{}' '{}'", lbl, dev_path)
+                format!("mkfs.vfat -F 32 -n {} {}", label_arg, dev_arg)
             } else {
-                format!("mkfs.vfat -F 32 '{}'", dev_path)
+                format!("mkfs.vfat -F 32 {}", dev_arg)
             }
         }
         "ntfs" => {
             let q_flag = if quick { "-Q" } else { "-f" };
             if !lbl.is_empty() {
-                format!("mkfs.ntfs {} -L '{}' '{}'", q_flag, lbl, dev_path)
+                format!("mkfs.ntfs {} -L {} {}", q_flag, label_arg, dev_arg)
             } else {
-                format!("mkfs.ntfs {} '{}'", q_flag, dev_path)
+                format!("mkfs.ntfs {} {}", q_flag, dev_arg)
             }
         }
         "swap" => {
             if !lbl.is_empty() {
-                format!("mkswap -L '{}' '{}'", lbl, dev_path)
+                format!("mkswap -L {} {}", label_arg, dev_arg)
             } else {
-                format!("mkswap '{}'", dev_path)
+                format!("mkswap {}", dev_arg)
             }
         }
         other => return Err(format!("Unsupported filesystem type '{}'. Supported: ext4, ext3, xfs, btrfs, vfat, ntfs, swap", other)),
@@ -1009,17 +1016,24 @@ pub async fn disk_set_label(
     let clean_dev = device.trim();
     let clean_fs = fstype.trim().to_lowercase();
     let clean_lbl = label.trim();
+    if !valid_device_path(clean_dev) || clean_lbl.len() > 64
+        || !clean_lbl.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.'))
+    {
+        return Err("Invalid device path or filesystem label.".into());
+    }
+    let dev_arg = shell_quote(clean_dev);
+    let label_arg = shell_quote(clean_lbl);
 
     let cmd = if clean_fs.contains("ext") {
-        format!("e2label '{}' '{}'", clean_dev, clean_lbl)
+        format!("e2label {} {}", dev_arg, label_arg)
     } else if clean_fs == "xfs" {
-        format!("xfs_admin -L '{}' '{}'", clean_lbl, clean_dev)
+        format!("xfs_admin -L {} {}", label_arg, dev_arg)
     } else if clean_fs == "vfat" || clean_fs == "fat32" {
-        format!("fatlabel '{}' '{}'", clean_dev, clean_lbl)
+        format!("fatlabel {} {}", dev_arg, label_arg)
     } else if clean_fs == "btrfs" {
-        format!("btrfs filesystem label '{}' '{}'", clean_dev, clean_lbl)
+        format!("btrfs filesystem label {} {}", dev_arg, label_arg)
     } else if clean_fs == "ntfs" {
-        format!("ntfslabel '{}' '{}'", clean_dev, clean_lbl)
+        format!("ntfslabel {} {}", dev_arg, label_arg)
     } else {
         return Err(format!("Setting label for '{}' filesystem is not supported.", clean_fs));
     };
@@ -1041,8 +1055,11 @@ pub async fn disk_check_filesystem(
     repair: bool,
 ) -> Result<String, String> {
     let clean_dev = device.trim();
+    if !valid_device_path(clean_dev) {
+        return Err("Invalid block device path.".into());
+    }
     let flag = if repair { "-y" } else { "-n" };
-    let cmd = format!("fsck {} '{}' 2>&1", flag, clean_dev);
+    let cmd = format!("fsck {} {} 2>&1", flag, shell_quote(clean_dev));
     let (stdout, _) = run_sudo(&state, &conn_id, &cmd).await;
     Ok(stdout)
 }
