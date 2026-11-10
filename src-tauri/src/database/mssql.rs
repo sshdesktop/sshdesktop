@@ -176,10 +176,28 @@ pub async fn execute_query_mssql(
                         extra: None,
                     });
                 }
-                let val = row
-                    .get::<&str, _>(col_idx)
-                    .map(|s| serde_json::Value::String(s.to_string()))
-                    .unwrap_or(serde_json::Value::Null);
+                let val = if let Ok(Some(v)) = row.try_get::<i64, _>(col_idx) {
+                    serde_json::json!(v)
+                } else if let Ok(Some(v)) = row.try_get::<i32, _>(col_idx) {
+                    serde_json::json!(v)
+                } else if let Ok(Some(v)) = row.try_get::<i16, _>(col_idx) {
+                    serde_json::json!(v)
+                } else if let Ok(Some(v)) = row.try_get::<u8, _>(col_idx) {
+                    serde_json::json!(v)
+                } else if let Ok(Some(v)) = row.try_get::<bool, _>(col_idx) {
+                    serde_json::json!(v)
+                } else if let Ok(Some(v)) = row.try_get::<f64, _>(col_idx) {
+                    serde_json::json!(v)
+                } else if let Ok(Some(v)) = row.try_get::<f32, _>(col_idx) {
+                    serde_json::json!(v)
+                } else if let Ok(Some(v)) = row.try_get::<&str, _>(col_idx) {
+                    serde_json::Value::String(v.to_string())
+                } else if let Ok(Some(v)) = row.try_get::<&[u8], _>(col_idx) {
+                    use base64::Engine;
+                    serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(v))
+                } else {
+                    serde_json::Value::Null
+                };
                 obj.insert(col_name, val);
             }
             json_rows.push(serde_json::Value::Object(obj));
