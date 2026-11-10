@@ -724,9 +724,9 @@ partprobe "$DEV" 2>/dev/null || true
 udevadm settle 2>/dev/null || sleep 1
 "#,
         ensure_parted = ensure_parted_script(),
-        dev = dev_path,
+        dev = shell_quote(&dev_path),
         num = part_number,
-        pdev = pdev
+        pdev = shell_quote(&pdev)
     );
 
     let (stdout, code) = run_sudo(&state, &conn_id, &rm_cmd).await;
