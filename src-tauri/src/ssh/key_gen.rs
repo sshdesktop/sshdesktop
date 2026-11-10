@@ -210,7 +210,7 @@ pub async fn ssh_install_public_key(
     let clean_key = public_key.trim();
     let fields: Vec<&str> = clean_key.split_whitespace().collect();
     if fields.len() < 2 || fields.len() > 3
-        || !fields[0].starts_with("ssh-") && !fields[0].starts_with("ecdsa-")
+        || !(fields[0].starts_with("ssh-") || fields[0].starts_with("ecdsa-") || fields[0].starts_with("sk-ssh-") || fields[0].starts_with("sk-ecdsa-"))
         || !fields[0].bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
     {
         return Err("Invalid SSH public key format".into());
@@ -232,7 +232,7 @@ pub async fn ssh_install_public_key(
 
     // Never interpolate public-key data into a remote shell command. Send it
     // over the SSH channel stdin after creating the protected destination file.
-    let install_cmd = "umask 077 && mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && echo KEY_INSTALLED_OK";
+    let install_cmd = "IFS= read -r key_line && umask 077 && mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qxF -- \"$key_line\" ~/.ssh/authorized_keys || printf '%s\\n' \"$key_line\" >> ~/.ssh/authorized_keys) && chmod 600 ~/.ssh/authorized_keys && echo KEY_INSTALLED_OK";
     let (output, code) = crate::ssh::session::run_exec_channel_with_stdin(handle, install_cmd, key_line.as_bytes())
         .await
         .map_err(|e| format!("Failed to execute key installation: {}", e))?;
