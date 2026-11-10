@@ -342,8 +342,11 @@ pub async fn disk_mount(
         let opts_val = options.as_deref().unwrap_or("defaults");
         // Append to /etc/fstab if not already present
         mount_cmd.push_str(&format!(
-            " && (grep -qs '[[:space:]]{}[[:space:]]' /etc/fstab || printf '%s %s %s %s 0 2\\n' '{}' '{}' '{}' '{}' >> /etc/fstab)",
-            clean_mp, device.trim(), clean_mp, fs_val, opts_val
+            " && (grep -Fqs -- {mount_arg} /etc/fstab || printf '%s %s %s %s 0 2\\n' {device_arg} {mount_arg} {fs_arg} {opts_arg} >> /etc/fstab)",
+            mount_arg = mount_arg,
+            device_arg = device_arg,
+            fs_arg = shell_quote(fs_val),
+            opts_arg = shell_quote(opts_val)
         ));
     }
 
@@ -376,12 +379,13 @@ pub async fn disk_unmount(
     if lazy {
         umount_cmd.push_str(" -l");
     }
-    umount_cmd.push_str(&format!(" '{}'", clean_target));
+    let target_arg = shell_quote(clean_target);
+    umount_cmd.push_str(&format!(" {}", target_arg));
 
     if remove_from_fstab {
         umount_cmd.push_str(&format!(
-            " && sed -i '\\#[[:space:]]{}[[:space:]]#d' /etc/fstab 2>/dev/null || true",
-            clean_target
+            " && (tmp=$(mktemp /etc/fstab.XXXXXX) && awk -v target={} '$1 != target && $2 != target' /etc/fstab > \"$tmp\" && cat \"$tmp\" > /etc/fstab && rm -f \"$tmp\")",
+            target_arg
         ));
     }
 
@@ -402,7 +406,15 @@ pub async fn disk_remount(
 ) -> Result<String, String> {
     let clean_mp = mount_point.trim();
     let opts = options.trim();
-    let cmd = format!("mount -o remount,{} '{}'", opts, clean_mp);
+    if !valid_absolute_path(clean_mp) {
+        return Err("Mount point must be an absolute path.".into());
+    }
+    if opts.is_empty() || opts.len() > 512
+        || !opts.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ',' | '=' | '_' | '-' | '.'))
+    {
+        return Err("Invalid remount options.".into());
+    }
+    let cmd = format!("mount -o remount,{} {}", opts, shell_quote(clean_mp));
     let (stdout, code) = run_sudo(&state, &conn_id, &cmd).await;
     if code != 0 {
         return Err(format!("Remount failed (exit code {}): {}", code, stdout.trim()));
