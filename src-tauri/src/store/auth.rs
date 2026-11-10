@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use sha2::{Digest, Sha256};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::SaltString;
+use base64::Engine;
 
 static IS_AUTHENTICATED: AtomicBool = AtomicBool::new(false);
 
@@ -100,8 +101,8 @@ fn verify_password(password: &str, salt: &str, stored: &str) -> bool {
     }
     // Constant-time comparison for legacy SHA-256 hashes during migration.
     let candidate = legacy_sha256_password(password, salt);
-    use subtle::ConstantTimeEq;
-    candidate.as_bytes().ct_eq(stored.as_bytes()).into()
+    if candidate.len() != stored.len() { return false; }
+    candidate.as_bytes().iter().zip(stored.as_bytes()).fold(0u8, |diff, (a, b)| diff | (a ^ b)) == 0
 }
 
 /// Loads or auto-initializes the default admin/admin configuration
