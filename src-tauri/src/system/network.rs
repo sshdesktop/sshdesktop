@@ -1,3 +1,14 @@
+fn valid_host_or_domain(value: &str) -> bool {
+    if value.is_empty() || value.len() > 253 || value.starts_with('-') || value.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']' | '%'))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::AppState;
@@ -206,15 +217,15 @@ pub async fn network_ping(
     conn_id: String,
     host: String,
 ) -> Result<String, String> {
-    // Validate host (no shell metacharacters)
-    if host.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')' | '<' | '>')) {
+    if !valid_host_or_domain(&host) {
         return Err(format!("Invalid host: {}", host));
     }
+    let host_arg = shell_quote(&host);
 
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        &format!("ping -c 4 -W 3 '{}' 2>&1", host),
+        &format!("ping -c 4 -W 3 -- {} 2>&1", host_arg),
     ).await;
 
     if code == -1 {
@@ -234,15 +245,16 @@ pub async fn network_dns_lookup(
     conn_id: String,
     domain: String,
 ) -> Result<String, String> {
-    if domain.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')' | '<' | '>')) {
+    if !valid_host_or_domain(&domain) {
         return Err(format!("Invalid domain: {}", domain));
     }
+    let domain_arg = shell_quote(&domain);
 
     // Try dig first, fall back to host, then nslookup
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        &format!("dig +noall +answer +comments '{}' 2>/dev/null || host '{}' 2>/dev/null || nslookup '{}' 2>&1", domain, domain, domain),
+        &format!("dig +noall +answer +comments -- {0} 2>/dev/null || host -- {0} 2>/dev/null || nslookup {0} 2>&1", domain_arg),
     ).await;
 
     if code == -1 {
