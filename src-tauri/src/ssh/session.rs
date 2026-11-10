@@ -54,19 +54,26 @@ pub async fn run_exec_channel(
     let mut stdout = Vec::new();
     let mut exit_code = 0;
 
-    while let Some(msg) = channel.wait().await {
-        match msg {
-            ChannelMsg::Data { ref data } => {
-                stdout.extend_from_slice(data);
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                ChannelMsg::Data { ref data } => {
+                    stdout.extend_from_slice(data);
+                }
+                ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                    stdout.extend_from_slice(data);
+                }
+                ChannelMsg::ExitStatus { exit_status } => {
+                    exit_code = exit_status as i32;
+                }
+                _ => {}
             }
-            ChannelMsg::ExtendedData { ref data, ext: 1 } => {
-                stdout.extend_from_slice(data);
-            }
-            ChannelMsg::ExitStatus { exit_status } => {
-                exit_code = exit_status as i32;
-            }
-            _ => {}
         }
+    }).await;
+
+    if completed.is_err() {
+        // Dropping the channel closes the SSH channel instead of waiting forever.
+        return Err("Remote command timed out after 120 seconds; SSH channel was closed.".into());
     }
 
     let clean_out = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
