@@ -42,7 +42,7 @@ pub async fn setup_ssh_tunnel(
                     {
                         let mut lock = app_state.sessions.lock().await;
                         lock.insert(conn.id.clone(), arc_h.clone());
-                        lock.insert("default".to_string(), arc_h.clone());
+                        lock.entry("default".to_string()).or_insert_with(|| arc_h.clone());
                     }
                     maybe_handle = Some(arc_h);
                 }
