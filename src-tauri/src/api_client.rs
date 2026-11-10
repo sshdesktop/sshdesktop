@@ -124,7 +124,9 @@ pub async fn api_send_request(
     }
 
     let raw_url = req.url.trim();
-    let formatted_url = if !raw_url.starts_with("http://") && !raw_url.starts_with("https://") {
+    let has_http_scheme = raw_url.get(..7).map(|s| s.eq_ignore_ascii_case("http://")).unwrap_or(false)
+        || raw_url.get(..8).map(|s| s.eq_ignore_ascii_case("https://")).unwrap_or(false);
+    let formatted_url = if !has_http_scheme {
         format!("http://{}", raw_url)
     } else {
         raw_url.to_string()
@@ -503,7 +505,7 @@ async fn execute_direct_request(
 
     let client = builder.build().map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
-    let method = match req.method.to_uppercase().as_str() {
+    let method = match req.method.trim().to_ascii_uppercase().as_str() {
         "GET" => reqwest::Method::GET,
         "POST" => reqwest::Method::POST,
         "PUT" => reqwest::Method::PUT,
