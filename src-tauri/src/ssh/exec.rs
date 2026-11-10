@@ -638,12 +638,17 @@ pub async fn run_cmd_priv_with_stdin(
 
     if let Some(ref pwd) = conn.config.password {
         if !pwd.is_empty() {
+            // Never place the sudo password in a remote shell command or process
+            // argument list. Send it through the SSH channel stdin instead.
             let sudo_s_cmd = format!(
-                "printf '%s\\n' '{}' | sudo -S -p '' -- sh -c '{}' 2>&1",
-                pwd.replace('\'', r"'\''"),
+                "sudo -S -p '' -- sh -c '{}' 2>&1",
                 raw_cmd.replace('\'', r"'\''")
             );
-            let (s_out, s_code) = run_cmd_with_stdin(state, conn_id, &sudo_s_cmd, stdin_data).await;
+            let mut sudo_input = Vec::with_capacity(pwd.len() + 1 + stdin_data.len());
+            sudo_input.extend_from_slice(pwd.as_bytes());
+            sudo_input.push(b'\n');
+            sudo_input.extend_from_slice(stdin_data);
+            let (s_out, s_code) = run_cmd_with_stdin(state, conn_id, &sudo_s_cmd, &sudo_input).await;
             if s_code == 0 {
                 return (s_out, s_code);
             }
