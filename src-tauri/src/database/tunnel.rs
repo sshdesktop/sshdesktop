@@ -13,6 +13,11 @@ pub async fn setup_ssh_tunnel(
         config.host.trim().to_string()
     };
     let target_port = config.port;
+    if target_host.len() > 253 || target_host.chars().any(|c| c.is_control() || c.is_whitespace())
+        || target_port == 0
+    {
+        return Err("Invalid database tunnel target host or port.".into());
+    }
 
     let ssh_conn_id = config.ssh_connection_id.as_deref()
         .filter(|id| !id.trim().is_empty())
