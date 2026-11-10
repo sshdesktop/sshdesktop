@@ -299,16 +299,37 @@ function verifyPassword(auth, password) {
 }
 
 function initializeAuthentication() {
-  let auth = readJsonSafe(AUTH_FILE, null);
+  let auth = null;
+  if (fs.existsSync(AUTH_FILE)) {
+    // Never interpret an unreadable or malformed existing credential file as
+    // a first-run installation: doing so would silently replace valid access.
+    let raw;
+    try {
+      raw = fs.readFileSync(AUTH_FILE, 'utf8');
+      auth = JSON.parse(raw);
+    } catch (err) {
+      throw new Error(`Authentication file ${AUTH_FILE} is unreadable or invalid; refusing to reset credentials: ${err.message}`);
+    }
+    if (!auth || typeof auth !== 'object' || Array.isArray(auth)) {
+      throw new Error(`Authentication file ${AUTH_FILE} has an invalid structure; refusing to reset credentials.`);
+    }
+  }
 
   const isValidHashedAuth =
     auth &&
-    auth.username &&
-    auth.password_hash &&
-    auth.password_salt;
+    typeof auth.username === 'string' && auth.username.length > 0 &&
+    typeof auth.password_hash === 'string' && auth.password_hash.length > 0 &&
+    typeof auth.password_salt === 'string' && auth.password_salt.length > 0;
 
   if (isValidHashedAuth) {
     return;
+  }
+
+  // Support only the known legacy plaintext format for migration. Any other
+  // existing credential file is treated as corruption, not first-run state.
+  if (auth && !(typeof auth.username === 'string' && auth.username.length > 0 &&
+      typeof auth.password === 'string' && auth.password.length > 0)) {
+    throw new Error(`Authentication file ${AUTH_FILE} is incomplete; refusing to reset credentials.`);
   }
 
   let initialPassword;
