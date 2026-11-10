@@ -268,6 +268,11 @@ pub fn write_secure_private_key(path: &std::path::Path, data: &[u8]) -> Result<(
             .map_err(|e| format!("Failed to create private key file with mode 0600: {}", e))?;
         file.write_all(data)
             .map_err(|e| format!("Failed to write private key data: {}", e))?;
+        // OpenOptionsExt::mode only applies when the file is newly created.
+        // Existing key files must also be chmod'd after truncation.
+        secure_private_key_permissions(path)?;
+        file.sync_all()
+            .map_err(|e| format!("Failed to flush private key data: {}", e))?;
         Ok(())
     }
     #[cfg(not(unix))]
