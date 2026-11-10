@@ -367,3 +367,49 @@ pub async fn ssh_trust_host_key(
     );
     Ok(())
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hashed_host_token(host: &str, salt: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha1::Sha1;
+        let mut mac = Hmac::<Sha1>::new_from_slice(salt).expect("valid HMAC key");
+        mac.update(host.as_bytes());
+        format!(
+            "|1|{}|{}",
+            base64::engine::general_purpose::STANDARD.encode(salt),
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+        )
+    }
+
+    #[test]
+    fn matches_hashed_default_port_host() {
+        let token = hashed_host_token("server.example.com", b"test-salt");
+        assert!(host_token_matches(&token, "server.example.com", 22));
+        assert!(!host_token_matches(&token, "other.example.com", 22));
+    }
+
+    #[test]
+    fn matches_hashed_non_default_port_host() {
+        let token = hashed_host_token("[server.example.com]:2222", b"another-salt");
+        assert!(host_token_matches(&token, "server.example.com", 2222));
+        assert!(!host_token_matches(&token, "server.example.com", 22));
+    }
+
+    #[test]
+    fn malformed_hashed_host_never_matches() {
+        assert!(!host_token_matches("|1|not-base64|also-not-base64", "server.example.com", 22));
+        assert!(!host_token_matches("|2|c2FsdA==|aGFzaA==", "server.example.com", 22));
+    }
+
+    #[test]
+    fn plain_host_matching_is_exact() {
+        assert!(host_token_matches("server.example.com", "server.example.com", 22));
+        assert!(!host_token_matches("server.example.com", "other.example.com", 22));
+        assert!(host_token_matches("[server.example.com]:2222", "server.example.com", 2222));
+        assert!(!host_token_matches("[server.example.com]:2222", "server.example.com", 22));
+    }
+}
