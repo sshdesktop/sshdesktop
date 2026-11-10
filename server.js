@@ -5602,7 +5602,7 @@ backendServer.requestTimeout = 120000;
 backendServer.keepAliveTimeout = 5000;
 
 // WebSocket Server attached directly to Backend Server
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
 
 function handleWsConnection(ws, req) {
   const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -5646,8 +5646,12 @@ function handleWsConnection(ws, req) {
     try {
       const parsed = JSON.parse(message.toString());
       if (parsed.type === 'resize') {
-        const r = parsed.rows || 24;
-        const c = parsed.cols || 80;
+        const r = parsed.rows;
+        const c = parsed.cols;
+        if (!Number.isInteger(r) || !Number.isInteger(c) || r < 1 || r > 500 || c < 1 || c > 1000) {
+          ws.close(1008, 'Invalid terminal dimensions');
+          return;
+        }
         pendingTerminalResizes.set(termId, { rows: r, cols: c });
         if (session && session.stream && typeof session.stream.setWindow === 'function') {
           try {
