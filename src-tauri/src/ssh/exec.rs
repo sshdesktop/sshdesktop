@@ -95,7 +95,9 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
     let destination = format!("{}@{}", user, host);
 
     let auth_method = conn.config.auth_method.as_deref().unwrap_or("password");
-    let is_key_auth = auth_method == "key" || conn.config.private_key_path.is_some();
+    let is_key_auth = auth_method == "key"
+        || (auth_method != "password" && conn.config.private_key_path.is_some());
+    let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
 
     // ── 1. Password auth via plink (only if not key auth) ───────────────────
     if !is_key_auth {
@@ -181,7 +183,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
 }
 
     // ── 2. Key auth via Plink (for PPK) or OpenSSH (for PEM) ────────────────
-    let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
     if is_ppk {
         let plink_bin = crate::ssh::connection::get_plink_path();
         for attempt in 0..2 {
@@ -263,7 +265,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         .arg("-o").arg("ServerAliveInterval=10")
         .arg("-o").arg("ServerAliveCountMax=2");
 
-    if let Some(key_path) = &conn.config.private_key_path {
+    if let Some(key_path) = selected_key_path {
         if crate::ssh::connection::resolve_key_path(key_path).is_some() {
             ssh_cmd.arg("-i").arg(key_path);
         }
@@ -497,7 +499,9 @@ pub async fn run_cmd_with_stdin(
     let destination = format!("{}@{}", user, host);
 
     let auth_method = conn.config.auth_method.as_deref().unwrap_or("password");
-    let is_key_auth = auth_method == "key" || conn.config.private_key_path.is_some();
+    let is_key_auth = auth_method == "key"
+        || (auth_method != "password" && conn.config.private_key_path.is_some());
+    let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
 
     // 1. Password auth via plink (only if not key auth)
     if !is_key_auth {
@@ -541,7 +545,7 @@ pub async fn run_cmd_with_stdin(
 }
 
     // 2. PPK Key auth via plink
-    let is_ppk = conn.config.private_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
     if is_ppk {
         let plink_bin = crate::ssh::connection::get_plink_path();
         let mut cmd = tokio::process::Command::new(plink_bin);
@@ -591,7 +595,7 @@ pub async fn run_cmd_with_stdin(
         .arg("-o").arg("IdentitiesOnly=yes")
         .arg("-o").arg("ConnectTimeout=10");
 
-    if let Some(key_path) = &conn.config.private_key_path {
+    if let Some(key_path) = selected_key_path {
         if crate::ssh::connection::resolve_key_path(key_path).is_some() {
             ssh_cmd.arg("-i").arg(key_path);
         }
