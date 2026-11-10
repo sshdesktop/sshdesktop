@@ -1,3 +1,19 @@
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn valid_device_path(value: &str) -> bool {
+    let v = value.strip_prefix("/dev/").unwrap_or(value);
+    !v.is_empty() && v.len() <= 128
+        && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+        && !v.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+}
+
+fn valid_absolute_path(value: &str) -> bool {
+    value.starts_with('/') && value.len() <= 4096
+        && !value.chars().any(|c| c.is_control())
+}
+
 use serde::{Deserialize, Serialize};
 use crate::AppState;
 use super::monitor::DiskUsage;
@@ -258,15 +274,20 @@ pub async fn disk_usage(state: tauri::State<'_, AppState>, conn_id: String) -> R
 
 #[tauri::command]
 pub async fn disk_smart(state: tauri::State<'_, AppState>, conn_id: String, device: String) -> Result<String, String> {
-    let clean_dev = device.trim_start_matches("/dev/");
-    let cmd = format!("smartctl -H -A /dev/{} 2>/dev/null || smartctl -H /dev/{} 2>/dev/null || echo 'SMART info unavailable for {}'", clean_dev, clean_dev, clean_dev);
+    if !valid_device_path(&device) {
+        return Err("Invalid block device path.".into());
+    }
+    let dev_path = if device.starts_with("/dev/") { device.clone() } else { format!("/dev/{}", device) };
+    let dev_arg = shell_quote(&dev_path);
+    let cmd = format!("smartctl -H -A {} 2>/dev/null || smartctl -H {} 2>/dev/null || echo 'SMART information unavailable'", dev_arg, dev_arg);
     let (stdout, _) = run_sudo(&state, &conn_id, &cmd).await;
     Ok(stdout)
 }
 
 #[tauri::command]
 pub async fn disk_largest_dirs(state: tauri::State<'_, AppState>, conn_id: String, path: String) -> Result<String, String> {
-    let cmd = format!("du -h -d 1 '{}' 2>/dev/null | sort -hr | head -n 10", path);
+    if !valid_absolute_path(&path) { return Err("Directory path must be absolute and contain no control characters.".into()); }
+    let cmd = format!("du -h -d 1 {} 2>/dev/null | sort -hr | head -n 10", shell_quote(&path));
     let (stdout, _) = run_cmd(&state, &conn_id, &cmd).await;
     Ok(stdout)
 }
@@ -286,11 +307,24 @@ pub async fn disk_mount(
     persist_fstab: bool,
 ) -> Result<String, String> {
     let clean_mp = mount_point.trim();
-    if clean_mp.is_empty() {
-        return Err("Mount point cannot be empty.".to_string());
+    let clean_device = device.trim();
+    if !valid_absolute_path(clean_mp) || !valid_device_path(clean_device) {
+        return Err("Mount point must be an absolute path and device must be a valid /dev path or device identifier.".into());
+    }
+    if let Some(fs) = fstype.as_deref() {
+        if !fs.is_empty() && fs != "auto" && !fs.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+            return Err("Invalid filesystem type.".into());
+        }
+    }
+    if let Some(opt) = options.as_deref() {
+        if opt.len() > 512 || !opt.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ',' | '=' | '_' | '-' | '.')) {
+            return Err("Invalid mount options.".into());
+        }
     }
 
-    let mut mount_cmd = format!("mkdir -p '{}' && mount", clean_mp);
+    let device_arg = shell_quote(clean_device);
+    let mount_arg = shell_quote(clean_mp);
+    let mut mount_cmd = format!("mkdir -p {} && mount", mount_arg);
     if let Some(ref fs) = fstype {
         if !fs.is_empty() && fs != "auto" {
             mount_cmd.push_str(&format!(" -t {}", fs));
@@ -301,7 +335,7 @@ pub async fn disk_mount(
             mount_cmd.push_str(&format!(" -o {}", opt.trim()));
         }
     }
-    mount_cmd.push_str(&format!(" '{}' '{}'", device.trim(), clean_mp));
+    mount_cmd.push_str(&format!(" {} {}", device_arg, mount_arg));
 
     if persist_fstab {
         let fs_val = fstype.as_deref().unwrap_or("auto");
@@ -331,8 +365,8 @@ pub async fn disk_unmount(
     remove_from_fstab: bool,
 ) -> Result<String, String> {
     let clean_target = target.trim();
-    if clean_target.is_empty() {
-        return Err("Target device or mount point cannot be empty.".to_string());
+    if !(valid_absolute_path(clean_target) || valid_device_path(clean_target)) {
+        return Err("Unmount target must be an absolute path or valid device identifier.".into());
     }
 
     let mut umount_cmd = "umount".to_string();
