@@ -543,7 +543,7 @@ pub async fn package_install(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.contains("already installed") && !stdout.contains("Nothing to do") && !stdout.contains("Complete!") {
+    if code != 0 {
         return Err(format!("Install failed: {}", stdout.trim()));
     }
 
@@ -604,7 +604,7 @@ pub async fn package_remove(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("Remove failed: {}", stdout.trim()));
     }
 
