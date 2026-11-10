@@ -145,27 +145,8 @@ pub async fn user_add(
         .filter(|g| g != "sudo" && g != "wheel" && g != "admin" && g.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-'))
         .collect();
 
-    // Base user creation without hardcoding -G to prevent aborting on distros where 'wheel' (Ubuntu/Debian) or 'sudo' (RHEL/CentOS) does not exist
-    let useradd_base = if let Some(ref pwd) = password {
-        if !pwd.trim().is_empty() {
-            let escaped_pwd = pwd.replace('\'', r"'\''");
-            format!(
-                "HASH=$(openssl passwd -6 '{pwd}' 2>/dev/null || openssl passwd -1 '{pwd}' 2>/dev/null); \
-                 if [ -n \"$HASH\" ]; then \
-                     useradd -m -p \"$HASH\" -s '{sh}' '{username}' 2>&1 || (useradd -m -s '{sh}' '{username}' 2>&1 && usermod -p \"$HASH\" '{username}' 2>&1); \
-                 else \
-                     useradd -m -s '{sh}' '{username}' 2>&1 && echo '{username}:{pwd}' | chpasswd 2>&1; \
-                 fi",
-                pwd = escaped_pwd,
-                sh = sh,
-                username = username
-            )
-        } else {
-            format!("useradd -m -s '{}' '{}' 2>&1", sh, username)
-        }
-    } else {
-        format!("useradd -m -s '{}' '{}' 2>&1", sh, username)
-    };
+    // Create the account without exposing its password in a remote shell command.
+    let useradd_base = format!("useradd -m -s '{}' '{}' 2>&1", sh, username);
 
     // Cross-distribution administrative group assignment:
     // Debian/Ubuntu uses 'sudo', RHEL/CentOS/Fedora/Arch/Amazon Linux uses 'wheel', macOS/BSD uses 'admin'
@@ -209,6 +190,18 @@ pub async fn user_add(
         return Err(format!("Failed to create user: {}", stdout.trim()));
     }
 
+    if let Some(pwd) = password.as_deref() {
+        if !pwd.is_empty() {
+            let password_input = format!("{}:{}\\n", username, pwd);
+            let (password_out, password_code) = crate::ssh::exec::run_cmd_priv_with_stdin(
+                &state, &conn_id, "chpasswd", password_input.as_bytes()
+            ).await;
+            if password_code != 0 {
+                return Err(format!("User was created, but setting its password failed: {}", password_out.trim()));
+            }
+        }
+    }
+
     log::info!("SSH Desktop: Added user {}", username);
     Ok(())
 }
@@ -227,19 +220,13 @@ pub async fn user_set_password(
         return Err("Password cannot be empty.".into());
     }
 
-    let escaped_pwd = password.replace('\'', r"'\''");
-    let cmd = format!(
-        "HASH=$(openssl passwd -6 '{pwd}' 2>/dev/null || openssl passwd -1 '{pwd}' 2>/dev/null); \
-         if [ -n \"$HASH\" ]; then \
-             usermod -p \"$HASH\" '{username}' 2>&1; \
-         else \
-             echo '{username}:{pwd}' | chpasswd 2>&1; \
-         fi",
-        pwd = escaped_pwd,
-        username = username
-    );
-
-    let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    let password_input = format!("{}:{}\\n", username, password);
+    let (stdout, code) = crate::ssh::exec::run_cmd_priv_with_stdin(
+        &state,
+        &conn_id,
+        "chpasswd",
+        password_input.as_bytes(),
+    ).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
