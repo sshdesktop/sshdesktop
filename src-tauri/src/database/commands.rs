@@ -415,7 +415,7 @@ pub async fn db_execute_operation(
             (sql, format!("Table '{}' truncated", table))
         }
         DatabaseOperation::AddColumn { table, column, .. } => {
-            let sql = generate_add_column_sql(&engine, table, column);
+            let sql = generate_add_column_sql(&engine, table, column)?;
             (sql, format!("Column '{}' added to table '{}'", column.name, table))
         }
         DatabaseOperation::DropColumn { table, column_name, .. } => {
