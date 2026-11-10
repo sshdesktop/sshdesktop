@@ -243,7 +243,7 @@ pub async fn user_set_password(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() {
+    if code != 0 {
         return Err(format!("Failed to set password: {}", stdout.trim()));
     }
     log::info!("SSH Desktop: Changed password for user {}", username);
@@ -300,7 +300,7 @@ pub async fn user_toggle_sudo(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
-    if code != 0 && !stdout.is_empty() && !stdout.contains("is not a member") {
+    if code != 0 && !stdout.contains("is not a member") {
         return Err(format!("Failed to update administrative privileges: {}", stdout.trim()));
     }
     log::info!("SSH Desktop: Toggled sudo for {} (grant={})", username, grant);
