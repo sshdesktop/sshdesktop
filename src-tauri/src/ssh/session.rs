@@ -234,6 +234,18 @@ pub async fn connect_session_with_passphrase(
     key_path: Option<&str>,
     passphrase: Option<&str>,
 ) -> Result<ClientHandle, Box<dyn std::error::Error + Send + Sync>> {
+    connect_session_with_passphrase_auth(host, port, user, password, key_path, passphrase, true).await
+}
+
+pub async fn connect_session_with_passphrase_auth(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: Option<&str>,
+    key_path: Option<&str>,
+    passphrase: Option<&str>,
+    allow_default_keys: bool,
+) -> Result<ClientHandle, Box<dyn std::error::Error + Send + Sync>> {
     let config = Arc::new(russh::client::Config::default());
     let handler = ClientHandler {
         host: host.to_string(),
@@ -280,7 +292,7 @@ pub async fn connect_session_with_passphrase(
     // Only use agent-independent default identities when the user did not
     // explicitly select a key for this connection.
     // Priority 2: Standard ~/.ssh/ default keys (id_ed25519, id_rsa, id_ecdsa)
-    if !authenticated && key_path.map(|p| p.trim().is_empty()).unwrap_or(true) {
+    if allow_default_keys && !authenticated && key_path.map(|p| p.trim().is_empty()).unwrap_or(true) {
         if let Some(base) = BaseDirs::new() {
             let ssh_dir = base.home_dir().join(".ssh");
             let default_keys = ["id_ed25519", "id_rsa", "id_ecdsa"];
