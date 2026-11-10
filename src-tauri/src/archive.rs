@@ -154,8 +154,9 @@ pub async fn sftp_extract_archive_pure(
             .unwrap_or_default()
             .to_string_lossy();
         format!(
-            "mkdir -p '{}' && gzip -d -k -c '{}' > '{}/{}'",
+            "mkdir -p '{}' && python3 -c '{}' '{}' '{}/{}'",
             escaped_dest,
+            shell_escape("import gzip,sys\nsrc,dst=sys.argv[1],sys.argv[2]\ntotal=0\nwith gzip.open(src,'rb') as r, open(dst,'wb') as w:\n    while True:\n        chunk=r.read(1048576)\n        if not chunk: break\n        total+=len(chunk)\n        if total>5368709120: raise SystemExit('Gzip output exceeds 5 GiB limit')\n        w.write(chunk)"),
             escaped_arch,
             escaped_dest,
             shell_escape(&uncompressed_name)
