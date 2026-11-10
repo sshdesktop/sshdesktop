@@ -167,7 +167,7 @@ pub async fn terminal_create(
                         let arc_h = std::sync::Arc::new(new_handle);
                         let mut sessions = state.sessions.lock().await;
                         sessions.insert(conn_id.clone(), arc_h.clone());
-                        sessions.insert("default".to_string(), arc_h.clone());
+                        sessions.entry("default".to_string()).or_insert_with(|| arc_h.clone());
                         Some(arc_h)
                     }
                     Err(e) => {
