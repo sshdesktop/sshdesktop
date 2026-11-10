@@ -46,6 +46,14 @@ pub async fn terminal_create(
                     .creation_flags(0x08000000)
                     .output();
             }
+            #[cfg(unix)]
+            {
+                let _ = tokio::process::Command::new("kill")
+                    .arg("-TERM")
+                    .arg(pid.to_string())
+                    .output()
+                    .await;
+            }
         }
     }
 
@@ -418,10 +426,15 @@ pub async fn terminal_resize(
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
-    if let Some(term) = state.terminals.lock().get_mut(&terminal_id) {
-        term.rows = rows;
-        term.cols = cols;
+    if rows == 0 || cols == 0 || rows > 500 || cols > 1000 {
+        return Err("Terminal dimensions must be between 1x1 and 500x1000.".into());
     }
+    let mut terminals = state.terminals.lock();
+    let term = terminals.get_mut(&terminal_id)
+        .ok_or_else(|| format!("Terminal session '{}' not found.", terminal_id))?;
+    term.rows = rows;
+    term.cols = cols;
+    // The channel-stream transport does not currently expose window_change after into_stream().
     Ok(())
 }
 
