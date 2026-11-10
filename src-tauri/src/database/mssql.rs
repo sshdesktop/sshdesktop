@@ -123,15 +123,34 @@ pub async fn execute_query_mssql(
     let mut final_rows = Vec::new();
     let mut total_affected = 0u64;
     let mut batch_results = Vec::new();
+    let mut remaining_rows = limit;
 
     for stmt in &statements {
         let stmt_start = Instant::now();
+        let normalized = stmt.trim_start().to_ascii_uppercase();
+        let is_bounded_select = normalized.starts_with("SELECT") && !normalized.contains(" INTO ");
+        if is_bounded_select {
+            let row_cap = remaining_rows.saturating_add(1);
+            client.simple_query(&format!("SET ROWCOUNT {}", row_cap))
+                .await.map_err(|e| format!("MSSQL row limit setup failed: {}", e))?
+                .into_first_result().await.map_err(|e| format!("MSSQL row limit setup failed: {}", e))?;
+        }
         let stream = client
             .simple_query(stmt)
             .await
             .map_err(|e| format!("MSSQL query error: {}", e))?;
 
-        let rows = stream.into_first_result().await.unwrap_or_default();
+        let mut rows = stream.into_first_result().await
+            .map_err(|e| format!("MSSQL result retrieval error: {}", e))?;
+        if is_bounded_select {
+            client.simple_query("SET ROWCOUNT 0").await
+                .map_err(|e| format!("MSSQL row limit reset failed: {}", e))?
+                .into_first_result().await.map_err(|e| format!("MSSQL row limit reset failed: {}", e))?;
+            if rows.len() > remaining_rows {
+                rows.truncate(remaining_rows);
+            }
+            remaining_rows = remaining_rows.saturating_sub(rows.len());
+        }
         let mut cols_meta = Vec::new();
         let mut json_rows = Vec::new();
 
