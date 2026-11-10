@@ -509,7 +509,6 @@ pub async fn firewall_add_rule_advanced(
         }
         _ => {
             let chain = if direction == "out" { "OUTPUT" } else { "INPUT" };
-            let protocol = if proto == "any" { "tcp" } else { proto };
             let target = match action.as_str() {
                 "allow" => "ACCEPT",
                 "reject" => "REJECT",
@@ -522,11 +521,14 @@ pub async fn firewall_add_rule_advanced(
                 String::new()
             };
             let iptables_bin = if from_ip.contains(':') { "ip6tables" } else { "iptables" };
-            if action == "limit" {
-                format!("{} -A {} {} -p {} --dport {} -m limit --limit 5/minute --limit-burst 10 -j {} 2>&1", iptables_bin, chain, source_arg, protocol, port, target)
-            } else {
-                format!("{} -A {} {} -p {} --dport {} -j {} 2>&1", iptables_bin, chain, source_arg, protocol, port, target)
-            }
+            let protocols: Vec<&str> = if proto == "any" { vec!["tcp", "udp"] } else { vec![proto] };
+            protocols.iter().map(|protocol| {
+                if action == "limit" {
+                    format!("{} -A {} {} -p {} --dport {} -m limit --limit 5/minute --limit-burst 10 -j {} 2>&1", iptables_bin, chain, source_arg, protocol, port, target)
+                } else {
+                    format!("{} -A {} {} -p {} --dport {} -j {} 2>&1", iptables_bin, chain, source_arg, protocol, port, target)
+                }
+            }).collect::<Vec<_>>().join(" && ")
         }
     };
 
