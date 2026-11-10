@@ -122,6 +122,7 @@ pub async fn setup_ssh_tunnel(
 
         let mut cmd = if is_ppk || password_file.is_some() {
             let mut c = tokio::process::Command::new(plink_bin);
+    c.kill_on_drop(true);
             #[cfg(windows)]
             c.creation_flags(0x08000000); // CREATE_NO_WINDOW
             c.arg("-ssh")
@@ -140,6 +141,7 @@ pub async fn setup_ssh_tunnel(
             c
         } else {
             let mut c = tokio::process::Command::new("ssh");
+    c.kill_on_drop(true);
             #[cfg(windows)]
             c.creation_flags(0x08000000); // CREATE_NO_WINDOW
             c.arg("-N")
