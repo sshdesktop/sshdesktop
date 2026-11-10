@@ -49,7 +49,7 @@ pub async fn ssh_generate_key_pair(
         .unwrap_or_else(|| "id_ed25519".to_string())
         .trim()
         .to_string();
-    if base_name.is_empty()
+    if base_name.is_empty() || base_name.len() > 200
         || base_name == "." || base_name == ".."
         || !base_name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-' || c == b'.')
     {
@@ -71,6 +71,14 @@ pub async fn ssh_generate_key_pair(
 
     let comm = comment.unwrap_or_else(|| "sshdesktop".to_string());
     let pass = passphrase.unwrap_or_default();
+    if comm.len() > 256 || comm.chars().any(|c| c.is_control()) {
+        return Err("Key comment must be at most 256 characters and contain no control characters.".into());
+    }
+    if pass.len() > 4096 || pass.contains('\0') {
+        return Err("Key passphrase must be at most 4096 bytes and contain no NUL characters.".into());
+    }
+    let target_priv_str = target_priv.to_str()
+        .ok_or_else(|| "SSH key path contains characters that cannot be represented by ssh-keygen.".to_string())?;
 
     // 1. Try native ssh-keygen binary first
     let mut cmd = tokio::process::Command::new("ssh-keygen");
@@ -84,7 +92,7 @@ pub async fn ssh_generate_key_pair(
         .arg("-N")
         .arg(&pass)
         .arg("-f")
-        .arg(target_priv.to_str().unwrap());
+        .arg(target_priv_str);
 
     let output = cmd.output().await;
 
