@@ -834,15 +834,15 @@ pub async fn ssh_exec_stream(
             }
         };
 
-        if let Some(handle) = handle_opt {
-            let cmd_to_run = if command_clone.trim().starts_with("sudo ") {
-                let trimmed = command_clone.trim();
-                trimmed.strip_prefix("sudo ").unwrap_or(trimmed).trim().to_string()
-            } else {
-                command_clone.clone()
-            };
-            if let Ok(_) = crate::ssh::session::run_stream_channel(&app_clone, &handle, &stream_id_clone, &cmd_to_run).await {
-                return;
+        // Never strip sudo from a command: that would execute a different,
+        // unprivileged operation and could incorrectly report success.
+        if !command_clone.trim_start().starts_with("sudo ") {
+            if let Some(handle) = handle_opt {
+                if crate::ssh::session::run_stream_channel(
+                    &app_clone, &handle, &stream_id_clone, &command_clone
+                ).await.is_ok() {
+                    return;
+                }
             }
         }
 
