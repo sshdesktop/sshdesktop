@@ -1670,6 +1670,18 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       if (ipRecord.count >= 5) {
         ipRecord.lockedUntil = now + 60 * 1000; // 1 minute lockout
       }
+      const MAX_LOGIN_ATTEMPT_ENTRIES = 10000;
+      if (!loginAttempts.has(clientIp) && loginAttempts.size >= MAX_LOGIN_ATTEMPT_ENTRIES) {
+        let oldestIp = null;
+        let oldestAttempt = Number.POSITIVE_INFINITY;
+        for (const [ip, record] of loginAttempts.entries()) {
+          if (record.lastAttempt < oldestAttempt) {
+            oldestAttempt = record.lastAttempt;
+            oldestIp = ip;
+          }
+        }
+        if (oldestIp !== null) loginAttempts.delete(oldestIp);
+      }
       loginAttempts.set(clientIp, ipRecord);
 
       return {
