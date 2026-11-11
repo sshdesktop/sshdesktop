@@ -1460,10 +1460,6 @@ function buildSshClientConfig(config, targetId) {
     if (config.passphrase) {
       connectConfig.passphrase = String(config.passphrase);
     }
-    if (config.password) {
-      connectConfig.password = String(config.password);
-      connectConfig.tryKeyboard = true;
-    }
   }
 
   return connectConfig;
@@ -5611,7 +5607,15 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMess
 function handleWsConnection(ws, req) {
   const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const cookieMatch = req.headers.cookie ? req.headers.cookie.match(/(?:^|;\s*)sshdesktop_session=([^;]+)/) : null;
-  const cookieToken = cookieMatch ? decodeURIComponent(cookieMatch[1].trim()) : null;
+  let cookieToken = null;
+  if (cookieMatch) {
+    try {
+      cookieToken = decodeURIComponent(cookieMatch[1].trim());
+    } catch {
+      ws.close(1008, 'Malformed session cookie');
+      return;
+    }
+  }
   const secProtoToken = req.headers['sec-websocket-protocol'] ? req.headers['sec-websocket-protocol'].split(',')[0].trim() : null;
   const token = secProtoToken || cookieToken || req.headers['x-session-token'];
   const session = getSession(token);
