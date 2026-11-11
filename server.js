@@ -4739,7 +4739,7 @@ function handleBrowserGatewayRequest(req, res) {
   }
 
   // 2. Gateway route resolution: /s/:sessionId/* or legacy /api/browser/gateway/:connId/:proto/:hostPart/*
-  const resolved = resolveSessionFromRequest(req.url);
+  const resolved = resolveSessionFromRequest(req.url, extractSessionToken(req, null));
   if (!resolved) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Gateway route or active session not found' }));
