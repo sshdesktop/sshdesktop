@@ -368,6 +368,10 @@ pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
         return Err("Invalid ProxyJump value.".into());
     }
 
+    if entry.port == Some(0) {
+        return Err("SSH port must be between 1 and 65535.".into());
+    }
+
     let ssh_dir = get_ssh_dir().ok_or_else(|| "Could not determine .ssh directory".to_string())?;
     let config_path = get_ssh_config_path().ok_or_else(|| "Could not determine .ssh/config path".to_string())?;
 
