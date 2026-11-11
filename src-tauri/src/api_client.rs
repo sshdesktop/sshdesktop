@@ -314,7 +314,7 @@ async fn execute_remote_ssh_request(
         let b64 = to_base64(&body_bytes);
         format!("printf '%s' '{}' | base64 -d | curl {} --data-binary @- 2>&1 | head -c 7340032 | base64", b64, curl_args)
     } else {
-        format!("curl {} 2>&1 | head -c 10485760 | base64", curl_args)
+        format!("curl {} 2>&1 | head -c 7340032 | base64", curl_args)
     };
     let remote_cmd = format!("bash -o pipefail -c {}", shell_quote(&pipeline));
 
