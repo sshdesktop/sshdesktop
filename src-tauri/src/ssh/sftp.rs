@@ -745,22 +745,18 @@ pub async fn sftp_download(
     remote_path: String,
     local_path: String,
 ) -> Result<(), String> {
-    // 1. Primary fast path: read remote file content directly via SSH stream
-    if let Ok(bytes) = sftp_read_file(state.clone(), conn_id.clone(), remote_path.clone()).await {
-        if let Some(parent) = std::path::Path::new(&local_path).parent() {
-            tokio::fs::create_dir_all(parent).await
-                .map_err(|e| format!("Failed to create local download directory: {}", e))?;
-        }
-        if let Ok(()) = tokio::fs::write(&local_path, &bytes).await {
-            log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_path);
-            return Ok(());
-        }
+    // Preserve the 48 MiB transfer cap and surface remote permission/transport
+    // errors. Falling back to SCP after a capped read failure would bypass the
+    // limit and could silently turn a failed transfer into an unbounded one.
+    let bytes = sftp_read_file(state.clone(), conn_id.clone(), remote_path.clone()).await?;
+    if let Some(parent) = std::path::Path::new(&local_path).parent() {
+        tokio::fs::create_dir_all(parent).await
+            .map_err(|e| format!("Failed to create local download directory: {}", e))?;
     }
-
-    // 2. Fallback: use the exact configured authentication method.
-    let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
-        .ok_or("No active SSH connection.")?;
-    run_scp_transfer(&conn, &local_path, &remote_path, false).await
+    tokio::fs::write(&local_path, &bytes).await
+        .map_err(|e| format!("Failed to save downloaded file '{}': {}", local_path, e))?;
+    log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_path);
+    Ok(())
 
 }
 
