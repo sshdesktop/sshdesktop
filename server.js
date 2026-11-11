@@ -188,6 +188,23 @@ const activeWsClients = new Map();   // termId -> WebSocket
 const pendingTerminalResizes = new Map(); // termId -> { rows, cols }
 
 // Helper: Safely resolve active SSH connection (strict matching: no cross-server fallback)
+function sendTerminalOutput(termId, text) {
+  const ws = activeWsClients.get(termId);
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  // Never let a slow WebSocket client cause unbounded terminal-output buffering.
+  if (ws.bufferedAmount > 1024 * 1024) {
+    try { ws.close(1013, 'Terminal client is too slow; reconnect to resume output'); } catch {}
+    if (activeWsClients.get(termId) === ws) activeWsClients.delete(termId);
+    return;
+  }
+  try { ws.send(JSON.stringify({ type: 'output', text })); }
+  catch (error) {
+    console.warn('[SSH Desktop] Failed to send terminal output:', error.message);
+    try { ws.close(1011, 'Terminal output transport failed'); } catch {}
+    if (activeWsClients.get(termId) === ws) activeWsClients.delete(termId);
+  }
+}
+
 function getActiveEntry(connId) {
   if (connId) {
     return activeConnections.get(connId) || null;
@@ -3863,6 +3880,7 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
           activeTerminals.set(termId, {
             stream: {
               write: (d) => proc.stdin && proc.stdin.write(d),
+              once: (event, callback) => proc.stdin && proc.stdin.once(event, callback),
               end: () => proc.kill(),
               setWindow: () => {}
             },
@@ -3871,17 +3889,11 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
           });
           proc.stdout.on('data', chunk => {
             const text = chunk.toString('utf8');
-            const ws = activeWsClients.get(termId);
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'output', text }));
-            }
+            sendTerminalOutput(termId, text);
           });
           proc.stderr.on('data', chunk => {
             const text = chunk.toString('utf8');
-            const ws = activeWsClients.get(termId);
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'output', text }));
-            }
+            sendTerminalOutput(termId, text);
           });
           proc.on('close', () => {
             activeTerminals.delete(termId);
@@ -3909,10 +3921,7 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
           stream.on('data', chunk => {
             const text = chunk.toString('utf8');
-            const ws = activeWsClients.get(termId);
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'output', text }));
-            }
+            sendTerminalOutput(termId, text);
           });
 
           stream.on('close', () => {
@@ -5741,10 +5750,18 @@ function handleWsConnection(ws, req) {
       }
     } catch {}
 
-    if (Buffer.isBuffer(message)) {
-      session.stream.write(message);
-    } else {
-      session.stream.write(message.toString());
+    const terminalData = Buffer.isBuffer(message) ? message : message.toString();
+    try {
+      const writable = session.stream.write(terminalData);
+      if (writable === false && typeof session.stream.once === 'function') {
+        ws.pause();
+        session.stream.once('drain', () => {
+          if (ws.readyState === WebSocket.OPEN) ws.resume();
+        });
+      }
+    } catch (error) {
+      console.warn('[SSH Desktop] Terminal input write failed:', error.message);
+      ws.close(1011, 'Terminal input transport failed');
     }
   });
 
