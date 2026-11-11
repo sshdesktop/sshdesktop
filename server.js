@@ -572,7 +572,7 @@ setInterval(() => {
   let changed = false;
   for (const [token, sess] of activeSessions.entries()) {
     if (!sess || sess.expiresAt <= now) {
-      activeSessions.delete(token);
+      destroySession(token);
       changed = true;
     }
   }
@@ -1744,7 +1744,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       // the authenticated session that performed the change.
       for (const [activeToken] of activeSessions.entries()) {
         if (!currentSession?.token || activeToken !== currentSession.token) {
-          activeSessions.delete(activeToken);
+          destroySession(activeToken);
         }
       }
       const preservedHash = currentSession?.token ? hashToken(currentSession.token) : null;
@@ -4477,18 +4477,22 @@ const BROWSER_SESSION_TTL = 4 * 60 * 60 * 1000; // 4 hours
 
 function pruneBrowserSessions() {
   const now = Date.now();
+  const removeGatewaySession = (id, sess) => {
+    for (const gatewaySocket of sess?.sockets || []) {
+      try { gatewaySocket.destroy(); } catch {}
+    }
+    browserSessionRegistry.delete(id);
+  };
   for (const [id, sess] of browserSessionRegistry.entries()) {
-    if (now - sess.lastActiveAt > BROWSER_SESSION_TTL) {
-      browserSessionRegistry.delete(id);
+    if (now - sess.lastActiveAt > BROWSER_SESSION_TTL || !getSession(sess.authToken)) {
+      removeGatewaySession(id, sess);
     }
   }
   if (browserSessionRegistry.size > MAX_BROWSER_SESSIONS) {
     const sorted = Array.from(browserSessionRegistry.entries())
       .sort((a, b) => a[1].lastActiveAt - b[1].lastActiveAt);
     const toRemove = sorted.slice(0, browserSessionRegistry.size - MAX_BROWSER_SESSIONS);
-    for (const [id] of toRemove) {
-      browserSessionRegistry.delete(id);
-    }
+    for (const [id, sess] of toRemove) removeGatewaySession(id, sess);
   }
 }
 setInterval(pruneBrowserSessions, 300000).unref?.();
