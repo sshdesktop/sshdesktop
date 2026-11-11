@@ -307,22 +307,25 @@ pub async fn sftp_read_file(
     };
 
     if let Some(handle) = handle_opt {
+        // Only fall back to the shell when the SFTP subsystem itself cannot be
+        // opened. Once SFTP is active, preserve file/open/read errors rather
+        // than hiding permission and transport failures behind a second path.
         if let Ok(sftp) = crate::ssh::session::open_sftp(&handle).await {
             use tokio::io::AsyncReadExt;
-            if let Ok(file) = sftp.open(&path).await {
-                let mut content = Vec::new();
-                const MAX_READ_BYTES: u64 = 48 * 1024 * 1024; // 48 MiB safety limit
-                let read_res = tokio::time::timeout(
-                    std::time::Duration::from_secs(60),
-                    file.take(MAX_READ_BYTES + 1).read_to_end(&mut content)
-                ).await;
-                if let Ok(Ok(bytes_read)) = read_res {
-                    if bytes_read as u64 > MAX_READ_BYTES {
-                        return Err("File is too large for binary transfer (maximum 48 MiB).".into());
-                    }
-                    return Ok(content);
-                }
+            let file = sftp.open(&path).await
+                .map_err(|e| format!("SFTP could not open '{}': {}", path, e))?;
+            let mut content = Vec::new();
+            const MAX_READ_BYTES: u64 = 48 * 1024 * 1024; // 48 MiB safety limit
+            let bytes_read = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                file.take(MAX_READ_BYTES + 1).read_to_end(&mut content)
+            ).await
+                .map_err(|_| format!("SFTP read timed out for '{}'.", path))?
+                .map_err(|e| format!("SFTP read failed for '{}': {}", path, e))?;
+            if bytes_read as u64 > MAX_READ_BYTES {
+                return Err("File is too large for binary transfer (maximum 48 MiB).".into());
             }
+            return Ok(content);
         }
     }
 
