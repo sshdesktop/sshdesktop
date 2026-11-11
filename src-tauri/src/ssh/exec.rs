@@ -91,6 +91,11 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         Some(c) => c,
         None => return (String::new(), -1),
     };
+    if conn.config.auth_method.as_deref() == Some("key")
+        && conn.config.private_key_path.as_deref().map(|path| path.trim().is_empty()).unwrap_or(true)
+    {
+        return ("Key authentication was selected, but no private key was configured.".into(), -1);
+    }
 
     // Attempt lazy persistent session establishment for future instantaneous calls (deduplicating concurrent attempts)
     let should_spawn = if !conn_id.is_empty() && conn_id != "default" {
