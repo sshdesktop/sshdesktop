@@ -213,17 +213,29 @@ pub async fn db_execute_query(
         });
         let upper_compact = upper.split_whitespace().collect::<Vec<_>>().join(" ");
         let upper_no_ws: String = upper.chars().filter(|c| !c.is_whitespace()).collect();
+        // This is a conservative application-level guard, not a substitute
+        // for a database account that has server-enforced read-only privileges.
+        // Block known side-effecting, file, process, lock, and administrative
+        // functions across the supported SQL dialects.
         let potentially_mutating = [
             "INTO", "FORUPDATE", "FORSHARE", "LOCKINSHAREMODE",
-            "NEXTVAL(", "SETVAL(", "PG_ADVISORY", "LOAD_FILE(",
-            "SLEEP(", "BENCHMARK(", "DBLINK_EXEC(", "PG_READ_FILE(",
-            "PG_READ_BINARY_FILE(", "PG_STAT_FILE(", "LO_IMPORT(", "LO_EXPORT(",
-            "PG_TERMINATE_BACKEND(", "PG_CANCEL_BACKEND(", "XP_CMDSHELL",
-            "SP_OACREATE", "OPENROWSET(", "OPENDATASOURCE(",
-            "GET_LOCK(", "RELEASE_LOCK(", "PG_SLEEP(", "PG_LS_DIR(",
-            "DBMS_LOCK.", "DBMS_SCHEDULER.",
-        ].iter().any(|needle| upper_no_ws.contains(needle))
-            || upper_compact.contains("LOCK IN SHARE MODE");
+            "NEXTVAL(", "SETVAL(", "PG_ADVISORY", "PG_NOTIFY(",
+            "PG_RELOAD_CONF(", "PG_ROTATE_LOGFILE(", "PG_LOG_BACKEND_MEMORY_CONTEXTS(",
+            "LOAD_FILE(", "SLEEP(", "BENCHMARK(", "DBLINK_EXEC(",
+            "PG_READ_FILE(", "PG_READ_BINARY_FILE(", "PG_STAT_FILE(",
+            "LO_IMPORT(", "LO_EXPORT(", "LO_CREATE(", "LO_UNLINK(",
+            "PG_TERMINATE_BACKEND(", "PG_CANCEL_BACKEND(", "PG_LS_DIR(",
+            "XP_CMDSHELL", "SP_OACREATE", "OPENROWSET(", "OPENDATASOURCE(",
+            "GET_LOCK(", "RELEASE_LOCK(", "PG_SLEEP(", "SET_CONFIG(",
+            "DBMS_LOCK.", "DBMS_SCHEDULER.", "DBMS_PIPE.", "DBMS_SQL.",
+            "UTL_FILE.", "UTL_HTTP.", "UTL_SMTP.", "UTL_TCP.", "UTL_INADDR.",
+            "WAITFOR", "DBCC", "SHUTDOWN", "KILL ", "LOAD_EXTENSION(",
+            "WRITEFILE(", "READFILE(", "INTOOUTFILE", "INTODUMPFILE",
+        ].iter().any(|needle| upper_no_ws.contains(&needle.replace(' ', "")))
+            || upper_compact.contains("LOCK IN SHARE MODE")
+            || upper_no_ws.contains("PRAGMA")
+            || upper_no_ws.contains("ATTACHDATABASE")
+            || upper_no_ws.contains("DETACHDATABASE");
         let semicolon_count = normalized.chars().filter(|c| *c == ';').count();
         let has_multiple_statements = semicolon_count > 1
             || (semicolon_count == 1 && !normalized.trim_end().ends_with(';'));
