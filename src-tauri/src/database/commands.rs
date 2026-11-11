@@ -276,6 +276,22 @@ pub async fn db_execute_query(
         }
     };
 
+    // Bound the payload sent across the Tauri IPC boundary. A row-count limit
+    // alone is insufficient because a single database row may contain very
+    // large text/blob values. This check applies uniformly to every engine.
+    const MAX_QUERY_RESULT_BYTES: usize = 16 * 1024 * 1024;
+    if let Ok(ref qr) = res {
+        let encoded_len = serde_json::to_vec(qr)
+            .map_err(|e| format!("Could not serialize database query result: {}", e))?
+            .len();
+        if encoded_len > MAX_QUERY_RESULT_BYTES {
+            return Err(format!(
+                "Database query result exceeds the 16 MiB response limit ({} bytes). Add a WHERE clause or reduce the selected columns.",
+                encoded_len
+            ));
+        }
+    }
+
     if let Ok(ref qr) = res {
         let mut new_db_name: Option<String> = None;
         let trimmed_q = query.trim().trim_end_matches(';').trim();
