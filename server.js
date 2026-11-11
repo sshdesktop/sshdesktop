@@ -1477,8 +1477,17 @@ function verifySshHostKey(host, port, keyBlob) {
 
 function buildSshClientConfig(config, targetId) {
   const host = String(config.host || '').trim();
-  const port = parseInt(config.port || 22, 10);
+  const port = Number(config.port || 22);
   const username = String(config.username || 'root').trim();
+  if (!host || host.length > 253 || /[\\s/?#@]/.test(host)) {
+    throw new Error('Invalid SSH host name or address.');
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('SSH port must be an integer between 1 and 65535.');
+  }
+  if (!username || username.length > 255 || /[\\0\\r\\n]/.test(username)) {
+    throw new Error('Invalid SSH username.');
+  }
 
   const connectConfig = {
     host,
@@ -1518,7 +1527,6 @@ function buildSshClientConfig(config, targetId) {
         'hmac-sha2-512',
         'hmac-sha2-256-etm@openssh.com',
         'hmac-sha2-512-etm@openssh.com',
-        'hmac-sha1-etm@openssh.com'
       ]
     }
   };
