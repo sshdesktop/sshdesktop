@@ -1511,6 +1511,7 @@ function buildSshClientConfig(config, targetId) {
     username,
     readyTimeout: 30000,
     keepaliveInterval: 10000,
+    hostVerifier: key => verifySshHostKey(host, port, key),
     tryKeyboard: true,
     algorithms: {
       kex: [
