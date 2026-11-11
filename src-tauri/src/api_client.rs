@@ -402,11 +402,15 @@ fn parse_curl_bytes(
 
     let status_line = lines.next().ok_or_else(|| "Empty HTTP status line from SSH response".to_string())?;
     let mut status_parts = status_line.split_whitespace();
-    let _http_version = status_parts.next().unwrap_or("HTTP/1.1");
-    let status_code: u16 = status_parts
-        .next()
+    let http_version = status_parts.next()
+        .ok_or_else(|| "Missing HTTP protocol version in SSH response".to_string())?;
+    if !matches!(http_version, "HTTP/1.0" | "HTTP/1.1" | "HTTP/2" | "HTTP/2.0") {
+        return Err(format!("Invalid HTTP protocol version in SSH response: {}", http_version));
+    }
+    let status_code: u16 = status_parts.next()
         .and_then(|c| c.parse().ok())
-        .unwrap_or(200);
+        .filter(|code| (100..=599).contains(code))
+        .ok_or_else(|| "Invalid or missing HTTP status code in SSH response".to_string())?;
     let status_text = status_parts.collect::<Vec<_>>().join(" ");
 
     let mut headers = HashMap::new();
