@@ -4461,13 +4461,16 @@ function pruneBrowserSessions() {
 }
 setInterval(pruneBrowserSessions, 300000).unref?.();
 
-function getOrCreateBrowserSession(connId, proto, host, port) {
+function getOrCreateBrowserSession(connId, proto, host, port, authToken) {
+  const authSession = getSession(authToken);
+  if (!authSession) throw new Error('An active authenticated session is required for browser gateway access.');
   pruneBrowserSessions();
   connId = connId || 'default';
   proto = (proto || 'http').toLowerCase();
   port = Number(port) || (proto === 'https' ? 443 : 80);
   const cleanHost = (host || '127.0.0.1').toLowerCase().trim();
-  const key = `${connId}:${proto}:${cleanHost}:${port}`;
+  const authTokenHash = hashToken(authToken);
+  const key = `${authTokenHash}:${connId}:${proto}:${cleanHost}:${port}`;
 
   for (const sess of browserSessionRegistry.values()) {
     if (sess.key === key) {
@@ -4487,7 +4490,9 @@ function getOrCreateBrowserSession(connId, proto, host, port) {
     proto,
     host: cleanHost,
     port,
-    cookies: new Map(), // Isolated per-upstream-target cookie jar
+    cookies: new Map(), // Isolated per-authenticated-user and upstream-target cookie jar
+    authToken,
+    authUsername: authSession.username,
     createdAt: Date.now(),
     lastActiveAt: Date.now()
   };
@@ -4496,7 +4501,7 @@ function getOrCreateBrowserSession(connId, proto, host, port) {
   return session;
 }
 
-function resolveSessionFromRequest(reqUrl) {
+function resolveSessionFromRequest(reqUrl, authToken = null) {
   if (typeof reqUrl !== 'string') return null;
 
   // 1. Stable short route: /s/:sessionId/*
@@ -4507,6 +4512,10 @@ function resolveSessionFromRequest(reqUrl) {
     const rest = slashIdx === -1 ? '/' : afterS.slice(slashIdx);
     const sess = browserSessionRegistry.get(sessionId);
     if (sess) {
+      if (!getSession(sess.authToken)) {
+        browserSessionRegistry.delete(sessionId);
+        return null;
+      }
       sess.lastActiveAt = Date.now();
       return { session: sess, targetPath: rest, isSessionRoute: true };
     }
@@ -4540,7 +4549,8 @@ function resolveSessionFromRequest(reqUrl) {
           targetPath = portMatch[2] || '/';
         }
       }
-      const sess = getOrCreateBrowserSession(connId, proto, host, port);
+      if (!getSession(authToken)) return null;
+      const sess = getOrCreateBrowserSession(connId, proto, host, port, authToken);
       return { session: sess, targetPath, isSessionRoute: false };
     }
   }
@@ -4615,7 +4625,7 @@ function buildUpstreamCookieHeader(session, clientCookieHeader) {
 // internal services, and private IPs seamlessly.
 // -------------------------------------------------------------
 function handleBrowserGatewayUpgrade(req, socket, head) {
-  const resolved = resolveSessionFromRequest(req.url);
+  const resolved = resolveSessionFromRequest(req.url, extractSessionToken(req, null));
   if (!resolved) {
     try { socket.destroy(); } catch {}
     return;
@@ -4713,7 +4723,7 @@ function handleBrowserGatewayRequest(req, res) {
       const proto = parsed.protocol.replace(':', '');
       const port = parsed.port || (proto === 'https' ? '443' : '80');
       const pathAndQuery = (parsed.pathname || '/') + (parsed.search || '');
-      const session = getOrCreateBrowserSession(connId, proto, parsed.hostname, port);
+      const session = getOrCreateBrowserSession(connId, proto, parsed.hostname, port, extractSessionToken(req, null));
       const redirectDest = `/s/${encodeURIComponent(session.id)}${pathAndQuery}`;
       res.writeHead(302, {
         'Location': redirectDest,
@@ -4953,7 +4963,7 @@ function handleBrowserGatewayRequest(req, res) {
           const locUrl = new URL(loc);
           const locProto = locUrl.protocol.replace(':', '');
           const locPort = locUrl.port || (locProto === 'https' ? 443 : 80);
-          const targetSession = getOrCreateBrowserSession(connId, locProto, locUrl.hostname, locPort);
+          const targetSession = getOrCreateBrowserSession(connId, locProto, locUrl.hostname, locPort, extractSessionToken(req, null));
           return `/s/${encodeURIComponent(targetSession.id)}${locUrl.pathname}${locUrl.search}${locUrl.hash || ''}`;
         } catch {
           return loc;
