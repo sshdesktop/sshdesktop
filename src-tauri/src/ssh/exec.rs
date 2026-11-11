@@ -51,6 +51,9 @@ async fn write_child_stdin(
 /// Helper: run a command on the remote server via SSH (plink or openssh).
 /// Returns (stdout, exit_code). exit_code = -1 means no connection / spawn error.
 pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String, i32) {
+    if command.trim().is_empty() || command.len() > 1024 * 1024 || command.contains('\0') {
+        return ("SSH command must be non-empty, contain no NUL bytes, and be at most 1 MiB.".into(), -1);
+    }
     // 0. Primary Fast Path: Execute directly over active persistent in-memory SSH transport
     {
         let handle_opt = {
@@ -175,7 +178,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                     Err(error) => return (error, -1),
                 };
                 for attempt in 0..2 {
-                let mut cmd = tokio::process::Command::new("plink");
+                let mut cmd = tokio::process::Command::new(crate::ssh::connection::get_plink_path());
             cmd.kill_on_drop(true);
                 #[cfg(windows)]
                 cmd.creation_flags(0x08000000);
@@ -384,11 +387,9 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
     let trimmed_cmd = command.trim();
     let raw_cmd = trimmed_cmd.strip_prefix("sudo ").unwrap_or(trimmed_cmd).trim();
     // Normalize nested sudo in pipes/chains since the entire subshell will be elevated
-    let normalized_cmd = raw_cmd
-        .replace("| sudo ", "| ")
-        .replace("; sudo ", "; ")
-        .replace("&& sudo ", "&& ")
-        .replace("|| sudo ", "|| ");
+    // The whole shell command is already executed inside sudo. Avoid textual
+    // substitutions that can corrupt quoted literals or alter command meaning.
+    let normalized_cmd = raw_cmd.to_string();
 
     let conn = match conn_opt {
         Some(c) => c,
@@ -541,6 +542,9 @@ pub async fn run_cmd_with_stdin(
     command: &str,
     stdin_data: &[u8],
 ) -> (String, i32) {
+    if command.trim().is_empty() || command.len() > 1024 * 1024 || command.contains('\0') {
+        return ("SSH command must be non-empty, contain no NUL bytes, and be at most 1 MiB.".into(), -1);
+    }
     const MAX_STDIN_BYTES: usize = 64 * 1024 * 1024;
     if stdin_data.len() > MAX_STDIN_BYTES {
         return ("SSH command input exceeds the 64 MiB safety limit.".into(), -1);
@@ -606,7 +610,7 @@ pub async fn run_cmd_with_stdin(
                 Ok(file) => file,
                 Err(error) => return (error, -1),
             };
-            let mut cmd = tokio::process::Command::new("plink");
+            let mut cmd = tokio::process::Command::new(crate::ssh::connection::get_plink_path());
             cmd.kill_on_drop(true);
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
