@@ -281,6 +281,9 @@ pub async fn ssh_install_public_key(
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(fields[1])
         .map_err(|_| "Invalid SSH public key base64 data".to_string())?;
+    if decoded.len() > 48 * 1024 {
+        return Err("Decoded SSH public key exceeds the 48 KiB safety limit.".into());
+    }
     if decoded.len() < 4 {
         return Err("SSH public key data is malformed".into());
     }
