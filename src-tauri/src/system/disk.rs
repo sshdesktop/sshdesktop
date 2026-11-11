@@ -833,6 +833,8 @@ PDEV={pdev}
 [ -b "$PDEV" ] || {{ echo "Refusing partition deletion: target partition is not a block device." >&2; exit 21; }}
 DEV_REAL=$(readlink -f -- "$DEV") || exit 22
 PDEV_REAL=$(readlink -f -- "$PDEV") || exit 23
+command -v findmnt >/dev/null 2>&1 || {{ echo "findmnt is required for partition deletion safety checks." >&2; exit 127; }}
+command -v swapon >/dev/null 2>&1 || {{ echo "swapon is required for partition deletion safety checks." >&2; exit 127; }}
 DEVICE_NODES=$(lsblk -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate disk descendants; refusing partition deletion." >&2; exit 24; }}
 ANCESTOR_NODES=$(lsblk -s -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate disk ancestors; refusing partition deletion." >&2; exit 25; }}
 [ -n "$DEVICE_NODES" ] || {{ echo "No block-device tree returned; refusing partition deletion." >&2; exit 26; }}
@@ -932,6 +934,13 @@ FS={fs}
 [ -b "$PDEV" ] || {{ echo "Refusing resize: selected partition is not a block device." >&2; exit 41; }}
 DEV_REAL=$(readlink -f -- "$DEV") || exit 42
 PDEV_REAL=$(readlink -f -- "$PDEV") || exit 43
+command -v swapon >/dev/null 2>&1 || {{ echo "swapon is required for partition resize safety checks." >&2; exit 127; }}
+if swapon --noheadings --raw --show=NAME 2>/dev/null | while IFS= read -r SWAP_NODE; do
+    [ "$(readlink -f -- "$SWAP_NODE" 2>/dev/null)" = "$PDEV_REAL" ] && exit 0
+done; then
+    echo "Refusing resize: selected partition is active swap." >&2
+    exit 47
+fi
 DEVICE_NODES=$(lsblk -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate disk descendants; refusing partition resize." >&2; exit 44; }}
 [ -n "$DEVICE_NODES" ] || {{ echo "No block-device tree returned; refusing partition resize." >&2; exit 45; }}
 PDEV_FOUND=0
