@@ -1401,9 +1401,6 @@ function buildSshClientConfig(config, targetId) {
         'ecdh-sha2-nistp521',
         'diffie-hellman-group-exchange-sha256',
         'diffie-hellman-group14-sha256',
-        'diffie-hellman-group14-sha1',
-        'diffie-hellman-group-exchange-sha1',
-        'diffie-hellman-group1-sha1'
       ],
       cipher: [
         'chacha20-poly1305@openssh.com',
@@ -1412,10 +1409,6 @@ function buildSshClientConfig(config, targetId) {
         'aes128-ctr',
         'aes192-ctr',
         'aes256-ctr',
-        'aes128-cbc',
-        'aes192-cbc',
-        'aes256-cbc',
-        '3des-cbc'
       ],
       serverHostKey: [
         'ssh-ed25519',
@@ -1424,13 +1417,10 @@ function buildSshClientConfig(config, targetId) {
         'ecdsa-sha2-nistp521',
         'rsa-sha2-512',
         'rsa-sha2-256',
-        'ssh-rsa',
-        'ssh-dss'
       ],
       hmac: [
         'hmac-sha2-256',
         'hmac-sha2-512',
-        'hmac-sha1',
         'hmac-sha2-256-etm@openssh.com',
         'hmac-sha2-512-etm@openssh.com',
         'hmac-sha1-etm@openssh.com'
@@ -4772,7 +4762,7 @@ function handleBrowserGatewayRequest(req, res) {
     method: req.method,
     headers: headersToSend,
     rejectUnauthorized: strictTls,
-    maxHeaderSize: 1048576, // 1MB header limit to eliminate "Header overflow" on YouTube/Google
+    maxHeaderSize: 16 * 1024, // 1MB header limit to eliminate "Header overflow" on YouTube/Google
   };
 
   if (entry && entry.client) {
@@ -5519,10 +5509,7 @@ function handleBrowserGatewayRequest(req, res) {
 // -------------------------------------------------------------
 // BACKEND SERVER (Listening on Port 2020)
 // -------------------------------------------------------------
-const backendServer = http.createServer({ maxHeaderSize: 1048576 }, async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+const backendServer = http.createServer({ maxHeaderSize: 16 * 1024 }, async (req, res) => {
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -5732,10 +5719,7 @@ backendServer.on('upgrade', (req, socket, head) => {
 // -------------------------------------------------------------
 // FRONTEND SERVER (Listening on Port 2222)
 // -------------------------------------------------------------
-const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+const frontendServer = http.createServer({ maxHeaderSize: 16 * 1024 }, (req, res) => {
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -5755,7 +5739,7 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
         host: `127.0.0.1:${BACKEND_PORT}`,
         'x-forwarded-for': req.headers['x-forwarded-for'] || req.socket.remoteAddress
       },
-      maxHeaderSize: 1048576
+      maxHeaderSize: 16 * 1024
     }, proxyRes => {
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
       proxyRes.pipe(res);
@@ -5775,7 +5759,14 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
     req.url = req.url.replace(/\/undefined\//g, '/');
   }
 
-  let reqPath = decodeURI(req.url.split('?')[0]);
+  let reqPath;
+  try {
+    reqPath = decodeURI(req.url.split('?')[0]);
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Malformed URL');
+    return;
+  }
 
   // 1. Resolve Gateway context from Cookie or Referer
   let savedGw = null;
@@ -5915,7 +5906,7 @@ const frontendServer = http.createServer({ maxHeaderSize: 1048576 }, (req, res) 
       path: forwardedPath,
       method: req.method,
       headers: { ...req.headers, host: `127.0.0.1:${BACKEND_PORT}` },
-      maxHeaderSize: 1048576
+      maxHeaderSize: 16 * 1024
     }, proxyRes => {
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
       proxyRes.pipe(res);
