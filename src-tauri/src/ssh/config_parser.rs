@@ -40,7 +40,10 @@ fn parse_config_value(raw: &str) -> String {
     let quoted = value.len() >= 2
         && ((value.starts_with('"') && value.ends_with('"'))
             || (value.starts_with('\'') && value.ends_with('\'')));
-    let value = if quoted { &value[1..value.len() - 1] } else { value };
+    if !quoted {
+        return value.to_string();
+    }
+    let value = &value[1..value.len() - 1];
     let mut decoded = String::with_capacity(value.len());
     let mut chars = value.chars();
     while let Some(ch) = chars.next() {
