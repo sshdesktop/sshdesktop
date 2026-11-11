@@ -89,6 +89,8 @@ echo "[4/5] Creating Systemd Service at ${SERVICE_FILE}..."
 cat <<EOF > "${SERVICE_FILE}"
 [Unit]
 Description=SSH Desktop - Remote Linux Administration Web Gateway
+StartLimitIntervalSec=60
+StartLimitBurst=5
 After=network.target network-online.target sshd.service
 Wants=network-online.target
 
@@ -99,8 +101,6 @@ WorkingDirectory=${INSTALL_DIR}
 ExecStart=${INSTALL_DIR}/sshdesktop --server --port ${PORT}
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 RestartSec=5
 LimitNOFILE=65536
 StandardOutput=journal
