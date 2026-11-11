@@ -22,6 +22,18 @@ pub fn get_ssh_config_path() -> Option<PathBuf> {
     get_ssh_dir().map(|dir| dir.join("config"))
 }
 
+/// Quote an OpenSSH config value when it contains characters that would
+/// otherwise be interpreted as separators or comments. Escape backslashes and
+/// double quotes inside the quoted value.
+fn format_config_value(value: &str) -> String {
+    if value.chars().any(|c| c.is_whitespace() || c == '#' || c == '"') {
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\\\"{}\\\"", escaped)
+    } else {
+        value.to_string()
+    }
+}
+
 pub fn expand_tilde(path_str: &str) -> String {
     let trimmed = path_str.trim().trim_matches('"').trim_matches('\'');
     if trimmed.starts_with("~/") || trimmed.starts_with("~\\") || trimmed == "~" {
@@ -308,7 +320,7 @@ pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
         }
     }
     if let Some(ref id) = entry.raw_identity_file.as_ref().or(entry.identity_file.as_ref()) {
-        block.push_str(&format!("    IdentityFile {}\n", id));
+        block.push_str(&format!("    IdentityFile {}\n", format_config_value(id)));
         block.push_str("    IdentitiesOnly yes\n");
     }
     if let Some(ref pj) = entry.proxy_jump {
