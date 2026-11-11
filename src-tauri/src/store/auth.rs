@@ -8,6 +8,34 @@ use argon2::password_hash::SaltString;
 
 static IS_AUTHENTICATED: AtomicBool = AtomicBool::new(false);
 
+// Persist credential changes through a same-directory temporary file so readers
+// never observe a partially-written JSON document. The temporary file is
+// private on Unix and renamed only after its contents have been flushed.
+fn persist_auth_config(path: &PathBuf, json: &str) -> Result<(), String> {
+    let parent = path.parent().ok_or_else(|| "Authentication path has no parent directory".to_string())?;
+    fs::create_dir_all(parent).map_err(|e| format!("Could not create authentication directory: {}", e))?;
+    let temp_path = parent.join(format!(".auth-{}.tmp", uuid::Uuid::new_v4().simple()));
+    let write_result = (|| -> Result<(), String> {
+        use std::io::Write;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+        let mut file = options.open(&temp_path).map_err(|e| format!("Could not create temporary authentication file: {}", e))?;
+        file.write_all(json.as_bytes()).and_then(|_| file.sync_all())
+            .map_err(|e| format!("Could not flush temporary authentication file: {}", e))?;
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("Could not secure temporary authentication file: {}", e))?;
+        }
+        fs::rename(&temp_path, path).map_err(|e| format!("Could not atomically replace authentication configuration: {}", e))?;
+        #[cfg(unix)] { if let Ok(dir) = fs::File::open(parent) { let _ = dir.sync_all(); } }
+        Ok(())
+    })();
+    if write_result.is_err() { let _ = fs::remove_file(&temp_path); }
+    write_result
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerAuthConfig {
     pub username: String,
@@ -212,8 +240,7 @@ pub async fn auth_login(username: String, password: String) -> Result<AuthAction
     config.last_login_at = Some(chrono::Utc::now().timestamp());
     let json = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Could not serialize authentication configuration: {}", e))?;
-    fs::write(&path, json)
-        .map_err(|e| format!("Could not update authentication configuration: {}", e))?;
+    persist_auth_config(&path, &json)?;
     enforce_strict_permissions(&path)?;
     IS_AUTHENTICATED.store(true, Ordering::SeqCst);
 
@@ -270,7 +297,7 @@ pub async fn auth_change_credentials(
     config.last_login_at = Some(chrono::Utc::now().timestamp());
 
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| format!("Could not save new authentication credentials: {}", e))?;
+    persist_auth_config(&path, &json)?;
     enforce_strict_permissions(&path)?;
 
     IS_AUTHENTICATED.store(true, Ordering::SeqCst);
