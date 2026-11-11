@@ -340,10 +340,16 @@ pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
     {
         return Err("Invalid SSH host alias. Use only letters, numbers, dots, underscores, and hyphens.".into());
     }
-    if entry.hostname.trim().is_empty() || has_control(&entry.hostname) || entry.hostname.chars().any(char::is_whitespace) {
+    if entry.hostname.trim().is_empty()
+        || has_control(&entry.hostname)
+        || entry.hostname.chars().any(|c| c.is_whitespace() || c == '#')
+    {
         return Err("Invalid SSH hostname.".into());
     }
-    if entry.user.as_deref().map(|v| v.trim().is_empty() || has_control(v) || v.chars().any(char::is_whitespace)).unwrap_or(false) {
+    if entry.user.as_deref()
+        .map(|v| v.trim().is_empty() || has_control(v) || v.chars().any(|c| c.is_whitespace() || c == '#'))
+        .unwrap_or(false)
+    {
         return Err("Invalid SSH username.".into());
     }
     if entry.raw_identity_file.as_deref().or(entry.identity_file.as_deref())
