@@ -181,12 +181,23 @@ fn parse_ssh_config_internal(
                 .filter(|s| !s.is_empty())
                 .collect();
 
-            if tokens.is_empty() || tokens.iter().all(|t| t == "*") {
+            let concrete_aliases: Vec<String> = tokens
+                .into_iter()
+                .filter(|alias| {
+                    !alias.starts_with('!')
+                        && !alias.contains('*')
+                        && !alias.contains('?')
+                })
+                .collect();
+
+            // Pattern and negation entries control OpenSSH matching; they are
+            // not concrete saved connections and must not appear in the host list.
+            if concrete_aliases.is_empty() {
                 current_aliases = Vec::new();
                 current_template = None;
             } else {
-                let first_alias = tokens[0].clone();
-                current_aliases = tokens;
+                let first_alias = concrete_aliases[0].clone();
+                current_aliases = concrete_aliases;
                 current_template = Some(SshConfigHost {
                     name: first_alias.clone(),
                     hostname: first_alias,
