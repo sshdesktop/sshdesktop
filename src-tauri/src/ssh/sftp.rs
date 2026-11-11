@@ -604,7 +604,7 @@ pub async fn sftp_delete(
     let canonical = if canonical.len() > 1 { canonical.trim_end_matches('/') } else { canonical };
     let protected = ["/", "/home", "/root", "/etc", "/usr", "/boot", "/sys", "/proc", "/dev", "/bin", "/sbin", "/lib", "/lib64", "/var", "/run"];
     let is_protected = protected.iter().any(|root| {
-        canonical == *root || (*root != &"/" && canonical.starts_with(&format!("{}/", root)))
+        canonical == *root || (*root != "/" && canonical.starts_with(&format!("{}/", root)))
     });
     if is_protected {
         return Err(format!("System protection active: Refusing to delete protected system path '{}'", canonical));
