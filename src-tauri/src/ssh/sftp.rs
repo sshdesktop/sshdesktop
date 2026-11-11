@@ -721,16 +721,25 @@ pub async fn sftp_stat(
         return Err("Invalid remote stat path.".into());
     }
     let escaped = shell_escape(&path);
-    let (stdout, code) = run_cmd(&state, &conn_id, &format!("stat -c \"%s %Y %A %U %G\" '{}'", escaped)).await;
+    let stat_cmd = format!(
+        "stat -c '%s\\t%Y\\t%A\\t%U\\t%G' '{}' 2>/dev/null || stat -f '%z\\t%m\\t%Sp\\t%Su\\t%Sg' '{}' 2>/dev/null",
+        escaped, escaped
+    );
+    let (stdout, code) = run_cmd(&state, &conn_id, &stat_cmd).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
     if code == 0 && !stdout.is_empty() {
-        let parts: Vec<&str> = stdout.split_whitespace().collect();
-        if parts.len() >= 5 {
-            let size = parts[0].parse::<u64>().unwrap_or(0);
-            let modified = parts[1].parse::<i64>().unwrap_or(0);
+        let parts: Vec<&str> = stdout.trim().splitn(5, '\\t').collect();
+        if parts.len() == 5 {
+            let size = parts[0].parse::<u64>()
+                .map_err(|_| "Remote stat returned an invalid file size.".to_string())?;
+            let modified = parts[1].parse::<i64>()
+                .map_err(|_| "Remote stat returned an invalid modification time.".to_string())?;
             let perms = parts[2].to_string();
+            if perms.is_empty() {
+                return Err("Remote stat returned empty permission metadata.".into());
+            }
             let is_dir = perms.starts_with('d');
             let is_symlink = perms.starts_with('l');
             return Ok(FileEntry {
@@ -871,9 +880,7 @@ pub async fn sftp_upload(
     if bytes.len() as u64 > MAX_UPLOAD_BYTES {
         return Err("Local file grew beyond the 256 MiB upload limit while being read.".into());
     }
-    sftp_write_bytes(&state, &conn_id, &remote_path, &bytes).await;
-
-
+    sftp_write_bytes(&state, &conn_id, &remote_path, &bytes).await
 }
 
 #[tauri::command]
