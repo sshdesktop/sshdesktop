@@ -1,12 +1,12 @@
 {
   "name": "SSH Desktop",
   "version": "2.4.2",
-  "releaseDate": "2026-11-10T15:03:16.024Z",
+  "releaseDate": "2026-11-11T07:01:50.896Z",
   "defaultPort": 2222,
   "webAuthGate": {
     "enabled": true,
     "defaultUsername": "admin",
-    "defaultPassword": "sshdesktop"
+    "initialCredentialsFile": "/var/lib/sshdesktop/initial-admin-credentials.txt"
   },
   "packages": {
     "debian": {

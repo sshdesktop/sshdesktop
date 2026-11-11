@@ -153,6 +153,7 @@ const CONNECTIONS_FILE = path.join(DATA_DIR, 'connections.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+const AUDIT_LOG_FILE = path.join(DATA_DIR, 'audit.log');
 const KEYS_DIR = path.join(DATA_DIR, 'keys');
 try {
   if (!fs.existsSync(KEYS_DIR)) {
@@ -637,6 +638,22 @@ function validateSafeToken(val, pattern, label) {
   return str;
 }
 
+function appendAuditEvent(event) {
+  try {
+    const entry = JSON.stringify({
+      ts: new Date().toISOString(),
+      ...event
+    }) + '\n';
+    if (fs.existsSync(AUDIT_LOG_FILE)) {
+      const st = fs.statSync(AUDIT_LOG_FILE);
+      if (st.size > 10 * 1024 * 1024) {
+        try { fs.renameSync(AUDIT_LOG_FILE, `${AUDIT_LOG_FILE}.1`); } catch {}
+      }
+    }
+    fs.appendFileSync(AUDIT_LOG_FILE, entry, { encoding: 'utf8', mode: 0o600 });
+  } catch {}
+}
+
 // Execute command: remotely over active SSH connection. Never fallback to host execution!
 function runRemoteExec(client, command, timeoutMs = 60000) {
   return runRemoteExecWithStdin(client, command, null, timeoutMs);
@@ -928,7 +945,7 @@ function buildInstallCommand(pm, rawName) {
     } else {
       installCmd = "(DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y default-mysql-server 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server 2>&1) && (DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-client 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y default-mysql-client 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-client 2>&1 || true)";
     }
-    const post = "if [ ! -d /var/lib/mysql/mysql ]; then (mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql 2>/dev/null || mysql_install_db --user=mysql --datadir=/var/lib/mysql 2>/dev/null || true); fi; (systemctl enable --now mariadb 2>/dev/null || systemctl enable --now mysqld 2>/dev/null || systemctl enable --now mysql 2>/dev/null || rc-service mariadb start 2>/dev/null || service mariadb start 2>/dev/null || service mysql start 2>/dev/null || service mysqld start 2>/dev/null || true); mysql -e \"CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY ''; GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;\" 2>/dev/null || true; mysql -e \"CREATE USER IF NOT EXISTS 'root'@'localhost' IDENTIFIED BY ''; GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;\" 2>/dev/null || true";
+    const post = "if [ ! -d /var/lib/mysql/mysql ]; then (mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql 2>/dev/null || mysql_install_db --user=mysql --datadir=/var/lib/mysql 2>/dev/null || true); fi; (systemctl enable --now mariadb 2>/dev/null || systemctl enable --now mysqld 2>/dev/null || systemctl enable --now mysql 2>/dev/null || rc-service mariadb start 2>/dev/null || service mariadb start 2>/dev/null || service mysql start 2>/dev/null || service mysqld start 2>/dev/null || true); DB_INIT_PWD=$(openssl rand -hex 16 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n'); if [ -n \"$DB_INIT_PWD\" ]; then umask 077 && printf 'MySQL/MariaDB Initial Root Password: %s\\n' \"$DB_INIT_PWD\" > /root/.sshdesktop-mysql-init.txt; mysql -e \"CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '$DB_INIT_PWD'; GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;\" 2>/dev/null || true; mysql -e \"ALTER USER IF EXISTS 'root'@'localhost' IDENTIFIED BY '$DB_INIT_PWD'; FLUSH PRIVILEGES;\" 2>/dev/null || true; fi";
     return { installCmd, post };
   }
 
@@ -1697,6 +1714,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       ) {
         loginAttempts.delete(clientIp);
         const session = createSession(auth.username);
+        appendAuditEvent({ event: 'auth_login', username: auth.username, ip: clientIp, status: 'success' });
 
         return {
           success: true,
@@ -1713,6 +1731,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       if (ipRecord.count >= 5) {
         ipRecord.lockedUntil = now + 60 * 1000; // 1 minute lockout
       }
+      appendAuditEvent({ event: 'auth_login', username: String(username || ''), ip: clientIp, status: 'failed', attempts: ipRecord.count });
       const MAX_LOGIN_ATTEMPT_ENTRIES = 10000;
       if (!loginAttempts.has(clientIp) && loginAttempts.size >= MAX_LOGIN_ATTEMPT_ENTRIES) {
         let oldestIp = null;
@@ -1823,7 +1842,21 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       const token = extractSessionToken(null, { args });
       if (token) destroySession(token);
       if (currentSession?.token) destroySession(currentSession.token);
+      appendAuditEvent({ event: 'auth_logout', username: currentSession?.username || '', ip: clientIp, status: 'ok' });
       return true;
+    }
+
+    case 'audit_get_logs': {
+      const limit = validateInt(args?.limit ?? 200, 1, 2000, 'limit');
+      if (!fs.existsSync(AUDIT_LOG_FILE)) return [];
+      try {
+        const lines = fs.readFileSync(AUDIT_LOG_FILE, 'utf8').trim().split('\n').filter(Boolean);
+        return lines.slice(-limit).reverse().map(l => {
+          try { return JSON.parse(l); } catch { return { raw: l }; }
+        });
+      } catch {
+        return [];
+      }
     }
 
     // ==========================================
@@ -3663,8 +3696,12 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     case 'disk_set_label': {
       if (!entry) return '';
       const { device, fstype, label } = args || {};
-      let cmd = `e2label "${device}" "${label}" 2>&1`;
-      if (fstype === 'xfs') cmd = `xfs_admin -L "${label}" "${device}" 2>&1`;
+      const safeDev = validateSafeToken(device, /^\/dev\/[A-Za-z0-9._\/-]+$/, 'device path');
+      const cleanLabel = String(label ?? '').replace(/[\0\r\n]/g, '').slice(0, 32);
+      const qDev = shellQuote(safeDev);
+      const qLabel = shellQuote(cleanLabel);
+      let cmd = `e2label -- ${qDev} ${qLabel} 2>&1`;
+      if (String(fstype || '').toLowerCase() === 'xfs') cmd = `xfs_admin -L ${qLabel} -- ${qDev} 2>&1`;
       const res = await runRemotePrivExec(entry, cmd);
       return res.stdout || 'Label set';
     }
@@ -3672,8 +3709,9 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     case 'disk_check_filesystem': {
       if (!entry) return '';
       const { device, repair } = args || {};
+      const safeDev = validateSafeToken(device, /^\/dev\/[A-Za-z0-9._\/-]+$/, 'device path');
       const opt = repair ? '-y' : '-n';
-      const res = await runRemotePrivExec(entry, `fsck ${opt} "${device}" 2>&1`);
+      const res = await runRemotePrivExec(entry, `fsck ${opt} -- ${shellQuote(safeDev)} 2>&1`);
       return res.stdout || res.stderr || 'Check completed';
     }
 
@@ -3729,7 +3767,11 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     case 'disk_manage_swap': {
       if (!entry) throw new Error('No active SSH connection');
       const act = String(args?.action || '').trim().toLowerCase();
-      const targetMb = parseInt(args?.size_mb ?? args?.sizeMb ?? 2048, 10);
+      const rawMb = args?.size_mb ?? args?.sizeMb ?? 2048;
+      const targetMb = Number(rawMb);
+      if (act === 'set_size' && (!Number.isInteger(targetMb) || (targetMb !== 0 && (targetMb < 64 || targetMb > 65536)))) {
+        throw new Error('Invalid swap size: must be 0 (remove) or an integer between 64 and 65536 MiB');
+      }
 
       let script = '';
       if (act === 'disable') {
@@ -3738,9 +3780,9 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
         script = 'if [ -f /swapfile ]; then swapon /swapfile 2>/dev/null || swapon -a; else swapon -a; fi\necho "Swap successfully enabled."';
       } else if (act === 'set_size') {
         if (targetMb === 0) {
-          script = 'swapoff -a 2>/dev/null || true\nrm -f /swapfile\nsed -i \'\\#/swapfile#d\' /etc/fstab 2>/dev/null || true\necho "Swapfile successfully removed."';
+          script = "swapoff -a 2>/dev/null || true\nrm -f /swapfile\nsed -i '\\#^/swapfile[[:space:]]#d' /etc/fstab 2>/dev/null || true\necho \"Swapfile successfully removed.\"";
         } else {
-          script = `set -e\nTARGET_MB=${targetMb}\nswapoff -a 2>/dev/null || true\nif ! fallocate -l "${TARGET_MB}M" /swapfile 2>/dev/null; then\n  dd if=/dev/zero of=/swapfile bs=1M count="$TARGET_MB" status=none\nfi\nchmod 600 /swapfile\nmkswap /swapfile\nswapon /swapfile\nif ! grep -qs '/swapfile' /etc/fstab; then\n  printf '\\n/swapfile none swap sw 0 0\\n' >> /etc/fstab\nfi\necho "Successfully configured swap space to ${TARGET_MB} MB (/swapfile active)."`;
+          script = `set -e\nTARGET_MB=${targetMb}\nswapoff -a 2>/dev/null || true\nif ! fallocate -l "\${TARGET_MB}M" /swapfile 2>/dev/null; then\n  dd if=/dev/zero of=/swapfile bs=1M count="$TARGET_MB" status=none\nfi\nchmod 600 /swapfile\nmkswap /swapfile\nswapon /swapfile\nif ! grep -qEs '^[[:space:]]*/swapfile[[:space:]]' /etc/fstab; then\n  printf '\\n/swapfile none swap sw 0 0\\n' >> /etc/fstab\nfi\necho "Successfully configured swap space to ${targetMb} MB (/swapfile active)."`;
         }
       } else {
         throw new Error(`Unknown swap action '${act}'`);
@@ -3753,13 +3795,13 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'disk_manage_tmp': {
       if (!entry) throw new Error('No active SSH connection');
-      const size = String(args?.size || '').trim().toUpperCase();
-      if (!size) throw new Error("Size cannot be empty (e.g. '2G', '4G')");
+      const size = validateSafeToken(String(args?.size || '').trim().toUpperCase(), /^\d+(?:\.\d+)?[KMGT%]?$/, '/tmp size');
       const persist = Boolean(args?.persist);
+      const qSize = shellQuote(size);
 
-      let script = `set -e\nSIZE="${size}"\nif findmnt -n -o FSTYPE /tmp 2>/dev/null | grep -qi "tmpfs"; then\n  mount -o remount,size="$SIZE" /tmp\nelse\n  mount -t tmpfs -o size="$SIZE",mode=1777 tmpfs /tmp\nfi\n`;
+      let script = `set -e\nSIZE=${qSize}\nif findmnt -n -o FSTYPE /tmp 2>/dev/null | grep -qi "tmpfs"; then\n  mount -o remount,size="$SIZE" /tmp\nelse\n  mount -t tmpfs -o size="$SIZE",mode=1777 tmpfs /tmp\nfi\n`;
       if (persist) {
-        script += `if grep -qs '[[:space:]]/tmp[[:space:]]' /etc/fstab; then\n  sed -i "s|.*[[:space:]]/tmp[[:space:]].*|tmpfs /tmp tmpfs defaults,noatime,mode=1777,size=$SIZE 0 0|" /etc/fstab\nelse\n  printf "\\ntmpfs /tmp tmpfs defaults,noatime,mode=1777,size=$SIZE 0 0\\n" >> /etc/fstab\nfi\n`;
+        script += `if grep -qEs '^[[:space:]]*[^#].*[[:space:]]/tmp[[:space:]]' /etc/fstab; then\n  sed -i -E "s|^([[:space:]]*[^#].*[[:space:]]/tmp[[:space:]].*)|tmpfs /tmp tmpfs defaults,noatime,mode=1777,size=$SIZE 0 0|" /etc/fstab\nelse\n  printf "\\ntmpfs /tmp tmpfs defaults,noatime,mode=1777,size=%s 0 0\\n" "$SIZE" >> /etc/fstab\nfi\n`;
       }
       script += `echo "Successfully configured /tmp space to $SIZE"`;
 
@@ -3772,12 +3814,16 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     // 15. SFTP File Suite
     // ==========================================
     case 'sftp_list_dir': {
-      const target = args?.path || (process.platform === 'win32' ? process.cwd() : '/root');
+      const target = args?.path || '/root';
       if (!entry || !entry.client) {
+        if (process.env.SSHDESKTOP_ENABLE_LOCAL_FS !== 'true') {
+          throw new Error('No active SSH connection. Local host filesystem access is disabled by policy.');
+        }
         try {
           const dirents = fs.readdirSync(target, { withFileTypes: true });
           const results = [];
           for (const d of dirents) {
+            if (results.length >= 10000) break;
             try {
               const full = path.join(target, d.name);
               const st = fs.statSync(full);
@@ -3809,7 +3855,7 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       return new Promise((resolve, reject) => {
         sftp.readdir(target, (err, list) => {
           if (err) return reject(new Error(`sftp_list_dir failed on '${target}': ${err.message}`));
-          const results = (list || []).map(item => {
+          const results = (list || []).slice(0, 10000).map(item => {
             const isDir = (item.attrs.mode & 0o040000) !== 0;
             const isLink = (item.attrs.mode & 0o120000) === 0o120000;
             const size = item.attrs.size || 0;
@@ -3825,8 +3871,8 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
               permissions: formatPermissions(item.attrs.mode),
               modified: mtime,
               modified_formatted: new Date(mtime).toLocaleString(),
-              owner: item.attrs.uid ? String(item.attrs.uid) : 'root',
-              group: item.attrs.gid ? String(item.attrs.gid) : 'root'
+              owner: item.attrs.uid !== undefined ? String(item.attrs.uid) : '',
+              group: item.attrs.gid !== undefined ? String(item.attrs.gid) : ''
             };
           });
           results.sort((a, b) => (a.is_dir && !b.is_dir ? -1 : !a.is_dir && b.is_dir ? 1 : a.name.localeCompare(b.name)));
@@ -3836,89 +3882,181 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     }
 
     case 'sftp_read_text_file': {
+      const targetPath = String(args?.path || '').trim();
+      if (!targetPath) throw new Error('Missing file path');
       if (!entry || !entry.client) {
-        return fs.existsSync(args?.path) ? fs.readFileSync(args?.path, 'utf8') : '';
+        if (process.env.SSHDESKTOP_ENABLE_LOCAL_FS !== 'true') {
+          throw new Error('No active SSH connection. Local host filesystem access is disabled by policy.');
+        }
+        return fs.existsSync(targetPath) ? fs.readFileSync(targetPath, 'utf8') : '';
       }
+      const MAX_SFTP_READ = 48 * 1024 * 1024;
       let sftp = entry.sftp || await getSftp(entry.client);
       return new Promise((resolve, reject) => {
-        const stream = sftp.createReadStream(args?.path);
-        let content = '';
-        stream.on('data', chunk => { content += chunk.toString('utf8'); });
-        stream.on('end', () => resolve(content));
-        stream.on('error', err => reject(err));
+        const stream = sftp.createReadStream(targetPath);
+        const chunks = [];
+        let total = 0;
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          try { stream.destroy(); } catch {}
+          reject(new Error('SFTP text read timed out after 30s'));
+        }, 30000);
+        stream.on('data', chunk => {
+          if (settled) return;
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          total += buf.length;
+          if (total > MAX_SFTP_READ) {
+            settled = true;
+            clearTimeout(timer);
+            try { stream.destroy(); } catch {}
+            return reject(new Error('Remote file exceeds 48 MiB read limit'));
+          }
+          chunks.push(buf);
+        });
+        stream.on('end', () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(Buffer.concat(chunks, total).toString('utf8'));
+        });
+        stream.on('error', err => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        });
       });
     }
 
     case 'sftp_read_file_base64': {
+      const targetPath = String(args?.path || '').trim();
+      if (!targetPath) throw new Error('Missing file path');
       if (!entry || !entry.client) {
-        return fs.existsSync(args?.path) ? fs.readFileSync(args?.path).toString('base64') : '';
+        if (process.env.SSHDESKTOP_ENABLE_LOCAL_FS !== 'true') {
+          throw new Error('No active SSH connection. Local host filesystem access is disabled by policy.');
+        }
+        return fs.existsSync(targetPath) ? fs.readFileSync(targetPath).toString('base64') : '';
       }
+      const MAX_SFTP_READ = 48 * 1024 * 1024;
       let sftp = entry.sftp || await getSftp(entry.client);
       return new Promise((resolve, reject) => {
-        const stream = sftp.createReadStream(args?.path);
+        const stream = sftp.createReadStream(targetPath);
         const chunks = [];
-        stream.on('data', chunk => chunks.push(chunk));
-        stream.on('end', () => resolve(Buffer.concat(chunks).toString('base64')));
-        stream.on('error', err => reject(err));
+        let total = 0;
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          try { stream.destroy(); } catch {}
+          reject(new Error('SFTP binary read timed out after 30s'));
+        }, 30000);
+        stream.on('data', chunk => {
+          if (settled) return;
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          total += buf.length;
+          if (total > MAX_SFTP_READ) {
+            settled = true;
+            clearTimeout(timer);
+            try { stream.destroy(); } catch {}
+            return reject(new Error('Remote file exceeds 48 MiB read limit'));
+          }
+          chunks.push(buf);
+        });
+        stream.on('end', () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(Buffer.concat(chunks, total).toString('base64'));
+        });
+        stream.on('error', err => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        });
       });
     }
 
     case 'sftp_write_text_file': {
+      const targetPath = String(args?.path || '').trim();
+      if (!targetPath) throw new Error('Missing destination path');
       if (!entry || !entry.client) {
-        fs.writeFileSync(args?.path, args?.content || '', 'utf8');
+        if (process.env.SSHDESKTOP_ENABLE_LOCAL_FS !== 'true') {
+          throw new Error('No active SSH connection. Local host filesystem access is disabled by policy.');
+        }
+        fs.writeFileSync(targetPath, args?.content || '', { encoding: 'utf8', mode: 0o600 });
         return true;
       }
+      const textContent = String(args?.content ?? '');
+      const buf = Buffer.from(textContent, 'utf8');
+      if (buf.length > 48 * 1024 * 1024) throw new Error('Upload exceeds 48 MiB limit');
       try {
         let sftp = entry.sftp || await getSftp(entry.client);
         await new Promise((resolve, reject) => {
-          const stream = sftp.createWriteStream(args?.path, { flags: 'w' });
+          const stream = sftp.createWriteStream(targetPath, { flags: 'w' });
           stream.on('close', () => resolve());
           stream.on('error', err => reject(err));
-          stream.end(args?.content || '', 'utf8');
+          stream.end(buf);
         });
+        appendAuditEvent({ event: 'sftp_write', target: targetPath, bytes: buf.length, status: 'ok' });
         return true;
       } catch (err) {
-        // Fallback with elevated privilege: write to /tmp first, then sudo mv
-        const b64 = Buffer.from(args?.content || '', 'utf8').toString('base64');
-        const tmpFile = `/tmp/.cd_up_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
-        const tmpRes = await runRemoteExec(entry.client, `echo "${b64}" | base64 -d > "${tmpFile}"`);
+        const b64 = buf.toString('base64');
+        const tmpFile = `/tmp/.sshdesktop_up_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+        const qTmp = shellQuote(tmpFile);
+        const qDst = shellQuote(targetPath);
+        const tmpRes = await runRemoteExecWithStdin(entry.client, `umask 077 && (base64 -d || base64 -D) > ${qTmp}`, b64, 60000);
         if (tmpRes.exit_code === 0) {
-          const mvRes = await runRemotePrivExec(entry, `mv -f "${tmpFile}" "${args?.path}" && chmod 644 "${args?.path}"`);
+          const mvCmd = `if [ -f ${qDst} ] && [ ! -L ${qDst} ]; then chmod $(stat -c '%a' ${qDst} 2>/dev/null || echo 600) ${qTmp} 2>/dev/null || chmod 600 ${qTmp}; else chmod 600 ${qTmp}; fi && mv -f -- ${qTmp} ${qDst}`;
+          const mvRes = await runRemotePrivExec(entry, mvCmd);
           if (mvRes.exit_code === 0) {
+            appendAuditEvent({ event: 'sftp_write_priv', target: targetPath, bytes: buf.length, status: 'ok' });
             return true;
           }
-          await runRemoteExec(entry.client, `rm -f "${tmpFile}"`);
+          await runRemoteExec(entry.client, `rm -f -- ${qTmp}`);
         }
         throw err;
       }
     }
 
     case 'sftp_write_file': {
+      const targetPath = String(args?.path || '').trim();
+      if (!targetPath) throw new Error('Missing destination path');
       const buf = Array.isArray(args?.content) ? Buffer.from(args.content) : Buffer.from(args?.content || '');
+      if (buf.length > 48 * 1024 * 1024) throw new Error('Upload exceeds 48 MiB limit');
       if (!entry || !entry.client) {
-        fs.writeFileSync(args?.path, buf);
+        if (process.env.SSHDESKTOP_ENABLE_LOCAL_FS !== 'true') {
+          throw new Error('No active SSH connection. Local host filesystem access is disabled by policy.');
+        }
+        fs.writeFileSync(targetPath, buf, { mode: 0o600 });
         return true;
       }
       try {
         let sftp = entry.sftp || await getSftp(entry.client);
         await new Promise((resolve, reject) => {
-          const stream = sftp.createWriteStream(args?.path, { flags: 'w' });
+          const stream = sftp.createWriteStream(targetPath, { flags: 'w' });
           stream.on('close', () => resolve());
           stream.on('error', err => reject(err));
           stream.end(buf);
         });
+        appendAuditEvent({ event: 'sftp_write', target: targetPath, bytes: buf.length, status: 'ok' });
         return true;
       } catch (err) {
-        // Fallback with elevated privilege: write to /tmp first, then sudo mv
         const b64 = buf.toString('base64');
-        const tmpFile = `/tmp/.cd_up_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
-        const tmpRes = await runRemoteExec(entry.client, `echo "${b64}" | base64 -d > "${tmpFile}"`);
+        const tmpFile = `/tmp/.sshdesktop_up_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+        const qTmp = shellQuote(tmpFile);
+        const qDst = shellQuote(targetPath);
+        const tmpRes = await runRemoteExecWithStdin(entry.client, `umask 077 && (base64 -d || base64 -D) > ${qTmp}`, b64, 60000);
         if (tmpRes.exit_code === 0) {
-          const mvRes = await runRemotePrivExec(entry, `mv -f "${tmpFile}" "${args?.path}" && chmod 644 "${args?.path}"`);
+          const mvCmd = `if [ -f ${qDst} ] && [ ! -L ${qDst} ]; then chmod $(stat -c '%a' ${qDst} 2>/dev/null || echo 600) ${qTmp} 2>/dev/null || chmod 600 ${qTmp}; else chmod 600 ${qTmp}; fi && mv -f -- ${qTmp} ${qDst}`;
+          const mvRes = await runRemotePrivExec(entry, mvCmd);
           if (mvRes.exit_code === 0) {
+            appendAuditEvent({ event: 'sftp_write_priv', target: targetPath, bytes: buf.length, status: 'ok' });
             return true;
           }
-          await runRemoteExec(entry.client, `rm -f "${tmpFile}"`);
+          await runRemoteExec(entry.client, `rm -f -- ${qTmp}`);
         }
         throw err;
       }
@@ -4042,23 +4180,38 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       const escapedDest = cleanDest.replace(/'/g, "'\\''");
       const lower = archivePath.toLowerCase();
 
+      // Pre-validate archive entries against ZipSlip / tar path traversal & absolute paths
+      const listCmd = lower.endsWith('.zip')
+        ? `(command -v unzip >/dev/null 2>&1 && unzip -Z1 '${escapedArch}' || python3 -c "import sys,zipfile;print('\\n'.join(zipfile.ZipFile(sys.argv[1]).namelist()))" '${escapedArch}')`
+        : `tar -tf '${escapedArch}'`;
+      const listRes = await runRemotePrivExec(entry, listCmd, 60000);
+      if (listRes.exit_code !== 0) throw new Error('Unable to inspect archive contents before extraction');
+      for (const member of listRes.stdout.split('\n')) {
+        const trimmed = member.trim();
+        if (!trimmed) continue;
+        if (trimmed.startsWith('/') || trimmed.split('/').includes('..')) {
+          throw new Error(`Unsafe archive entry rejected (path traversal): ${trimmed}`);
+        }
+      }
+
       let cmd = '';
       if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
-        cmd = `mkdir -p '${escapedDest}' && tar -xzvf '${escapedArch}' -C '${escapedDest}'`;
+        cmd = `mkdir -p '${escapedDest}' && tar --no-same-owner --no-same-permissions -xzvf '${escapedArch}' -C '${escapedDest}'`;
       } else if (lower.endsWith('.tar.bz2')) {
-        cmd = `mkdir -p '${escapedDest}' && tar -xjvf '${escapedArch}' -C '${escapedDest}'`;
+        cmd = `mkdir -p '${escapedDest}' && tar --no-same-owner --no-same-permissions -xjvf '${escapedArch}' -C '${escapedDest}'`;
       } else if (lower.endsWith('.tar.xz')) {
-        cmd = `mkdir -p '${escapedDest}' && tar -xJvf '${escapedArch}' -C '${escapedDest}'`;
+        cmd = `mkdir -p '${escapedDest}' && tar --no-same-owner --no-same-permissions -xJvf '${escapedArch}' -C '${escapedDest}'`;
       } else if (lower.endsWith('.tar')) {
-        cmd = `mkdir -p '${escapedDest}' && tar -xvf '${escapedArch}' -C '${escapedDest}'`;
+        cmd = `mkdir -p '${escapedDest}' && tar --no-same-owner --no-same-permissions -xvf '${escapedArch}' -C '${escapedDest}'`;
       } else if (lower.endsWith('.zip')) {
         cmd = `mkdir -p '${escapedDest}' && (command -v unzip >/dev/null 2>&1 && unzip -o '${escapedArch}' -d '${escapedDest}' || python3 -m zipfile -e '${escapedArch}' '${escapedDest}')`;
       } else {
-        cmd = `mkdir -p '${escapedDest}' && tar -xvf '${escapedArch}' -C '${escapedDest}'`;
+        cmd = `mkdir -p '${escapedDest}' && tar --no-same-owner --no-same-permissions -xvf '${escapedArch}' -C '${escapedDest}'`;
       }
 
       const res = await runRemotePrivExec(entry, cmd, 120000);
       if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Archive extraction failed');
+      appendAuditEvent({ event: 'sftp_extract', target: archivePath, dest: cleanDest, status: 'ok' });
       return cleanDest;
     }
 
@@ -4750,6 +4903,9 @@ function resolveSessionFromRequest(reqUrl, authToken = null) {
         browserSessionRegistry.delete(sessionId);
         return null;
       }
+      if (authToken && hashToken(authToken) !== hashToken(sess.authToken)) {
+        return null;
+      }
       sess.lastActiveAt = Date.now();
       return { session: sess, targetPath: rest, isSessionRoute: true };
     }
@@ -5170,14 +5326,18 @@ function handleBrowserGatewayRequest(req, res) {
     delete outHeaders['x-frame-options'];
 
     const origin = req.headers['origin'];
+    const reqHost = String(req.headers.host || '').toLowerCase();
     if (origin) {
-      outHeaders['access-control-allow-origin'] = origin;
-      outHeaders['access-control-allow-credentials'] = 'true';
-    } else {
-      outHeaders['access-control-allow-origin'] = '*';
+      try {
+        const parsedOrigin = new URL(origin);
+        if (parsedOrigin.host.toLowerCase() === reqHost) {
+          outHeaders['access-control-allow-origin'] = origin;
+          outHeaders['access-control-allow-credentials'] = 'true';
+        }
+      } catch {}
     }
     outHeaders['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH';
-    outHeaders['access-control-allow-headers'] = '*';
+    outHeaders['access-control-allow-headers'] = 'Content-Type, Authorization, X-Session-Token';
 
     // Cookie Management: Update isolated in-memory cookie jar for this upstream target
     if (outHeaders['set-cookie']) {
@@ -5253,10 +5413,29 @@ function handleBrowserGatewayRequest(req, res) {
     const isJs = contentType.includes('javascript') || contentType.includes('application/x-javascript');
 
     if (isHtml || isCss || isJs) {
+      const MAX_GATEWAY_REWRITE_BYTES = 32 * 1024 * 1024;
       const chunks = [];
-      targetRes.on('data', c => chunks.push(c));
+      let totalBytes = 0;
+      let oversized = false;
+      targetRes.on('data', c => {
+        if (oversized) return;
+        const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
+        totalBytes += buf.length;
+        if (totalBytes > MAX_GATEWAY_REWRITE_BYTES) {
+          oversized = true;
+          chunks.length = 0;
+          try { targetRes.destroy(); } catch {}
+          if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+            res.end('Gateway response exceeded 32 MiB rewrite buffer limit');
+          }
+          return;
+        }
+        chunks.push(buf);
+      });
       targetRes.on('end', () => {
-        let buffer = Buffer.concat(chunks);
+        if (oversized) return;
+        let buffer = Buffer.concat(chunks, totalBytes);
 
         // Decompress GZIP, Deflate, or Brotli if target server sent compressed payload
         const enc = (outHeaders['content-encoding'] || '').toLowerCase();

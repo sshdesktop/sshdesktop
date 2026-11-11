@@ -16,7 +16,7 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || '0.0.0.0',
+    host: host || '127.0.0.1',
     hmr: host
       ? {
           protocol: "ws",
@@ -42,6 +42,9 @@ export default defineConfig(async () => ({
       output: {
         manualChunks(id) {
           if (id.includes("node_modules")) {
+            if (id.includes("react-dom") || id.includes("react-router") || /[/\\]react[/\\]/.test(id) || id.includes("zustand")) {
+              return "vendor-react";
+            }
             if (id.includes("@xterm")) {
               return "vendor-xterm";
             }

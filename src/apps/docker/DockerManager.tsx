@@ -31,6 +31,8 @@ import {
   DockerAuthInfo, SavedDockerCredential, ResourceDeleteTarget, ResourceInUseItem
 } from './types';
 import { DOCKERFILE_TEMPLATES, COMPOSE_TEMPLATES, POPULAR_IMAGES } from './templates';
+
+const sq = (value: string): string => `'${String(value).replace(/'/g, "'\\''")}'`;
 import { DockerDeleteModal } from './components/DockerDeleteModal';
 import { DockerInspectModal } from './components/DockerInspectModal';
 import { DockerPruneModal } from './components/DockerPruneModal';
@@ -473,7 +475,7 @@ export default function DockerManager() {
     setActionLoadingId(loadKey);
     showNotification(`Pushing ${targetTag} to ${dockerAuth?.registry || 'registry'}...`);
     try {
-      const res = await sshExec(activeConnId, `docker push "${targetTag}"`);
+      const res = await sshExec(activeConnId, `docker push ${sq(targetTag)}`);
       if (res.exit_code === 0) {
         showNotification(`Successfully pushed image ${targetTag}!`);
       } else {
@@ -613,8 +615,7 @@ export default function DockerManager() {
     setLoginError(null);
     try {
       const reg = loginRegistry.trim() || 'docker.io';
-      const escapedPwd = loginPassword.replace(/'/g, "'\\''");
-      const cmd = `printf '%s\\n' '${escapedPwd}' | docker login -u '${loginUsername.trim()}' --password-stdin ${reg === 'docker.io' ? '' : `'${reg}'`}`.trim();
+      const cmd = `printf '%s\\n' ${sq(loginPassword)} | docker login -u ${sq(loginUsername.trim())} --password-stdin ${reg === 'docker.io' ? '' : sq(reg)}`.trim();
       const res = await sshExec(activeConnId, cmd);
       if (res.exit_code === 0 && (res.stdout.toLowerCase().includes('succeeded') || !res.stderr)) {
         showNotification(`Logged in to Docker registry as ${loginUsername.trim()}`);
@@ -650,7 +651,7 @@ export default function DockerManager() {
   const handleDockerLogout = async (registryToLogout?: string) => {
     const reg = registryToLogout || dockerAuth?.registry || 'docker.io';
     try {
-      const cmd = `docker logout ${reg === 'docker.io' ? '' : `'${reg}'`}`.trim();
+      const cmd = `docker logout ${reg === 'docker.io' ? '' : sq(reg)}`.trim();
       await sshExec(activeConnId, cmd);
       showNotification(`Logged out from ${reg}`);
       await checkDockerAuth();
@@ -748,18 +749,18 @@ export default function DockerManager() {
     setIsSubmittingVol(true);
     try {
       let cmd = 'docker volume create';
-      if (volCreateDriver.trim()) cmd += ` --driver ${volCreateDriver.trim()}`;
+      if (volCreateDriver.trim()) cmd += ` --driver ${sq(volCreateDriver.trim())}`;
       if (volCreateOpts.trim()) {
         volCreateOpts.split(',').forEach(o => {
-          if (o.trim()) cmd += ` --opt ${o.trim()}`;
+          if (o.trim()) cmd += ` --opt ${sq(o.trim())}`;
         });
       }
       if (volCreateLabels.trim()) {
         volCreateLabels.split(',').forEach(l => {
-          if (l.trim()) cmd += ` --label ${l.trim()}`;
+          if (l.trim()) cmd += ` --label ${sq(l.trim())}`;
         });
       }
-      cmd += ` ${volCreateName.trim()}`;
+      cmd += ` ${sq(volCreateName.trim())}`;
       const res = await sshExec(activeConnId, cmd);
       if (res.exit_code === 0) {
         showNotification(`Volume "${volCreateName.trim()}" created successfully!`);
@@ -788,14 +789,14 @@ export default function DockerManager() {
     setIsSubmittingNet(true);
     try {
       let cmd = 'docker network create';
-      if (netCreateDriver) cmd += ` --driver ${netCreateDriver}`;
-      if (netCreateSubnet.trim()) cmd += ` --subnet ${netCreateSubnet.trim()}`;
-      if (netCreateGateway.trim()) cmd += ` --gateway ${netCreateGateway.trim()}`;
-      if (netCreateIpRange.trim()) cmd += ` --ip-range ${netCreateIpRange.trim()}`;
+      if (netCreateDriver) cmd += ` --driver ${sq(netCreateDriver)}`;
+      if (netCreateSubnet.trim()) cmd += ` --subnet ${sq(netCreateSubnet.trim())}`;
+      if (netCreateGateway.trim()) cmd += ` --gateway ${sq(netCreateGateway.trim())}`;
+      if (netCreateIpRange.trim()) cmd += ` --ip-range ${sq(netCreateIpRange.trim())}`;
       if (netCreateInternal) cmd += ` --internal`;
       if (netCreateAttachable) cmd += ` --attachable`;
       if (netCreateIpv6) cmd += ` --ipv6`;
-      cmd += ` ${netCreateName.trim()}`;
+      cmd += ` ${sq(netCreateName.trim())}`;
       const res = await sshExec(activeConnId, cmd);
       if (res.exit_code === 0) {
         showNotification(`Network "${netCreateName.trim()}" created successfully!`);
@@ -845,7 +846,7 @@ export default function DockerManager() {
     const filename = editorMode === 'dockerfile' ? 'Dockerfile' : 'docker-compose.yml';
     const filePath = `${editorPath.replace(/\/$/, '')}/${filename}`;
     try {
-      const res = await sshExec(activeConnId, `cat "${filePath}" 2>/dev/null`);
+      const res = await sshExec(activeConnId, `cat ${sq(filePath)} 2>/dev/null`);
       if (res.exit_code === 0 && res.stdout) {
         setEditorContent(res.stdout);
         showNotification(`Loaded ${filename} from ${editorPath}`);
@@ -861,8 +862,7 @@ export default function DockerManager() {
     const filename = editorMode === 'dockerfile' ? 'Dockerfile' : 'docker-compose.yml';
     const filePath = `${editorPath.replace(/\/$/, '')}/${filename}`;
     try {
-      const eofTag = `DOCKER_${Date.now()}_EOF`;
-      const cmd = `mkdir -p "${editorPath}" && cat << '${eofTag}' > "${filePath}"\n${editorContent}\n${eofTag}`;
+      const cmd = `mkdir -p ${sq(editorPath)} && printf '%s\\n' ${sq(editorContent)} > ${sq(filePath)}`;
       const res = await sshExec(activeConnId, cmd);
       if (res.exit_code === 0) {
         showNotification(`Saved ${filename} to ${editorPath}`);
@@ -1529,31 +1529,31 @@ export default function DockerManager() {
     setRunModalError(null);
     try {
       let cmd = `docker run -d`;
-      if (runName.trim()) cmd += ` --name ${runName.trim()}`;
-      if (runRestart) cmd += ` --restart ${runRestart}`;
+      if (runName.trim()) cmd += ` --name ${sq(runName.trim())}`;
+      if (runRestart) cmd += ` --restart ${sq(runRestart)}`;
       
       if (runPorts.trim()) {
         const portList = runPorts.split(',').map(p => p.trim()).filter(Boolean);
         portList.forEach(p => {
-          cmd += ` -p ${p}`;
+          cmd += ` -p ${sq(p)}`;
         });
       }
 
       if (runVolumes.trim()) {
         const volList = runVolumes.split(',').map(v => v.trim()).filter(Boolean);
         volList.forEach(v => {
-          cmd += ` -v ${v}`;
+          cmd += ` -v ${sq(v)}`;
         });
       }
 
       if (runEnv.trim()) {
         const envList = runEnv.split(',').map(e => e.trim()).filter(Boolean);
         envList.forEach(envItem => {
-          cmd += ` -e ${envItem}`;
+          cmd += ` -e ${sq(envItem)}`;
         });
       }
 
-      cmd += ` ${runImage.trim()}`;
+      cmd += ` ${sq(runImage.trim())}`;
 
       const res = await sshExec(activeConnId, cmd);
       if (res.exit_code === 0) {
@@ -1584,7 +1584,7 @@ export default function DockerManager() {
     setIsPulling(true);
     setPullLogs(`Pulling ${target} from Docker Hub registry...\nPlease wait, this may take a moment.`);
     try {
-      const res = await sshExec(activeConnId, `docker pull ${target}`);
+      const res = await sshExec(activeConnId, `docker pull ${sq(target)}`);
       if (res.exit_code === 0) {
         setPullLogs(`Successfully pulled ${target}!\n\n${res.stdout}`);
         showNotification(`Image ${target} pulled successfully`);
@@ -1606,7 +1606,7 @@ export default function DockerManager() {
     setIsExecRunning(true);
     setExecOutput('Executing inside container...');
     try {
-      const res = await sshExec(activeConnId, `docker exec ${execTarget.id} ${execCmd.trim()}`);
+      const res = await sshExec(activeConnId, `docker exec ${sq(execTarget.id)} sh -c ${sq(execCmd.trim())}`);
       setExecOutput(res.stdout || res.stderr || 'Command executed with no output.');
     } catch (err: any) {
       setExecOutput(`Execution failed: ${err?.message || err}`);
@@ -1666,7 +1666,7 @@ export default function DockerManager() {
   const promptDeleteVolume = async (vol: VolumeItem) => {
     let usingContainers: ResourceInUseItem[] = [];
     try {
-      const res = await sshExec(activeConnId, `docker ps -a --filter volume="${vol.name}" --format "{{.ID}}|{{.Names}}|{{.Status}}"`);
+      const res = await sshExec(activeConnId, `docker ps -a --filter ${sq(`volume=${vol.name}`)} --format "{{.ID}}|{{.Names}}|{{.Status}}"`);
       if (res.stdout && res.stdout.trim()) {
         usingContainers = res.stdout.trim().split('\n').filter(Boolean).map(l => {
           const [id, name, status] = l.split('|');
@@ -1690,7 +1690,7 @@ export default function DockerManager() {
     let usingContainers: ResourceInUseItem[] = [];
     if (!isSystemNetwork) {
       try {
-        const res = await sshExec(activeConnId, `docker network inspect ${net.id} --format "{{range .Containers}}{{.Name}}|{{.IPv4Address}},{{end}}"`);
+        const res = await sshExec(activeConnId, `docker network inspect ${sq(net.id)} --format "{{range .Containers}}{{.Name}}|{{.IPv4Address}},{{end}}"`);
         if (res.stdout && res.stdout.trim()) {
           const parts = res.stdout.trim().split(',').filter(Boolean);
           usingContainers = parts.map(p => {
@@ -1755,7 +1755,7 @@ export default function DockerManager() {
           break;
         }
         case 'volume': {
-          const res = await sshExec(activeConnId, `docker volume rm ${target.id}`);
+          const res = await sshExec(activeConnId, `docker volume rm ${sq(target.id)}`);
           if (res.exit_code === 0) {
             showNotification(`Volume "${target.name}" removed successfully`);
           } else {
@@ -1764,7 +1764,7 @@ export default function DockerManager() {
           break;
         }
         case 'network': {
-          const res = await sshExec(activeConnId, `docker network rm ${target.id}`);
+          const res = await sshExec(activeConnId, `docker network rm ${sq(target.id)}`);
           if (res.exit_code === 0) {
             showNotification(`Network "${target.name}" removed successfully`);
           } else {
@@ -1811,7 +1811,7 @@ export default function DockerManager() {
     try {
       const sourceRef = tagTargetImage.repository === '<none>' ? tagTargetImage.id : `${tagTargetImage.repository}:${tagTargetImage.tag}`;
       const targetRef = `${tagNewRepo.trim()}:${tagNewTag.trim() || 'latest'}`;
-      const res = await sshExec(activeConnId, `docker tag "${sourceRef}" "${targetRef}"`);
+      const res = await sshExec(activeConnId, `docker tag ${sq(sourceRef)} ${sq(targetRef)}`);
       if (res.exit_code === 0) {
         showNotification(`Successfully tagged image as ${targetRef}`);
         setShowTagModal(false);
@@ -1845,10 +1845,10 @@ export default function DockerManager() {
     setIsCommitting(true);
     try {
       const pauseFlag = commitPause ? '' : '--pause=false';
-      const authorFlag = commitAuthor.trim() ? `-a "${commitAuthor.replace(/"/g, '\\"')}"` : '';
-      const msgFlag = commitMessage.trim() ? `-m "${commitMessage.replace(/"/g, '\\"')}"` : '';
+      const authorFlag = commitAuthor.trim() ? `-a ${sq(commitAuthor.trim())}` : '';
+      const msgFlag = commitMessage.trim() ? `-m ${sq(commitMessage.trim())}` : '';
       const targetRef = `${commitRepo.trim()}:${commitTag.trim() || 'latest'}`;
-      const cmd = `docker commit ${pauseFlag} ${authorFlag} ${msgFlag} ${commitTargetContainer.id} "${targetRef}"`.trim();
+      const cmd = `docker commit ${pauseFlag} ${authorFlag} ${msgFlag} ${sq(commitTargetContainer.id)} ${sq(targetRef)}`.trim();
       const res = await sshExec(activeConnId, cmd);
       if (res.exit_code === 0) {
         showNotification(`Committed container ${commitTargetContainer.name} to ${targetRef}`);
@@ -1878,7 +1878,7 @@ export default function DockerManager() {
       const remoteArchive = `/tmp/docker_dl_${Date.now()}_${safeName}.tar.gz`;
 
       // 1. Export and compress image on remote host
-      const exportRes = await sshExec(activeConnId, `docker save "${imageRef}" | gzip > "${remoteArchive}"`);
+      const exportRes = await sshExec(activeConnId, `docker save ${sq(imageRef)} | gzip > ${sq(remoteArchive)}`);
       if (exportRes.exit_code !== 0) {
         throw new Error(exportRes.stderr || exportRes.stdout || 'docker save failed on remote server');
       }
@@ -1889,7 +1889,7 @@ export default function DockerManager() {
 
       // 3. Remove remote temporary archive
       setDownloadStatusText('Cleaning up remote temporary file...');
-      await sshExec(activeConnId, `rm -f "${remoteArchive}"`);
+      await sshExec(activeConnId, `rm -f ${sq(remoteArchive)}`);
 
       setDownloadStatusText(`Saved to: ${localSavedPath || 'Downloads folder'}`);
       showNotification(`Image ${imageRef} downloaded to local machine!`);
@@ -3679,8 +3679,7 @@ export default function DockerManager() {
         savedCredentialsList={savedCredentialsList}
         onClose={() => setShowLoginModal(false)}
         onLogin={async (reg: string, user: string, pwd: string, save: boolean) => {
-          const escapedPwd = pwd.replace(/'/g, "'\\''");
-          const cmd = `printf '%s\\n' '${escapedPwd}' | docker login -u '${user.trim()}' --password-stdin ${reg === 'docker.io' ? '' : `'${reg}'`}`.trim();
+          const cmd = `printf '%s\\n' ${sq(pwd)} | docker login -u ${sq(user.trim())} --password-stdin ${reg === 'docker.io' ? '' : sq(reg)}`.trim();
           const res = await sshExec(activeConnId, cmd);
           if (res.exit_code === 0 && (res.stdout.toLowerCase().includes('succeeded') || !res.stderr)) {
             showNotification(`Logged in to Docker registry as ${user.trim()}`);
@@ -3722,10 +3721,16 @@ export default function DockerManager() {
         onCreate={async (vName, vDriver, vOpts, vLabels) => {
           setIsSubmittingVol(true);
           try {
-            const driverFlag = vDriver ? `-d ${vDriver}` : '';
-            const optFlags = vOpts ? vOpts.split(',').map(o => `--opt ${o.trim()}`).join(' ') : '';
-            const labelFlags = vLabels ? vLabels.split(',').map(l => `--label ${l.trim()}`).join(' ') : '';
-            const cmd = `docker volume create ${driverFlag} ${optFlags} ${labelFlags} ${vName}`.trim().replace(/\s+/g, ' ');
+            const driverFlag = vDriver ? `-d ${sq(vDriver)}` : '';
+            const optFlags = vOpts ? vOpts.split(',').map(o => `--opt ${sq(o.trim())}`).join(' ') : '';
+            const labelFlags = vLabels ? vLabels.split(',').map(l => `--label ${sq(l.trim())}`).join(' ') : '';
+            const cmd = [
+              'docker volume create',
+              driverFlag,
+              optFlags,
+              labelFlags,
+              sq(vName),
+            ].filter(Boolean).join(' ');
             const res = await sshExec(activeConnId, cmd);
             if (res.exit_code === 0) {
               showNotification(`Volume ${vName} created successfully`);
@@ -3750,14 +3755,24 @@ export default function DockerManager() {
         onCreate={async (netData) => {
           setIsSubmittingNet(true);
           try {
-            const driverFlag = `-d ${netData.driver}`;
-            const subnetFlag = netData.subnet ? `--subnet=${netData.subnet}` : '';
-            const gatewayFlag = netData.gateway ? `--gateway=${netData.gateway}` : '';
-            const ipRangeFlag = netData.ipRange ? `--ip-range=${netData.ipRange}` : '';
+            const driverFlag = `-d ${sq(netData.driver)}`;
+            const subnetFlag = netData.subnet ? `--subnet=${sq(netData.subnet)}` : '';
+            const gatewayFlag = netData.gateway ? `--gateway=${sq(netData.gateway)}` : '';
+            const ipRangeFlag = netData.ipRange ? `--ip-range=${sq(netData.ipRange)}` : '';
             const internalFlag = netData.internal ? '--internal' : '';
             const attachableFlag = netData.attachable ? '--attachable' : '';
             const ipv6Flag = netData.ipv6 ? '--ipv6' : '';
-            const cmd = `docker network create ${driverFlag} ${subnetFlag} ${gatewayFlag} ${ipRangeFlag} ${internalFlag} ${attachableFlag} ${ipv6Flag} ${netData.name}`.trim().replace(/\s+/g, ' ');
+            const cmd = [
+              'docker network create',
+              driverFlag,
+              subnetFlag,
+              gatewayFlag,
+              ipRangeFlag,
+              internalFlag,
+              attachableFlag,
+              ipv6Flag,
+              sq(netData.name),
+            ].filter(Boolean).join(' ');
             const res = await sshExec(activeConnId, cmd);
             if (res.exit_code === 0) {
               showNotification(`Network ${netData.name} created successfully`);
@@ -3784,7 +3799,7 @@ export default function DockerManager() {
           try {
             const src = img.repository === '<none>' ? img.id : `${img.repository}:${img.tag}`;
             const target = `${targetRepo}:${targetTag}`;
-            const res = await sshExec(activeConnId, `docker tag ${src} ${target}`);
+            const res = await sshExec(activeConnId, `docker tag ${sq(src)} ${sq(target)}`);
             if (res.exit_code === 0) {
               showNotification(`Tagged ${src} as ${target}`);
               setShowTagModal(false);
@@ -3810,10 +3825,10 @@ export default function DockerManager() {
           setIsCommitting(true);
           try {
             const pauseFlag = pause ? '' : '--pause=false';
-            const authorFlag = author ? `-a "${author.replace(/"/g, '\\"')}"` : '';
-            const msgFlag = msg ? `-m "${msg.replace(/"/g, '\\"')}"` : '';
+            const authorFlag = author ? `-a ${sq(author)}` : '';
+            const msgFlag = msg ? `-m ${sq(msg)}` : '';
             const targetRef = `${targetRepo}:${targetTag || 'latest'}`;
-            const cmd = `docker commit ${pauseFlag} ${authorFlag} ${msgFlag} ${c.id} "${targetRef}"`.trim();
+            const cmd = `docker commit ${pauseFlag} ${authorFlag} ${msgFlag} ${sq(c.id)} ${sq(targetRef)}`.trim();
             const res = await sshExec(activeConnId, cmd);
             if (res.exit_code === 0) {
               showNotification(`Container committed to ${targetRef}`);
@@ -4173,7 +4188,7 @@ export default function DockerManager() {
                   const vol = contextMenu.volume!;
                   setContextMenu(null);
                   try {
-                    const res = await sshExec(activeConnId, `docker volume inspect ${vol.name}`);
+                    const res = await sshExec(activeConnId, `docker volume inspect ${sq(vol.name)}`);
                     alert(`Volume Inspect (${vol.name}):\n\n${res.stdout || res.stderr}`);
                   } catch (e: any) {
                     alert(`Inspect error: ${e?.message || e}`);
@@ -4224,7 +4239,7 @@ export default function DockerManager() {
                   const net = contextMenu.network!;
                   setContextMenu(null);
                   try {
-                    const res = await sshExec(activeConnId, `docker network inspect ${net.id}`);
+                    const res = await sshExec(activeConnId, `docker network inspect ${sq(net.id)}`);
                     alert(`Network Inspect (${net.name}):\n\n${res.stdout || res.stderr}`);
                   } catch (e: any) {
                     alert(`Inspect error: ${e?.message || e}`);

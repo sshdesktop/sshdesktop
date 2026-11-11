@@ -97,6 +97,7 @@ pub async fn cron_list_all(
         for f in /etc/cron.d/* /etc/crontab 2>/dev/null; do
             [ -f "$f" ] && awk -v src="$f" '!/^#|^$/{print src "\t" $0}' "$f";
         done
+        true
         "#,
     ).await;
 

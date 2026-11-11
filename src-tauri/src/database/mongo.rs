@@ -51,7 +51,13 @@ pub async fn connect_mongo(
         format!("?{}", query_params.join("&"))
     };
 
-    let uri = format!("mongodb://{}{}:{}/{}{}", auth, effective_host, effective_port, db_name, query_str);
+    let host_part = if effective_host.contains(':') && !effective_host.starts_with('[') {
+        format!("[{}]", effective_host)
+    } else {
+        effective_host.to_string()
+    };
+
+    let uri = format!("mongodb://{}{}:{}/{}{}", auth, host_part, effective_port, urlencoding(&db_name), query_str);
     let mut client_options = mongodb::options::ClientOptions::parse(&uri)
         .await
         .map_err(|e| format!("MongoDB connection string error: {}", e))?;
@@ -77,10 +83,19 @@ pub async fn connect_mongo(
         .and_then(|d| d.get_str("version").ok().map(|s| s.to_string()))
         .unwrap_or_else(|| "MongoDB".to_string());
 
+    let hello_doc = db
+        .run_command(mongodb::bson::doc! { "hello": 1 }, None)
+        .await
+        .ok();
+    let supports_tx = hello_doc
+        .as_ref()
+        .map(|d| d.get_str("setName").is_ok() || d.get_str("msg").map(|m| m == "isdbgrid").unwrap_or(false))
+        .unwrap_or(false);
+
     let capabilities = ServerCapabilities {
         engine: "mongodb".to_string(),
         server_version: version_str,
-        supports_transactions: true,
+        supports_transactions: supports_tx,
         supports_schemas: false,
         supports_procedures: false,
         supports_functions: false,
@@ -2824,13 +2839,14 @@ pub async fn mongodb_find_documents(
             mongodb::bson::doc! {}
         };
 
+        let safe_limit = limit.unwrap_or(100).clamp(1, 10000);
         let mut find_options = mongodb::options::FindOptions::default();
         find_options.skip = skip;
-        find_options.limit = Some(limit.unwrap_or(100));
+        find_options.limit = Some(safe_limit);
 
         let start = Instant::now();
         let mut cursor = coll.find(filter_doc, find_options).await.map_err(|e| e.to_string())?;
-        collect_mongo_cursor_results(&mut cursor, "MongoDB Find", start, Some(session.capabilities.server_version.clone()), limit.unwrap_or(100) as usize).await
+        collect_mongo_cursor_results(&mut cursor, "MongoDB Find", start, Some(session.capabilities.server_version.clone()), safe_limit as usize).await
     } else {
         Err("Active connection is not MongoDB".to_string())
     }

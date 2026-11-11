@@ -39,8 +39,7 @@ export default function DesktopLockScreen({
 
   const handleUnlockAttempt = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    // Allow unlock with password or blank (session lock)
-    if (activeServer?.password && password && password !== activeServer.password) {
+    if (activeServer?.password && password !== activeServer.password) {
       setHasError(true);
       setTimeout(() => setHasError(false), 800);
       return;

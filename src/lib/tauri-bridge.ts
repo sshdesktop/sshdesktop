@@ -169,12 +169,19 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
     }
   } catch (err: any) {
     console.error(`[SSH Desktop Web IPC] Command '${cmd}' failed:`, err);
-    if (
-      cmd === 'ssh_connect' || 
-      cmd === 'ssh_test_connection' || 
-      cmd === 'terminal_create' || 
-      cmd.startsWith('auth_')
-    ) {
+    const isReadOnlyFallback =
+      cmd.endsWith('_list') ||
+      cmd.endsWith('_get') ||
+      cmd.endsWith('_status') ||
+      cmd === 'system_get_stats' ||
+      cmd === 'system_get_disks' ||
+      cmd === 'system_get_network' ||
+      cmd === 'network_bandwidth_stats' ||
+      cmd === 'ssh_list_connections' ||
+      cmd === 'ssh_list_tunnels' ||
+      cmd === 'ssh_get_socks5' ||
+      cmd === 'store_list_connections';
+    if (!isReadOnlyFallback) {
       throw err;
     }
     return fallback;

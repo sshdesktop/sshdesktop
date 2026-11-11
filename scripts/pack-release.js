@@ -1,29 +1,38 @@
 import fs from 'fs';
 import path from 'path';
-import zlib from 'zlib';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DIST_PACKAGES = path.join(ROOT_DIR, 'dist-packages');
+const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8')).version || '2.4.2';
 
 fs.mkdirSync(DIST_PACKAGES, { recursive: true });
 
-console.log('📦 Generating SSH Desktop 2.4.0 Release Distribution Files in dist-packages/ ...');
+console.log(`📦 Generating SSH Desktop ${PKG_VERSION} Release Distribution Files in dist-packages/ ...`);
 
 // 1. Generate sshdesktop-installer.sh
 const linuxInstallerSh = `#!/usr/bin/env bash
-# SSH Desktop 2.4.0 - All-in-One Linux Installer (Port 2222)
+# SSH Desktop ${PKG_VERSION} - All-in-One Linux Installer (Port 2222)
 set -e
-echo "🚀 Installing SSH Desktop v2.4.0 on Linux..."
+echo "🚀 Installing SSH Desktop v${PKG_VERSION} on Linux..."
 PORT="\${PORT:-2222}"
 mkdir -p /opt/sshdesktop
 cp -r ./dist /opt/sshdesktop/ 2>/dev/null || true
-cp ./server.js /opt/sshdesktop/ 2>/dev/null || true
-cp ./package.json /opt/sshdesktop/ 2>/dev/null || true
+cp ./server.js /opt/sshdesktop/
+cp ./package.json /opt/sshdesktop/
+if [ -f ./package-lock.json ]; then cp ./package-lock.json /opt/sshdesktop/; fi
 if [ -f ./embedded-dist.js ]; then cp ./embedded-dist.js /opt/sshdesktop/; else echo 'export const EMBEDDED_FILES = {};' > /opt/sshdesktop/embedded-dist.js; fi
-if [ -f /opt/sshdesktop/package.json ] && command -v npm >/dev/null 2>&1; then (cd /opt/sshdesktop && npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1 || true); fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo "Error: npm is required to install production dependencies."
+  exit 1
+fi
+if [ -f /opt/sshdesktop/package-lock.json ]; then
+  (cd /opt/sshdesktop && npm ci --omit=dev --no-audit --no-fund)
+else
+  (cd /opt/sshdesktop && npm install --omit=dev --no-audit --no-fund)
+fi
 
 # Systemd service
 cat << EOF > /etc/systemd/system/sshdesktop.service
@@ -43,7 +52,6 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# Hardened StateDirectory used as WorkingDirectory
 Environment=PORT=\${PORT}
 Environment=HOST=0.0.0.0
 ExecStart=$(which node) /opt/sshdesktop/server.js --data-dir /var/lib/sshdesktop
@@ -74,8 +82,8 @@ const setupDebSh = `#!/usr/bin/env bash
 # SSH Desktop Debian / Ubuntu .deb Package Installer
 set -e
 echo "📦 Installing SSH Desktop .deb package on Debian / Ubuntu..."
-if [ -f "./ssh-desktop_2.4.0_amd64.deb" ]; then
-  sudo dpkg -i ./ssh-desktop_2.4.0_amd64.deb || sudo apt-get install -f -y
+if [ -f "./ssh-desktop_${PKG_VERSION}_amd64.deb" ]; then
+  sudo dpkg -i "./ssh-desktop_${PKG_VERSION}_amd64.deb" || sudo apt-get install -f -y
 else
   sudo apt-get update && sudo apt-get install -y nodejs npm
   sudo bash ./sshdesktop-installer.sh
@@ -88,8 +96,8 @@ const setupRpmSh = `#!/usr/bin/env bash
 # SSH Desktop Fedora / RHEL / Rocky .rpm Package Installer
 set -e
 echo "📦 Installing SSH Desktop .rpm package on RHEL / Rocky / Fedora..."
-if [ -f "./ssh-desktop-2.4.0-1.x86_64.rpm" ]; then
-  sudo rpm -Uvh ./ssh-desktop-2.4.0-1.x86_64.rpm || sudo dnf install ./ssh-desktop-2.4.0-1.x86_64.rpm -y
+if [ -f "./ssh-desktop-${PKG_VERSION}-1.x86_64.rpm" ]; then
+  sudo rpm -Uvh "./ssh-desktop-${PKG_VERSION}-1.x86_64.rpm" || sudo dnf install "./ssh-desktop-${PKG_VERSION}-1.x86_64.rpm" -y
 else
   sudo dnf install -y nodejs npm
   sudo bash ./sshdesktop-installer.sh
@@ -119,34 +127,34 @@ fs.writeFileSync(path.join(DIST_PACKAGES, 'SSHDesktop-macOS-Installer.command'),
 // 5. Generate a manifest file
 const manifest = {
   name: "SSH Desktop",
-  version: "2.4.0",
+  version: PKG_VERSION,
   releaseDate: new Date().toISOString(),
   defaultPort: 2222,
   webAuthGate: {
     enabled: true,
     defaultUsername: "admin",
-    defaultPassword: "sshdesktop"
+    initialCredentialsFile: "/var/lib/sshdesktop/initial-admin-credentials.txt"
   },
   packages: {
     debian: {
-      file: "ssh-desktop_2.4.0_amd64.deb",
+      file: `ssh-desktop_${PKG_VERSION}_amd64.deb`,
       type: "Debian / Ubuntu DEB Package",
-      command: "sudo dpkg -i ssh-desktop_2.4.0_amd64.deb || sudo apt-get install -f -y"
+      command: `sudo dpkg -i ssh-desktop_${PKG_VERSION}_amd64.deb || sudo apt-get install -f -y`
     },
     redhat: {
-      file: "ssh-desktop-2.4.0-1.x86_64.rpm",
+      file: `ssh-desktop-${PKG_VERSION}-1.x86_64.rpm`,
       type: "Fedora / RHEL / Rocky Linux RPM Package",
-      command: "sudo rpm -Uvh ssh-desktop-2.4.0-1.x86_64.rpm || sudo dnf install ./ssh-desktop-2.4.0-1.x86_64.rpm"
+      command: `sudo rpm -Uvh ssh-desktop-${PKG_VERSION}-1.x86_64.rpm || sudo dnf install ./ssh-desktop-${PKG_VERSION}-1.x86_64.rpm`
     },
     portable: {
-      file: "ssh-desktop-2.4.0-linux-x86_64.tar.gz",
+      file: `ssh-desktop-${PKG_VERSION}-linux-x86_64.tar.gz`,
       type: "Portable Standalone Archive",
-      command: "tar -xzvf ssh-desktop-2.4.0-linux-x86_64.tar.gz && sudo bash sshdesktop/install.sh"
+      command: `tar -xzvf ssh-desktop-${PKG_VERSION}-linux-x86_64.tar.gz && sudo bash sshdesktop/install.sh`
     },
     macos: {
-      file: "SSHDesktop-2.4.0.dmg",
+      file: `SSHDesktop-${PKG_VERSION}.dmg`,
       type: "macOS Universal Disk Image",
-      command: "hdiutil attach SSHDesktop-2.4.0.dmg && cp -R /Volumes/SSHDesktop/SSHDesktop.app /Applications/"
+      command: `hdiutil attach SSHDesktop-${PKG_VERSION}.dmg && cp -R /Volumes/SSHDesktop/SSHDesktop.app /Applications/`
     }
   }
 };

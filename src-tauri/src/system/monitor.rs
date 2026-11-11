@@ -224,18 +224,11 @@ echo "===END==="
         }
     }
     if cpu_percent.first().copied().unwrap_or(0.0) == 0.0 && load_avg.0 > 0.0 {
-        let est = ((load_avg.0 / (cpu_cores as f64).max(1.0)) * 100.0).clamp(1.5, 95.0) as f32;
+        let est = ((load_avg.0 / (cpu_cores as f64).max(1.0)) * 100.0).clamp(0.5, 95.0) as f32;
         cpu_percent = vec![est];
-        cpu_user = (est * 0.7).clamp(0.5, 100.0);
-        cpu_system = (est * 0.3).clamp(0.5, 100.0);
+        cpu_user = (est * 0.7).clamp(0.0, 100.0);
+        cpu_system = (est * 0.3).clamp(0.0, 100.0);
         cpu_idle = (100.0 - est).clamp(0.0, 100.0);
-    }
-
-    if cpu_percent.first().copied().unwrap_or(0.0) == 0.0 {
-        cpu_percent = vec![1.5];
-        cpu_user = 0.9;
-        cpu_system = 0.6;
-        cpu_idle = 98.5;
     }
 
     // 4. UPTIME

@@ -74,6 +74,9 @@ if [ -f "$CURRENT_DIR/server.js" ] && [ -d "$CURRENT_DIR/dist" ]; then
   cp -r "$CURRENT_DIR/dist" "$INSTALL_DIR/"
   cp "$CURRENT_DIR/server.js" "$INSTALL_DIR/"
   cp "$CURRENT_DIR/package.json" "$INSTALL_DIR/"
+  if [ -f "$CURRENT_DIR/package-lock.json" ]; then
+    cp "$CURRENT_DIR/package-lock.json" "$INSTALL_DIR/"
+  fi
   if [ -f "$CURRENT_DIR/embedded-dist.js" ]; then
     cp "$CURRENT_DIR/embedded-dist.js" "$INSTALL_DIR/"
   else
@@ -90,6 +93,9 @@ else
   if [ -f "./package.json" ]; then
     cp ./package.json "$INSTALL_DIR/"
   fi
+  if [ -f "./package-lock.json" ]; then
+    cp ./package-lock.json "$INSTALL_DIR/"
+  fi
   if [ -f "./embedded-dist.js" ]; then
     cp ./embedded-dist.js "$INSTALL_DIR/"
   elif [ ! -f "$INSTALL_DIR/embedded-dist.js" ]; then
@@ -97,8 +103,16 @@ else
   fi
 fi
 
-if [ -f "$INSTALL_DIR/package.json" ] && command -v npm >/dev/null 2>&1; then
-  (cd "$INSTALL_DIR" && npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1 || true)
+if [ -f "$INSTALL_DIR/package.json" ]; then
+  if ! command -v npm >/dev/null 2>&1; then
+    echo -e "${RED}[ERROR] npm is required to install production backend dependencies.${NC}"
+    exit 1
+  fi
+  if [ -f "$INSTALL_DIR/package-lock.json" ]; then
+    (cd "$INSTALL_DIR" && npm ci --omit=dev --no-audit --no-fund)
+  else
+    (cd "$INSTALL_DIR" && npm install --omit=dev --no-audit --no-fund)
+  fi
 fi
 
 echo -e "${BLUE}[3/5] 🛡️ Opening Port ${PORT} in Firewall...${NC}"
@@ -166,7 +180,7 @@ echo -e "     ${CYAN}http://${PRIMARY_IP}:${PORT}${NC}"
 echo ""
 echo -e "  ${BOLD}🔒 Authentication Gate Credentials:${NC}"
 echo -e "     Username:  ${YELLOW}admin${NC}"
-echo -e "     Password:  ${YELLOW}sshdesktop${NC}"
+echo -e "     Password:  ${YELLOW}sudo cat /var/lib/sshdesktop/initial-admin-credentials.txt${NC}"
 echo ""
 echo -e "  ${BOLD}Service Management Commands:${NC}"
 echo -e "     Check Status: ${BOLD}systemctl status sshdesktop-web${NC}"

@@ -8,7 +8,7 @@ set -e
 
 APP_NAME="ssh-desktop"
 APP_TITLE="SSH Desktop"
-VERSION="2.4.0"
+VERSION="2.4.2"
 ARCH="amd64"
 RPM_ARCH="x86_64"
 DESCRIPTION="SSH Desktop macOS Edition for Linux Remote Server Administration"
@@ -131,7 +131,15 @@ EOF
 cp -r dist "${DEB_DIR}/opt/sshdesktop/"
 cp server.js "${DEB_DIR}/opt/sshdesktop/"
 cp package.json "${DEB_DIR}/opt/sshdesktop/"
+if [ -f "package-lock.json" ]; then cp package-lock.json "${DEB_DIR}/opt/sshdesktop/"; fi
 if [ -f "embedded-dist.js" ]; then cp embedded-dist.js "${DEB_DIR}/opt/sshdesktop/"; else echo 'export const EMBEDDED_FILES = {};' > "${DEB_DIR}/opt/sshdesktop/embedded-dist.js"; fi
+if command -v npm >/dev/null 2>&1; then
+  if [ -f "${DEB_DIR}/opt/sshdesktop/package-lock.json" ]; then
+    (cd "${DEB_DIR}/opt/sshdesktop" && npm ci --omit=dev --no-audit --no-fund)
+  else
+    (cd "${DEB_DIR}/opt/sshdesktop" && npm install --omit=dev --no-audit --no-fund)
+  fi
+fi
 cp "${TAR_DIR}/bin/sshdesktop" "${DEB_DIR}/usr/local/bin/sshdesktop"
 cp "${TAR_DIR}/share/applications/sshdesktop.desktop" "${DEB_DIR}/usr/share/applications/"
 if [ -f "src-tauri/icons/128x128.png" ]; then

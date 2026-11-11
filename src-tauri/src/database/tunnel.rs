@@ -85,6 +85,7 @@ pub async fn setup_ssh_tunnel(
             .port();
 
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         let target_host_clone = target_host.clone();
         let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(64));
 
@@ -92,6 +93,7 @@ pub async fn setup_ssh_tunnel(
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => {
+                        let _ = cancel_tx.send(true);
                         log::info!("SSH direct-tcpip tunnel on port {} stopped", local_port);
                         break;
                     }
@@ -107,6 +109,7 @@ pub async fn setup_ssh_tunnel(
                                 };
                                 let h = handle.clone();
                                 let r_host = target_host_clone.clone();
+                                let mut task_cancel = cancel_rx.clone();
                                 tokio::spawn(async move {
                                     let _permit = permit;
                                     match tokio::time::timeout(
@@ -115,7 +118,10 @@ pub async fn setup_ssh_tunnel(
                                     ).await {
                                         Ok(Ok(channel)) => {
                                             let mut ssh_stream = channel.into_stream();
-                                            let _ = tokio::io::copy_bidirectional(&mut local_stream, &mut ssh_stream).await;
+                                            tokio::select! {
+                                                _ = tokio::io::copy_bidirectional(&mut local_stream, &mut ssh_stream) => {}
+                                                _ = task_cancel.changed() => {}
+                                            }
                                         }
                                         Ok(Err(e)) => {
                                             log::error!("Failed to open direct-tcpip channel to {}:{}: {}", r_host, target_port, e);

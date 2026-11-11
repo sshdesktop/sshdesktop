@@ -40,9 +40,18 @@ pub async fn connect_postgres(
         ssl_param
     );
 
+    let read_only_flag = config.read_only;
     let connect_res = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .acquire_timeout(std::time::Duration::from_secs(config.timeout_seconds.unwrap_or(8)))
+        .after_connect(move |conn, _meta| {
+            Box::pin(async move {
+                if read_only_flag {
+                    sqlx::Executor::execute(conn, "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY").await?;
+                }
+                Ok(())
+            })
+        })
         .connect(&url)
         .await;
 
@@ -55,13 +64,21 @@ pub async fn connect_postgres(
                     "postgres://{}:{}@{}:{}/postgres{}",
                     urlencoding(&config.username),
                     urlencoding(pwd),
-                    effective_host,
+                    host_part,
                     effective_port,
                     ssl_param
                 );
                 sqlx::postgres::PgPoolOptions::new()
                     .max_connections(5)
                     .acquire_timeout(std::time::Duration::from_secs(config.timeout_seconds.unwrap_or(8)))
+                    .after_connect(move |conn, _meta| {
+                        Box::pin(async move {
+                            if read_only_flag {
+                                sqlx::Executor::execute(conn, "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY").await?;
+                            }
+                            Ok(())
+                        })
+                    })
                     .connect(&fallback_url)
                     .await
                     .map_err(|fe| format!("PostgreSQL connection error: {} (fallback to 'postgres' db also failed: {})", e, fe))?
@@ -97,6 +114,29 @@ pub async fn connect_postgres(
     Ok((DriverInstance::Postgres(pool), capabilities))
 }
 
+async fn exec_pg_stmt(
+    pool: &sqlx::PgPool,
+    stmt: &str,
+) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+    sqlx::raw_sql(stmt).execute(pool).await
+}
+
+async fn fetch_pg_stmt(
+    pool: &sqlx::PgPool,
+    stmt: &str,
+    max_rows: usize,
+) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
+    let mut rows = Vec::with_capacity(max_rows.min(1024));
+    let mut row_stream = sqlx::raw_sql(stmt).fetch(pool);
+    while let Some(row) = row_stream.try_next().await? {
+        rows.push(row);
+        if rows.len() > max_rows {
+            break;
+        }
+    }
+    Ok(rows)
+}
+
 pub async fn execute_query_postgres(
     pool: &sqlx::PgPool,
     query: &str,
@@ -104,20 +144,22 @@ pub async fn execute_query_postgres(
     session: &ActiveDatabaseSession,
     start: Instant,
 ) -> Result<QueryResult, String> {
+    let server_version = session.capabilities.server_version.clone();
+
     let statements = split_sql_statements_for_engine(query, "postgres");
     if statements.is_empty() {
         return Err("Query string is empty".to_string());
     }
+    let num_stmts = statements.len();
 
     let mut final_cols = Vec::new();
     let mut final_rows = Vec::new();
     let mut total_affected = 0u64;
     let mut warnings = Vec::new();
     let mut batch_results = Vec::new();
-    let num_stmts = statements.len();
 
     let mut remaining_rows = limit;
-    for (stmt_idx, stmt) in statements.iter().enumerate() {
+    for (stmt_idx, stmt) in statements.into_iter().enumerate() {
         let stmt_start = Instant::now();
         let s_upper = stmt.trim().to_uppercase();
         let is_write_query = s_upper.starts_with("INSERT")
@@ -132,8 +174,7 @@ pub async fn execute_query_postgres(
         let is_mutation = is_write_query && !s_upper.contains("RETURNING");
 
         if is_mutation {
-            let res = sqlx::raw_sql(stmt)
-                .execute(pool)
+            let res = exec_pg_stmt(pool, &stmt)
                 .await
                 .map_err(|e| format!("PostgreSQL error (statement {}/{}): {}", stmt_idx + 1, num_stmts, e))?;
 
@@ -143,7 +184,7 @@ pub async fn execute_query_postgres(
                 warnings.push(format!("Statement {}/{}: {} rows affected", stmt_idx + 1, num_stmts, aff));
             }
             batch_results.push(BatchStatementResult {
-                statement: stmt.to_string(),
+                statement: stmt,
                 columns: Vec::new(),
                 rows: Vec::new(),
                 affected_rows: aff,
@@ -152,16 +193,9 @@ pub async fn execute_query_postgres(
                 error: None,
             });
         } else {
-            let mut row_stream = sqlx::raw_sql(stmt).fetch(pool);
-            let mut rows = Vec::with_capacity(remaining_rows.min(1024));
-            while let Some(row) = row_stream.try_next().await
-                .map_err(|e| format!("PostgreSQL error (statement {}/{}): {}", stmt_idx + 1, num_stmts, e))?
-            {
-                rows.push(row);
-                if rows.len() > remaining_rows {
-                    break;
-                }
-            }
+            let mut rows = fetch_pg_stmt(pool, &stmt, remaining_rows)
+                .await
+                .map_err(|e| format!("PostgreSQL error (statement {}/{}): {}", stmt_idx + 1, num_stmts, e))?;
             let truncated = rows.len() > remaining_rows;
             if truncated {
                 rows.truncate(remaining_rows);
@@ -195,7 +229,7 @@ pub async fn execute_query_postgres(
             total_affected += stmt_affected;
 
             batch_results.push(BatchStatementResult {
-                statement: stmt.to_string(),
+                statement: stmt,
                 columns: cols_meta,
                 rows: json_rows,
                 affected_rows: stmt_affected,
@@ -213,7 +247,7 @@ pub async fn execute_query_postgres(
         last_insert_id: None,
         execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
         command_type: "SQL".to_string(),
-        server_version: Some(session.capabilities.server_version.clone()),
+        server_version: Some(server_version),
         warnings,
         all_results: if batch_results.len() > 1 { Some(batch_results) } else { None },
     })

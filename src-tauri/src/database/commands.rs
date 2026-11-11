@@ -50,6 +50,28 @@ pub use super::redis::{redis_delete_key, redis_get_value, redis_scan_keys, redis
 
 // ─── Tauri Command Implementations ─────────────────────────────────
 
+async fn dispatch_db_query(
+    session: &ActiveDatabaseSession,
+    query: &str,
+    limit: usize,
+    state: &crate::AppState,
+    start: Instant,
+) -> Result<QueryResult, String> {
+    match &session.driver {
+        DriverInstance::MySql(pool) => execute_query_mysql(pool, query, limit, session, start).await,
+        DriverInstance::Postgres(pool) => execute_query_postgres(pool, query, limit, session, start).await,
+        DriverInstance::Sqlite(pool) => execute_query_sqlite(pool, query, limit, session, state, start).await,
+        DriverInstance::Mssql { config, tcp_addr } => execute_query_mssql(config, tcp_addr, query, limit, session, start).await,
+        DriverInstance::Mongo(client) => execute_mongodb_query(client, &session.config.database, query, limit, Some(session.capabilities.server_version.clone())).await,
+        DriverInstance::Redis(client) => execute_query_redis(client, query, session, start).await,
+        DriverInstance::DynamoDb { .. } => execute_query_dynamodb(query, session, start),
+        DriverInstance::CosmosDb { .. } => execute_query_cosmos(query, session, start),
+        DriverInstance::Cassandra { .. } => execute_query_cassandra(query, session, start),
+        DriverInstance::Oracle { .. } => execute_query_oracle(query, session, start),
+        DriverInstance::Db2 { .. } => execute_query_db2(query, session, start),
+    }
+}
+
 #[tauri::command]
 pub async fn db_connect(
     state: tauri::State<'_, crate::AppState>,
@@ -200,9 +222,12 @@ pub async fn db_execute_query(
             .ok_or_else(|| "Database connection not active".to_string())?
     };
 
-    // Read-only sessions must not execute arbitrary SQL/commands. Keep this
-    // conservative: only single-statement read/query commands are permitted.
-    if session.config.read_only {
+    // Read-only sessions must not execute arbitrary SQL/commands. Redis uses its
+    // own safe READ_ONLY_COMMANDS allow-list inside execute_query_redis.
+    if session.config.read_only && !matches!(&session.driver, DriverInstance::Redis(_)) {
+        if matches!(&session.driver, DriverInstance::Mongo(_)) {
+            return Err("Read-only mode for MongoDB query consoles is not supported safely; use a read-only database account".to_string());
+        }
         let normalized = query.trim();
         // Comments and control characters make prefix-based SQL inspection
         // ambiguous (for example executable MySQL comments). Reject them in
@@ -254,51 +279,18 @@ pub async fn db_execute_query(
         if !is_read || potentially_mutating || has_multiple_statements {
             return Err("Read-only session: only one conservative read/query statement is allowed".to_string());
         }
-        // Redis and Mongo use command/query languages where a textual prefix
-        // allow-list cannot reliably guarantee read-only semantics.
-        if matches!(&session.driver, DriverInstance::Redis(_) | DriverInstance::Mongo(_)) {
-            return Err("Read-only mode for Redis/Mongo query consoles is not supported safely; use a read-only database account".to_string());
-        }
     }
 
     let limit = max_rows.unwrap_or(500).min(10000);
+    let query_timeout_secs = session.config.timeout_seconds.unwrap_or(60).clamp(5, 300);
     let start = Instant::now();
 
-    let res = match &session.driver {
-        DriverInstance::MySql(pool) => {
-            execute_query_mysql(pool, &query, limit, &session, start).await
-        }
-        DriverInstance::Postgres(pool) => {
-            execute_query_postgres(pool, &query, limit, &session, start).await
-        }
-        DriverInstance::Sqlite(pool) => {
-            execute_query_sqlite(pool, &query, limit, &session, &state, start).await
-        }
-        DriverInstance::Mssql { config, tcp_addr } => {
-            execute_query_mssql(config, tcp_addr, &query, limit, &session, start).await
-        }
-        DriverInstance::Mongo(client) => {
-            execute_mongodb_query(client, &session.config.database, &query, limit, Some(session.capabilities.server_version.clone())).await
-        }
-        DriverInstance::Redis(client) => {
-            execute_query_redis(client, &query, &session, start).await
-        }
-        DriverInstance::DynamoDb { .. } => {
-            execute_query_dynamodb(&query, &session, start)
-        }
-        DriverInstance::CosmosDb { .. } => {
-            execute_query_cosmos(&query, &session, start)
-        }
-        DriverInstance::Cassandra { .. } => {
-            execute_query_cassandra(&query, &session, start)
-        }
-        DriverInstance::Oracle { .. } => {
-            execute_query_oracle(&query, &session, start)
-        }
-        DriverInstance::Db2 { .. } => {
-            execute_query_db2(&query, &session, start)
-        }
-    };
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(query_timeout_secs),
+        dispatch_db_query(&session, &query, limit, &state, start),
+    )
+    .await
+    .map_err(|_| format!("Database query execution timed out after {} seconds.", query_timeout_secs))?;
 
     // Bound the payload sent across the Tauri IPC boundary. A row-count limit
     // alone is insufficient because a single database row may contain very

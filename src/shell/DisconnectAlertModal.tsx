@@ -50,6 +50,18 @@ export default function DisconnectAlertModal() {
   const otherConnected = connections.filter(c => c.id !== targetServerId && connectedServers.has(c.id));
   const otherSaved = connections.filter(c => c.id !== targetServerId && !connectedServers.has(c.id));
 
+  const handleAutoReconnect = useCallback(async () => {
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      return;
+    }
+    try {
+      await reconnect(targetServerId || undefined);
+    } catch {
+      // Reconnect failed, reset countdown to 10s for next auto-retry if under limit
+      setCountdown(10);
+    }
+  }, [reconnect, targetServerId, reconnectAttempts]);
+
   // Auto-reconnect countdown timer (Stops strictly after MAX_RECONNECT_ATTEMPTS = 3)
   useEffect(() => {
     if (!isDisconnected || isShuttingDown) {
@@ -67,32 +79,21 @@ export default function DisconnectAlertModal() {
     }
 
     timerRef.current = setInterval(() => {
-      setCountdown(prev => {
-        if (prev <= 1) {
-          clearInterval(timerRef.current!);
-          handleAutoReconnect();
-          return 8;
-        }
-        return prev - 1;
-      });
+      setCountdown(prev => (prev <= 1 ? 0 : prev - 1));
     }, 1000);
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [isDisconnected, isReconnecting, isAutoPaused, reconnectAttempts]);
+  }, [isDisconnected, isShuttingDown, isReconnecting, isAutoPaused, reconnectAttempts]);
 
-  const handleAutoReconnect = useCallback(async () => {
-    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      return;
+  useEffect(() => {
+    if (isDisconnected && !isShuttingDown && !isReconnecting && !isAutoPaused && reconnectAttempts < MAX_RECONNECT_ATTEMPTS && countdown === 0) {
+      if (timerRef.current) clearInterval(timerRef.current);
+      setCountdown(8);
+      handleAutoReconnect();
     }
-    try {
-      await reconnect(targetServerId || undefined);
-    } catch {
-      // Reconnect failed, reset countdown to 10s for next auto-retry if under limit
-      setCountdown(10);
-    }
-  }, [reconnect, targetServerId, reconnectAttempts]);
+  }, [countdown, isDisconnected, isShuttingDown, isReconnecting, isAutoPaused, reconnectAttempts, handleAutoReconnect]);
 
   const handleManualReconnect = useCallback(async () => {
     // If limit was reached, reset attempts so user gets another clean cycle of attempts on explicit manual retry

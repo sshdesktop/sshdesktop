@@ -262,7 +262,8 @@ pub async fn firewall_rules(
                         let num_str = line[1..close].trim();
                         if let Ok(num) = num_str.parse::<u32>() {
                             let rest = line[close + 1..].trim();
-                            let parts: Vec<&str> = rest.split_whitespace().collect();
+                            let raw_parts: Vec<&str> = rest.split_whitespace().collect();
+                            let parts: Vec<&str> = raw_parts.into_iter().filter(|p| !p.eq_ignore_ascii_case("(v6)")).collect();
                             if parts.len() >= 2 {
                                 let port_proto = parts[0];
                                 let action = parts[1].to_uppercase();

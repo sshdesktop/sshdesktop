@@ -12,7 +12,6 @@ bin/
 src-tauri/target/
 target/
 **/*.rs.bk
-Cargo.lock
 
 # Tauri build outputs
 src-tauri/WixTools/

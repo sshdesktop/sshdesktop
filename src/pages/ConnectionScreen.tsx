@@ -154,9 +154,14 @@ export default function ConnectionScreen() {
     return () => clearInterval(interval);
   }, []);
 
+  const connectionsRef = useRef(connections);
+  connectionsRef.current = connections;
+
   // Sync saved server profiles from disk storage ~/.sshdesktop/connections.json
   useEffect(() => {
+    let mounted = true;
     storeListConnections().then((saved) => {
+      if (!mounted) return;
       if (saved && Array.isArray(saved) && saved.length > 0) {
         saved.forEach((s: any) => {
           const formatted = {
@@ -171,16 +176,17 @@ export default function ConnectionScreen() {
     }).catch(() => {});
 
     // Discover OpenSSH standard configuration, local SSH keys & SSH Agent
-    sshConfigGetPath().then(setSshConfigPath).catch(() => {});
-    sshAgentGetStatus().then(setAgentStatus).catch(() => {});
-    sshListLocalKeys().then(setLocalKeys).catch(() => {});
+    sshConfigGetPath().then((p) => mounted && setSshConfigPath(p)).catch(() => {});
+    sshAgentGetStatus().then((st) => mounted && setAgentStatus(st)).catch(() => {});
+    sshListLocalKeys().then((lk) => mounted && setLocalKeys(lk)).catch(() => {});
 
     sshConfigReadHosts().then((sshHosts) => {
+      if (!mounted) return;
       if (sshHosts && Array.isArray(sshHosts) && sshHosts.length > 0) {
         sshHosts.forEach((sh) => {
           const targetHost = sh.hostname || sh.host;
           if (!targetHost || targetHost === '*') return;
-          const exists = connections.some(c => c.host === targetHost || c.name === sh.host);
+          const exists = connectionsRef.current.some(c => c.host === targetHost || c.name === sh.host);
           if (!exists) {
             const newConn: any = {
               id: `ssh-config-${sh.host.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}`,
@@ -202,7 +208,8 @@ export default function ConnectionScreen() {
         });
       }
     }).catch(() => {});
-  }, [addConnection, connections]);
+    return () => { mounted = false; };
+  }, [addConnection]);
 
   // Caps Lock detection
   useEffect(() => {

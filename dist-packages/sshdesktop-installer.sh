@@ -1,52 +1,45 @@
 #!/usr/bin/env bash
 # SSH Desktop 2.4.2 - All-in-One Linux Installer (Port 2222)
-set -euo pipefail
-if [ "${EUID}" -ne 0 ]; then
-  echo "Error: run this installer as root (or with sudo)." >&2
-  exit 1
-fi
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if ! command -v systemctl >/dev/null 2>&1; then
-  echo "Error: systemd/systemctl is required." >&2
-  exit 1
-fi
-if ! command -v node >/dev/null 2>&1; then
-  echo "Error: Node.js is required but was not found in PATH." >&2
-  exit 1
-fi
+set -e
 echo "🚀 Installing SSH Desktop v2.4.2 on Linux..."
 PORT="${PORT:-2222}"
-if ! [[ "${PORT}" =~ ^[0-9]{1,5}$ ]] || [ "${PORT}" -lt 1 ] || [ "${PORT}" -gt 65535 ]; then
-  echo "Error: PORT must be an integer between 1 and 65535." >&2
+mkdir -p /opt/sshdesktop
+cp -r ./dist /opt/sshdesktop/ 2>/dev/null || true
+cp ./server.js /opt/sshdesktop/
+cp ./package.json /opt/sshdesktop/
+if [ -f ./package-lock.json ]; then cp ./package-lock.json /opt/sshdesktop/; fi
+if [ -f ./embedded-dist.js ]; then cp ./embedded-dist.js /opt/sshdesktop/; else echo 'export const EMBEDDED_FILES = {};' > /opt/sshdesktop/embedded-dist.js; fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo "Error: npm is required to install production dependencies."
   exit 1
 fi
-for required in dist server.js package.json; do
-  if [ ! -e "${SCRIPT_DIR}/${required}" ]; then
-    echo "Error: required release file or directory is missing: ${SCRIPT_DIR}/${required}" >&2
-    exit 1
-  fi
-done
-install -d -m 0755 /opt/sshdesktop
-cp -a "${SCRIPT_DIR}/dist" /opt/sshdesktop/
-install -m 0644 "${SCRIPT_DIR}/server.js" /opt/sshdesktop/server.js
-install -m 0644 "${SCRIPT_DIR}/package.json" /opt/sshdesktop/package.json
+if [ -f /opt/sshdesktop/package-lock.json ]; then
+  (cd /opt/sshdesktop && npm ci --omit=dev --no-audit --no-fund)
+else
+  (cd /opt/sshdesktop && npm install --omit=dev --no-audit --no-fund)
+fi
 
 # Systemd service
 cat << EOF > /etc/systemd/system/sshdesktop.service
 [Unit]
 Description=SSH Desktop Web Desktop Server (Port ${PORT})
-StartLimitIntervalSec=60
-StartLimitBurst=5
 After=network.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/opt/sshdesktop
+DynamicUser=yes
+StateDirectory=sshdesktop
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/sshdesktop
+Environment=BACKEND_HOST=127.0.0.1
+Environment=SSHDESKTOP_DATA_DIR=/var/lib/sshdesktop
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
 Environment=PORT=${PORT}
 Environment=HOST=0.0.0.0
-ExecStart=$(command -v node) /opt/sshdesktop/server.js
-RestartSec=5
+ExecStart=$(which node) /opt/sshdesktop/server.js --data-dir /var/lib/sshdesktop
 Restart=always
 
 [Install]

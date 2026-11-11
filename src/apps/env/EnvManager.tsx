@@ -7,6 +7,10 @@ import {
 import { useConnectionStore } from '../../lib/store';
 import { sshExec, sftpReadTextFile, sftpWriteTextFile, sftpMkdir, sendDesktopNotification } from '../../lib/tauri-bridge';
 
+const sq = (value: string): string => `'${String(value).replace(/'/g, "'\\''")}'`;
+const escapeEnvDoubleQuoted = (value: string): string =>
+  String(value).replace(/[\r\n]/g, ' ').replace(/[\\"$`]/g, '\\$&');
+
 export type EnvScope = 'all' | 'user' | 'system' | 'session';
 
 export interface EnvItem {
@@ -275,7 +279,7 @@ export default function EnvManager() {
       // Expand ~ to userHome and test in batch
       const checks = paths.map(p => {
         const expanded = p.replace(/^~/, userHome);
-        return `if [ -d "${expanded}" ]; then echo "DIR:${p}"; elif [ -f "${expanded}" ]; then echo "FILE:${p}"; else echo "MISS:${p}"; fi`;
+        return `if [ -d ${sq(expanded)} ]; then printf 'DIR:%s\\n' ${sq(p)}; elif [ -f ${sq(expanded)} ]; then printf 'FILE:%s\\n' ${sq(p)}; else printf 'MISS:%s\\n' ${sq(p)}; fi`;
       }).join('; ');
 
       const res = await sshExec(activeConnId, checks);
@@ -347,7 +351,7 @@ export default function EnvManager() {
             continue;
           }
           if (trimmed.startsWith(`export ${targetKey}=`)) {
-            newLines.push(`export ${cleanKey}="${finalValue}"`);
+            newLines.push(`export ${cleanKey}="${escapeEnvDoubleQuoted(finalValue)}"`);
             replaced = true;
           } else {
             newLines.push(l);
@@ -358,13 +362,13 @@ export default function EnvManager() {
           if (newLines.length > 0 && newLines[newLines.length - 1].trim() !== '') {
             newLines.push('');
           }
-          newLines.push(`export ${cleanKey}="${finalValue}"`);
+          newLines.push(`export ${cleanKey}="${escapeEnvDoubleQuoted(finalValue)}"`);
         }
 
         await sftpWriteTextFile(activeConnId, bashrcPath, newLines.join('\n'));
 
         // Clean up legacy env.sh and any old backup files from remote server
-        await sshExec(activeConnId, `rm -f "${userHome}/.clouddesk/env.sh"* "${userHome}/.sshdesktop/env.sh"* "${userHome}/.bashrc.clouddesk.bak"* "${userHome}/.bashrc.sshdesktop.bak"*`).catch(() => {});
+        await sshExec(activeConnId, `rm -f ${sq(`${userHome}/.clouddesk/env.sh`)}* ${sq(`${userHome}/.sshdesktop/env.sh`)}* ${sq(`${userHome}/.bashrc.clouddesk.bak`)}* ${sq(`${userHome}/.bashrc.sshdesktop.bak`)}*`).catch(() => {});
 
       } else {
         // System Scope: Update /etc/environment (NO .bak files)
@@ -379,7 +383,7 @@ export default function EnvManager() {
         for (const l of lines) {
           const trimmed = l.trim();
           if (trimmed.startsWith(`${targetKey}=`)) {
-            newLines.push(`${cleanKey}="${finalValue}"`);
+            newLines.push(`${cleanKey}="${escapeEnvDoubleQuoted(finalValue)}"`);
             replaced = true;
           } else {
             newLines.push(l);
@@ -387,17 +391,18 @@ export default function EnvManager() {
         }
 
         if (!replaced) {
-          newLines.push(`${cleanKey}="${finalValue}"`);
+          newLines.push(`${cleanKey}="${escapeEnvDoubleQuoted(finalValue)}"`);
         }
 
-        const writeRes = await sshExec(activeConnId, `echo '${newLines.join('\n').replace(/'/g, "'\\''")}' > ${sysPath}`);
+        const payload = `${newLines.join('\n')}\n`;
+        const writeRes = await sshExec(activeConnId, `printf '%s' ${sq(payload)} > ${sq(sysPath)}`);
         if (writeRes.exit_code !== 0 && currentUsername !== 'root') {
           // If non-root, try with sudo
-          await sshExec(activeConnId, `sudo bash -c "cat << 'EOF' > ${sysPath}\n${newLines.join('\n')}\nEOF"`);
+          await sshExec(activeConnId, `printf '%s' ${sq(payload)} | sudo tee ${sq(sysPath)} >/dev/null`);
         }
 
         // Clean up any old system backup files
-        await sshExec(activeConnId, `rm -f "${sysPath}.clouddesk.bak"* "${sysPath}.sshdesktop.bak"*`).catch(() => {});
+        await sshExec(activeConnId, `rm -f ${sq(`${sysPath}.clouddesk.bak`)}* ${sq(`${sysPath}.sshdesktop.bak`)}*`).catch(() => {});
       }
 
       // If key was renamed, unset the old key
@@ -452,15 +457,16 @@ export default function EnvManager() {
           await sftpWriteTextFile(activeConnId, bashrcPath, filtered);
         }
         // Clean up any lingering env.sh files
-        await sshExec(activeConnId, `rm -f "${userHome}/.clouddesk/env.sh"* "${userHome}/.sshdesktop/env.sh"*`).catch(() => {});
+        await sshExec(activeConnId, `rm -f ${sq(`${userHome}/.clouddesk/env.sh`)}* ${sq(`${userHome}/.sshdesktop/env.sh`)}*`).catch(() => {});
       } else if (item.scope === 'system') {
         const sysPath = '/etc/environment';
         const content = await sftpReadTextFile(activeConnId, sysPath).catch(() => '');
         if (content) {
           const filtered = content.split('\n').filter(l => !l.trim().startsWith(`${item.key}=`)).join('\n');
-          const writeRes = await sshExec(activeConnId, `echo '${filtered.replace(/'/g, "'\\''")}' > ${sysPath}`);
+          const payload = filtered.endsWith('\n') ? filtered : `${filtered}\n`;
+          const writeRes = await sshExec(activeConnId, `printf '%s' ${sq(payload)} > ${sq(sysPath)}`);
           if (writeRes.exit_code !== 0 && currentUsername !== 'root') {
-            await sshExec(activeConnId, `sudo bash -c "cat << 'EOF' > ${sysPath}\n${filtered}\nEOF"`);
+            await sshExec(activeConnId, `printf '%s' ${sq(payload)} | sudo tee ${sq(sysPath)} >/dev/null`);
           }
         }
       }

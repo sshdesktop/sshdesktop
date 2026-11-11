@@ -378,12 +378,10 @@ export default function SystemMonitor() {
         }
         prevNetRef.current = { rx: totalRx, tx: totalTx, time: now };
 
-        // Disk Read/Write throughput calculation
-        const estimatedDiskRead = Math.max(1, Math.round(avgCpu * 0.4 + (Math.random() * 3) + 1));
-        const estimatedDiskWrite = Math.max(1, Math.round(avgCpu * 0.2 + (Math.random() * 2) + 1));
-
-        // Distinct composite Energy Impact score (CPU, disk I/O, network)
-        const energyScore = parseFloat(((avgCpu * 1.35) + (estimatedDiskRead * 0.35) + (rxRate * 0.04) + 2.5 + Math.sin(Date.now() / 2000) * 1.2).toFixed(1));
+        // Deterministic activity proxies computed from observed CPU & network counters (no synthetic randomness)
+        const estimatedDiskRead = Math.round(avgCpu * 0.4);
+        const estimatedDiskWrite = Math.round(avgCpu * 0.2);
+        const energyScore = parseFloat(((avgCpu * 1.35) + ((rxRate + txRate) * 0.04)).toFixed(1));
 
         setHistory(prev => {
           const point: HistoryPoint = {
