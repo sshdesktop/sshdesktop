@@ -896,8 +896,8 @@ pub async fn disk_resize_partition(
         }
     });
     let fs = fstype.as_deref().unwrap_or("").to_lowercase();
-    if !fs.is_empty() && !matches!(fs.as_str(), "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "vfat" | "ntfs" | "swap") {
-        return Err("Unsupported filesystem type.".into());
+    if !fs.is_empty() && !matches!(fs.as_str(), "ext2" | "ext3" | "ext4" | "xfs" | "btrfs") {
+        return Err("Partition growth currently supports filesystem expansion for ext2/ext3/ext4, XFS, and Btrfs only.".into());
     }
     if !valid_device_path(&pdev) {
         return Err("Invalid partition device path.".into());
@@ -931,7 +931,8 @@ CUR_END_MIB=$(parted -s -m "$DEV" unit MiB print 2>/dev/null | awk -F: -v p="$NU
     print int(val) 
 }}')
 if [ -z "$CUR_END_MIB" ] || [ "$CUR_END_MIB" -le 0 ]; then
-    CUR_END_MIB=1024
+    echo "Refusing resize: could not determine the current partition boundary." >&2
+    exit 50
 fi
 
 if echo "$NEW_END" | grep -q '^+'; then
@@ -996,18 +997,27 @@ case "$FS" in
         if [ -n "$MP" ]; then
             xfs_growfs "$MP"
         else
-            TMP_MNT="/tmp/xfs_resize_$$"
-            mkdir -p "$TMP_MNT"
+            TMP_MNT=$(mktemp -d /tmp/sshdesktop-xfs-resize.XXXXXX)
+            trap 'umount "$TMP_MNT" >/dev/null 2>&1 || true; rmdir "$TMP_MNT" >/dev/null 2>&1 || true' EXIT
             mount "$PDEV" "$TMP_MNT"
             xfs_growfs "$TMP_MNT"
             umount "$TMP_MNT"
-            rmdir "$TMP_MNT" 2>/dev/null || true
+            rmdir "$TMP_MNT"
+            trap - EXIT
         fi
         ;;
     btrfs)
         MP=$(findmnt -n -o TARGET "$PDEV" 2>/dev/null || true)
         if [ -n "$MP" ]; then
             btrfs filesystem resize max "$MP"
+        else
+            TMP_MNT=$(mktemp -d /tmp/sshdesktop-btrfs-resize.XXXXXX)
+            trap 'umount "$TMP_MNT" >/dev/null 2>&1 || true; rmdir "$TMP_MNT" >/dev/null 2>&1 || true' EXIT
+            mount "$PDEV" "$TMP_MNT"
+            btrfs filesystem resize max "$TMP_MNT"
+            umount "$TMP_MNT"
+            rmdir "$TMP_MNT"
+            trap - EXIT
         fi
         ;;
 esac
