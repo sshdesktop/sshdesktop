@@ -5782,23 +5782,23 @@ function handleWsConnection(ws, req) {
   });
 }
 
+function isAllowedWebSocketOrigin(req) {
+  const origin = req.headers.origin;
+  const host = String(req.headers.host || '').trim().toLowerCase();
+  if (typeof origin !== 'string' || !origin || !host) return false;
+  try {
+    const parsed = new URL(origin);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.host.toLowerCase() === host;
+  } catch { return false; }
+}
+
 backendServer.on('upgrade', (req, socket, head) => {
-  const origin = req.headers['origin'];
-  const host = req.headers['host'];
-  if (origin) {
-    try {
-      const u = new URL(origin);
-      if (u.hostname !== 'localhost' && u.hostname !== '127.0.0.1' && host && u.host !== host) {
-        socket.destroy();
-        return;
-      }
-    } catch {
-      socket.destroy();
-      return;
-    }
+  if (!isAllowedWebSocketOrigin(req)) {
+    socket.destroy();
+    return;
   }
 
-  if (req.url.startsWith('/ws/terminal')) {
+  if (/^\/ws\/terminal(?:\?|$)/.test(req.url)) {
     wss.handleUpgrade(req, socket, head, ws => {
       handleWsConnection(ws, req);
     });
@@ -6068,22 +6068,12 @@ frontendServer.keepAliveTimeout = 5000;
 
 // Forward WebSocket upgrades on port 2222 directly to backend WebSocket handler with origin & session validation
 frontendServer.on('upgrade', (req, socket, head) => {
-  const origin = req.headers['origin'];
-  const host = req.headers['host'];
-  if (origin) {
-    try {
-      const u = new URL(origin);
-      if (u.hostname !== 'localhost' && u.hostname !== '127.0.0.1' && host && u.host !== host) {
-        socket.destroy();
-        return;
-      }
-    } catch {
-      socket.destroy();
-      return;
-    }
+  if (!isAllowedWebSocketOrigin(req)) {
+    socket.destroy();
+    return;
   }
 
-  if (req.url.startsWith('/ws/terminal')) {
+  if (/^\/ws\/terminal(?:\?|$)/.test(req.url)) {
     wss.handleUpgrade(req, socket, head, ws => {
       handleWsConnection(ws, req);
     });
