@@ -358,7 +358,11 @@ pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
         return Err("Invalid SSH identity file path.".into());
     }
     if entry.proxy_jump.as_deref()
-        .map(|v| v.trim().is_empty() || has_control(v) || v.chars().any(char::is_whitespace))
+        .map(|v| {
+            v.trim().is_empty()
+                || has_control(v)
+                || v.chars().any(|c| c.is_whitespace() || c == '#' || c == '"' || c == '\'')
+        })
         .unwrap_or(false)
     {
         return Err("Invalid ProxyJump value.".into());
