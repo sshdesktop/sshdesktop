@@ -152,6 +152,12 @@ pub fn load_or_init_auth_config() -> Result<(ServerAuthConfig, PathBuf), String>
             .map_err(|e| format!("Could not read authentication configuration {}: {}", path.display(), e))?;
         let config = serde_json::from_str::<ServerAuthConfig>(&content)
             .map_err(|e| format!("Authentication configuration {} is invalid; refusing to reset credentials: {}", path.display(), e))?;
+        if config.username.is_empty() || config.username.len() > 64
+            || config.password_hash.is_empty() || config.password_hash.len() > 512
+            || config.salt.is_empty() || config.salt.len() > 128
+        {
+            return Err(format!("Authentication configuration {} contains invalid or oversized credential fields.", path.display()));
+        }
         return Ok((config, path));
     }
 
@@ -182,7 +188,13 @@ pub fn load_or_init_auth_config() -> Result<(ServerAuthConfig, PathBuf), String>
     }
     // create_new prevents racing initialization from truncating an existing file.
     use std::io::Write;
-    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&path)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)
         .map_err(|e| format!("Could not create initial authentication configuration {}: {}", path.display(), e))?;
     file.write_all(json.as_bytes())
         .and_then(|_| file.sync_all())
@@ -209,6 +221,9 @@ pub async fn auth_get_status() -> Result<AuthStatusResponse, String> {
 
 #[tauri::command]
 pub async fn auth_login(username: String, password: String) -> Result<AuthActionResult, String> {
+    if username.len() > 128 || password.len() > 4096 || username.chars().any(char::is_control) {
+        return Err("Username or password exceeds the allowed input size or contains invalid characters.".into());
+    }
     let (mut config, path) = load_or_init_auth_config()?;
     let trimmed_user = username.trim();
 
@@ -259,6 +274,12 @@ pub async fn auth_change_credentials(
     new_username: String,
     new_password: String,
 ) -> Result<AuthActionResult, String> {
+    if current_password.len() > 4096 || new_password.len() > 4096 || new_username.len() > 64 {
+        return Err("Credential input exceeds the allowed maximum length.".into());
+    }
+    if new_username.chars().any(char::is_control) || new_password.chars().any(char::is_control) {
+        return Err("Credentials must not contain control characters.".into());
+    }
     let (mut config, path) = load_or_init_auth_config()?;
 
     // Verify the current password on the blocking pool so Argon2 work does
@@ -274,10 +295,13 @@ pub async fn auth_change_credentials(
     }
 
     let clean_user = new_username.trim();
-    if clean_user.len() < 3 {
-        return Err("New username must be at least 3 characters long.".to_string());
+    if clean_user.len() < 3 || clean_user.len() > 64
+        || !clean_user.as_bytes()[0].is_ascii_alphanumeric()
+        || !clean_user.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+    {
+        return Err("New username must be 3-64 characters, start with a letter or number, and contain only letters, numbers, '.', '_' or '-'.".to_string());
     }
-    if new_password.trim().len() < 12 {
+    if new_password.trim().len() < 12 || new_password.trim().len() > 4096 {
         return Err("New password must be at least 12 characters long.".to_string());
     }
     if new_password.trim() == "admin" {
