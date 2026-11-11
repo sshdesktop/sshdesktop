@@ -541,10 +541,15 @@ setInterval(() => {
 }, 60 * 1000).unref?.();
 
 function getClientIp(req) {
-  // Do not trust client-supplied X-Forwarded-For. Unless a deployment has
-  // an explicit trusted-proxy allowlist, this header is trivially spoofable
-  // and must not be used for login throttling or security decisions.
-  return req?.socket?.remoteAddress || '127.0.0.1';
+  const remote = req?.socket?.remoteAddress || '127.0.0.1';
+  const normalizedRemote = remote.startsWith('::ffff:') ? remote.slice(7) : remote;
+  // The frontend proxy overwrites this private header. Trust it only when the
+  // backend connection itself comes from loopback; never trust public XFF.
+  if (normalizedRemote === '127.0.0.1' || normalizedRemote === '::1') {
+    const forwarded = req?.headers?.['x-sshdesktop-client-ip'];
+    if (typeof forwarded === 'string' && net.isIP(forwarded)) return forwarded;
+  }
+  return remote;
 }
 
 // Background session pruner (every 60 seconds)
@@ -5848,7 +5853,10 @@ const frontendServer = http.createServer({ maxHeaderSize: 16 * 1024 }, (req, res
       headers: {
         ...req.headers,
         host: `127.0.0.1:${BACKEND_PORT}`,
-        'x-forwarded-for': req.headers['x-forwarded-for'] || req.socket.remoteAddress
+        // Overwrite client-provided forwarding headers; backend trusts this
+        // private client-IP hint only from its loopback frontend proxy.
+        'x-forwarded-for': req.socket.remoteAddress || '',
+        'x-sshdesktop-client-ip': req.socket.remoteAddress || ''
       },
       maxHeaderSize: 16 * 1024
     }, proxyRes => {
