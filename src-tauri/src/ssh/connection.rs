@@ -443,6 +443,11 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
         _ => config.private_key_path.is_some() || config.password.is_none(),
     };
     let selected_key_path = if is_key_auth { config.private_key_path.as_deref() } else { None };
+    if config.auth_method.as_deref() == Some("key")
+        && selected_key_path.map(|path| path.trim().is_empty()).unwrap_or(true)
+    {
+        return Err("Key authentication was selected, but no private key was provided.".into());
+    }
     if let Some(key_path) = selected_key_path {
         if resolve_key_path(key_path).is_none() {
             return Err(format!("Selected SSH identity '{}' could not be found.", key_path));
