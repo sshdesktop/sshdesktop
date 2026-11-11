@@ -5711,32 +5711,27 @@ backendServer.keepAliveTimeout = 5000;
 const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
 
 function handleWsConnection(ws, req) {
-  const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  const cookieMatch = req.headers.cookie ? req.headers.cookie.match(/(?:^|;\s*)sshdesktop_session=([^;]+)/) : null;
+  const urlObj = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
+  const cookieMatch = req.headers.cookie ? req.headers.cookie.match(/(?:^|;\\s*)sshdesktop_session=([^;]+)/) : null;
   let cookieToken = null;
   if (cookieMatch) {
-    try {
-      cookieToken = decodeURIComponent(cookieMatch[1].trim());
-    } catch {
-      ws.close(1008, 'Malformed session cookie');
-      return;
-    }
+    try { cookieToken = decodeURIComponent(cookieMatch[1].trim()); }
+    catch { ws.close(1008, 'Malformed session cookie'); return; }
   }
   const secProtoToken = req.headers['sec-websocket-protocol'] ? req.headers['sec-websocket-protocol'].split(',')[0].trim() : null;
   const token = secProtoToken || cookieToken || req.headers['x-session-token'];
-  const session = getSession(token);
-  if (!session) {
-    ws.close(1008, 'Session expired or unauthorized (1 hour limit)');
-    return;
-  }
+  if (!getSession(token)) { ws.close(1008, 'Session expired or unauthorized (1 hour limit)'); return; }
 
   const termId = urlObj.searchParams.get('termId');
   const connId = urlObj.searchParams.get('connId');
-  const cols = parseInt(urlObj.searchParams.get('cols') || '80', 10);
-  const rows = parseInt(urlObj.searchParams.get('rows') || '24', 10);
-
-  if (!termId) {
-    ws.close(1008, 'Missing termId parameter');
+  const cols = urlObj.searchParams.has('cols') ? Number(urlObj.searchParams.get('cols')) : 80;
+  const rows = urlObj.searchParams.has('rows') ? Number(urlObj.searchParams.get('rows')) : 24;
+  if (!termId || termId.length > 128 || !/^[A-Za-z0-9_-]+$/.test(termId)) {
+    ws.close(1008, 'Invalid terminal identifier');
+    return;
+  }
+  if (!Number.isInteger(cols) || cols < 1 || cols > 1000 || !Number.isInteger(rows) || rows < 1 || rows > 500) {
+    ws.close(1008, 'Invalid initial terminal dimensions');
     return;
   }
 
@@ -5746,45 +5741,79 @@ function handleWsConnection(ws, req) {
   }
   activeWsClients.set(termId, ws);
 
+  let creationPending = false;
+  const pendingInput = [];
+  let pendingInputBytes = 0;
+  const writeTerminalData = data => {
+    const terminal = activeTerminals.get(termId);
+    if (!terminal || !terminal.stream) return false;
+    const writable = terminal.stream.write(data);
+    if (writable === false && typeof terminal.stream.once === 'function') {
+      ws.pause();
+      terminal.stream.once('drain', () => { if (ws.readyState === WebSocket.OPEN) ws.resume(); });
+    }
+    return true;
+  };
+
   if (!activeTerminals.has(termId) && connId) {
+    creationPending = true;
     handleInvokeCommand('terminal_create', { connId, rows, cols, terminalId: termId })
+      .then(async () => {
+        creationPending = false;
+        while (pendingInput.length && ws.readyState === WebSocket.OPEN) {
+          const data = pendingInput.shift();
+          pendingInputBytes -= data.length;
+          const terminal = activeTerminals.get(termId);
+          if (!terminal || !terminal.stream) break;
+          const writable = terminal.stream.write(data);
+          if (writable === false && typeof terminal.stream.once === 'function') {
+            ws.pause();
+            await new Promise(resolve => terminal.stream.once('drain', resolve));
+          }
+        }
+        if (ws.readyState === WebSocket.OPEN) ws.resume();
+      })
       .catch(err => {
-        ws.send(JSON.stringify({ type: 'output', text: `\r\n\x1b[31m[SSH Desktop Error] Terminal spawn failed: ${err.message}\x1b[0m\r\n` }));
+        creationPending = false;
+        pendingInput.length = 0;
+        pendingInputBytes = 0;
+        if (ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: 'output', text: '\\r\\n[SSH Desktop Error] Terminal spawn failed: ' + err.message + '\\r\\n' })); } catch {}
+        }
       });
   }
 
   ws.on('message', message => {
-    const session = activeTerminals.get(termId);
-    if (!session || !session.stream) return;
-
+    const data = Buffer.isBuffer(message) ? Buffer.from(message) : Buffer.from(message.toString());
+    const terminal = activeTerminals.get(termId);
+    if (!terminal || !terminal.stream) {
+      if (creationPending) {
+        if (pendingInputBytes + data.length > 64 * 1024) {
+          ws.close(1009, 'Terminal input queued during startup exceeded 64 KiB');
+          return;
+        }
+        pendingInput.push(data);
+        pendingInputBytes += data.length;
+      }
+      return;
+    }
     try {
-      const parsed = JSON.parse(message.toString());
-      if (parsed.type === 'resize') {
-        const r = parsed.rows;
-        const c = parsed.cols;
+      const parsed = JSON.parse(data.toString('utf8'));
+      if (parsed && parsed.type === 'resize') {
+        const r = parsed.rows, c = parsed.cols;
         if (!Number.isInteger(r) || !Number.isInteger(c) || r < 1 || r > 500 || c < 1 || c > 1000) {
           ws.close(1008, 'Invalid terminal dimensions');
           return;
         }
         pendingTerminalResizes.set(termId, { rows: r, cols: c });
-        if (session && session.stream && typeof session.stream.setWindow === 'function') {
-          try {
-            session.stream.setWindow(r, c, 0, 0);
-          } catch {}
+        if (typeof terminal.stream.setWindow === 'function') {
+          try { terminal.stream.setWindow(r, c, 0, 0); } catch {}
         }
         return;
       }
     } catch {}
-
-    const terminalData = Buffer.isBuffer(message) ? message : message.toString();
     try {
-      const writable = session.stream.write(terminalData);
-      if (writable === false && typeof session.stream.once === 'function') {
-        ws.pause();
-        session.stream.once('drain', () => {
-          if (ws.readyState === WebSocket.OPEN) ws.resume();
-        });
-      }
+      writeTerminalData(data);
     } catch (error) {
       console.warn('[SSH Desktop] Terminal input write failed:', error.message);
       ws.close(1011, 'Terminal input transport failed');
@@ -5792,9 +5821,9 @@ function handleWsConnection(ws, req) {
   });
 
   ws.on('close', () => {
-    if (activeWsClients.get(termId) === ws) {
-      activeWsClients.delete(termId);
-    }
+    pendingInput.length = 0;
+    pendingInputBytes = 0;
+    if (activeWsClients.get(termId) === ws) activeWsClients.delete(termId);
   });
 }
 
