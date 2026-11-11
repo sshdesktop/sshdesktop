@@ -5632,15 +5632,12 @@ const backendServer = http.createServer({ maxHeaderSize: 16 * 1024 }, async (req
   // Health check
   if (req.url === '/api/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
+    // Keep the unauthenticated liveness endpoint intentionally minimal.
+    // Runtime topology and active-session counts are not public health data.
     res.end(JSON.stringify({
       status: 'ok',
       service: 'sshdesktop-backend',
-      version: '2.4.2',
-      backendPort: BACKEND_PORT,
-      frontendPort: FRONTEND_PORT,
-      activeConnections: activeConnections.size,
-      activeTerminals: activeTerminals.size,
-      timestamp: Date.now()
+      version: VERSION
     }));
     return;
   }
