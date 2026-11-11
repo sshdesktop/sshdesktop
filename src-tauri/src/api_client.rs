@@ -284,7 +284,10 @@ async fn execute_remote_ssh_request(
                         return Err("Local file parts cannot be read by the remote SSH host. Disable SSH tunneling or use a text form field.".into());
                     }
                     let field = format!("{}={}", item.key, item.value);
-                    curl_args.push_str(&format!(" --form-string '{}'", shell_quote(&field)));
+                    // shell_quote already supplies the complete shell token. Do not
+                    // wrap it in another pair of single quotes, which breaks escaping
+                    // for apostrophes and can expose shell metacharacters.
+                    curl_args.push_str(&format!(" --form-string {}", shell_quote(&field)));
                 }
             }
             None
