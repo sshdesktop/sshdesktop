@@ -393,7 +393,11 @@ pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
 
             let is_ppk = is_ppk_key(trimmed);
             let ext = if is_ppk { "ppk" } else { "pem" };
-            let safe_id = conn_id.chars().filter(|c| c.is_alphanumeric() || *c == '-').collect::<String>();
+            let safe_id = conn_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>();
+            if safe_id.is_empty() {
+                log::error!("SSH Desktop: Refusing to persist private key without a valid connection ID.");
+                return None;
+            }
             let target_file = keys_dir.join(format!("{}.{}", safe_id, ext));
 
             if write_secure_private_key(&target_file, trimmed.as_bytes()).is_ok() {
