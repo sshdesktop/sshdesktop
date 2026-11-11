@@ -935,12 +935,13 @@ FS={fs}
 DEV_REAL=$(readlink -f -- "$DEV") || exit 42
 PDEV_REAL=$(readlink -f -- "$PDEV") || exit 43
 command -v swapon >/dev/null 2>&1 || {{ echo "swapon is required for partition resize safety checks." >&2; exit 127; }}
-if swapon --noheadings --raw --show=NAME 2>/dev/null | while IFS= read -r SWAP_NODE; do
-    [ "$(readlink -f -- "$SWAP_NODE" 2>/dev/null)" = "$PDEV_REAL" ] && exit 0
-done; then
-    echo "Refusing resize: selected partition is active swap." >&2
-    exit 47
-fi
+SWAP_NODES=$(swapon --noheadings --raw --show=NAME 2>/dev/null) || {{ echo "Unable to inspect active swap devices; refusing partition resize." >&2; exit 47; }}
+for SWAP_NODE in $SWAP_NODES; do
+    if [ "$(readlink -f -- "$SWAP_NODE" 2>/dev/null)" = "$PDEV_REAL" ]; then
+        echo "Refusing resize: selected partition is active swap." >&2
+        exit 48
+    fi
+done
 DEVICE_NODES=$(lsblk -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate disk descendants; refusing partition resize." >&2; exit 44; }}
 [ -n "$DEVICE_NODES" ] || {{ echo "No block-device tree returned; refusing partition resize." >&2; exit 45; }}
 PDEV_FOUND=0
