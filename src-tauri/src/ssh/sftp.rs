@@ -367,12 +367,16 @@ pub async fn sftp_read_text_file(
         return Err("Remote text file path must be absolute and contain no traversal or control characters.".into());
     }
     let escaped = shell_escape(&path);
-    let cmd = format!("size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 8388608 ] || {{ echo 'Text file exceeds 8 MiB limit' >&2; exit 1; }}; cat '{}'", escaped, escaped);
+    // Bound emitted bytes to the limit plus one byte to detect concurrent growth.
+    let cmd = format!("head -c 8388609 -- '{}' 2>/dev/null", escaped);
     let (stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
     if code == 0 {
+        if stdout.len() > 8 * 1024 * 1024 {
+            return Err("Text file exceeds the 8 MiB read limit.".into());
+        }
         return Ok(stdout);
     }
     Err(format!("Failed to read file '{}': {}", path, stdout.trim()))
@@ -595,8 +599,11 @@ pub async fn sftp_delete(
     let canonical = canonical.trim();
     let canonical = if canonical.len() > 1 { canonical.trim_end_matches('/') } else { canonical };
     let protected = ["/", "/home", "/root", "/etc", "/usr", "/boot", "/sys", "/proc", "/dev", "/bin", "/sbin", "/lib", "/lib64", "/var", "/run"];
-    if protected.contains(&canonical) {
-        return Err(format!("System protection active: Refusing to delete protected path '{}'", canonical));
+    let is_protected = protected.iter().any(|root| {
+        canonical == *root || (*root != &"/" && canonical.starts_with(&format!("{}/", root)))
+    });
+    if is_protected {
+        return Err(format!("System protection active: Refusing to delete protected system path '{}'", canonical));
     }
     let escaped = shell_escape(canonical);
     let (stdout, code) = run_cmd(&state, &conn_id, &format!("rm -rf '{}' 2>&1", escaped)).await;
@@ -683,7 +690,8 @@ pub async fn sftp_chown(
     }
     let target = if group.is_empty() { owner } else { format!("{}:{}", owner, group) };
     let escaped = shell_escape(&path);
-    let cmd = format!("chown -R '{}' '{}'", target, escaped);
+    // Ownership changes target one selected object; recursion is never implicit.
+    let cmd = format!("chown '{}' '{}'", target, escaped);
     let (_stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
@@ -793,14 +801,19 @@ pub async fn sftp_download(
     remote_path: String,
     local_path: String,
 ) -> Result<(), String> {
+    let destination = std::path::Path::new(&local_path);
+    if local_path.trim().is_empty() || local_path.len() > 4096
+        || local_path.chars().any(|ch| ch.is_control())
+    {
+        return Err("Invalid local download destination.".into());
+    }
+    if tokio::fs::try_exists(destination).await.unwrap_or(true) {
+        return Err(format!("Download destination already exists; refusing to overwrite '{}'.", local_path));
+    }
     // Preserve the 48 MiB transfer cap and surface remote permission/transport
     // errors. Falling back to SCP after a capped read failure would bypass the
     // limit and could silently turn a failed transfer into an unbounded one.
     let bytes = sftp_read_file(state.clone(), conn_id.clone(), remote_path.clone()).await?;
-    let destination = std::path::Path::new(&local_path);
-    if local_path.trim().is_empty() || local_path.chars().any(|ch| ch.is_control()) {
-        return Err("Invalid local download destination.".into());
-    }
     save_download_new(destination, &bytes).await
         .map_err(|e| format!("Failed to save downloaded file '{}': {}", local_path, e))?;
     log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_path);
@@ -821,23 +834,33 @@ pub async fn sftp_upload(
     {
         return Err("Invalid local upload path.".into());
     }
-    let local_metadata = tokio::fs::metadata(&local_path).await
-        .map_err(|e| format!("Cannot access local upload file '{}': {}", local_path, e))?;
-    if !local_metadata.is_file() {
-        return Err("Only regular local files can be uploaded.".into());
+    if !valid_remote_path(&remote_path) || remote_path == "/" || remote_path.ends_with('/') {
+        return Err("Remote upload path must be an absolute file path without traversal components.".into());
     }
     const MAX_UPLOAD_BYTES: u64 = 256 * 1024 * 1024;
+    let local_metadata = tokio::fs::symlink_metadata(&local_path).await
+        .map_err(|e| format!("Cannot access local upload file '{}': {}", local_path, e))?;
+    if local_metadata.file_type().is_symlink() || !local_metadata.is_file() {
+        return Err("Only regular local files (not symbolic links) can be uploaded.".into());
+    }
     if local_metadata.len() > MAX_UPLOAD_BYTES {
         return Err("Remote file upload is limited to 256 MiB per operation.".into());
     }
-
-    // 1. Primary fast path: read a bounded regular file and stream it over SSH.
-    let bytes = tokio::fs::read(&local_path).await
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(&local_path).await
+        .map_err(|e| format!("Failed to open local upload file '{}': {}", local_path, e))?;
+    let opened_metadata = file.metadata().await
+        .map_err(|e| format!("Failed to inspect opened upload file '{}': {}", local_path, e))?;
+    if !opened_metadata.is_file() || opened_metadata.len() > MAX_UPLOAD_BYTES {
+        return Err("Only regular local files up to 256 MiB can be uploaded.".into());
+    }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.take(MAX_UPLOAD_BYTES + 1).read_to_end(&mut bytes).await
         .map_err(|e| format!("Failed to read local upload file '{}': {}", local_path, e))?;
     if bytes.len() as u64 > MAX_UPLOAD_BYTES {
-        return Err("Local file changed during upload and now exceeds the 256 MiB limit.".into());
+        return Err("Local file grew beyond the 256 MiB upload limit while being read.".into());
     }
-    return sftp_write_bytes(&state, &conn_id, &remote_path, &bytes).await;
+    sftp_write_bytes(&state, &conn_id, &remote_path, &bytes).await;
 
 
 }
@@ -858,7 +881,16 @@ pub async fn sftp_read_file_base64(
         return Err("No active SSH connection.".into());
     }
     if code == 0 {
+        const MAX_BASE64_BYTES: usize = 64 * 1024 * 1024;
+        if stdout.len() > MAX_BASE64_BYTES {
+            return Err("Encoded remote file exceeds the 48 MiB transfer limit.".into());
+        }
         let clean_b64: String = stdout.chars().filter(|c| !c.is_whitespace()).collect();
+        if clean_b64.len() > MAX_BASE64_BYTES || clean_b64.len() % 4 != 0
+            || !clean_b64.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        {
+            return Err("Remote file transfer returned invalid or oversized base64 data.".into());
+        }
         return Ok(clean_b64);
     }
     Err(format!("Failed to read binary file '{}'", path))
