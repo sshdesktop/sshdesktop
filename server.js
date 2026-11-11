@@ -593,7 +593,10 @@ function runRemoteExec(client, command, timeoutMs = 60000) {
     let stderr = '';
     let timedOut = false;
     let streamRef = null;
-    const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB total output cap
+    let outputBytes = 0;
+    let outputTruncated = false;
+    const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
+    const TRUNCATION_MARKER = '\\n[Output truncated: size limit reached]';
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -622,33 +625,49 @@ function runRemoteExec(client, command, timeoutMs = 60000) {
 
       streamRef = stream;
 
-      stream.on('data', (chunk) => {
-        if (stdout.length + chunk.length <= MAX_OUTPUT_BYTES) {
-          stdout += chunk.toString('utf8');
-        } else if (!stdout.endsWith('[Output truncated: size limit reached]')) {
-          stdout += '\n[Output truncated: size limit reached]';
-          try { stream.close(); } catch {}
+      const appendOutput = (which, chunk) => {
+        if (outputTruncated) return;
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        const remaining = MAX_OUTPUT_BYTES - outputBytes;
+        if (data.length <= remaining) {
+          if (which === 'stdout') stdout += data.toString('utf8');
+          else stderr += data.toString('utf8');
+          outputBytes += data.length;
+          return;
         }
-      });
-
-      stream.stderr.on('data', (chunk) => {
-        if (stderr.length + chunk.length <= MAX_OUTPUT_BYTES) {
-          stderr += chunk.toString('utf8');
-        } else if (!stderr.endsWith('[Output truncated: size limit reached]')) {
-          stderr += '\n[Output truncated: size limit reached]';
-          try { stream.close(); } catch {}
+        const markerBytes = Buffer.byteLength(TRUNCATION_MARKER);
+        const contentBudget = Math.max(0, remaining - markerBytes);
+        if (contentBudget > 0) {
+          const text = data.subarray(0, contentBudget).toString('utf8');
+          if (which === 'stdout') stdout += text;
+          else stderr += text;
+          outputBytes += contentBudget;
         }
-      });
+        if (remaining >= markerBytes) {
+          if (which === 'stdout') stdout += TRUNCATION_MARKER;
+          else stderr += TRUNCATION_MARKER;
+          outputBytes += markerBytes;
+        }
+        outputTruncated = true;
+        try { stream.close(); } catch {}
+      };
 
-      stream.on('close', (code) => {
+      stream.on('data', chunk => appendOutput('stdout', chunk));
+      stream.stderr.on('data', chunk => appendOutput('stderr', chunk));
+      stream.on('error', err => {
         if (timedOut) return;
         clearTimeout(timer);
-        resolve({
-          stdout,
-          stderr,
-          exit_code: typeof code === 'number' ? code : 0,
-          duration_ms: Date.now() - startTime
-        });
+        resolve({ stdout, stderr: stderr || String(err.message || err), exit_code: -1, duration_ms: Date.now() - startTime });
+      });
+      stream.stderr.on('error', err => {
+        if (timedOut) return;
+        clearTimeout(timer);
+        resolve({ stdout, stderr: stderr || String(err.message || err), exit_code: -1, duration_ms: Date.now() - startTime });
+      });
+      stream.on('close', code => {
+        if (timedOut) return;
+        clearTimeout(timer);
+        resolve({ stdout, stderr, exit_code: typeof code === 'number' ? code : -1, duration_ms: Date.now() - startTime });
       });
     });
   });
