@@ -397,6 +397,14 @@ pub async fn terminal_create(
     let mut stdout = child.stdout.take().ok_or("Failed to open child stdout")?;
     let mut stderr = child.stderr.take().ok_or("Failed to open child stderr")?;
 
+    // Keep ownership of the process handle until exit so the OS child is
+    // always waited/reaped instead of becoming a zombie/orphaned process.
+    tokio::spawn(async move {
+        if let Err(error) = child.wait().await {
+            log::warn!("SSH Desktop: Failed waiting for SSH terminal process: {}", error);
+        }
+    });
+
     let (tx, mut rx) = channel::<Vec<u8>>(64);
 
     // Stdin Pump
