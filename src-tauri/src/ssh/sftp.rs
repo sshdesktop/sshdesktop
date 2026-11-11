@@ -319,7 +319,11 @@ pub async fn sftp_read_file(
         // than hiding permission and transport failures behind a second path.
         if let Ok(sftp) = crate::ssh::session::open_sftp(&handle).await {
             use tokio::io::AsyncReadExt;
-            let file = sftp.open(&path).await
+            let file = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                sftp.open(&path),
+            ).await
+                .map_err(|_| format!("SFTP open timed out for '{}'.", path))?
                 .map_err(|e| format!("SFTP could not open '{}': {}", path, e))?;
             let mut content = Vec::new();
             const MAX_READ_BYTES: u64 = 48 * 1024 * 1024; // 48 MiB safety limit
@@ -338,7 +342,7 @@ pub async fn sftp_read_file(
 
     let escaped = shell_escape(&path);
     // Check the remote size before encoding to avoid transferring an oversized file.
-    let command = format!("size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 50331648 ] || {{ echo 'File exceeds 48 MiB limit' >&2; exit 1; }}; base64 < '{}' | tr -d '\\n'", escaped, escaped);
+    let command = format!("head -c 50331649 -- '{}' | base64 | tr -d '\\n'", escaped);
     let (encoded, code) = run_cmd(&state, &conn_id, &command).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
@@ -760,7 +764,14 @@ async fn save_download_new(local_path: &std::path::Path, bytes: &[u8]) -> Result
     let mut temp_file = None;
     for _ in 0..8 {
         let candidate = parent.join(format!(".sshdesktop-download-{}.tmp", uuid::Uuid::new_v4().simple()));
-        match tokio::fs::OpenOptions::new().write(true).create_new(true).open(&candidate).await {
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate).await {
             Ok(file) => {
                 temp_path = Some(candidate);
                 temp_file = Some(file);
