@@ -419,6 +419,15 @@ pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
 pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: ConnectionConfig) -> Result<String, String> {
     validate_ssh_target(&config.host, config.port, &config.username)?;
 
+    if let Some(provided_id) = config.id.as_deref() {
+        if provided_id.is_empty()
+            || provided_id.len() > 128
+            || provided_id == "default"
+            || !provided_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("Invalid SSH connection ID.".into());
+        }
+    }
     let id = config.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     config.id = Some(id.clone());
     invalidate_user_privilege_cache(&id);
