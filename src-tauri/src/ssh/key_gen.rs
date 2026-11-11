@@ -267,8 +267,11 @@ pub async fn ssh_install_public_key(
     public_key: String,
 ) -> Result<bool, String> {
     let clean_key = public_key.trim();
+    if clean_key.len() > 64 * 1024 || clean_key.chars().any(|ch| ch.is_control() && ch != '\t') {
+        return Err("SSH public key must be a single line no larger than 64 KiB.".into());
+    }
     let fields: Vec<&str> = clean_key.split_whitespace().collect();
-    if fields.len() < 2 || fields.len() > 3
+    if fields.len() < 2
         || !(fields[0].starts_with("ssh-") || fields[0].starts_with("ecdsa-") || fields[0].starts_with("sk-ssh-") || fields[0].starts_with("sk-ecdsa-"))
         || !fields[0].bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
     {
