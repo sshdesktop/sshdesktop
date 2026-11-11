@@ -328,9 +328,15 @@ pub async fn ssh_trust_host_key(
         return Err("Invalid SSH host key algorithm".into());
     }
 
+    if public_key_b64.len() > 64 * 1024 {
+        return Err("SSH public key data exceeds the 64 KiB safety limit.".into());
+    }
     let decoded_key = base64::engine::general_purpose::STANDARD
         .decode(public_key_b64)
         .map_err(|_| "Invalid base64 SSH public key".to_string())?;
+    if decoded_key.len() > 48 * 1024 {
+        return Err("Decoded SSH public key exceeds the 48 KiB safety limit.".into());
+    }
     if decoded_key.is_empty() {
         return Err("SSH public key cannot be empty".into());
     }
