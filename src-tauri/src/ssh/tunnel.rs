@@ -67,9 +67,19 @@ async fn handle_socks5_client(
                 // Domain: 1 byte len + domain string
                 let mut len = [0u8; 1];
                 stream.read_exact(&mut len).await?;
+                if len[0] == 0 {
+                    let _ = stream.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+                    return Err("SOCKS5 domain name cannot be empty".into());
+                }
                 let mut domain = vec![0u8; len[0] as usize];
                 stream.read_exact(&mut domain).await?;
-                String::from_utf8_lossy(&domain).to_string()
+                let domain = String::from_utf8(domain)
+                    .map_err(|_| "SOCKS5 domain name is not valid UTF-8")?;
+                if domain.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+                    let _ = stream.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+                    return Err("SOCKS5 domain name contains invalid characters".into());
+                }
+                domain
             }
             4 => {
                 // IPv6: 16 bytes
@@ -87,6 +97,10 @@ async fn handle_socks5_client(
         let mut port_buf = [0u8; 2];
         stream.read_exact(&mut port_buf).await?;
         let target_port = u16::from_be_bytes(port_buf);
+        if target_port == 0 {
+            let _ = stream.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+            return Err("SOCKS5 destination port must be between 1 and 65535".into());
+        }
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>((target_host, target_port))
     }).await.map_err(|_| "SOCKS5 client handshake timed out")??;
 
