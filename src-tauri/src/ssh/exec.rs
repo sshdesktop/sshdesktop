@@ -34,6 +34,20 @@ pub struct StreamChunk {
     pub exit_code: Option<i32>,
 }
 
+/// Send command input without allowing a stalled SSH subprocess to hang forever.
+async fn write_child_stdin(
+    child: &mut tokio::process::Child,
+    data: &[u8],
+) -> Result<(), String> {
+    let mut stdin = child.stdin.take().ok_or("SSH process stdin was not available")?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        tokio::io::AsyncWriteExt::write_all(&mut stdin, data),
+    ).await.map_err(|_| "Timed out sending input to SSH process")?
+        .map_err(|e| format!("Failed to send input to SSH process: {}", e))?;
+    Ok(())
+}
+
 /// Helper: run a command on the remote server via SSH (plink or openssh).
 /// Returns (stdout, exit_code). exit_code = -1 means no connection / spawn error.
 pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String, i32) {
@@ -222,7 +236,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                             }
                         }
                         Err(_) => {
-                            log::warn!("SSH Desktop: plink timed out for {} on command: {}", host, command);
+                            log::warn!("SSH Desktop: plink command timed out for {}", host);
                             return (String::new(), -1);
                         }
                     }
@@ -295,7 +309,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                         }
                     }
                     Err(_) => {
-                        log::warn!("SSH Desktop: plink ppk timed out for {} on command: {}", host, command);
+                        log::warn!("SSH Desktop: Plink key command timed out for {}", host);
                         return (String::new(), -1);
                     }
                 }
@@ -354,7 +368,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
             log::warn!("SSH Desktop: ssh spawn error for {}: {}", host, e);
         }
         Err(_) => {
-            log::warn!("SSH Desktop: ssh timed out for {} on command: {}", host, command);
+            log::warn!("SSH Desktop: OpenSSH command timed out for {}", host);
         }
     }
 
@@ -608,8 +622,9 @@ pub async fn run_cmd_with_stdin(
                 .stderr(std::process::Stdio::piped());
 
             if let Ok(mut child) = cmd.spawn() {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, stdin_data).await;
+                if let Err(error) = write_child_stdin(&mut child, stdin_data).await {
+                    let _ = child.kill().await;
+                    return (error, -1);
                 }
                 if let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
                     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -649,8 +664,9 @@ pub async fn run_cmd_with_stdin(
             .stderr(std::process::Stdio::piped());
 
         if let Ok(mut child) = cmd.spawn() {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, stdin_data).await;
+            if let Err(error) = write_child_stdin(&mut child, stdin_data).await {
+                let _ = child.kill().await;
+                return (error, -1);
             }
             if let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -693,8 +709,9 @@ pub async fn run_cmd_with_stdin(
         .stderr(std::process::Stdio::piped());
 
     if let Ok(mut child) = ssh_cmd.spawn() {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, stdin_data).await;
+        if let Err(error) = write_child_stdin(&mut child, stdin_data).await {
+            let _ = child.kill().await;
+            return (error, -1);
         }
         if let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
