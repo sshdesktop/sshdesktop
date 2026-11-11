@@ -5712,7 +5712,7 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMess
 
 function handleWsConnection(ws, req) {
   const urlObj = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
-  const cookieMatch = req.headers.cookie ? req.headers.cookie.match(/(?:^|;\\s*)sshdesktop_session=([^;]+)/) : null;
+  const cookieMatch = req.headers.cookie ? req.headers.cookie.match(/(?:^|;\s*)sshdesktop_session=([^;]+)/) : null;
   let cookieToken = null;
   if (cookieMatch) {
     try { cookieToken = decodeURIComponent(cookieMatch[1].trim()); }
@@ -5778,7 +5778,7 @@ function handleWsConnection(ws, req) {
         pendingInput.length = 0;
         pendingInputBytes = 0;
         if (ws.readyState === WebSocket.OPEN) {
-          try { ws.send(JSON.stringify({ type: 'output', text: '\\r\\n[SSH Desktop Error] Terminal spawn failed: ' + err.message + '\\r\\n' })); } catch {}
+          try { ws.send(JSON.stringify({ type: 'output', text: '\r\n[SSH Desktop Error] Terminal spawn failed: ' + err.message + '\r\n' })); } catch {}
         }
       });
   }
