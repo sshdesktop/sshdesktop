@@ -626,8 +626,8 @@ fi
 
 # Refuse to edit a disk while any descendant is mounted or active swap.
 DEV_REAL=$(readlink -f -- "$DEV") || exit 2
-command -v lsblk >/dev/null 2>&1 || { echo "lsblk is required for partition safety checks." >&2; exit 127; }
-command -v findmnt >/dev/null 2>&1 || { echo "findmnt is required for partition safety checks." >&2; exit 127; }
+command -v lsblk >/dev/null 2>&1 || {{ echo "lsblk is required for partition safety checks." >&2; exit 127; }}
+command -v findmnt >/dev/null 2>&1 || {{ echo "findmnt is required for partition safety checks." >&2; exit 127; }}
 for NODE in $(lsblk -nrpo NAME "$DEV_REAL"); do
     if findmnt -rn -S "$NODE" >/dev/null 2>&1; then
         echo "Refusing to create a partition: $NODE is mounted." >&2
