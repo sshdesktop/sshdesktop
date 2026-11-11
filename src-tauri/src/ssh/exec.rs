@@ -626,7 +626,12 @@ pub async fn run_cmd_with_stdin(
                     let _ = child.kill().await;
                     return (error, -1);
                 }
-                if let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
+                let output = match tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(error)) => return (format!("SSH subprocess wait failed: {}", error), -1),
+                    Err(_) => return ("SSH subprocess timed out; refusing authentication fallback to avoid replay.".into(), -1),
+                };
+
                     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                     let exit_code = output.status.code().unwrap_or(-1);
@@ -634,7 +639,7 @@ pub async fn run_cmd_with_stdin(
                         return (stdout, exit_code);
                     }
                     return (stderr, exit_code);
-                }
+                
             }
         }
     }
@@ -668,7 +673,12 @@ pub async fn run_cmd_with_stdin(
                 let _ = child.kill().await;
                 return (error, -1);
             }
-            if let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
+            let output = match tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
+                Ok(Ok(output)) => output,
+                Ok(Err(error)) => return (format!("SSH subprocess wait failed: {}", error), -1),
+                Err(_) => return ("SSH subprocess timed out; refusing authentication fallback to avoid replay.".into(), -1),
+            };
+
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                 let exit_code = output.status.code().unwrap_or(-1);
@@ -676,7 +686,7 @@ pub async fn run_cmd_with_stdin(
                     return (stdout, exit_code);
                 }
                 return (stderr, exit_code);
-            }
+            
         }
     }
 
@@ -713,7 +723,12 @@ pub async fn run_cmd_with_stdin(
             let _ = child.kill().await;
             return (error, -1);
         }
-        if let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
+        let output = match tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => return (format!("SSH subprocess wait failed: {}", error), -1),
+            Err(_) => return ("SSH subprocess timed out; refusing authentication fallback to avoid replay.".into(), -1),
+        };
+
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let exit_code = output.status.code().unwrap_or(-1);
@@ -721,7 +736,7 @@ pub async fn run_cmd_with_stdin(
                 return (stdout, exit_code);
             }
             return (stderr, exit_code);
-        }
+        
     }
 
     (String::new(), -1)
