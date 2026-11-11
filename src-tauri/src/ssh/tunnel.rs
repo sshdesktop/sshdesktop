@@ -226,6 +226,11 @@ pub async fn ssh_start_tunnel(
         _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
     };
     let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
+    if conn.config.auth_method.as_deref() == Some("key")
+        && selected_key_path.map(|key| key.trim().is_empty()).unwrap_or(true)
+    {
+        return Err("Key authentication was selected, but no private key was provided.".into());
+    }
     if let Some(key_path) = selected_key_path {
         if crate::ssh::connection::resolve_key_path(key_path).is_none() {
             return Err(format!("Selected SSH identity '{}' could not be found.", key_path));
@@ -802,6 +807,11 @@ pub async fn ssh_start_socks5(
         _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
     };
     let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
+    if conn.config.auth_method.as_deref() == Some("key")
+        && selected_key_path.map(|key| key.trim().is_empty()).unwrap_or(true)
+    {
+        return Err("Key authentication was selected, but no private key was provided.".into());
+    }
     if let Some(key_path) = selected_key_path {
         if crate::ssh::connection::resolve_key_path(key_path).is_none() {
             return Err(format!("Selected SSH identity '{}' could not be found.", key_path));
