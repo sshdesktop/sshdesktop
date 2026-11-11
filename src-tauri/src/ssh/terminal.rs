@@ -526,7 +526,8 @@ pub async fn terminal_resize(
     term.rows = rows;
     term.cols = cols;
     if let Some(ref action_tx) = term.action_tx {
-        let _ = action_tx.try_send(TerminalAction::Resize { rows, cols });
+        action_tx.try_send(TerminalAction::Resize { rows, cols })
+            .map_err(|e| format!("Terminal resize could not be queued: {}", e))?;
     }
     Ok(())
 }
