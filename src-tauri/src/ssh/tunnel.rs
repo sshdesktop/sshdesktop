@@ -346,13 +346,20 @@ pub async fn ssh_start_tunnel(
                                     let r_host = target_host.clone();
                                     tokio::spawn(async move {
                                         let _permit = permit;
-                                        match h.channel_open_direct_tcpip(&r_host, target_port as u32, "127.0.0.1", local_p as u32).await {
-                                            Ok(channel) => {
+                                        let channel_result = tokio::time::timeout(
+                                            std::time::Duration::from_secs(15),
+                                            h.channel_open_direct_tcpip(&r_host, target_port as u32, "127.0.0.1", local_p as u32),
+                                        ).await;
+                                        match channel_result {
+                                            Ok(Ok(channel)) => {
                                                 let mut ssh_stream = channel.into_stream();
                                                 let _ = tokio::io::copy_bidirectional(&mut local_stream, &mut ssh_stream).await;
                                             }
-                                            Err(e) => {
+                                            Ok(Err(e)) => {
                                                 log::error!("Failed to open direct-tcpip channel to {}:{}: {}", r_host, target_port, e);
+                                            }
+                                            Err(_) => {
+                                                log::warn!("Timed out opening direct-tcpip channel to {}:{}.", r_host, target_port);
                                             }
                                         }
                                     });
