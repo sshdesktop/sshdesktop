@@ -923,26 +923,26 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
     // 3. Password probe via Plink
     if !is_key_auth {
         if let Some(pwd) = &config.password {
-        if !pwd.is_empty() {
-            let password_file = create_password_file(pwd)?;
-            let plink_bin = get_plink_path();
-            let mut cmd = tokio::process::Command::new(plink_bin);
-    cmd.kill_on_drop(true);
-            #[cfg(windows)]
-            cmd.creation_flags(0x08000000);
-            cmd.arg("-ssh")
-                .arg("-batch")
-                .arg("-P").arg(&port)
-                .arg("-l").arg(user)
-                .arg("-pwfile").arg(password_file.path())
-                .arg(host)
-                .arg("echo sshdesktop-ok");
-            if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await {
-                if res.status.success() {
-                    return Ok(true);
+            if !pwd.is_empty() {
+                let password_file = create_password_file(pwd)?;
+                let plink_bin = get_plink_path();
+                let mut cmd = tokio::process::Command::new(plink_bin);
+                cmd.kill_on_drop(true);
+                #[cfg(windows)]
+                cmd.creation_flags(0x08000000);
+                cmd.arg("-ssh")
+                    .arg("-batch")
+                    .arg("-P").arg(&port)
+                    .arg("-l").arg(user)
+                    .arg("-pwfile").arg(password_file.path())
+                    .arg(host)
+                    .arg("echo sshdesktop-ok");
+                if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await {
+                    if res.status.success() {
+                        return Ok(true);
+                    }
                 }
             }
-        }
         }
     }
 
