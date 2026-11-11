@@ -34,6 +34,29 @@ fn format_config_value(value: &str) -> String {
     }
 }
 
+/// Decode a single SSH config value, preserving whitespace inside quotes.
+fn parse_config_value(raw: &str) -> String {
+    let value = raw.trim();
+    let quoted = value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')));
+    let value = if quoted { &value[1..value.len() - 1] } else { value };
+    let mut decoded = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                decoded.push(next);
+            } else {
+                decoded.push(ch);
+            }
+        } else {
+            decoded.push(ch);
+        }
+    }
+    decoded
+}
+
 pub fn expand_tilde(path_str: &str) -> String {
     let trimmed = path_str.trim().trim_matches('"').trim_matches('\'');
     if trimmed.starts_with("~/") || trimmed.starts_with("~\\") || trimmed == "~" {
@@ -102,13 +125,12 @@ fn parse_ssh_config_internal(
             continue;
         }
 
-        let mut parts = line.split_whitespace();
-        let key = match parts.next() {
-            Some(k) => k.to_lowercase(),
+        let separator = match line.find(char::is_whitespace) {
+            Some(index) => index,
             None => continue,
         };
-        let value = parts.collect::<Vec<_>>().join(" ");
-        let value = value.trim_matches('"').trim_matches('\'').trim().to_string();
+        let key = line[..separator].to_lowercase();
+        let value = parse_config_value(&line[separator..]);
 
         if key == "host" {
             // Flush any previously collected host block
