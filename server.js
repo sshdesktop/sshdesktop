@@ -532,13 +532,10 @@ function extractSessionToken(req, payload) {
 
   if (req?.headers?.cookie) {
     const match = req.headers.cookie.match(/(?:^|;\s*)sshdesktop_session=([^;]+)/);
-    if (match) return decodeURIComponent(match[1]).trim();
-  }
-
-  if (req?.url) {
-    try {
-      const u = new URL(req.url, 'http://localhost');
-    } catch {}
+    if (match) {
+      try { return decodeURIComponent(match[1]).trim(); }
+      catch { return null; }
+    }
   }
   return null;
 }
@@ -4501,10 +4498,16 @@ function getOrCreateBrowserSession(connId, proto, host, port, authToken) {
   const authSession = getSession(authToken);
   if (!authSession) throw new Error('An active authenticated session is required for browser gateway access.');
   pruneBrowserSessions();
-  connId = connId || 'default';
-  proto = (proto || 'http').toLowerCase();
-  port = Number(port) || (proto === 'https' ? 443 : 80);
-  const cleanHost = (host || '127.0.0.1').toLowerCase().trim();
+  connId = String(connId || 'default').trim();
+  proto = String(proto || 'http').toLowerCase();
+  port = port === undefined || port === null || port === '' ? (proto === 'https' ? 443 : 80) : Number(port);
+  const cleanHost = String(host || '127.0.0.1').toLowerCase().trim();
+  if (!connId || connId.length > 128 || /[\x00-\x1f\x7f]/.test(connId)) {
+    throw new Error('Invalid browser gateway connection identifier.');
+  }
+  if (!['http', 'https'].includes(proto)) throw new Error('Browser gateway supports HTTP and HTTPS targets only.');
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid browser gateway target port.');
+  if (!cleanHost || cleanHost.length > 253 || /[\s/?#@]/.test(cleanHost)) throw new Error('Invalid browser gateway target host.');
   const authTokenHash = hashToken(authToken);
   const key = `${authTokenHash}:${connId}:${proto}:${cleanHost}:${port}`;
 
@@ -4570,6 +4573,7 @@ function resolveSessionFromRequest(reqUrl, authToken = null) {
       const afterConn = subPath.slice(slash1 + 1);
       const slash2 = afterConn.indexOf('/');
       const proto = (slash2 === -1 ? afterConn : afterConn.slice(0, slash2)).toLowerCase();
+      if (!['http', 'https'].includes(proto)) return null;
       const afterProto = slash2 === -1 ? '' : afterConn.slice(slash2 + 1);
       const slash3 = afterProto.indexOf('/');
       const hostPart = slash3 === -1 ? afterProto : afterProto.slice(0, slash3);
@@ -4763,6 +4767,9 @@ function handleBrowserGatewayRequest(req, res) {
       const fullUrl = targetUrl.startsWith('http://') || targetUrl.startsWith('https://') ? targetUrl : `http://${targetUrl}`;
       const parsed = new URL(fullUrl);
       const proto = parsed.protocol.replace(':', '');
+      if (!['http', 'https'].includes(proto) || parsed.username || parsed.password) {
+        throw new Error('Only HTTP/HTTPS targets without embedded credentials are supported.');
+      }
       const port = parsed.port || (proto === 'https' ? '443' : '80');
       const pathAndQuery = (parsed.pathname || '/') + (parsed.search || '');
       const session = getOrCreateBrowserSession(connId, proto, parsed.hostname, port, extractSessionToken(req, null));
