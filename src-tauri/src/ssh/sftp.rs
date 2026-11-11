@@ -157,12 +157,17 @@ pub async fn sftp_list_dir(
 
     if let Some(handle) = handle_opt {
         if let Ok(sftp) = crate::ssh::session::open_sftp(&handle).await {
-            if let Ok(dir_entries) = sftp.read_dir(clean_path).await {
-                const MAX_DIR_ENTRIES: usize = 10000;
-                if dir_entries.len() > MAX_DIR_ENTRIES {
-                    return Err(format!("Directory contains more than {} entries; narrow the directory before listing.", MAX_DIR_ENTRIES));
-                }
-                let mut entries = Vec::new();
+            let dir_entries = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                sftp.read_dir(clean_path)
+            ).await
+                .map_err(|_| format!("SFTP directory listing timed out for '{}'.", clean_path))?
+                .map_err(|e| format!("SFTP could not list '{}': {}", clean_path, e))?;
+            const MAX_DIR_ENTRIES: usize = 10000;
+            if dir_entries.len() > MAX_DIR_ENTRIES {
+                return Err(format!("Directory contains more than {} entries; narrow the directory before listing.", MAX_DIR_ENTRIES));
+            }
+            let mut entries = Vec::new();
                 for entry in dir_entries {
                     if entries.len() >= MAX_DIR_ENTRIES {
                         break;
@@ -193,8 +198,7 @@ pub async fn sftp_list_dir(
                         modified,
                     });
                 }
-                return Ok(entries);
-            }
+            return Ok(entries);
         }
     }
 
