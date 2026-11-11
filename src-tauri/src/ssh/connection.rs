@@ -377,7 +377,11 @@ pub fn resolve_key_path(key_input: &str) -> Option<String> {
     // Check if path references legacy ~/.clouddesk or ~/.sshdesktop
     let migrated = trimmed.replace(".clouddesk", ".sshdesktop");
     let p_migrated = std::path::Path::new(&migrated);
-    if p_migrated.exists() && p_migrated.is_file() {
+    if let Ok(metadata) = std::fs::symlink_metadata(p_migrated) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
+            log::error!("SSH Desktop: Refusing invalid, symlinked, or oversized migrated private key: {}", p_migrated.display());
+            return None;
+        }
         if secure_private_key_permissions(p_migrated).is_err() {
             log::error!("SSH Desktop: Refusing to use migrated private key because permissions could not be secured: {}", p_migrated.display());
             return None;
