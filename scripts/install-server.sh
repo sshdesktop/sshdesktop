@@ -31,6 +31,11 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
+if ! command -v systemctl >/dev/null 2>&1; then
+  echo "Error: systemd/systemctl is required to install the service."
+  exit 1
+fi
+
 echo "[1/5] Setting up secure configuration directory..."
 mkdir -p "${CONFIG_DIR}"
 chmod 700 "${CONFIG_DIR}"
@@ -115,7 +120,7 @@ chmod 644 "${SERVICE_FILE}"
 
 echo "[5/5] Reloading systemd and enabling service..."
 systemctl daemon-reload
-systemctl enable "${SERVICE_NAME}" 2>/dev/null || true
+systemctl enable "${SERVICE_NAME}"
 
 # Detect Server Primary IP
 SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "your-server-ip")
