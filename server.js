@@ -1479,13 +1479,13 @@ function buildSshClientConfig(config, targetId) {
   const host = String(config.host || '').trim();
   const port = Number(config.port || 22);
   const username = String(config.username || 'root').trim();
-  if (!host || host.length > 253 || /[\\s/?#@]/.test(host)) {
+  if (!host || host.length > 253 || /[\s/?#@]/.test(host)) {
     throw new Error('Invalid SSH host name or address.');
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error('SSH port must be an integer between 1 and 65535.');
   }
-  if (!username || username.length > 255 || /[\\0\\r\\n]/.test(username)) {
+  if (!username || username.length > 255 || /[\0\r\n]/.test(username)) {
     throw new Error('Invalid SSH username.');
   }
 
