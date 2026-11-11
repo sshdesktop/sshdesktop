@@ -5785,6 +5785,21 @@ function handleWsConnection(ws, req) {
 
   ws.on('message', message => {
     const data = Buffer.isBuffer(message) ? Buffer.from(message) : Buffer.from(message.toString());
+    let parsed = null;
+    try { parsed = JSON.parse(data.toString('utf8')); } catch {}
+    if (parsed && parsed.type === 'resize') {
+      const r = parsed.rows, c = parsed.cols;
+      if (!Number.isInteger(r) || !Number.isInteger(c) || r < 1 || r > 500 || c < 1 || c > 1000) {
+        ws.close(1008, 'Invalid terminal dimensions');
+        return;
+      }
+      pendingTerminalResizes.set(termId, { rows: r, cols: c });
+      const active = activeTerminals.get(termId);
+      if (active && active.stream && typeof active.stream.setWindow === 'function') {
+        try { active.stream.setWindow(r, c, 0, 0); } catch {}
+      }
+      return;
+    }
     const terminal = activeTerminals.get(termId);
     if (!terminal || !terminal.stream) {
       if (creationPending) {
@@ -5797,21 +5812,6 @@ function handleWsConnection(ws, req) {
       }
       return;
     }
-    try {
-      const parsed = JSON.parse(data.toString('utf8'));
-      if (parsed && parsed.type === 'resize') {
-        const r = parsed.rows, c = parsed.cols;
-        if (!Number.isInteger(r) || !Number.isInteger(c) || r < 1 || r > 500 || c < 1 || c > 1000) {
-          ws.close(1008, 'Invalid terminal dimensions');
-          return;
-        }
-        pendingTerminalResizes.set(termId, { rows: r, cols: c });
-        if (typeof terminal.stream.setWindow === 'function') {
-          try { terminal.stream.setWindow(r, c, 0, 0); } catch {}
-        }
-        return;
-      }
-    } catch {}
     try {
       writeTerminalData(data);
     } catch (error) {
