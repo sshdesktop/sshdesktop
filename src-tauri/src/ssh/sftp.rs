@@ -730,7 +730,7 @@ pub async fn sftp_stat(
         return Err("No active SSH connection.".into());
     }
     if code == 0 && !stdout.is_empty() {
-        let parts: Vec<&str> = stdout.trim().splitn(5, '\\t').collect();
+        let parts: Vec<&str> = stdout.trim().splitn(5, '\t').collect();
         if parts.len() == 5 {
             let size = parts[0].parse::<u64>()
                 .map_err(|_| "Remote stat returned an invalid file size.".to_string())?;
