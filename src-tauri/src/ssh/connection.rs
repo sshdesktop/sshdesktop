@@ -873,7 +873,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
             &config.username,
             if is_key_auth { None } else { config.password.as_deref() },
             selected_key_path,
-            None,
+            config.passphrase.as_deref(),
             config.auth_method.as_deref() != Some("password"),
         ).await {
             if let Ok((out, _err, code)) = crate::ssh::session::run_exec_channel(&handle, "echo sshdesktop-ok").await {
