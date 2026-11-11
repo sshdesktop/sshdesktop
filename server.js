@@ -1693,7 +1693,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
 
       const username = String(newUsername || '').trim();
 
-      if (!username || username.length < 3 || username.length > 64 || /[\\x00-\\x1f\\x7f]/.test(username)) {
+      if (!username || username.length < 3 || username.length > 64 || /[\x00-\x1f\x7f]/.test(username)) {
         return {
           success: false,
           message: 'Username must contain 3 to 64 characters and no control characters.'
