@@ -133,8 +133,11 @@ pub async fn ssh_generate_key_pair(
 
         crate::ssh::connection::write_secure_private_key(&target_priv, &priv_pem)
             .map_err(|e| format!("Failed to write private key file: {}", e))?;
-        std::fs::write(&target_pub, &pub_formatted)
-            .map_err(|e| format!("Failed to write public key file: {}", e))?;
+        if let Err(error) = std::fs::write(&target_pub, &pub_formatted) {
+            let _ = std::fs::remove_file(&target_priv);
+            let _ = std::fs::remove_file(&target_pub);
+            return Err(format!("Failed to write public key file: {}", error));
+        }
     }
 
     if let Err(error) = crate::ssh::connection::secure_private_key_permissions(&target_priv) {
@@ -153,10 +156,14 @@ pub async fn ssh_generate_key_pair(
         }
     }
 
-    let pub_content = std::fs::read_to_string(&target_pub)
-        .map_err(|e| format!("Failed to read generated public key: {}", e))?
-        .trim()
-        .to_string();
+    let pub_content = match std::fs::read_to_string(&target_pub) {
+        Ok(content) => content.trim().to_string(),
+        Err(error) => {
+            let _ = std::fs::remove_file(&target_priv);
+            let _ = std::fs::remove_file(&target_pub);
+            return Err(format!("Failed to read generated public key: {}", error));
+        }
+    };
 
     Ok(GeneratedKeyPair {
         private_key_path: target_priv.to_string_lossy().to_string(),
