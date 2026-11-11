@@ -1415,7 +1415,9 @@ function sshHostTokenMatches(token, candidate) {
       pattern += ch;
     }
   }
-  try { return new RegExp('^' + pattern + '
+  try { return new RegExp('^' + pattern + '$', 'i').test(candidate); }
+  catch { return false; }
+}
 
 function sshHostFieldMatches(field, candidates) {
   let positive = false;
