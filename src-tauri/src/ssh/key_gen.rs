@@ -81,6 +81,8 @@ pub async fn ssh_generate_key_pair(
 
     // 1. Try native ssh-keygen binary first
     let mut cmd = tokio::process::Command::new("ssh-keygen");
+    cmd.kill_on_drop(true);
+    cmd.stdin(std::process::Stdio::null());
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
@@ -93,11 +95,18 @@ pub async fn ssh_generate_key_pair(
         .arg("-f")
         .arg(target_priv_str);
 
-    let output = cmd.output().await;
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output()).await;
 
     let success = match output {
-        Ok(out) => out.status.success() && target_priv.exists(),
-        Err(_) => false,
+        Ok(Ok(out)) => out.status.success() && target_priv.exists() && target_pub.exists(),
+        Ok(Err(error)) => {
+            log::warn!("SSH Desktop: ssh-keygen could not be started: {}", error);
+            false
+        }
+        Err(_) => {
+            log::warn!("SSH Desktop: ssh-keygen timed out after 30 seconds.");
+            false
+        }
     };
 
     if !success {
