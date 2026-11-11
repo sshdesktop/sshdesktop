@@ -60,7 +60,9 @@ pub async fn ssh_agent_get_status() -> Result<SshAgentStatus, String> {
             });
         }
 
-        if stderr.contains("Could not open a connection") || stderr.contains("Communication with agent failed") {
+        if stderr.contains("Could not open a connection") || stderr.contains("Communication with agent failed")
+            || stdout.contains("Could not open a connection") || stdout.contains("Communication with agent failed")
+        {
             return Ok(SshAgentStatus {
                 is_running: false,
                 identities: Vec::new(),
@@ -68,6 +70,19 @@ pub async fn ssh_agent_get_status() -> Result<SshAgentStatus, String> {
                 message: "SSH Agent service is not currently running".to_string(),
             });
         }
+
+        // ssh-add -l returns non-zero for both an empty agent and operational
+        // failures. Do not report an unknown failure as a healthy running agent.
+        return Ok(SshAgentStatus {
+            is_running: false,
+            identities: Vec::new(),
+            socket_path,
+            message: if stderr.is_empty() {
+                format!("SSH agent status check failed (exit code {}).", output.status.code().unwrap_or(-1))
+            } else {
+                format!("SSH agent status check failed: {}", stderr)
+            },
+        });
     }
 
     let mut identities = Vec::new();
