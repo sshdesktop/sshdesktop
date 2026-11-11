@@ -430,14 +430,19 @@ pub async fn sftp_write_bytes(
             let tmp_path = if parent == "/" { format!("/{}", tmp_name) } else { format!("{}/{}", parent.trim_end_matches('/'), tmp_name) };
 
             if let Ok(mut file) = sftp.create(&tmp_path).await {
-                let write_res = tokio::time::timeout(std::time::Duration::from_secs(60), file.write_all(bytes)).await;
-                let flush_res = file.flush().await;
-                if let Ok(Ok(())) = write_res {
-                    if flush_res.is_ok() {
-                        drop(file);
-                        if sftp.rename(&tmp_path, clean_path).await.is_ok() {
-                            return Ok(());
-                        }
+                // Bound the complete transfer, including flush: a successful write_all
+                // does not guarantee the remote SFTP server has accepted all buffered data.
+                let transfer_res = tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    async {
+                        file.write_all(bytes).await?;
+                        file.flush().await
+                    },
+                ).await;
+                if matches!(transfer_res, Ok(Ok(()))) {
+                    drop(file);
+                    if sftp.rename(&tmp_path, clean_path).await.is_ok() {
+                        return Ok(());
                     }
                 }
                 let _ = sftp.remove_file(&tmp_path).await;
