@@ -536,16 +536,31 @@ pub async fn disk_create_label(
     }
 
     let cmd = format!(
-        r#"{ensure_parted}
+        r#"set -e
+DEV={dev}
+[ -b "$DEV" ] || {{ echo "Refusing to initialize a partition table: target is not a block device." >&2; exit 30; }}
+command -v lsblk >/dev/null 2>&1 || {{ echo "lsblk is required for partition-table safety checks." >&2; exit 127; }}
+command -v findmnt >/dev/null 2>&1 || {{ echo "findmnt is required for partition-table safety checks." >&2; exit 127; }}
+for NODE in $(lsblk -nrpo NAME "$DEV"); do
+    if findmnt -rn -S "$NODE" >/dev/null 2>&1; then
+        echo "Refusing to replace partition table: $NODE is mounted." >&2
+        exit 31
+    fi
+    if swapon --noheadings --raw --show=NAME 2>/dev/null | grep -Fxq -- "$NODE"; then
+        echo "Refusing to replace partition table: $NODE is active swap." >&2
+        exit 32
+    fi
+done
+{ensure_parted}
 if command -v parted >/dev/null 2>&1; then
-    parted -s {dev} mklabel {lbl}
+    parted -s "$DEV" mklabel {lbl}
 elif command -v sfdisk >/dev/null 2>&1; then
-    echo "label: {lbl}" | sfdisk {dev}
+    echo "label: {lbl}" | sfdisk "$DEV"
 else
     echo "Error: Neither parted nor sfdisk command found." >&2
     exit 127
 fi
-partprobe {dev} 2>/dev/null || true
+partprobe "$DEV" 2>/dev/null || true
 "#,
         ensure_parted = ensure_parted_script(),
         dev = shell_quote(clean_dev),
@@ -609,12 +624,13 @@ if [ ! -b "$DEV" ]; then
     exit 1
 fi
 
-# Detect or initialize partition table (GPT)
+# Partition-table initialization is intentionally a separate, explicit
+# operation. Never silently create GPT here because that destroys existing
+# partition metadata on an unrecognized or damaged disk.
 PT_CHECK=$(parted -s "$DEV" print 2>&1 || true)
-if echo "$PT_CHECK" | grep -qi "unrecognised disk label\|unknown partition table"; then
-    parted -s "$DEV" mklabel gpt
-    partprobe "$DEV" 2>/dev/null || true
-    sleep 1
+if echo "$PT_CHECK" | grep -qi "unrecognised disk label\\|unknown partition table"; then
+    echo "No recognized partition table exists on $DEV. Initialize GPT/MBR explicitly before creating partitions." >&2
+    exit 33
 fi
 
 # Detect partition table type
