@@ -4527,7 +4527,9 @@ function resolveSessionFromRequest(reqUrl, authToken = null) {
     const subPath = reqUrl.slice(rawPrefix.length);
     const slash1 = subPath.indexOf('/');
     if (slash1 !== -1) {
-      const connId = decodeURIComponent(subPath.slice(0, slash1));
+      let connId;
+      try { connId = decodeURIComponent(subPath.slice(0, slash1)); }
+      catch { return null; }
       const afterConn = subPath.slice(slash1 + 1);
       const slash2 = afterConn.indexOf('/');
       const proto = (slash2 === -1 ? afterConn : afterConn.slice(0, slash2)).toLowerCase();
