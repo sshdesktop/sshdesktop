@@ -758,6 +758,9 @@ pub async fn run_cmd_priv_with_stdin(
     }
     let conn_opt = crate::ssh::connection::resolve_connection(state, conn_id);
     let trimmed_cmd = command.trim();
+    if trimmed_cmd.is_empty() || command.len() > 1024 * 1024 || command.contains('\0') {
+        return ("Privileged SSH command must be non-empty, contain no NUL bytes, and be at most 1 MiB.".into(), -1);
+    }
     let raw_cmd = trimmed_cmd.strip_prefix("sudo ").unwrap_or(trimmed_cmd).trim();
 
     let conn = match conn_opt {
