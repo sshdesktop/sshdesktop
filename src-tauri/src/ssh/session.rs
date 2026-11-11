@@ -187,11 +187,15 @@ pub async fn run_stream_channel(
         std::time::Duration::from_secs(15),
         channel.exec(true, cmd)
     ).await.map_err(|_| "Timed out starting remote command")??;
-    let mut exit_code = -1;
+    let mut exit_code: Option<i32> = None;
     let mut total_streamed: usize = 0;
     const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
 
-    while let Some(msg) = channel.wait().await {
+    loop {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(300), channel.wait())
+            .await
+            .map_err(|_| "SSH command stream was idle for 5 minutes")?;
+        let Some(msg) = msg else { break };
         match msg {
             ChannelMsg::Data { ref data } => {
                 total_streamed = total_streamed.saturating_add(data.len());
@@ -238,7 +242,7 @@ pub async fn run_stream_channel(
                 });
             }
             ChannelMsg::ExitStatus { exit_status } => {
-                exit_code = exit_status as i32;
+                exit_code = Some(exit_status as i32);
             }
             ChannelMsg::Eof | ChannelMsg::Close => {
                 break;
@@ -247,6 +251,7 @@ pub async fn run_stream_channel(
         }
     }
 
+    let exit_code = exit_code.ok_or("SSH stream closed without a remote exit status")?;
     let _ = app.emit("exec-output", crate::ssh::exec::StreamChunk {
         stream_id: stream_id.to_string(),
         data: String::new(),
