@@ -767,15 +767,30 @@ pub async fn sftp_upload(
     local_path: String,
     remote_path: String,
 ) -> Result<(), String> {
-    // 1. Primary fast path: read local file and stream write over active SSH session
-    if let Ok(bytes) = tokio::fs::read(&local_path).await {
-        return sftp_write_bytes(&state, &conn_id, &remote_path, &bytes).await;
+    if local_path.trim().is_empty()
+        || local_path.len() > 4096
+        || local_path.chars().any(|ch| ch.is_control())
+    {
+        return Err("Invalid local upload path.".into());
+    }
+    let local_metadata = tokio::fs::metadata(&local_path).await
+        .map_err(|e| format!("Cannot access local upload file '{}': {}", local_path, e))?;
+    if !local_metadata.is_file() {
+        return Err("Only regular local files can be uploaded.".into());
+    }
+    const MAX_UPLOAD_BYTES: u64 = 256 * 1024 * 1024;
+    if local_metadata.len() > MAX_UPLOAD_BYTES {
+        return Err("Remote file upload is limited to 256 MiB per operation.".into());
     }
 
-    // 2. Fallback: use the exact configured authentication method.
-    let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
-        .ok_or("No active SSH connection.")?;
-    run_scp_transfer(&conn, &local_path, &remote_path, true).await
+    // 1. Primary fast path: read a bounded regular file and stream it over SSH.
+    let bytes = tokio::fs::read(&local_path).await
+        .map_err(|e| format!("Failed to read local upload file '{}': {}", local_path, e))?;
+    if bytes.len() as u64 > MAX_UPLOAD_BYTES {
+        return Err("Local file changed during upload and now exceeds the 256 MiB limit.".into());
+    }
+    return sftp_write_bytes(&state, &conn_id, &remote_path, &bytes).await;
+
 
 }
 
