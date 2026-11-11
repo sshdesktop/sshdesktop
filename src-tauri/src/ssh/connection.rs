@@ -165,6 +165,9 @@ pub fn create_password_file(password: &str) -> Result<SshPasswordFile, String> {
     }
     use std::io::Write;
     if let Err(error) = writeln!(file, "{}", password).and_then(|_| file.sync_all()) {
+        // Windows does not allow removing an open file. Close the handle before
+        // cleanup so a failed credential write cannot leave a plaintext secret.
+        drop(file);
         let _ = std::fs::remove_file(&path);
         return Err(format!("Could not write protected SSH password file: {}", error));
     }
