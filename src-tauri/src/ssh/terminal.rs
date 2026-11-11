@@ -531,12 +531,13 @@ pub async fn terminal_resize(
     let mut terminals = state.terminals.lock();
     let term = terminals.get_mut(&terminal_id)
         .ok_or_else(|| format!("Terminal session '{}' not found.", terminal_id))?;
-    term.rows = rows;
-    term.cols = cols;
     if let Some(ref action_tx) = term.action_tx {
         action_tx.try_send(TerminalAction::Resize { rows, cols })
             .map_err(|e| format!("Terminal resize could not be queued: {}", e))?;
     }
+    // Update the stored dimensions only after the live PTY accepted the resize.
+    term.rows = rows;
+    term.cols = cols;
     Ok(())
 }
 
