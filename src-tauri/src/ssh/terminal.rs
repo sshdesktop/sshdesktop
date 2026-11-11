@@ -100,6 +100,11 @@ pub async fn terminal_create(
         _ => private_key.is_some() || password.is_none(),
     };
     let selected_key_path = if is_key_auth { private_key.as_deref() } else { None };
+    if conn.config.auth_method.as_deref() == Some("key")
+        && selected_key_path.map(|key| key.trim().is_empty()).unwrap_or(true)
+    {
+        return Err("Key authentication was selected, but no private key was provided.".into());
+    }
     let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
 
     // Only resolve the identity selected by the configured auth method.
