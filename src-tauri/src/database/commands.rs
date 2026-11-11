@@ -204,6 +204,17 @@ pub async fn db_execute_query(
     // conservative: only single-statement read/query commands are permitted.
     if session.config.read_only {
         let normalized = query.trim();
+        // Comments and control characters make prefix-based SQL inspection
+        // ambiguous (for example executable MySQL comments). Reject them in
+        // read-only mode rather than attempting to strip SQL syntax manually.
+        if normalized.contains("--")
+            || normalized.contains("/*")
+            || normalized.contains("*/")
+            || normalized.contains('#')
+            || normalized.chars().any(|c| c == '\\0' || (c.is_control() && c != '\\n' && c != '\\r' && c != '\\t'))
+        {
+            return Err("Read-only mode rejects SQL comments and control characters; use a database account with server-enforced read-only privileges for stronger guarantees.".into());
+        }
         let upper = normalized.to_ascii_uppercase();
         let allowed = ["SELECT", "SHOW", "DESCRIBE", "DESC"];
         let is_read = allowed.iter().any(|prefix| {
