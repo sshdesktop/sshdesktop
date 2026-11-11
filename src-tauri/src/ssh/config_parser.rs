@@ -28,7 +28,7 @@ pub fn get_ssh_config_path() -> Option<PathBuf> {
 fn format_config_value(value: &str) -> String {
     if value.chars().any(|c| c.is_whitespace() || c == '#' || c == '"') {
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\\\"{}\\\"", escaped)
+        format!("\"{}\"", escaped)
     } else {
         value.to_string()
     }
