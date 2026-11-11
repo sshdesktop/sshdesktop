@@ -912,6 +912,18 @@ PDEV={pdev}
 NEW_END={end}
 FS={fs}
 
+# Validate that the selected partition belongs to the selected disk.
+[ -b "$DEV" ] || {{ echo "Refusing resize: selected disk is not a block device." >&2; exit 40; }}
+[ -b "$PDEV" ] || {{ echo "Refusing resize: selected partition is not a block device." >&2; exit 41; }}
+DEV_REAL=$(readlink -f -- "$DEV") || exit 42
+PDEV_REAL=$(readlink -f -- "$PDEV") || exit 43
+if ! lsblk -nrpo NAME "$DEV_REAL" | while IFS= read -r NODE; do
+    [ "$(readlink -f -- "$NODE" 2>/dev/null)" = "$PDEV_REAL" ] && exit 0
+done; then
+    echo "Refusing resize: selected partition does not belong to selected disk." >&2
+    exit 44
+fi
+
 # Find current partition end in MiB
 CUR_END_MIB=$(parted -s -m "$DEV" unit MiB print 2>/dev/null | awk -F: -v p="$NUM" '$1 == p {{ 
     val = $3; 
@@ -925,24 +937,48 @@ fi
 if echo "$NEW_END" | grep -q '^+'; then
     NUM_VAL=$(echo "$NEW_END" | sed -E 's/^\+([0-9.]+).*/\1/')
     UNIT_VAL=$(echo "$NEW_END" | sed -E 's/^\+[0-9.]+//' | tr '[:lower:]' '[:upper:]')
-    ADD_MIB=1024
     case "$UNIT_VAL" in
         T|TB|TIB) ADD_MIB=$(awk "BEGIN {{print int($NUM_VAL * 1048576)}}") ;;
-        G|GB|GIB) ADD_MIB=$(awk "BEGIN {{print int($NUM_VAL * 1024)}}") ;;
-        M|MB|MIB) ADD_MIB=$(awk "BEGIN {{print int($NUM_VAL)}}") ;;
-        K|KB|KIB) ADD_MIB=$(awk "BEGIN {{print int($NUM_VAL / 1024)}}") ;;
-        *)        ADD_MIB=$(awk "BEGIN {{print int($NUM_VAL * 1024)}}") ;;
+        G|GIB) ADD_MIB=$(awk "BEGIN {{print int($NUM_VAL * 1024)}}") ;;
+        GB) ADD_MIB=$(awk "BEGIN {{print int($NUM_VAL * 1000000000 / 1048576)}}") ;;
+        M|MIB) ADD_MIB=$(awk "BEGIN {{print int($NUM_VAL)}}") ;;
+        MB) ADD_MIB=$(awk "BEGIN {{print int($NUM_VAL * 1000000 / 1048576)}}") ;;
+        K|KIB) ADD_MIB=$(awk "BEGIN {{print int($NUM_VAL / 1024)}}") ;;
+        KB) ADD_MIB=$(awk "BEGIN {{print int($NUM_VAL * 1000 / 1048576)}}") ;;
+        *) echo "Unsupported relative resize unit." >&2; exit 45 ;;
     esac
+    if [ -z "$ADD_MIB" ] || [ "$ADD_MIB" -le 0 ]; then
+        echo "Refusing resize: requested growth must be greater than zero." >&2
+        exit 46
+    fi
     TARGET_END_MIB=$((CUR_END_MIB + ADD_MIB))
     TARGET_END="${{TARGET_END_MIB}}MiB"
 elif [ "$NEW_END" = "100%" ]; then
+    DISK_SIZE_MIB=$(parted -s -m "$DEV" unit MiB print 2>/dev/null | awk -F: 'NR == 2 {{ val=$2; gsub(/[^0-9.]/, "", val); print int(val) }}')
+    if [ -z "$DISK_SIZE_MIB" ] || [ "$DISK_SIZE_MIB" -le "$CUR_END_MIB" ]; then
+        echo "Refusing resize: no additional disk capacity is available." >&2
+        exit 47
+    fi
+    TARGET_END_MIB="$DISK_SIZE_MIB"
     TARGET_END="100%"
 else
+    ABS_NUM=$(echo "$NEW_END" | sed -E 's/^([0-9.]+).*/\1/')
+    ABS_UNIT=$(echo "$NEW_END" | sed -E 's/^[0-9.]+//' | tr '[:lower:]' '[:upper:]')
+    case "$ABS_UNIT" in
+        MIB) TARGET_END_MIB=$(awk "BEGIN {{print int($ABS_NUM)}}") ;;
+        GIB) TARGET_END_MIB=$(awk "BEGIN {{print int($ABS_NUM * 1024)}}") ;;
+        TIB) TARGET_END_MIB=$(awk "BEGIN {{print int($ABS_NUM * 1048576)}}") ;;
+        MB) TARGET_END_MIB=$(awk "BEGIN {{print int($ABS_NUM * 1000000 / 1048576)}}") ;;
+        GB) TARGET_END_MIB=$(awk "BEGIN {{print int($ABS_NUM * 1000000000 / 1048576)}}") ;;
+        TB) TARGET_END_MIB=$(awk "BEGIN {{print int($ABS_NUM * 1000000000000 / 1048576)}}") ;;
+        *) echo "Use an explicit MiB/GiB/TiB/MB/GB/TB boundary, +SIZE, or 100%." >&2; exit 48 ;;
+    esac
     TARGET_END="$NEW_END"
 fi
 
-if [ "$FS" = "ext4" ] || [ "$FS" = "ext3" ] || [ "$FS" = "ext2" ]; then
-    e2fsck -f -y "$PDEV" 2>/dev/null || true
+if [ -z "$TARGET_END_MIB" ] || [ "$TARGET_END_MIB" -le "$CUR_END_MIB" ]; then
+    echo "Refusing to shrink or keep the same partition size. Only safe growth is supported." >&2
+    exit 49
 fi
 
 # Resize partition table
