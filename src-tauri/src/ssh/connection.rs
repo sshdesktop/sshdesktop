@@ -157,6 +157,12 @@ pub fn create_password_file(password: &str) -> Result<SshPasswordFile, String> {
     #[cfg(not(unix))]
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
         .open(&path).map_err(|e| format!("Could not create protected SSH password file: {}", e))?;
+    #[cfg(windows)]
+    if let Err(error) = secure_private_key_permissions(&path) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("Could not secure SSH password file permissions: {}", error));
+    }
     use std::io::Write;
     if let Err(error) = writeln!(file, "{}", password).and_then(|_| file.sync_all()) {
         let _ = std::fs::remove_file(&path);
