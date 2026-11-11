@@ -912,7 +912,8 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
     }
 
     // 3. Password probe via Plink
-    if let Some(pwd) = &config.password {
+    if !is_key_auth {
+        if let Some(pwd) = &config.password {
         if !pwd.is_empty() {
             let password_file = create_password_file(pwd)?;
             let plink_bin = get_plink_path();
@@ -932,6 +933,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
                     return Ok(true);
                 }
             }
+        }
         }
     }
 
