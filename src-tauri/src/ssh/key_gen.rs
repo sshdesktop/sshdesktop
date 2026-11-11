@@ -59,14 +59,19 @@ pub async fn ssh_generate_key_pair(
     let pub_path = ssh_dir.join(format!("{}.pub", base_name));
 
     // If key already exists, generate with unique suffix
-    let (target_priv, target_pub) = if priv_path.exists() {
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let new_priv = ssh_dir.join(format!("{}_{}", base_name, timestamp));
-        let new_pub = ssh_dir.join(format!("{}_{}.pub", base_name, timestamp));
+    let (target_priv, target_pub) = if priv_path.exists() || pub_path.exists() {
+        // A timestamp-only suffix collides when multiple keys are generated in
+        // the same second. UUID suffixes avoid accidental key replacement.
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let new_priv = ssh_dir.join(format!("{}_{}", base_name, suffix));
+        let new_pub = ssh_dir.join(format!("{}_{}.pub", base_name, suffix));
         (new_priv, new_pub)
     } else {
         (priv_path, pub_path)
     };
+    if target_priv.exists() || target_pub.exists() {
+        return Err("Generated SSH key destination already exists; refusing to overwrite it.".into());
+    }
 
     let comm = comment.unwrap_or_else(|| "sshdesktop".to_string());
     let pass = passphrase.unwrap_or_default();
