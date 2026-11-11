@@ -103,7 +103,11 @@ pub async fn run_exec_channel_with_stdin(
     handle: &ClientHandle,
     cmd: &str,
     stdin_data: &[u8],
-) -> Result<(String, i32), Box<dyn std::error::Error + Send + Sync>> {
+ ) -> Result<(String, i32), Box<dyn std::error::Error + Send + Sync>> {
+    const MAX_STDIN_BYTES: usize = 64 * 1024 * 1024;
+    if stdin_data.len() > MAX_STDIN_BYTES {
+        return Err("Remote command input exceeded the 64 MiB safety limit.".into());
+    }
     let result = tokio::time::timeout(std::time::Duration::from_secs(300), async {
         let mut channel = tokio::time::timeout(
             std::time::Duration::from_secs(15),
