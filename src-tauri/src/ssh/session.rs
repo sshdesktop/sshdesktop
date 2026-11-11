@@ -266,9 +266,22 @@ pub async fn run_log_stream_channel(
         channel.exec(true, command)
     ).await.map_err(|_| "Timed out starting remote log stream")??;
     let mut exit_code = -1;
+    let mut total_streamed: usize = 0;
+    const MAX_LOG_STREAM_BYTES: usize = 64 * 1024 * 1024;
     while let Some(msg) = channel.wait().await {
         match msg {
             ChannelMsg::Data { ref data } => {
+                total_streamed = total_streamed.saturating_add(data.len());
+                if total_streamed > MAX_LOG_STREAM_BYTES {
+                    let _ = app.emit("log-stream-data", serde_json::json!({
+                        "stream_id": stream_id,
+                        "data": "\\r\\n[Log stream exceeded maximum 64 MiB safety limit]\\r\\n",
+                        "done": true,
+                        "exit_code": 1
+                    }));
+                    let _ = channel.eof().await;
+                    return Ok(1);
+                }
                 let _ = app.emit("log-stream-data", serde_json::json!({
                     "stream_id": stream_id,
                     "data": String::from_utf8_lossy(data).to_string(),
@@ -276,6 +289,17 @@ pub async fn run_log_stream_channel(
                 }));
             }
             ChannelMsg::ExtendedData { ref data, ext: 1 } => {
+                total_streamed = total_streamed.saturating_add(data.len());
+                if total_streamed > MAX_LOG_STREAM_BYTES {
+                    let _ = app.emit("log-stream-data", serde_json::json!({
+                        "stream_id": stream_id,
+                        "data": "\\r\\n[Log stream exceeded maximum 64 MiB safety limit]\\r\\n",
+                        "done": true,
+                        "exit_code": 1
+                    }));
+                    let _ = channel.eof().await;
+                    return Ok(1);
+                }
                 let _ = app.emit("log-stream-data", serde_json::json!({
                     "stream_id": stream_id,
                     "data": String::from_utf8_lossy(data).to_string(),
