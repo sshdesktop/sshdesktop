@@ -34,15 +34,14 @@ pub async fn ssh_generate_key_pair(
 ) -> Result<GeneratedKeyPair, String> {
     let ssh_dir = get_ssh_dir().ok_or_else(|| "Could not locate user home directory".to_string())?;
 
-    if !ssh_dir.exists() {
-        std::fs::create_dir_all(&ssh_dir)
-            .map_err(|e| format!("Failed to create .ssh directory: {}", e))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| format!("Could not secure SSH key directory permissions: {}", e))?;
-        }
+    std::fs::create_dir_all(&ssh_dir)
+        .map_err(|e| format!("Failed to create .ssh directory: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Secure existing directories too; do not assume ~/.ssh already has safe mode bits.
+        std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("Could not secure SSH key directory permissions: {}", e))?;
     }
 
     let base_name = filename
