@@ -378,6 +378,13 @@ pub async fn connect_session_with_passphrase_auth(
     if let Some(key_p) = key_path {
         let trimmed_key = key_p.trim();
         if !trimmed_key.is_empty() {
+            // Validate a path before any parser follows it. Inline PEM content is
+            // not a filesystem path and simply produces a NotFound result here.
+            if let Ok(metadata) = std::fs::symlink_metadata(trimmed_key) {
+                if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
+                    return Err("Selected SSH identity is not a regular non-symlink file or exceeds 16 MiB".into());
+                }
+            }
             // 1. Try loading from file path
             if let Ok(key) = russh_keys::load_secret_key(trimmed_key, passphrase) {
                 authenticated = tokio::time::timeout(
