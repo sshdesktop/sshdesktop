@@ -541,7 +541,11 @@ DEV={dev}
 [ -b "$DEV" ] || {{ echo "Refusing to initialize a partition table: target is not a block device." >&2; exit 30; }}
 command -v lsblk >/dev/null 2>&1 || {{ echo "lsblk is required for partition-table safety checks." >&2; exit 127; }}
 command -v findmnt >/dev/null 2>&1 || {{ echo "findmnt is required for partition-table safety checks." >&2; exit 127; }}
-for NODE in $(lsblk -nrpo NAME "$DEV"); do
+command -v swapon >/dev/null 2>&1 || {{ echo "swapon is required for partition-table safety checks." >&2; exit 127; }}
+DEV_REAL=$(readlink -f -- "$DEV") || exit 33
+DEVICE_NODES=$(lsblk -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate target disk devices; refusing partition-table replacement." >&2; exit 34; }}
+[ -n "$DEVICE_NODES" ] || {{ echo "No block-device tree returned; refusing partition-table replacement." >&2; exit 35; }}
+for NODE in $DEVICE_NODES; do
     if findmnt -rn -S "$NODE" >/dev/null 2>&1; then
         echo "Refusing to replace partition table: $NODE is mounted." >&2
         exit 31
@@ -628,7 +632,10 @@ fi
 DEV_REAL=$(readlink -f -- "$DEV") || exit 2
 command -v lsblk >/dev/null 2>&1 || {{ echo "lsblk is required for partition safety checks." >&2; exit 127; }}
 command -v findmnt >/dev/null 2>&1 || {{ echo "findmnt is required for partition safety checks." >&2; exit 127; }}
-for NODE in $(lsblk -nrpo NAME "$DEV_REAL"); do
+command -v swapon >/dev/null 2>&1 || {{ echo "swapon is required for partition safety checks." >&2; exit 127; }}
+DEVICE_NODES=$(lsblk -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate target disk devices; refusing partition creation." >&2; exit 36; }}
+[ -n "$DEVICE_NODES" ] || {{ echo "No block-device tree returned; refusing partition creation." >&2; exit 37; }}
+for NODE in $DEVICE_NODES; do
     if findmnt -rn -S "$NODE" >/dev/null 2>&1; then
         echo "Refusing to create a partition: $NODE is mounted." >&2
         exit 34
@@ -822,17 +829,25 @@ NUM={num}
 PDEV={pdev}
 
 # Fail closed before destructive partition-table changes.
-[ -b "$DEV" ] || { echo "Refusing partition deletion: target disk is not a block device." >&2; exit 20; }
-[ -b "$PDEV" ] || { echo "Refusing partition deletion: target partition is not a block device." >&2; exit 21; }
+[ -b "$DEV" ] || {{ echo "Refusing partition deletion: target disk is not a block device." >&2; exit 20; }}
+[ -b "$PDEV" ] || {{ echo "Refusing partition deletion: target partition is not a block device." >&2; exit 21; }}
 DEV_REAL=$(readlink -f -- "$DEV") || exit 22
 PDEV_REAL=$(readlink -f -- "$PDEV") || exit 23
-if ! lsblk -nrpo NAME "$DEV_REAL" | while IFS= read -r NODE; do
-    [ "$(readlink -f -- "$NODE" 2>/dev/null)" = "$PDEV_REAL" ] && exit 0
-done; then
+DEVICE_NODES=$(lsblk -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate disk descendants; refusing partition deletion." >&2; exit 24; }}
+ANCESTOR_NODES=$(lsblk -s -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate disk ancestors; refusing partition deletion." >&2; exit 25; }}
+[ -n "$DEVICE_NODES" ] || {{ echo "No block-device tree returned; refusing partition deletion." >&2; exit 26; }}
+PDEV_FOUND=0
+for NODE in $DEVICE_NODES; do
+    if [ "$(readlink -f -- "$NODE" 2>/dev/null)" = "$PDEV_REAL" ]; then
+        PDEV_FOUND=1
+        break
+    fi
+done
+if [ "$PDEV_FOUND" -ne 1 ]; then
     echo "Refusing partition deletion: selected partition does not belong to the selected disk." >&2
-    exit 25
+    exit 27
 fi
-for NODE in $(lsblk -nrpo NAME "$DEV_REAL") $(lsblk -s -nrpo NAME "$DEV_REAL"); do
+for NODE in $DEVICE_NODES $ANCESTOR_NODES; do
     if findmnt -rn -S "$NODE" >/dev/null 2>&1; then
         echo "Refusing partition deletion: $NODE is mounted. Unmount it explicitly first." >&2
         exit 26
@@ -917,11 +932,18 @@ FS={fs}
 [ -b "$PDEV" ] || {{ echo "Refusing resize: selected partition is not a block device." >&2; exit 41; }}
 DEV_REAL=$(readlink -f -- "$DEV") || exit 42
 PDEV_REAL=$(readlink -f -- "$PDEV") || exit 43
-if ! lsblk -nrpo NAME "$DEV_REAL" | while IFS= read -r NODE; do
-    [ "$(readlink -f -- "$NODE" 2>/dev/null)" = "$PDEV_REAL" ] && exit 0
-done; then
+DEVICE_NODES=$(lsblk -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate disk descendants; refusing partition resize." >&2; exit 44; }}
+[ -n "$DEVICE_NODES" ] || {{ echo "No block-device tree returned; refusing partition resize." >&2; exit 45; }}
+PDEV_FOUND=0
+for NODE in $DEVICE_NODES; do
+    if [ "$(readlink -f -- "$NODE" 2>/dev/null)" = "$PDEV_REAL" ]; then
+        PDEV_FOUND=1
+        break
+    fi
+done
+if [ "$PDEV_FOUND" -ne 1 ]; then
     echo "Refusing resize: selected partition does not belong to selected disk." >&2
-    exit 44
+    exit 46
 fi
 
 # Find current partition end in MiB
@@ -1108,7 +1130,11 @@ pub async fn disk_format_filesystem(
 [ -b "$DEV" ] || {{ echo "Refusing to format: target is not a block device" >&2; exit 50; }}
 command -v lsblk >/dev/null 2>&1 || {{ echo "lsblk is required for safe filesystem formatting" >&2; exit 127; }}
 command -v findmnt >/dev/null 2>&1 || {{ echo "findmnt is required for safe filesystem formatting" >&2; exit 127; }}
-for NODE in $(lsblk -nrpo NAME "$DEV"); do
+command -v swapon >/dev/null 2>&1 || {{ echo "swapon is required for safe filesystem formatting" >&2; exit 127; }}
+DEV_REAL=$(readlink -f -- "$DEV") || exit 53
+DEVICE_NODES=$(lsblk -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate target device tree; refusing filesystem formatting." >&2; exit 54; }}
+[ -n "$DEVICE_NODES" ] || {{ echo "No block-device tree returned; refusing filesystem formatting." >&2; exit 55; }}
+for NODE in $DEVICE_NODES; do
     if findmnt -rn -S "$NODE" >/dev/null 2>&1; then
         echo "Refusing to format: $NODE is mounted. Unmount it explicitly first." >&2
         exit 51
