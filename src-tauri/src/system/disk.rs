@@ -624,6 +624,21 @@ if [ ! -b "$DEV" ]; then
     exit 1
 fi
 
+# Refuse to edit a disk while any descendant is mounted or active swap.
+DEV_REAL=$(readlink -f -- "$DEV") || exit 2
+command -v lsblk >/dev/null 2>&1 || { echo "lsblk is required for partition safety checks." >&2; exit 127; }
+command -v findmnt >/dev/null 2>&1 || { echo "findmnt is required for partition safety checks." >&2; exit 127; }
+for NODE in $(lsblk -nrpo NAME "$DEV_REAL"); do
+    if findmnt -rn -S "$NODE" >/dev/null 2>&1; then
+        echo "Refusing to create a partition: $NODE is mounted." >&2
+        exit 34
+    fi
+    if swapon --noheadings --raw --show=NAME 2>/dev/null | grep -Fxq -- "$NODE"; then
+        echo "Refusing to create a partition: $NODE is active swap." >&2
+        exit 35
+    fi
+done
+
 # Partition-table initialization is intentionally a separate, explicit
 # operation. Never silently create GPT here because that destroys existing
 # partition metadata on an unrecognized or damaged disk.
