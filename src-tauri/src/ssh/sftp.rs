@@ -738,6 +738,54 @@ pub async fn sftp_stat(
     Err(format!("Could not stat path '{}': {}", path, stdout.trim()))
 }
 
+/// Write a completed download atomically without overwriting an existing local file.
+async fn save_download_new(local_path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let parent = local_path.parent().filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    tokio::fs::create_dir_all(parent).await
+        .map_err(|e| format!("Failed to create local download directory: {}", e))?;
+    if tokio::fs::try_exists(local_path).await.unwrap_or(true) {
+        return Err(format!("Download destination already exists; refusing to overwrite '{}'.", local_path.display()));
+    }
+    let mut temp_path = None;
+    let mut temp_file = None;
+    for _ in 0..8 {
+        let candidate = parent.join(format!(".sshdesktop-download-{}.tmp", uuid::Uuid::new_v4().simple()));
+        match tokio::fs::OpenOptions::new().write(true).create_new(true).open(&candidate).await {
+            Ok(file) => {
+                temp_path = Some(candidate);
+                temp_file = Some(file);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Failed to create temporary download file: {}", error)),
+        }
+    }
+    let temp_path = temp_path.ok_or_else(|| "Could not allocate a unique temporary download file.".to_string())?;
+    let mut file = temp_file.expect("temporary file path and handle are created together");
+    let write_result = async {
+        file.write_all(bytes).await?;
+        file.flush().await?;
+        file.sync_all().await
+    }.await;
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(format!("Failed to write temporary download file: {}", error));
+    }
+    match tokio::fs::hard_link(&temp_path, local_path).await {
+        Ok(()) => {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            Err(format!("Could not publish download without overwriting an existing file: {}", error))
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn sftp_download(
     state: tauri::State<'_, AppState>,
@@ -749,11 +797,11 @@ pub async fn sftp_download(
     // errors. Falling back to SCP after a capped read failure would bypass the
     // limit and could silently turn a failed transfer into an unbounded one.
     let bytes = sftp_read_file(state.clone(), conn_id.clone(), remote_path.clone()).await?;
-    if let Some(parent) = std::path::Path::new(&local_path).parent() {
-        tokio::fs::create_dir_all(parent).await
-            .map_err(|e| format!("Failed to create local download directory: {}", e))?;
+    let destination = std::path::Path::new(&local_path);
+    if local_path.trim().is_empty() || local_path.chars().any(|ch| ch.is_control()) {
+        return Err("Invalid local download destination.".into());
     }
-    tokio::fs::write(&local_path, &bytes).await
+    save_download_new(destination, &bytes).await
         .map_err(|e| format!("Failed to save downloaded file '{}': {}", local_path, e))?;
     log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_path);
     Ok(())
@@ -858,12 +906,9 @@ pub async fn sftp_download_to_downloads(
     let local_dest = download_dir.join(filename);
     let local_dest_str = local_dest.to_string_lossy().to_string();
 
-    tokio::fs::create_dir_all(&download_dir).await
-        .map_err(|e| format!("Failed to create Downloads directory: {}", e))?;
-    // Use the bounded SFTP read path here as well; SCP must not bypass the
-    // shared 48 MiB binary-transfer limit.
+    // Use the bounded SFTP read path and never overwrite an existing Downloads file.
     let bytes = sftp_read_file(state.clone(), conn_id.clone(), remote_path.clone()).await?;
-    tokio::fs::write(&local_dest, &bytes).await
+    save_download_new(&local_dest, &bytes).await
         .map_err(|e| format!("Failed to save downloaded file '{}': {}", local_dest_str, e))?;
     log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_dest_str);
     Ok(local_dest_str)
