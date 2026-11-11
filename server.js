@@ -484,22 +484,36 @@ function getSession(token) {
   }
   if (!session) return null;
   if (Date.now() >= session.expiresAt) {
-    activeSessions.delete(token);
-    hashedSessions.delete(hashToken(token));
-    persistSessions();
+    destroySession(token);
     return null;
   }
   return session;
 }
 
 function destroySession(token) {
-  if (token) {
-    activeSessions.delete(token);
-    hashedSessions.delete(hashToken(token));
-    persistSessions();
-    return true;
+  if (!token) return false;
+  activeSessions.delete(token);
+  hashedSessions.delete(hashToken(token));
+
+  // Revoke long-lived transports as well as the HTTP bearer token.
+  for (const [termId, ws] of activeWsClients.entries()) {
+    if (ws && ws.authToken === token) {
+      try { ws.close(1008, 'Authentication session expired or was revoked'); } catch {}
+      if (activeWsClients.get(termId) === ws) activeWsClients.delete(termId);
+    }
   }
-  return false;
+  if (typeof browserSessionRegistry !== 'undefined') {
+    for (const [sessionId, gatewaySession] of browserSessionRegistry.entries()) {
+      if (gatewaySession && gatewaySession.authToken === token) {
+        for (const gatewaySocket of gatewaySession.sockets || []) {
+          try { gatewaySocket.destroy(); } catch {}
+        }
+        browserSessionRegistry.delete(sessionId);
+      }
+    }
+  }
+  persistSessions();
+  return true;
 }
 
 function extractSessionToken(req, payload) {
@@ -4511,6 +4525,7 @@ function getOrCreateBrowserSession(connId, proto, host, port, authToken) {
     cookies: new Map(), // Isolated per-authenticated-user and upstream-target cookie jar
     authToken,
     authUsername: authSession.username,
+    sockets: new Set(),
     createdAt: Date.now(),
     lastActiveAt: Date.now()
   };
@@ -4653,6 +4668,9 @@ function handleBrowserGatewayUpgrade(req, socket, head) {
 
   const { session, targetPath } = resolved;
   const { connId, proto, host, port } = session;
+  if (!session.sockets) session.sockets = new Set();
+  session.sockets.add(socket);
+  socket.once('close', () => session.sockets.delete(socket));
 
   let entry = null;
   if (connId && connId !== 'default' && connId !== 'local' && activeConnections.has(connId)) {
@@ -5752,6 +5770,7 @@ function handleWsConnection(ws, req) {
   const secProtoToken = req.headers['sec-websocket-protocol'] ? req.headers['sec-websocket-protocol'].split(',')[0].trim() : null;
   const token = secProtoToken || cookieToken || req.headers['x-session-token'];
   if (!getSession(token)) { ws.close(1008, 'Session expired or unauthorized (1 hour limit)'); return; }
+  ws.authToken = token;
 
   const termId = urlObj.searchParams.get('termId');
   const connId = urlObj.searchParams.get('connId');
