@@ -280,7 +280,9 @@ async function verifyPasswordAsync(auth, password) {
     return stored.length === calculated.length && crypto.timingSafeEqual(stored, calculated);
   }
   if (typeof auth.password === 'string') {
-    return crypto.timingSafeEqual(Buffer.from(password), Buffer.from(auth.password));
+    const supplied = Buffer.from(password);
+    const stored = Buffer.from(auth.password);
+    return supplied.length === stored.length && crypto.timingSafeEqual(supplied, stored);
   }
   return false;
 }
@@ -306,10 +308,9 @@ function verifyPassword(auth, password) {
 
   // Legacy password migration support.
   if (typeof auth.password === 'string') {
-    return crypto.timingSafeEqual(
-      Buffer.from(password),
-      Buffer.from(auth.password)
-    );
+    const supplied = Buffer.from(password);
+    const stored = Buffer.from(auth.password);
+    return supplied.length === stored.length && crypto.timingSafeEqual(supplied, stored);
   }
 
   return false;
