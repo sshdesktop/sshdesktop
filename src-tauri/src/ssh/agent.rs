@@ -24,14 +24,23 @@ pub async fn ssh_agent_get_status() -> Result<SshAgentStatus, String> {
 
     cmd.arg("-l");
 
-    let output = match cmd.output().await {
-        Ok(out) => out,
-        Err(e) => {
+    cmd.kill_on_drop(true);
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output()).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
             return Ok(SshAgentStatus {
                 is_running: false,
                 identities: Vec::new(),
                 socket_path: None,
                 message: format!("ssh-add binary not available or failed: {}", e),
+            });
+        }
+        Err(_) => {
+            return Ok(SshAgentStatus {
+                is_running: false,
+                identities: Vec::new(),
+                socket_path: std::env::var("SSH_AUTH_SOCK").ok(),
+                message: "SSH agent status check timed out after 15 seconds".to_string(),
             });
         }
     };
