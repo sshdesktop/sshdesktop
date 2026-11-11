@@ -119,7 +119,7 @@ pub async fn terminal_create(
 
     // ── 0. Fast TCP Connectivity Probe (3.5s timeout) ─────────────────────────
     // Avoid misleading "Connected" messages when port 22 is unreachable or offline
-    let target_addr = format!("{}:{}", host, port);
+    let target_port = conn.config.port;
     let banner_init = format!("\x1b[1;36m[SSH Desktop Terminal]\x1b[0m Connecting to \x1b[1m{}@{}:{}\x1b[0m...\r\n", user, host, port);
     let _ = app.emit("terminal-output", TerminalOutput {
         terminal_id: term_id.clone(),
@@ -129,10 +129,10 @@ pub async fn terminal_create(
 
     match tokio::time::timeout(
         std::time::Duration::from_millis(3500),
-        tokio::net::TcpStream::connect(&target_addr),
+        tokio::net::TcpStream::connect((host.as_str(), target_port)),
     ).await {
         Ok(Ok(_sock)) => {
-            log::info!("SSH Desktop: TCP connect succeeded to {}", target_addr);
+            log::info!("SSH Desktop: TCP connect succeeded to {}:{}", host, target_port);
         }
         Ok(Err(e)) => {
             let diag = format!(
