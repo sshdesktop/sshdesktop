@@ -4700,7 +4700,6 @@ function handleBrowserGatewayRequest(req, res) {
       const redirectDest = `/s/${encodeURIComponent(session.id)}${pathAndQuery}`;
       res.writeHead(302, {
         'Location': redirectDest,
-        'Access-Control-Allow-Origin': '*',
         'Set-Cookie': `__ssh_session=${encodeURIComponent(session.id)}; Path=/; SameSite=Lax`
       });
       res.end();
@@ -4733,7 +4732,6 @@ function handleBrowserGatewayRequest(req, res) {
     if (isHtmlNav) {
       res.writeHead(302, {
         'Location': `/s/${encodeURIComponent(session.id)}${targetPath}`,
-        'Access-Control-Allow-Origin': '*',
         'Set-Cookie': `__ssh_session=${encodeURIComponent(session.id)}; Path=/; SameSite=Lax`
       });
       res.end();
@@ -5632,26 +5630,31 @@ const backendServer = http.createServer({ maxHeaderSize: 16 * 1024 }, async (req
 
   // Unified Web IPC Invoke Endpoint with 1-Hour Session Expiration Security
   if (req.url === '/api/invoke' && req.method === 'POST') {
-    let rawBody = '';
-    const MAX_INVOKE_BODY = 10 * 1024 * 1024; // 10 MB payload limit to prevent unbounded memory exhaustion
+    const bodyChunks = [];
+    const MAX_INVOKE_BODY = 10 * 1024 * 1024; // 10 MiB measured in actual request bytes
+    let bodyBytes = 0;
     let bodyOverflow = false;
 
     req.on('data', chunk => {
       if (bodyOverflow) return;
-      rawBody += chunk;
-      if (rawBody.length > MAX_INVOKE_BODY) {
+      bodyBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+      if (bodyBytes > MAX_INVOKE_BODY) {
         bodyOverflow = true;
+        bodyChunks.length = 0;
         res.writeHead(413, { 'Content-Type': 'application/json', 'Connection': 'close' });
-        res.end(JSON.stringify({ error: 'Payload Too Large: Maximum request body is 10 MB' }), () => {
+        res.end(JSON.stringify({ error: 'Payload Too Large: Maximum request body is 10 MiB' }), () => {
           try { req.socket.destroy(); } catch {}
         });
         req.pause();
+        return;
       }
+      bodyChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
     });
 
     req.on('end', async () => {
       if (bodyOverflow) return;
       try {
+        const rawBody = Buffer.concat(bodyChunks, bodyBytes).toString('utf8');
         const payload = JSON.parse(rawBody || '{}');
         const { cmd, args } = payload;
         const token = extractSessionToken(req, payload);
