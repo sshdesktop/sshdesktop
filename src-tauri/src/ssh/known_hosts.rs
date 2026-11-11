@@ -240,6 +240,13 @@ pub async fn ssh_verify_host_key(
     host: String,
     port: u16,
 ) -> Result<HostKeyVerification, String> {
+    if host.trim().is_empty()
+        || host.len() > 253
+        || host.chars().any(|ch| ch.is_control() || ch.is_whitespace() || ch == '/' || ch == '\\')
+        || port == 0
+    {
+        return Err("Invalid SSH host or port for host-key verification.".into());
+    }
     let config = std::sync::Arc::new(russh::client::Config::default());
     let captured = std::sync::Arc::new(parking_lot::Mutex::new(None));
     let handler = ProbeHandler {
