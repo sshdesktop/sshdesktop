@@ -3910,6 +3910,7 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
             connId: 'local',
             buffer: ''
           });
+          pendingTerminalResizes.delete(termId);
           proc.stdout.on('data', chunk => {
             const text = chunk.toString('utf8');
             sendTerminalOutput(termId, text);
@@ -3920,6 +3921,7 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
           });
           proc.on('close', () => {
             activeTerminals.delete(termId);
+            pendingTerminalResizes.delete(termId);
             const ws = activeWsClients.get(termId);
             if (ws) {
               try { ws.close(); } catch {}
@@ -3932,6 +3934,7 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
       return new Promise((resolve, reject) => {
         const pending = pendingTerminalResizes.get(termId);
+        pendingTerminalResizes.delete(termId);
         const actualCols = pending?.cols || cols || 80;
         const actualRows = pending?.rows || rows || 24;
 
@@ -3949,6 +3952,7 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
           stream.on('close', () => {
             activeTerminals.delete(termId);
+            pendingTerminalResizes.delete(termId);
             const ws = activeWsClients.get(termId);
             if (ws) {
               try { ws.close(); } catch {}
