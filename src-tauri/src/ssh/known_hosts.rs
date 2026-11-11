@@ -326,6 +326,27 @@ pub async fn ssh_trust_host_key(
     if decoded_key.is_empty() {
         return Err("SSH public key cannot be empty".into());
     }
+    // An SSH public-key blob starts with an SSH wire-format string containing
+    // the algorithm name. Validate it against the separately supplied key_type
+    // before writing the record, otherwise malformed/mismatched records can be
+    // persisted and later misreported as trusted.
+    if decoded_key.len() < 4 {
+        return Err("SSH public key blob is truncated".into());
+    }
+    let algorithm_len = u32::from_be_bytes([
+        decoded_key[0], decoded_key[1], decoded_key[2], decoded_key[3],
+    ]) as usize;
+    if algorithm_len == 0 || algorithm_len > decoded_key.len().saturating_sub(4) {
+        return Err("SSH public key blob contains an invalid algorithm field".into());
+    }
+    let embedded_algorithm = std::str::from_utf8(&decoded_key[4..4 + algorithm_len])
+        .map_err(|_| "SSH public key algorithm is not valid UTF-8".to_string())?;
+    if embedded_algorithm != key_type {
+        return Err(format!(
+            "SSH public key algorithm mismatch: declared '{}' but blob contains '{}'",
+            key_type, embedded_algorithm
+        ));
+    }
 
     // Do not silently replace a changed key. The user must verify it out-of-band,
     // remove the old known_hosts entry with ssh-keygen -R, then reconnect.
