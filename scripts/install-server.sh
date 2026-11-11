@@ -10,6 +10,11 @@
 set -e
 
 PORT="${PORT:-8080}"
+if ! [[ "${PORT}" =~ ^[0-9]{1,5}$ ]] || [ "${PORT}" -lt 1 ] || [ "${PORT}" -gt 65535 ]; then
+  echo "Error: PORT must be an integer between 1 and 65535."
+  exit 1
+fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/opt/sshdesktop"
 CONFIG_DIR="/etc/sshdesktop"
 AUTH_FILE="${CONFIG_DIR}/auth.json"
@@ -41,7 +46,8 @@ if [ ! -f "${AUTH_FILE}" ]; then
   elif command -v sha256sum >/dev/null 2>&1; then
     PASS_HASH=$(printf "%s::sshdesktop_secure_auth_v2::admin" "${SALT}" | sha256sum | awk '{print $1}')
   else
-    PASS_HASH="8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
+    echo "Error: openssl or sha256sum is required to initialize credentials safely."
+    exit 1
   fi
 
   cat <<EOF > "${AUTH_FILE}"
@@ -65,6 +71,14 @@ fi
 echo "[3/5] Setting up application binary in ${INSTALL_DIR}..."
 mkdir -p "${INSTALL_DIR}"
 chmod 755 "${INSTALL_DIR}"
+if [ -f "${SCRIPT_DIR}/sshdesktop" ]; then
+  install -m 0755 "${SCRIPT_DIR}/sshdesktop" "${INSTALL_DIR}/sshdesktop"
+elif [ -x "/usr/local/bin/sshdesktop" ]; then
+  install -m 0755 "/usr/local/bin/sshdesktop" "${INSTALL_DIR}/sshdesktop"
+else
+  echo "Error: sshdesktop server binary was not found beside this installer or at /usr/local/bin/sshdesktop."
+  exit 1
+fi
 
 echo "[4/5] Creating Systemd Service at ${SERVICE_FILE}..."
 cat <<EOF > "${SERVICE_FILE}"
@@ -78,7 +92,10 @@ Type=simple
 User=root
 WorkingDirectory=${INSTALL_DIR}
 ExecStart=${INSTALL_DIR}/sshdesktop --server --port ${PORT}
-Restart=always
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
 RestartSec=5
 LimitNOFILE=65536
 StandardOutput=journal
@@ -109,7 +126,7 @@ echo "================================================================="
 echo ""
 echo " Web Gateway URL: http://${SERVER_IP}:${PORT}"
 echo " Default Username: admin"
-echo " Default Password: admin"
+echo " Default Password: admin (change immediately; first login enforces rotation)"
 echo " Security Storage: ${AUTH_FILE} (chmod 600)"
 echo ""
 echo " Mandatory Security Action on First Login:"
