@@ -200,12 +200,18 @@ pub async fn sftp_list_dir(
     }
 
     let escaped = shell_escape(clean_path);
-    // --time-style=+%s gives a Unix epoch timestamp; -N (--literal) prevents ls from quoting filenames with spaces
-    let cmd = format!(
-        "ls -la -N --time-style=+%s '{}' 2>&1 || ls -la -N '{}' 2>&1 || ls -la --time-style=+%s '{}' 2>&1 || ls -la '{}' 2>&1",
-        escaped, escaped, escaped, escaped
+    // Prefer NUL/tab-delimited find output to avoid ambiguity on spaces/quotes/newlines;
+    // fall back to literal ls -la on BSD/BusyBox systems that do not support find -printf.
+    let find_cmd = format!(
+        "if find '{}' -maxdepth 1 -mindepth 1 -printf '%y\\t%M\\t%u\\t%g\\t%s\\t%T@\\t%f\\0' >/dev/null 2>&1; then \
+            printf '__SSHDESKTOP_FIND__\\n'; \
+            find '{}' -maxdepth 1 -mindepth 1 -printf '%y\\t%M\\t%u\\t%g\\t%s\\t%T@\\t%f\\0' 2>&1 | tr '\\0' '\\n'; \
+         else \
+            ls -la -N --time-style=+%s '{}' 2>&1 || ls -la -N '{}' 2>&1 || ls -la --time-style=+%s '{}' 2>&1 || ls -la '{}' 2>&1; \
+         fi",
+        escaped, escaped, escaped, escaped, escaped, escaped
     );
-    let (stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
+    let (stdout, code) = run_cmd(&state, &conn_id, &find_cmd).await;
 
     if code == -1 {
         return Err("No active SSH connection. Please connect to a server first.".into());
@@ -226,7 +232,62 @@ pub async fn sftp_list_dir(
         return Err(format!("Failed to list remote directory '{}': {}", clean_path, stdout.trim()));
     }
 
+    if let Some(rest) = stdout.strip_prefix("__SSHDESKTOP_FIND__\n") {
+        return Ok(parse_structured_find_output(clean_path, rest));
+    }
+
+    Ok(parse_ls_output(clean_path, &stdout))
+}
+
+fn parse_structured_find_output(clean_path: &str, raw: &str) -> Vec<FileEntry> {
     let mut entries = Vec::new();
+    for line in raw.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.splitn(7, '\t');
+        let (Some(ftype), Some(perms), Some(owner), Some(group), Some(size_str), Some(mtime_str), Some(name)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            continue;
+        };
+        if name == "." || name == ".." || name.is_empty() || name.contains('/') {
+            continue;
+        }
+        let modified = mtime_str
+            .split('.')
+            .next()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let entry_path = if clean_path == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", clean_path, name)
+        };
+        entries.push(FileEntry {
+            name: name.to_string(),
+            path: entry_path,
+            size: size_str.parse::<u64>().unwrap_or(0),
+            is_dir: ftype == "d",
+            is_symlink: ftype == "l",
+            permissions: perms.to_string(),
+            owner: owner.to_string(),
+            group: group.to_string(),
+            modified,
+        });
+    }
+    entries
+}
+
+fn parse_ls_output(clean_path: &str, stdout: &str) -> Vec<FileEntry> {
+    let mut entries = Vec::new();
+    let now_ts = chrono::Utc::now().timestamp();
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
         // ls -la format: perms links owner group size [date/timestamp] name
@@ -235,25 +296,30 @@ pub async fn sftp_list_dir(
                 || parts[0].starts_with('-')
                 || parts[0].starts_with('l'))
         {
-            // Determine if we got epoch (all digits) or human date
+            // Preserve internal spaces inside filenames by slicing after the timestamp field in the original line
             let is_epoch = parts[5].chars().all(|c| c.is_ascii_digit());
-            let (name, modified) = if is_epoch {
-                // format: perms links owner group size epoch name...
-                (parts[6..].join(" "), parts[5].parse::<i64>().unwrap_or(0))
+            let (raw_name, modified) = if is_epoch {
+                let mut rest = line.trim_start();
+                for _ in 0..6 {
+                    rest = rest.split_once(char::is_whitespace).map(|(_, r)| r.trim_start()).unwrap_or("");
+                }
+                (rest.to_string(), parts[5].parse::<i64>().unwrap_or(0))
             } else if parts.len() >= 9 {
-                // format: perms links owner group size month day time name...
-                (parts[8..].join(" "), chrono::Utc::now().timestamp())
+                let mut rest = line.trim_start();
+                for _ in 0..8 {
+                    rest = rest.split_once(char::is_whitespace).map(|(_, r)| r.trim_start()).unwrap_or("");
+                }
+                (rest.to_string(), now_ts)
             } else {
                 (parts[parts.len() - 1].to_string(), 0)
             };
 
-            // Skip . and ..
-            if name == "." || name == ".." || name.is_empty() {
+            if raw_name == "." || raw_name == ".." || raw_name.is_empty() {
                 continue;
             }
 
             // For symlinks "name -> target", keep just the name and strip any surrounding quotes added by ls
-            let raw_target = name.split(" -> ").next().unwrap_or(&name).trim();
+            let raw_target = raw_name.split(" -> ").next().unwrap_or(&raw_name).trim();
             let display_name = if (raw_target.starts_with('\'') && raw_target.ends_with('\'') && raw_target.len() >= 2)
                 || (raw_target.starts_with('"') && raw_target.ends_with('"') && raw_target.len() >= 2)
             {
@@ -285,7 +351,7 @@ pub async fn sftp_list_dir(
         }
     }
 
-    Ok(entries)
+    entries
 }
 
 #[tauri::command]
@@ -1003,6 +1069,41 @@ pub async fn sftp_folder_size(
         Ok(stdout.trim().to_string())
     } else {
         Ok("—".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_find_preserves_spaces_quotes_and_symlinks() {
+        let raw = "f\t-rw-r--r--\troot\troot\t1234\t1700000000.5\tmy report 'final' \"v2\".pdf\n\
+                   l\tlrwxrwxrwx\troot\troot\t11\t1700000001.0\tlink name -> target\n\
+                   d\tdrwxr-xr-x\tubuntu\tubuntu\t4096\t1700000002\t-leading-hyphen dir\n";
+        let entries = parse_structured_find_output("/home/user", raw);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].name, "my report 'final' \"v2\".pdf");
+        assert_eq!(entries[0].path, "/home/user/my report 'final' \"v2\".pdf");
+        assert_eq!(entries[0].size, 1234);
+        assert_eq!(entries[0].modified, 1700000000);
+        assert!(entries[1].is_symlink);
+        assert_eq!(entries[1].name, "link name -> target");
+        assert!(entries[2].is_dir);
+        assert_eq!(entries[2].name, "-leading-hyphen dir");
+    }
+
+    #[test]
+    fn ls_fallback_preserves_multiple_spaces_in_filename() {
+        let ls_out = "total 8\n\
+                      -rw-r--r-- 1 ubuntu ubuntu 512 1700000100 two   spaces file.txt\n\
+                      lrwxrwxrwx 1 root root 9 1700000200 'my link' -> '/var/log/app.log'\n";
+        let entries = parse_ls_output("/tmp", ls_out);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "two   spaces file.txt");
+        assert_eq!(entries[0].modified, 1700000100);
+        assert!(entries[1].is_symlink);
+        assert_eq!(entries[1].name, "my link");
     }
 }
 

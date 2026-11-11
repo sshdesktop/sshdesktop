@@ -90,342 +90,46 @@ pub fn execute_query_db2(
     Err("DB2 connector is not implemented; simulated query execution is disabled.".to_string())
 }
 
-pub fn list_tables_dynamodb() -> Vec<DatabaseObject> {
-    vec![
-        DatabaseObject {
-            name: "users".to_string(),
-            object_type: "table".to_string(),
-            schema: None,
-            row_count: Some(15),
-            size_bytes: None,
-            definition: None,
-        },
-        DatabaseObject {
-            name: "orders".to_string(),
-            object_type: "table".to_string(),
-            schema: None,
-            row_count: Some(42),
-            size_bytes: None,
-            definition: None,
-        },
-    ]
+pub fn list_tables_dynamodb() -> Result<Vec<DatabaseObject>, String> {
+    Err("DYNAMODB connector is not implemented; simulated schema metadata is disabled.".to_string())
 }
 
-pub fn list_tables_cosmos(database: &str) -> Vec<DatabaseObject> {
-    vec![
-        DatabaseObject {
-            name: "items".to_string(),
-            object_type: "collection".to_string(),
-            schema: Some(database.to_string()),
-            row_count: Some(25),
-            size_bytes: None,
-            definition: None,
-        },
-        DatabaseObject {
-            name: "logs".to_string(),
-            object_type: "collection".to_string(),
-            schema: Some(database.to_string()),
-            row_count: Some(100),
-            size_bytes: None,
-            definition: None,
-        },
-    ]
+pub fn list_tables_cosmos(_database: &str) -> Result<Vec<DatabaseObject>, String> {
+    Err("COSMOS connector is not implemented; simulated schema metadata is disabled.".to_string())
 }
 
-pub fn list_tables_cassandra(keyspace: &Option<String>) -> Vec<DatabaseObject> {
-    let ks = keyspace.clone().unwrap_or_else(|| "system".to_string());
-    vec![
-        DatabaseObject {
-            name: "user_sessions".to_string(),
-            object_type: "table".to_string(),
-            schema: Some(ks.clone()),
-            row_count: Some(10),
-            size_bytes: None,
-            definition: None,
-        },
-        DatabaseObject {
-            name: "events_by_id".to_string(),
-            object_type: "table".to_string(),
-            schema: Some(ks),
-            row_count: Some(50),
-            size_bytes: None,
-            definition: None,
-        },
-    ]
+pub fn list_tables_cassandra(_keyspace: &Option<String>) -> Result<Vec<DatabaseObject>, String> {
+    Err("CASSANDRA connector is not implemented; simulated schema metadata is disabled.".to_string())
 }
 
-pub fn list_tables_oracle(sid: &Option<String>) -> Vec<DatabaseObject> {
-    let s = sid.clone().unwrap_or_else(|| "ORCL".to_string());
-    vec![
-        DatabaseObject {
-            name: "CUSTOMERS".to_string(),
-            object_type: "table".to_string(),
-            schema: Some(s.clone()),
-            row_count: Some(30),
-            size_bytes: None,
-            definition: None,
-        },
-        DatabaseObject {
-            name: "EMPLOYEES".to_string(),
-            object_type: "table".to_string(),
-            schema: Some(s),
-            row_count: Some(12),
-            size_bytes: None,
-            definition: None,
-        },
-    ]
+pub fn list_tables_oracle(_sid: &Option<String>) -> Result<Vec<DatabaseObject>, String> {
+    Err("ORACLE connector is not implemented; simulated schema metadata is disabled.".to_string())
 }
 
-pub fn list_tables_db2(database: &str) -> Vec<DatabaseObject> {
-    vec![
-        DatabaseObject {
-            name: "ACCOUNTS".to_string(),
-            object_type: "table".to_string(),
-            schema: Some(database.to_string()),
-            row_count: Some(18),
-            size_bytes: None,
-            definition: None,
-        },
-        DatabaseObject {
-            name: "TRANSACTIONS".to_string(),
-            object_type: "table".to_string(),
-            schema: Some(database.to_string()),
-            row_count: Some(90),
-            size_bytes: None,
-            definition: None,
-        },
-    ]
+pub fn list_tables_db2(_database: &str) -> Result<Vec<DatabaseObject>, String> {
+    Err("DB2 connector is not implemented; simulated schema metadata is disabled.".to_string())
 }
 
-pub fn get_table_columns_dynamodb() -> Vec<ColumnMeta> {
-    vec![
-        ColumnMeta {
-            name: "pk".to_string(),
-            data_type: "String (Partition Key)".to_string(),
-            nullable: false,
-            is_primary_key: true,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: Some("HASH".to_string()),
-        },
-        ColumnMeta {
-            name: "sk".to_string(),
-            data_type: "String (Sort Key)".to_string(),
-            nullable: true,
-            is_primary_key: false,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: Some("RANGE".to_string()),
-        },
-        ColumnMeta {
-            name: "data".to_string(),
-            data_type: "Document (Attributes)".to_string(),
-            nullable: true,
-            is_primary_key: false,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-    ]
+pub fn get_table_columns_dynamodb() -> Result<Vec<ColumnMeta>, String> {
+    Err("DYNAMODB connector is not implemented; simulated column metadata is disabled.".to_string())
 }
 
-pub fn get_table_columns_cosmos() -> Vec<ColumnMeta> {
-    vec![
-        ColumnMeta {
-            name: "id".to_string(),
-            data_type: "String".to_string(),
-            nullable: false,
-            is_primary_key: true,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-        ColumnMeta {
-            name: "_rid".to_string(),
-            data_type: "String".to_string(),
-            nullable: true,
-            is_primary_key: false,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-        ColumnMeta {
-            name: "_self".to_string(),
-            data_type: "String".to_string(),
-            nullable: true,
-            is_primary_key: false,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-        ColumnMeta {
-            name: "_etag".to_string(),
-            data_type: "String".to_string(),
-            nullable: true,
-            is_primary_key: false,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-        ColumnMeta {
-            name: "_ts".to_string(),
-            data_type: "Number".to_string(),
-            nullable: true,
-            is_primary_key: false,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-    ]
+pub fn get_table_columns_cosmos() -> Result<Vec<ColumnMeta>, String> {
+    Err("COSMOS connector is not implemented; simulated column metadata is disabled.".to_string())
 }
 
-pub fn get_table_columns_cassandra() -> Vec<ColumnMeta> {
-    vec![
-        ColumnMeta {
-            name: "id".to_string(),
-            data_type: "uuid".to_string(),
-            nullable: false,
-            is_primary_key: true,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: Some("Partition Key".to_string()),
-        },
-        ColumnMeta {
-            name: "created_at".to_string(),
-            data_type: "timestamp".to_string(),
-            nullable: false,
-            is_primary_key: true,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: Some("Clustering Key".to_string()),
-        },
-        ColumnMeta {
-            name: "payload".to_string(),
-            data_type: "text".to_string(),
-            nullable: true,
-            is_primary_key: false,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-    ]
+pub fn get_table_columns_cassandra() -> Result<Vec<ColumnMeta>, String> {
+    Err("CASSANDRA connector is not implemented; simulated column metadata is disabled.".to_string())
 }
 
-pub fn get_table_columns_oracle() -> Vec<ColumnMeta> {
-    vec![
-        ColumnMeta {
-            name: "ID".to_string(),
-            data_type: "NUMBER(38,0)".to_string(),
-            nullable: false,
-            is_primary_key: true,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-        ColumnMeta {
-            name: "NAME".to_string(),
-            data_type: "VARCHAR2(255)".to_string(),
-            nullable: true,
-            is_primary_key: false,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-        ColumnMeta {
-            name: "STATUS".to_string(),
-            data_type: "VARCHAR2(50)".to_string(),
-            nullable: true,
-            is_primary_key: false,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-    ]
+pub fn get_table_columns_oracle() -> Result<Vec<ColumnMeta>, String> {
+    Err("ORACLE connector is not implemented; simulated column metadata is disabled.".to_string())
 }
 
-pub fn get_table_columns_db2() -> Vec<ColumnMeta> {
-    vec![
-        ColumnMeta {
-            name: "ID".to_string(),
-            data_type: "INTEGER".to_string(),
-            nullable: false,
-            is_primary_key: true,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-        ColumnMeta {
-            name: "NAME".to_string(),
-            data_type: "VARCHAR(128)".to_string(),
-            nullable: true,
-            is_primary_key: false,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-        ColumnMeta {
-            name: "VALUE".to_string(),
-            data_type: "VARCHAR(256)".to_string(),
-            nullable: true,
-            is_primary_key: false,
-            is_foreign_key: false,
-            referenced_table: None,
-            referenced_column: None,
-            default_value: None,
-            extra: None,
-        },
-    ]
+pub fn get_table_columns_db2() -> Result<Vec<ColumnMeta>, String> {
+    Err("DB2 connector is not implemented; simulated column metadata is disabled.".to_string())
 }
 
-pub fn get_object_definition_others(driver: &DriverInstance, name: &str) -> Result<String, String> {
-    match driver {
-        DriverInstance::DynamoDb { .. } => {
-            Ok(format!("// DynamoDB Table: {}\n// Hash Key / Range Key definition\n{{\n  \"TableName\": \"{}\",\n  \"AttributeDefinitions\": [\n    {{ \"AttributeName\": \"pk\", \"AttributeType\": \"S\" }}\n  ]\n}}", name, name))
-        }
-        DriverInstance::CosmosDb { .. } => {
-            Ok(format!("// Azure Cosmos DB Container: {}\n{{\n  \"id\": \"{}\",\n  \"indexingPolicy\": {{ \"indexingMode\": \"consistent\" }}\n}}", name, name))
-        }
-        DriverInstance::Cassandra { .. } => {
-            Ok(format!("-- Apache Cassandra Table: {}\nCREATE TABLE {} (\n    id uuid,\n    created_at timestamp,\n    payload text,\n    PRIMARY KEY (id, created_at)\n);", name, name))
-        }
-        DriverInstance::Oracle { .. } => {
-            Ok(format!("-- Oracle Database Table: {}\nCREATE TABLE \"{}\" (\n    \"ID\" NUMBER(38,0) PRIMARY KEY,\n    \"NAME\" VARCHAR2(255),\n    \"STATUS\" VARCHAR2(50)\n);", name, name))
-        }
-        DriverInstance::Db2 { .. } => {
-            Ok(format!("-- IBM DB2 Table: {}\nCREATE TABLE \"{}\" (\n    \"ID\" INTEGER NOT NULL PRIMARY KEY,\n    \"NAME\" VARCHAR(128),\n    \"VALUE\" VARCHAR(256)\n);", name, name))
-        }
-        _ => Err("Unsupported database driver".to_string()),
-    }
+pub fn get_object_definition_others(_driver: &DriverInstance, _name: &str) -> Result<String, String> {
+    Err("Object DDL retrieval is not implemented for this database connector.".to_string())
 }

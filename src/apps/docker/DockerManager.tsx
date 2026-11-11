@@ -15,7 +15,7 @@ import { listen } from '@tauri-apps/api/event';
 import { 
   dockerContainers, dockerAction, dockerLogs, dockerImages, dockerImageRemove, 
   sshExec, sshExecStream, sshExecStop, sftpDownloadToDownloads,
-  packageInstall, serviceAction
+  packageInstall, serviceAction, storeSecretLoad, storeSecretSave
 } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
@@ -595,14 +595,36 @@ export default function DockerManager() {
     loadDockerData();
   }, [loadDockerData]);
 
-  // Load saved credentials from localStorage
+  // Load saved registry entries from secure vault (migrating & scrubbing any legacy localStorage entries)
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem('sshdesktop_docker_credentials') || localStorage.getItem('clouddesk_docker_credentials');
-      if (saved) {
-        setSavedCredentialsList(JSON.parse(saved));
-      }
-    } catch {}
+    let active = true;
+    (async () => {
+      try {
+        const legacyRaw = localStorage.getItem('sshdesktop_docker_credentials') || localStorage.getItem('clouddesk_docker_credentials');
+        if (legacyRaw) {
+          const parsed = JSON.parse(legacyRaw);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            const sanitized = parsed.map((c: any) => ({
+              id: String(c.id || ''),
+              registry: String(c.registry || 'docker.io'),
+              username: String(c.username || ''),
+              savedAt: String(c.savedAt || ''),
+            }));
+            await storeSecretSave('docker-registry:saved-list', JSON.stringify(sanitized));
+            if (active) setSavedCredentialsList(sanitized);
+          }
+          localStorage.removeItem('sshdesktop_docker_credentials');
+          localStorage.removeItem('clouddesk_docker_credentials');
+          return;
+        }
+        const vaultRaw = await storeSecretLoad('docker-registry:saved-list');
+        if (vaultRaw && active) {
+          const parsed = JSON.parse(vaultRaw);
+          if (Array.isArray(parsed)) setSavedCredentialsList(parsed);
+        }
+      } catch {}
+    })();
+    return () => { active = false; };
   }, []);
 
   const handleDockerLogin = async (e: React.FormEvent) => {
@@ -626,13 +648,8 @@ export default function DockerManager() {
             username: loginUsername.trim(),
             savedAt: new Date().toLocaleDateString(),
           };
-          const existing = JSON.parse(
-            localStorage.getItem('sshdesktop_docker_credentials') ||
-            localStorage.getItem('clouddesk_docker_credentials') ||
-            '[]'
-          );
-          const updated = [newCred, ...existing.filter((c: any) => c.id !== newCred.id)];
-          localStorage.setItem('sshdesktop_docker_credentials', JSON.stringify(updated));
+          const updated = [newCred, ...savedCredentialsList.filter((c) => c.id !== newCred.id)];
+          await storeSecretSave('docker-registry:saved-list', JSON.stringify(updated)).catch(() => {});
           setSavedCredentialsList(updated);
         }
         setShowLoginModal(false);
@@ -3690,14 +3707,9 @@ export default function DockerManager() {
                 username: user.trim(),
                 savedAt: new Date().toLocaleDateString(),
               };
-              const existing = JSON.parse(
-                localStorage.getItem('sshdesktop_docker_credentials') ||
-                localStorage.getItem('clouddesk_docker_credentials') ||
-                '[]'
-              );
-              const filtered = existing.filter((c: any) => c.id !== newCred.id);
+              const filtered = savedCredentialsList.filter(c => c.id !== newCred.id);
               const updated = [newCred, ...filtered];
-              localStorage.setItem('sshdesktop_docker_credentials', JSON.stringify(updated));
+              await storeSecretSave('docker-registry:saved-list', JSON.stringify(updated)).catch(() => {});
               setSavedCredentialsList(updated);
             }
             await checkDockerAuth();
@@ -3708,7 +3720,7 @@ export default function DockerManager() {
         onLogout={handleDockerLogout}
         onDeleteCredential={(id: string) => {
           const updated = savedCredentialsList.filter(c => c.id !== id);
-          localStorage.setItem('sshdesktop_docker_credentials', JSON.stringify(updated));
+          void storeSecretSave('docker-registry:saved-list', JSON.stringify(updated)).catch(() => {});
           setSavedCredentialsList(updated);
         }}
       />

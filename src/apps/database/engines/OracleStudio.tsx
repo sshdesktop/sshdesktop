@@ -491,19 +491,10 @@ export const OracleStudio: React.FC<OracleStudioProps> = ({ profile, onDisconnec
 
   const handleOpenDefinition = async (name: string, type: 'table' | 'view' | 'procedure' | 'function' | 'trigger') => {
     try {
-      let ddl = await dbGetObjectDefinition(profile.id, type, name, currentSchema);
+      const ddl = await dbGetObjectDefinition(profile.id, type, name, currentSchema);
       if (!ddl || ddl.trim().length === 0) {
-        if (type === 'view') {
-          ddl = `CREATE OR REPLACE VIEW "${currentSchema}"."${name}" AS\nSELECT * FROM "${currentSchema}"."${selectedTable || 'table_name'}";`;
-        } else if (type === 'procedure') {
-          ddl = `CREATE OR REPLACE PROCEDURE "${currentSchema}"."${name}"\nAS\nBEGIN\n  NULL;\nEND;`;
-        } else if (type === 'function') {
-          ddl = `CREATE OR REPLACE FUNCTION "${currentSchema}"."${name}" RETURN NUMBER\nAS\nBEGIN\n  RETURN 1;\nEND;`;
-        } else if (type === 'trigger') {
-          ddl = `CREATE OR REPLACE TRIGGER "${currentSchema}"."${name}"\nAFTER INSERT ON "${currentSchema}"."${selectedTable || 'table_name'}"\nFOR EACH ROW\nBEGIN\n  NULL;\nEND;`;
-        } else {
-          ddl = `SELECT DBMS_METADATA.GET_DDL('${type.toUpperCase()}', '${name}', '${currentSchema}') FROM DUAL;`;
-        }
+        alert(`Live DDL unavailable: Oracle connector is not implemented.`);
+        return;
       }
 
       const newId = `tab-${Date.now()}`;

@@ -6,7 +6,7 @@ import {
   ArrowRight, CornerDownRight, Sliders, Unlock, Plus, Trash2, 
   Eye, HelpCircle, ShieldX
 } from 'lucide-react';
-import { sshExec } from '../../lib/tauri-bridge';
+import { sshExec, auditGetLogs, auditVerifyChain, WorkspaceAuditEntry, AuditChainVerification } from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
 import { useUserPrivilege } from '../../lib/permissions';
 import PermissionAlertBanner from '../../components/PermissionAlertBanner';
@@ -56,7 +56,7 @@ interface ExposedPortItem {
 }
 
 export default function SecurityAuditor() {
-  const [activeTab, setActiveTab] = useState<'audit' | 'ssh' | 'ports' | 'intrusion' | 'ssl' | 'suid'>('audit');
+  const [activeTab, setActiveTab] = useState<'audit' | 'ssh' | 'ports' | 'intrusion' | 'ssl' | 'suid' | 'trail'>('audit');
   const [scanning, setScanning] = useState(false);
   const [checks, setChecks] = useState<SecurityCheck[]>([]);
   const [failedLogins, setFailedLogins] = useState<FailedLogin[]>([]);
@@ -64,6 +64,9 @@ export default function SecurityAuditor() {
   const [sslCerts, setSslCerts] = useState<SslCertItem[]>([]);
   const [exposedPorts, setExposedPorts] = useState<ExposedPortItem[]>([]);
   const [suidBinaries, setSuidBinaries] = useState<string[]>([]);
+  const [auditEntries, setAuditEntries] = useState<WorkspaceAuditEntry[]>([]);
+  const [chainVerification, setChainVerification] = useState<AuditChainVerification | null>(null);
+  const [auditFilter, setAuditFilter] = useState('');
   
   // Modals & Sheets
   const [fixModalTarget, setFixModalTarget] = useState<SecurityCheck | null>(null);
@@ -369,6 +372,53 @@ export default function SecurityAuditor() {
     runSecurityAudit();
   }, [runSecurityAudit]);
 
+  useEffect(() => {
+    let active = true;
+    Promise.all([auditGetLogs(250), auditVerifyChain()])
+      .then(([logs, verify]) => {
+        if (!active) return;
+        setAuditEntries(Array.isArray(logs) ? logs : []);
+        setChainVerification(verify);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [activeTab]);
+
+  const handleRefreshAuditTrail = async () => {
+    try {
+      const [logs, verify] = await Promise.all([auditGetLogs(250), auditVerifyChain()]);
+      setAuditEntries(Array.isArray(logs) ? logs : []);
+      setChainVerification(verify);
+      showNotification('Audit trail verified and refreshed');
+    } catch (e: any) {
+      showNotification(e?.message || 'Failed to load audit trail', 'error');
+    }
+  };
+
+  const handleExportAudit = (format: 'json' | 'csv') => {
+    const filtered = auditEntries.filter(e =>
+      !auditFilter.trim() || JSON.stringify(e).toLowerCase().includes(auditFilter.toLowerCase())
+    );
+    let content = '';
+    let mime = 'application/json';
+    if (format === 'json') {
+      content = JSON.stringify({ exportedAt: new Date().toISOString(), integrity: chainVerification, entries: filtered }, null, 2);
+    } else {
+      mime = 'text/csv;charset=utf-8';
+      const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+      content = ['ts,event,username,target,status,details,hash']
+        .concat(filtered.map(e => [esc(e.ts), esc(e.event), esc(e.username), esc(e.target), esc(e.status), esc(e.details), esc(e.hash)].join(',')))
+        .join('\n');
+    }
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sshdesktop-audit-${new Date().toISOString().slice(0, 10)}.${format}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   // Compute Hardening Score
   const passedCount = checks.filter(c => c.status === 'passed').length;
   const totalCount = checks.length || 1;
@@ -554,6 +604,18 @@ export default function SecurityAuditor() {
           >
             <Terminal className="w-3.5 h-3.5 text-cyan-400" />
             <span>SUID Binaries</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('trail')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-all ${
+              activeTab === 'trail'
+                ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30 font-semibold'
+                : 'text-gray-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Audit Trail ({auditEntries.length})</span>
           </button>
         </div>
 
@@ -947,6 +1009,87 @@ export default function SecurityAuditor() {
                   <span className="truncate">{bin}</span>
                 </div>
               ))}
+            </div>
+          </div>
+        )}
+
+        {/* TAB 7: WORKSPACE TAMPER-EVIDENT AUDIT TRAIL */}
+        {activeTab === 'trail' && (
+          <div className="flex-1 min-h-0 bg-[#1e1e2e]/90 rounded-2xl border border-white/10 shadow-2xl flex flex-col overflow-hidden backdrop-blur-md">
+            <div className="p-4 bg-[#14141e] border-b border-white/10 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center space-x-2">
+                  <h3 className="text-xs font-bold text-white uppercase tracking-wider font-mono">
+                    Tamper-Evident Security Audit Trail (SHA-256 Chain)
+                  </h3>
+                  {chainVerification && (
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      chainVerification.valid
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                    }`}>
+                      {chainVerification.valid
+                        ? `Chain Verified (${chainVerification.verified}/${chainVerification.total})`
+                        : `Integrity Alert at #${chainVerification.broken_at ?? chainVerification.brokenAt ?? '?'}`}
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-gray-400 mt-0.5">Export verifiable workspace authentication, SSH, firewall, disk, user, and policy events for SIEM ingestion</p>
+              </div>
+              <div className="flex items-center space-x-2">
+                <input
+                  type="text"
+                  value={auditFilter}
+                  onChange={e => setAuditFilter(e.target.value)}
+                  placeholder="Filter events..."
+                  className="px-3 py-1.5 bg-[#1e1e2e] border border-white/10 rounded-xl text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                />
+                <button
+                  onClick={handleRefreshAuditTrail}
+                  className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-xs text-gray-200 border border-white/10"
+                >
+                  Verify &amp; Refresh
+                </button>
+                <button
+                  onClick={() => handleExportAudit('json')}
+                  className="px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 text-xs font-semibold"
+                >
+                  Export JSON
+                </button>
+                <button
+                  onClick={() => handleExportAudit('csv')}
+                  className="px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 text-xs font-semibold"
+                >
+                  Export CSV
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto divide-y divide-white/[0.06] font-mono text-xs">
+              {auditEntries
+                .filter(e => !auditFilter.trim() || JSON.stringify(e).toLowerCase().includes(auditFilter.toLowerCase()))
+                .map((entry, idx) => (
+                  <div key={`${entry.ts}-${idx}`} className="px-4 py-2.5 flex items-center justify-between gap-4 hover:bg-white/[0.02]">
+                    <div className="min-w-0 flex-1 space-y-0.5">
+                      <div className="flex items-center space-x-2">
+                        <span className="text-gray-500 text-[11px]">{entry.ts}</span>
+                        <span className="px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 text-[10px] font-bold">{entry.event}</span>
+                        {entry.username && <span className="text-amber-300 text-[11px]">{entry.username}</span>}
+                        {entry.target && <span className="text-gray-300 text-[11px] truncate">→ {entry.target}</span>}
+                      </div>
+                      {entry.details && <div className="text-[11px] text-gray-400 truncate">{entry.details}</div>}
+                    </div>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                      entry.status === 'failed' || entry.status === 'error'
+                        ? 'bg-rose-500/20 text-rose-300'
+                        : 'bg-emerald-500/20 text-emerald-300'
+                    }`}>
+                      {entry.status || 'ok'}
+                    </span>
+                  </div>
+                ))}
+              {auditEntries.length === 0 && (
+                <div className="py-16 text-center text-gray-500 font-sans">No audit events recorded yet in this workspace.</div>
+              )}
             </div>
           </div>
         )}

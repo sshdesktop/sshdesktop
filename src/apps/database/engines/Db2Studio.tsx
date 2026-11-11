@@ -467,19 +467,10 @@ export const Db2Studio: React.FC<Db2StudioProps> = ({ profile, onDisconnect }) =
 
   const handleOpenDefinition = async (name: string, type: 'table' | 'view' | 'procedure' | 'function' | 'trigger') => {
     try {
-      let ddl = await dbGetObjectDefinition(profile.id, type, name, currentSchema);
+      const ddl = await dbGetObjectDefinition(profile.id, type, name, currentSchema);
       if (!ddl || ddl.trim().length === 0) {
-        if (type === 'view') {
-          ddl = `CREATE OR REPLACE VIEW "${currentSchema}"."${name}" AS\nSELECT * FROM "${currentSchema}"."${selectedTable || 'table_name'}";`;
-        } else if (type === 'procedure') {
-          ddl = `CREATE OR REPLACE PROCEDURE "${currentSchema}"."${name}"()\nLANGUAGE SQL\nBEGIN\n  -- Procedure body\nEND;`;
-        } else if (type === 'function') {
-          ddl = `CREATE OR REPLACE FUNCTION "${currentSchema}"."${name}"()\nRETURNS INTEGER\nLANGUAGE SQL\nBEGIN\n  RETURN 1;\nEND;`;
-        } else if (type === 'trigger') {
-          ddl = `CREATE OR REPLACE TRIGGER "${currentSchema}"."${name}"\nAFTER INSERT ON "${currentSchema}"."${selectedTable || 'table_name'}"\nFOR EACH ROW\nBEGIN\n  -- Trigger body\nEND;`;
-        } else {
-          ddl = `SELECT text FROM syscat.views WHERE viewschema = '${currentSchema}' AND viewname = '${name}';`;
-        }
+        alert(`Live DDL unavailable: DB2 connector is not implemented.`);
+        return;
       }
 
       const newId = `tab-${Date.now()}`;

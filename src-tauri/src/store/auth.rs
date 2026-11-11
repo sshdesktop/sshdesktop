@@ -144,7 +144,28 @@ fn verify_password(password: &str, salt: &str, stored: &str) -> bool {
     candidate.as_bytes().iter().zip(stored.as_bytes()).fold(0u8, |diff, (a, b)| diff | (*a ^ *b)) == 0
 }
 
-/// Loads or auto-initializes the default admin/admin configuration
+fn generate_initial_password() -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*-_";
+    let mut out = String::with_capacity(20);
+    // Concatenate two v4 UUIDs (32 CSPRNG bytes) to derive 20 unbiased characters
+    let bytes = [
+        *uuid::Uuid::new_v4().as_bytes(),
+        *uuid::Uuid::new_v4().as_bytes(),
+    ];
+    for chunk in bytes.iter().flat_map(|b| b.iter()).take(20) {
+        out.push(CHARSET[(*chunk as usize) % CHARSET.len()] as char);
+    }
+    out
+}
+
+fn initial_credentials_file_path(auth_path: &std::path::Path) -> PathBuf {
+    auth_path
+        .parent()
+        .map(|p| p.join("initial-admin-credentials.txt"))
+        .unwrap_or_else(|| PathBuf::from("initial-admin-credentials.txt"))
+}
+
+/// Loads or auto-initializes a unique random bootstrap administrator configuration
 pub fn load_or_init_auth_config() -> Result<(ServerAuthConfig, PathBuf), String> {
     let path = get_auth_file_path();
     if path.exists() {
@@ -161,11 +182,12 @@ pub fn load_or_init_auth_config() -> Result<(ServerAuthConfig, PathBuf), String>
         return Ok((config, path));
     }
 
-    // Initialize default admin / admin credentials only when no config exists.
+    // Initialize random one-time bootstrap administrator credentials only when no config exists.
     let salt = uuid::Uuid::new_v4().to_string();
+    let initial_password = generate_initial_password();
     let default_config = ServerAuthConfig {
         username: "admin".to_string(),
-        password_hash: hash_password("admin", &salt),
+        password_hash: hash_password(&initial_password, &salt),
         salt,
         must_change_password: true,
         created_at: chrono::Utc::now().timestamp(),
@@ -200,7 +222,29 @@ pub fn load_or_init_auth_config() -> Result<(ServerAuthConfig, PathBuf), String>
         .and_then(|_| file.sync_all())
         .map_err(|e| format!("Could not write initial authentication configuration: {}", e))?;
     enforce_strict_permissions(&path)?;
-    log::info!("SSH Desktop: Initialized default web auth credentials in {:?}", path);
+
+    let creds_path = initial_credentials_file_path(&path);
+    let _ = fs::remove_file(&creds_path);
+    let mut creds_opts = fs::OpenOptions::new();
+    creds_opts.write(true).create_new(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        creds_opts.mode(0o600);
+    }
+    if let Ok(mut cf) = creds_opts.open(&creds_path) {
+        let banner = format!(
+            "SSH Desktop Initial Setup Credentials (rotate on first login)\nusername=admin\npassword={}\n",
+            initial_password
+        );
+        let _ = cf.write_all(banner.as_bytes()).and_then(|_| cf.sync_all());
+        let _ = enforce_strict_permissions(&creds_path);
+    }
+
+    log::info!(
+        "SSH Desktop: Initialized random bootstrap admin credentials in {:?} (initial password written to {:?})",
+        path,
+        creds_path
+    );
 
     Ok((default_config, path))
 }
@@ -258,6 +302,7 @@ pub async fn auth_login(username: String, password: String) -> Result<AuthAction
     persist_auth_config(&path, &json)?;
     enforce_strict_permissions(&path)?;
     IS_AUTHENTICATED.store(true, Ordering::SeqCst);
+    crate::store::audit::append_audit_event("auth_login", &config.username, "desktop-auth", "ok", None);
 
     log::info!("SSH Desktop: Web session authenticated for user '{}'", config.username);
     Ok(AuthActionResult {
@@ -323,6 +368,7 @@ pub async fn auth_change_credentials(
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     persist_auth_config(&path, &json)?;
     enforce_strict_permissions(&path)?;
+    let _ = fs::remove_file(initial_credentials_file_path(&path));
 
     IS_AUTHENTICATED.store(true, Ordering::SeqCst);
     log::info!("SSH Desktop: Successfully updated master web credentials. User: '{}', file: {:?}", config.username, path);
@@ -361,5 +407,14 @@ mod tests {
         let legacy = legacy_sha256_password("legacy-password", salt);
         assert!(verify_password("legacy-password", salt, &legacy));
         assert!(!verify_password("incorrect", salt, &legacy));
+    }
+
+    #[test]
+    fn bootstrap_password_is_never_static_admin() {
+        let p1 = generate_initial_password();
+        let p2 = generate_initial_password();
+        assert!(p1.len() >= 18);
+        assert_ne!(p1, "admin");
+        assert_ne!(p1, p2);
     }
 }

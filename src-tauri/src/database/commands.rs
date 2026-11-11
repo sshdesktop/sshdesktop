@@ -381,11 +381,11 @@ pub async fn db_list_tables(
         DriverInstance::Mssql { config, tcp_addr } => list_tables_mssql(config, tcp_addr).await,
         DriverInstance::Mongo(client) => list_collections_mongo(client, &session).await,
         DriverInstance::Redis(client) => list_tables_redis(client).await,
-        DriverInstance::DynamoDb { .. } => Ok(list_tables_dynamodb()),
-        DriverInstance::CosmosDb { database, .. } => Ok(list_tables_cosmos(database)),
-        DriverInstance::Cassandra { keyspace, .. } => Ok(list_tables_cassandra(keyspace)),
-        DriverInstance::Oracle { sid, .. } => Ok(list_tables_oracle(sid)),
-        DriverInstance::Db2 { database, .. } => Ok(list_tables_db2(database)),
+        DriverInstance::DynamoDb { .. } => list_tables_dynamodb(),
+        DriverInstance::CosmosDb { database, .. } => list_tables_cosmos(database),
+        DriverInstance::Cassandra { keyspace, .. } => list_tables_cassandra(keyspace),
+        DriverInstance::Oracle { sid, .. } => list_tables_oracle(sid),
+        DriverInstance::Db2 { database, .. } => list_tables_db2(database),
     }
 }
 
@@ -410,11 +410,11 @@ pub async fn db_get_table_columns(
         DriverInstance::Mssql { config, tcp_addr } => get_table_columns_mssql(config, tcp_addr, &table_name).await,
         DriverInstance::Mongo(client) => get_collection_columns_mongo(client, &session, &table_name).await,
         DriverInstance::Redis(_) => Ok(get_table_columns_redis()),
-        DriverInstance::DynamoDb { .. } => Ok(get_table_columns_dynamodb()),
-        DriverInstance::CosmosDb { .. } => Ok(get_table_columns_cosmos()),
-        DriverInstance::Cassandra { .. } => Ok(get_table_columns_cassandra()),
-        DriverInstance::Oracle { .. } => Ok(get_table_columns_oracle()),
-        DriverInstance::Db2 { .. } => Ok(get_table_columns_db2()),
+        DriverInstance::DynamoDb { .. } => get_table_columns_dynamodb(),
+        DriverInstance::CosmosDb { .. } => get_table_columns_cosmos(),
+        DriverInstance::Cassandra { .. } => get_table_columns_cassandra(),
+        DriverInstance::Oracle { .. } => get_table_columns_oracle(),
+        DriverInstance::Db2 { .. } => get_table_columns_db2(),
     }
 }
 
@@ -435,6 +435,7 @@ pub async fn db_execute_operation(
     if session.config.read_only {
         return Err("Database session is in read-only mode".to_string());
     }
+    crate::store::audit::enforce_policy_permission("db_execute_operation")?;
 
     let start = Instant::now();
     let engine = session.config.engine.to_lowercase();

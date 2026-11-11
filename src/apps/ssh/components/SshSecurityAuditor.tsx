@@ -229,18 +229,39 @@ export default function SshSecurityAuditor({ isLight = false }: { isLight?: bool
     }
   };
 
-  // Delete host from known_hosts
+  // Delete host from known_hosts while preserving permissions/ownership (prefer ssh-keygen -R)
   const handleDeleteKnownHost = async (host: RemoteKnownHost) => {
     if (!activeConnectionId) return;
     try {
+      const sq = (v: string) => `'${String(v).replace(/'/g, "'\\''")}'`;
+      const hostTok = host.host.trim().split(',')[0].trim();
+      const canUseKeygen = Boolean(hostTok && !hostTok.startsWith('|1|') && /^[a-zA-Z0-9.\[\]:_-]+$/.test(hostTok));
+      if (canUseKeygen) {
+        const kgRes = await sshExec(activeConnectionId, `command -v ssh-keygen >/dev/null 2>&1 && ssh-keygen -R ${sq(hostTok)} 2>&1`);
+        if (kgRes.exit_code === 0) {
+          setKnownHosts(prev => prev.filter(h => h.id !== host.id));
+          setToastMessage(`Removed ${host.host} from known_hosts`);
+          setTimeout(() => setToastMessage(null), 3000);
+          return;
+        }
+      }
+
       const readRes = await sshExec(activeConnectionId, 'cat ~/.ssh/known_hosts 2>/dev/null || true');
       const lines = (readRes.stdout || '').split('\n');
       const targetRaw = host.raw.trim();
       const remaining = lines.filter(l => l.trim() && l.trim() !== targetRaw);
       const newContent = remaining.join('\n') + (remaining.length > 0 ? '\n' : '');
-      const b64 = btoa(unescape(encodeURIComponent(newContent)));
 
-      await sshExec(activeConnectionId, `echo "${b64}" | base64 -d > ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts`);
+      const updateScript = `mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
+MODE=$(stat -c %a ~/.ssh/known_hosts 2>/dev/null || stat -f %Lp ~/.ssh/known_hosts 2>/dev/null || echo 600); \
+TMP=$(mktemp ~/.ssh/.known_hosts.XXXXXX) || exit 1; \
+chmod "$MODE" "$TMP" 2>/dev/null || chmod 600 "$TMP"; \
+printf '%s' ${sq(newContent)} > "$TMP" && mv -f "$TMP" ~/.ssh/known_hosts`;
+      const writeRes = await sshExec(activeConnectionId, updateScript);
+      if (writeRes.exit_code !== 0) {
+        setError(writeRes.stderr || 'Failed to update ~/.ssh/known_hosts');
+        return;
+      }
       setKnownHosts(prev => prev.filter(h => h.id !== host.id));
       setToastMessage(`Removed ${host.host} from known_hosts`);
       setTimeout(() => setToastMessage(null), 3000);

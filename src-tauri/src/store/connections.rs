@@ -345,3 +345,54 @@ pub async fn store_update_connection(_state: tauri::State<'_, AppState>, mut con
     }
     write_connections_to_disk(&list)
 }
+
+fn validate_secret_key(key: &str) -> Result<String, String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() || trimmed.len() > 256 {
+        return Err("Secret identifier must be between 1 and 256 characters.".into());
+    }
+    if !(trimmed.starts_with("db-profile:") || trimmed.starts_with("docker-registry:")) {
+        return Err("Secret identifier must use the 'db-profile:' or 'docker-registry:' namespace.".into());
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.')) {
+        return Err("Secret identifier contains disallowed characters.".into());
+    }
+    Ok(trimmed.to_string())
+}
+
+#[tauri::command]
+pub async fn store_secret_save(key: String, value: String) -> Result<bool, String> {
+    let valid_key = validate_secret_key(&key)?;
+    if value.len() > 64 * 1024 {
+        return Err("Secret value exceeds the 64 KiB limit.".into());
+    }
+    if value.is_empty() {
+        if let Ok(entry) = keyring::Entry::new("com.sshdesktop.app", &valid_key) {
+            let _ = entry.delete_credential();
+        }
+        return Ok(true);
+    }
+    let entry = keyring::Entry::new("com.sshdesktop.app", &valid_key)
+        .map_err(|e| format!("Could not access the operating-system credential store: {}", e))?;
+    entry
+        .set_password(&value)
+        .map_err(|e| format!("Could not store secret in operating-system keyring: {}", e))?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn store_secret_load(key: String) -> Result<Option<String>, String> {
+    let valid_key = validate_secret_key(&key)?;
+    let entry = keyring::Entry::new("com.sshdesktop.app", &valid_key)
+        .map_err(|e| format!("Could not access the operating-system credential store: {}", e))?;
+    Ok(entry.get_password().ok())
+}
+
+#[tauri::command]
+pub async fn store_secret_delete(key: String) -> Result<bool, String> {
+    let valid_key = validate_secret_key(&key)?;
+    if let Ok(entry) = keyring::Entry::new("com.sshdesktop.app", &valid_key) {
+        let _ = entry.delete_credential();
+    }
+    Ok(true)
+}

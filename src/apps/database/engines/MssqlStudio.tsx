@@ -498,19 +498,10 @@ export const MssqlStudio: React.FC<MssqlStudioProps> = ({ profile, onDisconnect 
 
   const handleOpenDefinition = async (name: string, type: 'table' | 'view' | 'procedure' | 'function' | 'trigger') => {
     try {
-      let ddl = await dbGetObjectDefinition(profile.id, type, name, currentDb);
+      const ddl = await dbGetObjectDefinition(profile.id, type, name, currentDb);
       if (!ddl || ddl.trim().length === 0) {
-        if (type === 'procedure') {
-          ddl = `CREATE OR ALTER PROCEDURE [dbo].[${name}]\nAS\nBEGIN\n  SET NOCOUNT ON;\n  -- Routine body\nEND;`;
-        } else if (type === 'function') {
-          ddl = `CREATE OR ALTER FUNCTION [dbo].[${name}]()\nRETURNS INT\nAS\nBEGIN\n  RETURN 1;\nEND;`;
-        } else if (type === 'trigger') {
-          ddl = `CREATE OR ALTER TRIGGER [${name}]\nON [dbo].[${selectedTable || 'table_name'}]\nAFTER INSERT\nAS\nBEGIN\n  -- Trigger body\nEND;`;
-        } else if (type === 'view') {
-          ddl = `CREATE OR ALTER VIEW [dbo].[${name}]\nAS\nSELECT * FROM [dbo].[${selectedTable || 'table_name'}];`;
-        } else {
-          ddl = `sp_helptext '${name}';`;
-        }
+        alert(`Server did not return live DDL for ${type} "${name}". Verify VIEW DEFINITION permission.`);
+        return;
       }
 
       const newId = `tab-${Date.now()}`;

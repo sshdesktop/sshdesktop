@@ -520,19 +520,10 @@ export const PostgresStudio: React.FC<PostgresStudioProps> = ({ profile, onDisco
 
   const handleOpenDefinition = async (name: string, type: 'table' | 'view' | 'procedure' | 'function' | 'trigger') => {
     try {
-      let ddl = await dbGetObjectDefinition(profile.id, type, name, currentDb);
+      const ddl = await dbGetObjectDefinition(profile.id, type, name, currentDb);
       if (!ddl || ddl.trim().length === 0) {
-        if (type === 'procedure') {
-          ddl = `CREATE OR REPLACE PROCEDURE "${name}"()\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  -- Routine body\nEND;\n$$;`;
-        } else if (type === 'function') {
-          ddl = `CREATE OR REPLACE FUNCTION "${name}"()\nRETURNS integer\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN 1;\nEND;\n$$;`;
-        } else if (type === 'trigger') {
-          ddl = `CREATE OR REPLACE TRIGGER "${name}"\nAFTER INSERT ON "${selectedTable || 'table_name'}"\nFOR EACH ROW\nEXECUTE FUNCTION trigger_function();`;
-        } else if (type === 'view') {
-          ddl = `CREATE OR REPLACE VIEW "${name}" AS\nSELECT * FROM "${selectedTable || 'table_name'}";`;
-        } else {
-          ddl = `-- Definition for ${type} ${name}\nSELECT pg_get_viewdef('"${name}"'::regclass, true);`;
-        }
+        alert(`Server did not return live DDL for ${type} "${name}".`);
+        return;
       }
 
       const newId = `tab-${Date.now()}`;

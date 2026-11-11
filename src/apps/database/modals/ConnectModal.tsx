@@ -26,6 +26,8 @@ interface ConnectModalProps {
   initialProfile?: DbConnectionProfile | null;
 }
 
+const UNIMPLEMENTED_ENGINES = new Set<DbEngine>(['oracle', 'dynamodb', 'cosmos', 'cassandra', 'db2']);
+
 const ENGINE_DEFAULTS: Record<DbEngine, { port: number; user: string; db: string; label: string; icon: string }> = {
   postgresql: { port: 5432, user: 'postgres', db: 'postgres', label: 'PostgreSQL', icon: '🐘' },
   mysql: { port: 3306, user: 'root', db: 'mysql', label: 'MySQL', icon: '🐬' },
@@ -34,11 +36,11 @@ const ENGINE_DEFAULTS: Record<DbEngine, { port: number; user: string; db: string
   mssql: { port: 1433, user: 'sa', db: 'master', label: 'SQL Server (MSSQL)', icon: '🏢' },
   mongodb: { port: 27017, user: 'admin', db: 'admin', label: 'MongoDB', icon: '🍃' },
   redis: { port: 6379, user: 'default', db: '0', label: 'Redis', icon: '⚡' },
-  oracle: { port: 1521, user: 'SYSTEM', db: 'ORCL', label: 'Oracle Database', icon: '🏛️' },
-  dynamodb: { port: 8000, user: '', db: 'default', label: 'Amazon DynamoDB', icon: '📦' },
-  cosmos: { port: 443, user: '', db: 'cosmos-db', label: 'Azure Cosmos DB', icon: '🪐' },
-  cassandra: { port: 9042, user: 'cassandra', db: 'system', label: 'Apache Cassandra', icon: '👁️' },
-  db2: { port: 50000, user: 'db2inst1', db: 'SAMPLE', label: 'IBM DB2', icon: '🔷' },
+  oracle: { port: 1521, user: 'SYSTEM', db: 'ORCL', label: 'Oracle (Planned)', icon: '🏛️' },
+  dynamodb: { port: 8000, user: '', db: 'default', label: 'DynamoDB (Planned)', icon: '📦' },
+  cosmos: { port: 443, user: '', db: 'cosmos-db', label: 'Cosmos DB (Planned)', icon: '🪐' },
+  cassandra: { port: 9042, user: 'cassandra', db: 'system', label: 'Cassandra (Planned)', icon: '👁️' },
+  db2: { port: 50000, user: 'db2inst1', db: 'SAMPLE', label: 'IBM DB2 (Planned)', icon: '🔷' },
 };
 
 export const ConnectModal: React.FC<ConnectModalProps> = ({
@@ -98,6 +100,9 @@ export const ConnectModal: React.FC<ConnectModalProps> = ({
   };
 
   const validateInputs = (): string | null => {
+    if (UNIMPLEMENTED_ENGINES.has(engine)) {
+      return `${ENGINE_DEFAULTS[engine].label} driver is planned and not yet implemented in this release.`;
+    }
     if (!name.trim()) return 'Connection Profile Name is required.';
     
     if (engine === 'sqlite') {
@@ -286,6 +291,15 @@ export const ConnectModal: React.FC<ConnectModalProps> = ({
 
         {/* Form Body */}
         <div className="p-6 overflow-y-auto space-y-4 flex-1">
+          {UNIMPLEMENTED_ENGINES.has(engine) && (
+            <div className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200 text-xs flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <strong>Planned Engine:</strong> Native runtime driver and live metadata inspection for {ENGINE_DEFAULTS[engine].label.replace(' (Planned)', '')} are not yet implemented.
+              </div>
+            </div>
+          )}
+
           {/* Alert / Errors */}
           {errorMessage && (
             <div className="p-3 rounded-xl bg-red-500/15 border border-red-500/30 text-red-200 text-xs flex items-start gap-2.5 animate-in fade-in">
@@ -610,9 +624,9 @@ export const ConnectModal: React.FC<ConnectModalProps> = ({
             <div className="flex items-center gap-2">
               <Lock className="w-4 h-4 text-amber-400" />
               <div>
-                <span className="font-medium text-white block">Save Credentials on Server</span>
+                <span className="font-medium text-white block">Remember Credentials (Encrypted Vault)</span>
                 <span className="text-[11px] text-gray-400 block">
-                  Persist username & password securely in ~/.sshdesktop/database_profiles.json
+                  Store secrets in OS Keychain (Desktop) or encrypted Server Vault (Web); never saved to browser localStorage
                 </span>
               </div>
             </div>
@@ -630,7 +644,7 @@ export const ConnectModal: React.FC<ConnectModalProps> = ({
           <button
             type="button"
             onClick={handleTest}
-            disabled={isTesting || isConnecting}
+            disabled={isTesting || isConnecting || UNIMPLEMENTED_ENGINES.has(engine)}
             className="px-4 py-2 rounded-xl text-xs font-medium bg-white/10 text-white hover:bg-white/15 transition-colors flex items-center gap-2 disabled:opacity-50"
           >
             {isTesting && <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />}

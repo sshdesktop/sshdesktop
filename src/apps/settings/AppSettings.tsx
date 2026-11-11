@@ -10,7 +10,14 @@ import {
   ChevronDown, ChevronUp, FileText
 } from 'lucide-react';
 import { WALLPAPERS } from '../../shell/Desktop';
-import { sshExec } from '../../lib/tauri-bridge';
+import {
+  sshExec,
+  policyGetMode,
+  policySetMode,
+  backupExportConfig,
+  backupImportConfig,
+  WorkspaceSecurityPolicy,
+} from '../../lib/tauri-bridge';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
 import { SshDesktopLogo } from '../../components/SshDesktopLogo';
 import { useUserPrivilege } from '../../lib/permissions';
@@ -70,8 +77,11 @@ export default function AppSettings() {
   const { openApp } = useWindowManager();
 
   const [activeTab, setActiveTab] = useState<
-    'appearance' | 'wallpaper' | 'backup' | 'datetime' | 'terminal' | 'editor' | 'dock' | 'ssh' | 'about'
+    'appearance' | 'wallpaper' | 'backup' | 'security' | 'datetime' | 'terminal' | 'editor' | 'dock' | 'ssh' | 'about'
   >('appearance');
+  const [securityPolicy, setSecurityPolicy] = useState<WorkspaceSecurityPolicy>({ role: 'admin', blockMetadataEgress: true });
+  const [policyStatusMsg, setPolicyStatusMsg] = useState<string | null>(null);
+  const configImportRef = useRef<HTMLInputElement | null>(null);
   const [navSearch, setNavSearch] = useState('');
   const [customUrl, setCustomUrl] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -590,11 +600,59 @@ export default function AppSettings() {
     setCustomUrl('');
   };
 
+  useEffect(() => {
+    if (activeTab === 'security') {
+      policyGetMode().then(setSecurityPolicy).catch(() => {});
+    }
+  }, [activeTab]);
+
+  const handleUpdateSecurityPolicy = async (role: 'admin' | 'operator' | 'read_only', blockMeta: boolean) => {
+    try {
+      const updated = await policySetMode(role, blockMeta);
+      setSecurityPolicy(updated);
+      setPolicyStatusMsg(`Security policy saved: role=${updated.role}, metadataEgressBlocked=${updated.blockMetadataEgress}`);
+    } catch (e: any) {
+      setPolicyStatusMsg(e?.message || 'Failed to update security policy');
+    }
+  };
+
+  const handleExportWorkspaceBundle = async () => {
+    try {
+      const bundle = await backupExportConfig();
+      if (!bundle) throw new Error('Backup export returned empty response');
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `sshdesktop-config-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setPolicyStatusMsg('Workspace configuration backup downloaded (secrets stripped safely).');
+    } catch (e: any) {
+      setPolicyStatusMsg(e?.message || 'Failed to export workspace backup');
+    }
+  };
+
+  const handleImportWorkspaceBundle = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      await backupImportConfig(parsed);
+      setPolicyStatusMsg('Workspace configuration bundle restored cleanly.');
+    } catch (err: any) {
+      setPolicyStatusMsg(err?.message || 'Invalid backup bundle');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
   // Sidebar navigation items
   const navItems = [
     { id: 'appearance', label: 'Appearance', icon: Palette, color: 'text-pink-400' },
     { id: 'wallpaper', label: 'Wallpaper (4K)', icon: ImageIcon, color: 'text-blue-400' },
     { id: 'backup', label: 'Backup & Restore', icon: FolderArchive, color: 'text-emerald-400' },
+    { id: 'security', label: 'Security Policy & Governance', icon: ShieldCheck, color: 'text-amber-400' },
     { id: 'datetime', label: 'Date & Time (Server)', icon: Clock, color: 'text-teal-400' },
     { id: 'terminal', label: 'Terminal Emulator', icon: Terminal, color: 'text-sky-400' },
     { id: 'editor', label: 'Code Editor', icon: FileCode, color: 'text-purple-400' },
@@ -1736,6 +1794,88 @@ export default function AppSettings() {
                   <span className="text-xs font-mono font-bold text-gray-300 bg-[#12121e] px-3 py-1.5 rounded-xl border border-white/10">
                     22
                   </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB: ENTERPRISE SECURITY POLICY & CONFIG BACKUP */}
+          {activeTab === 'security' && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-lg font-bold text-white tracking-tight">Security Policy &amp; Workspace Governance</h2>
+                <p className="text-xs text-gray-400">Enforce backend command role restrictions, cloud metadata egress blocking, and non-secret workspace config backups.</p>
+              </div>
+
+              {policyStatusMsg && (
+                <div className="p-3 rounded-xl bg-blue-500/15 border border-blue-500/30 text-blue-200 text-xs">{policyStatusMsg}</div>
+              )}
+
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-4 shadow-xl">
+                <div>
+                  <span className="text-xs font-bold text-white block">Active Workspace Enforcement Role</span>
+                  <p className="text-[11px] text-gray-400 mt-0.5">Enforced on both the Rust native backend and Node web server for firewall, user, disk, and schema operations.</p>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  {([
+                    { id: 'admin', title: 'Administrator', desc: 'Full infrastructure and destructive ops access' },
+                    { id: 'operator', title: 'Operator', desc: 'Blocks disk format/partition, user delete & firewall reset' },
+                    { id: 'read_only', title: 'Read-Only', desc: 'Inspect logs/metrics/status; blocks all admin mutations' },
+                  ] as const).map(item => (
+                    <button
+                      key={item.id}
+                      onClick={() => handleUpdateSecurityPolicy(item.id, securityPolicy.blockMetadataEgress)}
+                      className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+                        securityPolicy.role === item.id
+                          ? 'bg-blue-600/20 border-blue-500 text-white'
+                          : 'bg-white/[0.03] border-white/10 text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      <div className="text-xs font-bold">{item.title}</div>
+                      <div className="text-[11px] opacity-80 mt-1">{item.desc}</div>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="pt-3 border-t border-white/10 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-white block">Block Cloud Metadata Egress in SOCKS5</span>
+                    <span className="text-[11px] text-gray-400">Prevents SOCKS5 clients from pivoting to 169.254.169.254 / metadata endpoints</span>
+                  </div>
+                  <button
+                    onClick={() => handleUpdateSecurityPolicy(securityPolicy.role, !securityPolicy.blockMetadataEgress)}
+                    className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer ${securityPolicy.blockMetadataEgress ? 'bg-emerald-600' : 'bg-white/10'}`}
+                  >
+                    <span className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${securityPolicy.blockMetadataEgress ? 'left-5.5' : 'left-0.5'}`} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3 shadow-xl">
+                <div>
+                  <span className="text-xs font-bold text-white block">Workspace Configuration Backup &amp; Restore</span>
+                  <span className="text-[11px] text-gray-400">Export or restore SSH connection profiles, settings, and security policy (passwords/passphrases remain protected in keychain/vault).</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={handleExportWorkspaceBundle}
+                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold cursor-pointer"
+                  >
+                    Export Workspace Config (.json)
+                  </button>
+                  <button
+                    onClick={() => configImportRef.current?.click()}
+                    className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-white text-xs font-semibold cursor-pointer"
+                  >
+                    Restore Config Bundle
+                  </button>
+                  <input
+                    ref={configImportRef}
+                    type="file"
+                    accept="application/json,.json"
+                    onChange={handleImportWorkspaceBundle}
+                    className="hidden"
+                  />
                 </div>
               </div>
             </div>

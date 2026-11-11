@@ -117,18 +117,9 @@ async fn run_sudo(state: &AppState, conn_id: &str, cmd: &str) -> (String, i32) {
 
 fn ensure_parted_script() -> &'static str {
     r#"export PATH="/usr/sbin:/sbin:/usr/local/sbin:$PATH"
-if ! command -v parted >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq parted >/dev/null 2>&1
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y -q parted >/dev/null 2>&1
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y -q parted >/dev/null 2>&1
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm parted >/dev/null 2>&1
-    elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache parted >/dev/null 2>&1
-    fi
+if ! command -v parted >/dev/null 2>&1 && ! command -v sfdisk >/dev/null 2>&1; then
+    echo "Missing required partitioning dependency 'parted' (or 'sfdisk'). Install 'parted' explicitly via Package Manager before performing partition operations." >&2
+    exit 127
 fi
 "#
 }
@@ -526,6 +517,7 @@ pub async fn disk_create_label(
     device: String,
     label_type: String, // "gpt" or "msdos"
 ) -> Result<String, String> {
+    crate::store::audit::enforce_policy_permission("disk_create_label")?;
     let clean_dev = device.trim();
     let clean_lbl = label_type.trim().to_lowercase();
     if !valid_device_path(clean_dev) {
@@ -596,6 +588,7 @@ pub async fn disk_create_partition(
     fstype: Option<String>,
     label: Option<String>,
 ) -> Result<String, String> {
+    crate::store::audit::enforce_policy_permission("disk_create_partition")?;
     let clean_dev = device.trim().to_string();
     let dev_path = if clean_dev.starts_with('/') { clean_dev } else { format!("/dev/{}", clean_dev) };
     let clean_type = if part_type.trim().is_empty() { "primary" } else { part_type.trim() };
@@ -810,6 +803,7 @@ pub async fn disk_delete_partition(
     part_number: u32,
     part_device: Option<String>,
 ) -> Result<String, String> {
+    crate::store::audit::enforce_policy_permission("disk_delete_partition")?;
     let clean_dev = device.trim().to_string();
     let dev_path = if clean_dev.starts_with('/') { clean_dev } else { format!("/dev/{}", clean_dev) };
     if !valid_device_path(&dev_path) || part_number == 0 {
@@ -1101,6 +1095,9 @@ pub async fn disk_set_partition_flag(
         r#"{ensure_parted}
 if command -v parted >/dev/null 2>&1; then
     parted -s {dev} set {num} {flag} {st}
+else
+    echo "Missing required partitioning dependency 'parted'. Install 'parted' explicitly via Package Manager first." >&2
+    exit 127
 fi
 partprobe {dev} 2>/dev/null || true
 "#,
@@ -1130,6 +1127,7 @@ pub async fn disk_format_filesystem(
     label: Option<String>,
     quick: bool,
 ) -> Result<String, String> {
+    crate::store::audit::enforce_policy_permission("disk_format_filesystem")?;
     let clean_dev = device.trim().to_string();
     let dev_path = if clean_dev.starts_with('/') { clean_dev } else { format!("/dev/{}", clean_dev) };
     let clean_fs = fstype.trim().to_lowercase();

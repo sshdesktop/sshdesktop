@@ -44,6 +44,8 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [ruleToDelete, setRuleToDelete] = useState<SshTunnelRule | null>(null);
+  const [socksUsername, setSocksUsername] = useState('');
+  const [socksPassword, setSocksPassword] = useState('');
 
   // User home directory calculation (~/.sshdesktop/tunnels.json)
   const username = activeServer?.username || 'sharuk';
@@ -328,8 +330,15 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
         // START TUNNEL
         if (t.type === 'dynamic') {
           const targetPort = t.localPort || 1080;
+          const useSocksAuth = Boolean(socksUsername.trim() && socksPassword);
           const boundPort = await executeWithTimeout(
-            sshStartSocks5(activeConnectionId!, targetPort),
+            sshStartSocks5(
+              activeConnectionId!,
+              targetPort,
+              useSocksAuth ? socksUsername.trim() : undefined,
+              useSocksAuth ? socksPassword : undefined,
+              useSocksAuth
+            ),
             12000,
             `Starting SOCKS5 proxy on port ${targetPort} timed out. Please check if port is already in use.`
           );
@@ -895,6 +904,33 @@ export default function SshTunnelsManager({ isLight = false }: { isLight?: boole
                     onChange={e => setRemoteHost(e.target.value)}
                     className="w-full px-3 py-2 rounded-xl bg-white/5 border border-white/10 text-white font-mono text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
+                </div>
+              )}
+
+              {ruleType === 'dynamic' && (
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2.5">
+                  <div className="text-[11px] text-amber-200 flex items-start space-x-2">
+                    <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <span>
+                      SOCKS5 binds loopback (127.0.0.1). Leave credentials blank only for single-user desktops, or configure RFC 1929 username/password authentication below to block local process pivoting.
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      placeholder="SOCKS5 Username (optional)"
+                      value={socksUsername}
+                      onChange={e => setSocksUsername(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-white text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                    <input
+                      type="password"
+                      placeholder="SOCKS5 Password (optional)"
+                      value={socksPassword}
+                      onChange={e => setSocksPassword(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-white text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
                 </div>
               )}
 

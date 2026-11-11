@@ -29,6 +29,17 @@ export function getStoredSession(): StoredSession | null {
       clearStoredSession();
       return null;
     }
+    if (parsed && 'token' in parsed) {
+      // Scrub legacy bearer token from browser storage; auth relies on HttpOnly cookie
+      const { token: _t, ...safe } = parsed;
+      try {
+        if (localStorage.getItem(AUTH_STORAGE_KEY)) localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(safe));
+        if (sessionStorage.getItem(AUTH_STORAGE_KEY)) sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(safe));
+        localStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
+        sessionStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
+      } catch {}
+      return safe;
+    }
     return parsed;
   } catch {
     return null;
@@ -126,20 +137,16 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
 
   // Web / Node.js Backend Mode (e.g. running via node server.js on port 2222 or web preview)
   try {
-    const session = getStoredSession();
-    const token = session?.token || '';
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      'X-Requested-With': 'SSHDesktop',
     };
-    if (token) {
-      headers['X-Session-Token'] = token;
-      headers['Authorization'] = `Bearer ${token}`;
-    }
 
     const res = await fetch('/api/invoke', {
       method: 'POST',
+      credentials: 'same-origin',
       headers,
-      body: JSON.stringify({ cmd, args, sessionToken: token }),
+      body: JSON.stringify({ cmd, args }),
     });
 
     if (res.status === 401) {
@@ -196,14 +203,13 @@ function setupWebTerminalSocket(termId: string, connId: string, cols: number, ro
   if (typeof window === 'undefined') return;
   try {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const session = getStoredSession();
     const wsUrl = `${protocol}//${window.location.host}/ws/terminal?termId=${encodeURIComponent(termId)}&connId=${encodeURIComponent(connId)}&cols=${cols}&rows=${rows}`;
     lastKnownTerminalSizes.set(termId, { rows, cols });
     const oldWs = webTerminalSockets.get(termId);
     if (oldWs && oldWs.readyState !== WebSocket.CLOSED) {
       try { oldWs.close(); } catch {}
     }
-    const ws = new WebSocket(wsUrl, session?.token ? [session.token] : undefined);
+    const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
       const latest = lastKnownTerminalSizes.get(termId) || { rows, cols };
@@ -1085,6 +1091,18 @@ export async function storeDeleteConnection(id: string): Promise<void> {
   return safeInvoke<void>('store_delete_connection', { id }, undefined);
 }
 
+export async function storeSecretSave(key: string, value: string): Promise<boolean> {
+  return safeInvoke<boolean>('store_secret_save', { key, value }, false);
+}
+
+export async function storeSecretLoad(key: string): Promise<string | null> {
+  return safeInvoke<string | null>('store_secret_load', { key }, null);
+}
+
+export async function storeSecretDelete(key: string): Promise<boolean> {
+  return safeInvoke<boolean>('store_secret_delete', { key }, false);
+}
+
 export async function settingsGet(): Promise<any> {
   return safeInvoke<any>('settings_get', {}, { theme: 'catppuccin-mocha', accentColor: 'blue', fontSize: 14 });
 }
@@ -1442,6 +1460,12 @@ export async function mongodbInsertDocument(
 }
 
 export async function sendDesktopNotification(title: string, body: string): Promise<void> {
+  if (!isTauri()) {
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+      try { new Notification(title, { body }); } catch {}
+    }
+    return;
+  }
   return safeInvoke<void>('send_desktop_notification', { title, body }, undefined);
 }
 
@@ -1543,13 +1567,19 @@ export async function sshListTunnels(): Promise<SshTunnelInfo[]> {
 
 export async function sshStartSocks5(
   connId: string,
-  preferredPort?: number
+  preferredPort?: number,
+  username?: string,
+  password?: string,
+  requireAuth?: boolean
 ): Promise<number> {
   return safeInvoke<number>(
     'ssh_start_socks5',
     {
       connId,
       preferredPort: preferredPort ? Number(preferredPort) : undefined,
+      username,
+      password,
+      requireAuth,
     },
     0
   );
@@ -1728,10 +1758,9 @@ export interface AuthActionResult {
 }
 
 export async function authGetStatus(): Promise<AuthStatusResponse> {
-  const session = getStoredSession();
   const hasChanged = localStorage.getItem('sshdesktop_credentials_changed') === 'true';
   const customUser = localStorage.getItem('sshdesktop_custom_uname');
-  return safeInvoke<AuthStatusResponse>('auth_get_status', { token: session?.token }, {
+  return safeInvoke<AuthStatusResponse>('auth_get_status', {}, {
     is_configured: true,
     is_authenticated: false,
     must_change_password: !hasChanged,
@@ -1905,6 +1934,75 @@ export async function sshAgentGetStatus(): Promise<SshAgentStatus> {
     keys: [],
     message: 'SSH agent status unavailable',
   });
+}
+
+// ----------------- Enterprise Governance: Audit Trail, Policy, Capabilities & Backup -----------------
+export interface WorkspaceAuditEntry {
+  ts: string;
+  event: string;
+  username?: string;
+  target?: string;
+  status?: string;
+  details?: string;
+  ip?: string;
+  prev_hash?: string;
+  hash?: string;
+}
+
+export interface AuditChainVerification {
+  valid: boolean;
+  total: number;
+  verified: number;
+  brokenAt?: number | null;
+  broken_at?: number | null;
+  reason?: string | null;
+}
+
+export interface WorkspaceSecurityPolicy {
+  role: 'admin' | 'operator' | 'read_only';
+  blockMetadataEgress: boolean;
+  updatedAt?: string | null;
+  updatedBy?: string | null;
+}
+
+export async function auditGetLogs(limit = 200): Promise<WorkspaceAuditEntry[]> {
+  return safeInvoke<WorkspaceAuditEntry[]>('audit_get_logs', { limit }, []);
+}
+
+export async function auditVerifyChain(): Promise<AuditChainVerification> {
+  return safeInvoke<AuditChainVerification>('audit_verify_chain', {}, {
+    valid: false,
+    total: 0,
+    verified: 0,
+    reason: 'Verification unavailable',
+  });
+}
+
+export async function policyGetMode(): Promise<WorkspaceSecurityPolicy> {
+  return safeInvoke<WorkspaceSecurityPolicy>('policy_get_mode', {}, {
+    role: 'admin',
+    blockMetadataEgress: true,
+  });
+}
+
+export async function policySetMode(role: 'admin' | 'operator' | 'read_only', blockMetadataEgress = true): Promise<WorkspaceSecurityPolicy> {
+  return safeInvoke<WorkspaceSecurityPolicy>('policy_set_mode', {
+    role,
+    block_metadata_egress: blockMetadataEgress,
+    blockMetadataEgress,
+  }, { role, blockMetadataEgress });
+}
+
+export async function getRuntimeCapabilities(): Promise<any> {
+  return safeInvoke<any>('runtime_capabilities', {}, null);
+}
+
+export async function backupExportConfig(): Promise<any> {
+  return safeInvoke<any>('backup_export_config', {}, null);
+}
+
+export async function backupImportConfig(bundle: any): Promise<any> {
+  return safeInvoke<any>('backup_import_config', { bundle }, { imported: false });
 }
 
 // ----------------- Centralized Application Lifecycle & Shutdown -----------------

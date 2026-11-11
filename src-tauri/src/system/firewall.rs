@@ -73,16 +73,17 @@ pub struct AddRulePayload {
     pub comment: Option<String>,
 }
 
-/// Detect whether ufw or firewalld is available on the remote system.
+/// Detect whether ufw, firewalld, nftables, or iptables is available on the remote system.
 pub async fn detect_firewall(state: &AppState, conn_id: &str) -> &'static str {
     let (out, _) = run_cmd(
         state,
         conn_id,
-        "if command -v ufw >/dev/null 2>&1; then echo 'ufw'; elif command -v firewall-cmd >/dev/null 2>&1; then echo 'firewalld'; elif command -v iptables >/dev/null 2>&1; then echo 'iptables'; else echo 'none'; fi",
+        "if command -v ufw >/dev/null 2>&1; then echo 'ufw'; elif command -v firewall-cmd >/dev/null 2>&1; then echo 'firewalld'; elif command -v nft >/dev/null 2>&1; then echo 'nftables'; elif command -v iptables >/dev/null 2>&1; then echo 'iptables'; else echo 'none'; fi",
     ).await;
     let out = out.trim().to_lowercase();
     if out.contains("ufw") { return "ufw"; }
     if out.contains("firewalld") { return "firewalld"; }
+    if out.contains("nftables") { return "nftables"; }
     if out.contains("iptables") { return "iptables"; }
     "none"
 }
@@ -653,14 +654,22 @@ pub async fn firewall_toggle(
     conn_id: String,
     enable: bool,
 ) -> Result<String, String> {
+    crate::store::audit::enforce_policy_permission("firewall_toggle")?;
     let fw = detect_firewall(&state, &conn_id).await;
     let cmd = match (fw, enable) {
-        ("ufw", true)        => "ufw --force enable 2>&1",
-        ("ufw", false)       => "ufw disable 2>&1",
-        ("firewalld", true)  => "systemctl enable --now firewalld 2>&1",
-        ("firewalld", false) => "systemctl stop firewalld 2>&1",
-        (_, true)            => "systemctl start iptables 2>&1",
-        (_, false)           => "systemctl stop iptables 2>&1",
+        ("ufw", true) => "ufw --force enable 2>&1 && ufw status | head -n 1",
+        ("ufw", false) => "ufw disable 2>&1 && ufw status | head -n 1",
+        ("firewalld", true) => "systemctl enable --now firewalld 2>&1 && firewall-cmd --state 2>&1",
+        ("firewalld", false) => "systemctl stop firewalld 2>&1 && (firewall-cmd --state 2>&1 || echo 'not running')",
+        ("nftables", true) => "systemctl enable --now nftables 2>&1 && nft list tables 2>&1",
+        ("nftables", false) => "systemctl stop nftables 2>&1",
+        ("iptables", true) => {
+            "if systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl enable --now iptables 2>&1; elif systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then systemctl enable --now netfilter-persistent 2>&1; else echo 'Raw iptables has no unified service daemon on this host; install ufw/firewalld or manage rules directly.' >&2; exit 1; fi"
+        }
+        ("iptables", false) => {
+            "if systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl stop iptables 2>&1; elif systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then systemctl stop netfilter-persistent 2>&1; else echo 'Raw iptables cannot be safely disabled via service stop; manage chains explicitly.' >&2; exit 1; fi"
+        }
+        _ => return Err("No supported firewall backend (ufw, firewalld, nftables, iptables) is installed.".into()),
     };
 
     let (stdout, code) = run_cmd_priv(&state, &conn_id, cmd).await;
@@ -669,10 +678,16 @@ pub async fn firewall_toggle(
     }
 
     if code != 0 {
-        return Err(format!("Failed to {} firewall: {}", if enable { "enable" } else { "disable" }, stdout.trim()));
+        return Err(format!(
+            "Failed to {} {} firewall: {}",
+            if enable { "enable" } else { "disable" },
+            fw,
+            stdout.trim()
+        ));
     }
     let status = if enable { "enabled" } else { "disabled" };
-    Ok(if !stdout.is_empty() { stdout } else { format!("Firewall is now {}.", status) })
+    crate::store::audit::append_audit_event("firewall_toggle", "desktop-user", &conn_id, "ok", Some(format!("backend={} enable={}", fw, enable)));
+    Ok(if !stdout.is_empty() { stdout } else { format!("{} firewall is now {}.", fw, status) })
 }
 
 #[tauri::command]
@@ -713,6 +728,7 @@ pub async fn firewall_set_default_policy(
     direction: String, // "incoming" or "outgoing"
     policy: String,    // "allow" or "deny"
 ) -> Result<String, String> {
+    crate::store::audit::enforce_policy_permission("firewall_set_default_policy")?;
     let dir = direction.trim().to_lowercase();
     let pol = policy.trim().to_lowercase();
     if !matches!(dir.as_str(), "incoming" | "outgoing" | "routed")
@@ -721,21 +737,55 @@ pub async fn firewall_set_default_policy(
         return Err("Default policy must use incoming/outgoing/routed and allow/deny/reject.".into());
     }
 
+    let fw = detect_firewall(&state, &conn_id).await;
     // Safety guard: if setting incoming policy to deny/reject, ensure active SSH port rule is in place
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id);
     let port = conn.map(|c| c.config.port).unwrap_or(22);
 
-    let cmd = if dir == "incoming" && (pol == "deny" || pol == "reject") {
-        format!("ufw allow {}/tcp 2>&1 && ufw default {} {} 2>&1", port, pol, dir)
-    } else {
-        format!("ufw default {} {} 2>&1", pol, dir)
+    let cmd = match fw {
+        "ufw" => {
+            if dir == "incoming" && (pol == "deny" || pol == "reject") {
+                format!("ufw allow {}/tcp 2>&1 && ufw default {} {} 2>&1", port, pol, dir)
+            } else {
+                format!("ufw default {} {} 2>&1", pol, dir)
+            }
+        }
+        "iptables" => {
+            if pol == "reject" {
+                return Err("iptables default chain policies only support ACCEPT or DROP (not REJECT).".into());
+            }
+            let chain = match dir.as_str() {
+                "incoming" => "INPUT",
+                "outgoing" => "OUTPUT",
+                _ => "FORWARD",
+            };
+            let target = if pol == "allow" { "ACCEPT" } else { "DROP" };
+            if dir == "incoming" && pol == "deny" {
+                format!(
+                    "iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>&1; iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -i lo -j ACCEPT 2>&1; iptables -C INPUT -p tcp --dport {0} -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -p tcp --dport {0} -j ACCEPT 2>&1; iptables -P INPUT DROP 2>&1",
+                    port
+                )
+            } else {
+                format!("iptables -P {} {} 2>&1", chain, target)
+            }
+        }
+        "firewalld" => {
+            return Err("firewalld manages default filtering via zone targets rather than UFW default policies.".into());
+        }
+        "nftables" => {
+            return Err("Default policy switching is not implemented for raw nftables; configure base chain policy in /etc/nftables.conf.".into());
+        }
+        _ => return Err("No supported firewall backend is installed on this host.".into()),
     };
 
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
-    if code != 0 {
-        return Err(format!("Failed to set default policy: {}", stdout.trim()));
+    if code == -1 {
+        return Err("No active SSH connection.".into());
     }
-    Ok(format!("Default policy for {} set to {}", dir, pol.to_uppercase()))
+    if code != 0 {
+        return Err(format!("Failed to set default policy on {}: {}", fw, stdout.trim()));
+    }
+    Ok(format!("Default {} policy for {} set to {}", fw, dir, pol.to_uppercase()))
 }
 
 #[tauri::command]
@@ -743,16 +793,29 @@ pub async fn firewall_reset(
     state: tauri::State<'_, AppState>,
     conn_id: String,
 ) -> Result<String, String> {
+    crate::store::audit::enforce_policy_permission("firewall_reset")?;
+    let fw = detect_firewall(&state, &conn_id).await;
     // Safety guard: ensure active SSH port is immediately restored so the session is not severed
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id);
     let port = conn.map(|c| c.config.port).unwrap_or(22);
 
-    let cmd = format!("echo y | ufw reset 2>&1 && ufw allow {}/tcp 2>&1", port);
+    let cmd = match fw {
+        "ufw" => format!("echo y | ufw reset 2>&1 && ufw allow {}/tcp 2>&1 && ufw status | head -n 5", port),
+        "firewalld" => "firewall-cmd --complete-reload 2>&1 && firewall-cmd --state 2>&1".to_string(),
+        "iptables" | "nftables" => {
+            return Err(format!("Refusing blind reset on '{}' backend to avoid severing active SSH/network connectivity.", fw));
+        }
+        _ => return Err("No supported firewall backend is installed on this host.".into()),
+    };
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
-    if code != 0 {
-        return Err(format!("Failed to reset firewall: {}", stdout.trim()));
+    if code == -1 {
+        return Err("No active SSH connection.".into());
     }
-    Ok(format!("Firewall reset to default state; SSH port {} preserved.", port))
+    if code != 0 {
+        return Err(format!("Failed to reset {} firewall: {}", fw, stdout.trim()));
+    }
+    crate::store::audit::append_audit_event("firewall_reset", "desktop-user", &conn_id, "ok", Some(format!("backend={} port={}", fw, port)));
+    Ok(format!("{} firewall reset/reloaded; SSH port {} preserved.", fw, port))
 }
 
 #[tauri::command]
@@ -762,12 +825,20 @@ pub async fn firewall_reload(
 ) -> Result<String, String> {
     let fw = detect_firewall(&state, &conn_id).await;
     let cmd = match fw {
-        "firewalld" => "firewall-cmd --reload 2>&1",
-        _ => "ufw reload 2>&1",
+        "firewalld" => "firewall-cmd --reload 2>&1 && firewall-cmd --state 2>&1",
+        "ufw" => "ufw reload 2>&1 && ufw status | head -n 1",
+        "nftables" => "nft -c -f /etc/nftables.conf 2>&1 && systemctl reload nftables 2>&1",
+        "iptables" => {
+            "if command -v netfilter-persistent >/dev/null 2>&1; then netfilter-persistent reload 2>&1; elif systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl reload iptables 2>&1; else echo 'No persistent iptables reload helper found.' >&2; exit 1; fi"
+        }
+        _ => return Err("No supported firewall backend is installed on this host.".into()),
     };
     let (stdout, code) = run_cmd_priv(&state, &conn_id, cmd).await;
-    if code != 0 {
-        return Err(format!("Failed to reload firewall: {}", stdout.trim()));
+    if code == -1 {
+        return Err("No active SSH connection.".into());
     }
-    Ok("Firewall rules reloaded successfully.".to_string())
+    if code != 0 {
+        return Err(format!("Failed to reload {} firewall: {}", fw, stdout.trim()));
+    }
+    Ok(format!("{} firewall rules reloaded successfully.", fw))
 }

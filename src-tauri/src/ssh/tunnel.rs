@@ -22,10 +22,30 @@ pub struct ActiveTunnel {
     pub password_file: Option<Arc<crate::ssh::connection::SshPasswordFile>>,
 }
 
+const MAX_SOCKS5_CONCURRENT_STREAMS: usize = 64;
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn validate_socks5_credentials(
+    offered_user: &[u8],
+    offered_pass: &[u8],
+    expected_user: &str,
+    expected_pass: &str,
+) -> bool {
+    constant_time_eq(offered_user, expected_user.as_bytes())
+        && constant_time_eq(offered_pass, expected_pass.as_bytes())
+}
+
 async fn handle_socks5_client(
     stream: &mut tokio::net::TcpStream,
     handle: &Arc<crate::ssh::session::ClientHandle>,
     local_port: u16,
+    auth: Option<&(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -38,15 +58,49 @@ async fn handle_socks5_client(
             return Err("Not SOCKS5".into());
         }
         let nmethods = header[1] as usize;
+        if nmethods == 0 {
+            let _ = stream.write_all(&[0x05, 0xFF]).await;
+            return Err("SOCKS5 client offered no authentication methods".into());
+        }
         let mut methods = vec![0u8; nmethods];
         stream.read_exact(&mut methods).await?;
-        // RFC 1928: Verify client offered Method 0x00 (NO AUTHENTICATION REQUIRED)
-        if !methods.contains(&0x00) {
-            let _ = stream.write_all(&[0x05, 0xFF]).await; // 0xFF = NO ACCEPTABLE METHODS
-            return Err("SOCKS5 client did not offer unauthenticated mode (0x00)".into());
+
+        if let Some((expected_user, expected_pass)) = auth {
+            // Require RFC 1929 Username/Password authentication (method 0x02)
+            if !methods.contains(&0x02) {
+                let _ = stream.write_all(&[0x05, 0xFF]).await;
+                return Err("SOCKS5 authentication (RFC 1929 0x02) is required".into());
+            }
+            stream.write_all(&[0x05, 0x02]).await?;
+
+            let mut sub_hdr = [0u8; 2];
+            stream.read_exact(&mut sub_hdr).await?;
+            if sub_hdr[0] != 0x01 {
+                let _ = stream.write_all(&[0x01, 0x01]).await;
+                return Err("Unsupported SOCKS5 auth subnegotiation version".into());
+            }
+            let ulen = sub_hdr[1] as usize;
+            let mut ubuf = vec![0u8; ulen];
+            stream.read_exact(&mut ubuf).await?;
+            let mut plen_buf = [0u8; 1];
+            stream.read_exact(&mut plen_buf).await?;
+            let mut pbuf = vec![0u8; plen_buf[0] as usize];
+            stream.read_exact(&mut pbuf).await?;
+
+            if !validate_socks5_credentials(&ubuf, &pbuf, expected_user, expected_pass) {
+                let _ = stream.write_all(&[0x01, 0x01]).await;
+                return Err("SOCKS5 username/password authentication failed".into());
+            }
+            stream.write_all(&[0x01, 0x00]).await?;
+        } else {
+            // RFC 1928: Verify client offered Method 0x00 (NO AUTHENTICATION REQUIRED)
+            if !methods.contains(&0x00) {
+                let _ = stream.write_all(&[0x05, 0xFF]).await; // 0xFF = NO ACCEPTABLE METHODS
+                return Err("SOCKS5 client did not offer unauthenticated mode (0x00)".into());
+            }
+            // Reply: Version 5, Method 0 (No authentication required)
+            stream.write_all(&[0x05, 0x00]).await?;
         }
-        // Reply: Version 5, Method 0 (No authentication required)
-        stream.write_all(&[0x05, 0x00]).await?;
 
         // 2. Request
         let mut req = [0u8; 4];
@@ -100,6 +154,17 @@ async fn handle_socks5_client(
         if target_port == 0 {
             let _ = stream.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
             return Err("SOCKS5 destination port must be between 1 and 65535".into());
+        }
+        let policy = crate::store::audit::load_security_policy();
+        let host_lower = target_host.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+        if policy.block_metadata_egress
+            && matches!(
+                host_lower.as_str(),
+                "169.254.169.254" | "169.254.170.2" | "fd00:ec2::254" | "metadata.google.internal"
+            )
+        {
+            let _ = stream.write_all(&[0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+            return Err("SOCKS5 connection to cloud instance metadata endpoints is blocked by workspace security policy".into());
         }
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>((target_host, target_port))
     }).await.map_err(|_| "SOCKS5 client handshake timed out")??;
@@ -166,7 +231,7 @@ pub async fn ssh_start_tunnel(
         return Err("Tunnel type must be local, remote, or dynamic SOCKS5.".into());
     }
     if ftype == "dynamic" || ftype == "socks" || ftype == "socks5" {
-        return ssh_start_socks5(state, conn_id, Some(if local_port > 0 { local_port } else { 1080 })).await;
+        return ssh_start_socks5(state, conn_id, Some(if local_port > 0 { local_port } else { 1080 }), None, None, None).await;
     }
 
     let is_remote_forward = ftype == "remote" || ftype == "reverse" || ftype == "-r";
@@ -770,12 +835,15 @@ pub async fn ssh_list_tunnels() -> Result<Vec<TunnelInfo>, String> {
     Ok(list)
 }
 
-/// Start an SSH Dynamic SOCKS5 Proxy: binds 127.0.0.1:local_port (via ssh -D)
+/// Start an SSH Dynamic SOCKS5 Proxy: binds 127.0.0.1:local_port
 #[tauri::command]
 pub async fn ssh_start_socks5(
     state: tauri::State<'_, AppState>,
     conn_id: String,
     preferred_port: Option<u16>,
+    username: Option<String>,
+    password: Option<String>,
+    require_auth: Option<bool>,
 ) -> Result<u16, String> {
     // 1. If an active SOCKS5 proxy already exists and is responsive for this connection, return its port
     let mut stale_socks_child = None;
@@ -807,6 +875,87 @@ pub async fn ssh_start_socks5(
     if preferred_port == Some(0) {
         return Err("SOCKS5 local port must be between 1 and 65535.".into());
     }
+
+    let socks_auth: Option<(String, String)> = match (username, password) {
+        (Some(u), Some(p)) => {
+            if u.is_empty() || u.len() > 255 || p.len() > 255 {
+                return Err("SOCKS5 username and password must be 1..=255 bytes.".into());
+            }
+            Some((u, p))
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err("Both username and password are required when configuring SOCKS5 authentication.".into());
+        }
+        (None, None) => None,
+    };
+    if require_auth == Some(true) && socks_auth.is_none() {
+        return Err("SOCKS5 authentication was requested without username/password credentials.".into());
+    }
+
+    let preferred = preferred_port.unwrap_or(1080);
+    let effective_local_port = find_available_port(if preferred >= 1024 { preferred } else { 10800 });
+
+    // Prefer the native in-process russh SOCKS5 listener when a session handle exists so
+    // optional RFC 1929 authentication and bounded concurrency apply consistently.
+    let native_handle = {
+        let lock = state.sessions.lock().await;
+        lock.get(&conn_id).cloned()
+    };
+    if let Some(client_handle) = native_handle {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", effective_local_port))
+            .await
+            .map_err(|e| format!("Failed to bind SOCKS5 listener on 127.0.0.1:{}: {}", effective_local_port, e))?;
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_SOCKS5_CONCURRENT_STREAMS));
+        let auth_enabled = socks_auth.is_some();
+        let auth_arc = socks_auth.map(Arc::new);
+        let listen_port = effective_local_port;
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accept_res = listener.accept() => {
+                        match accept_res {
+                            Ok((mut sock, _)) => {
+                                let Ok(permit) = semaphore.clone().try_acquire_owned() else {
+                                    continue;
+                                };
+                                let handle_clone = client_handle.clone();
+                                let auth_clone = auth_arc.clone();
+                                tokio::spawn(async move {
+                                    let _permit = permit;
+                                    let _ = handle_socks5_client(&mut sock, &handle_clone, listen_port, auth_clone.as_deref()).await;
+                                });
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        });
+        let tunnel_info = TunnelInfo {
+            tunnel_id: format!("socks5:{}", conn_id),
+            conn_id: conn_id.clone(),
+            local_port: effective_local_port,
+            remote_host: "127.0.0.1".to_string(),
+            remote_port: 0,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+        {
+            let mut lock = ACTIVE_SOCKS5.lock();
+            lock.insert(conn_id.clone(), ActiveTunnel {
+                info: tunnel_info,
+                child: None,
+                shutdown_tx: Some(shutdown_tx),
+                password_file: None,
+            });
+        }
+        log::info!("SSH Desktop: Native SOCKS5 Proxy active on 127.0.0.1:{} (auth={})", effective_local_port, auth_enabled);
+        return Ok(effective_local_port);
+    }
+    if socks_auth.is_some() {
+        return Err("Authenticated SOCKS5 requires an active native SSH session.".into());
+    }
     let is_key_auth = match conn.config.auth_method.as_deref() {
         Some("password") => false,
         Some("key") => true,
@@ -824,8 +973,6 @@ pub async fn ssh_start_socks5(
         }
     }
 
-    let preferred = preferred_port.unwrap_or(1080);
-    let effective_local_port = find_available_port(if preferred >= 1024 { preferred } else { 10800 });
     let host = conn.config.host.clone();
     let ssh_port = conn.config.port.to_string();
     let user = conn.config.username.clone();
@@ -1084,4 +1231,17 @@ pub async fn ssh_get_socks5(conn_id: String) -> Result<Option<u16>, String> {
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socks5_rfc1929_credential_validation_is_exact() {
+        assert!(validate_socks5_credentials(b"alice", b"s3cr3t", "alice", "s3cr3t"));
+        assert!(!validate_socks5_credentials(b"alice", b"s3cr3u", "alice", "s3cr3t"));
+        assert!(!validate_socks5_credentials(b"alice2", b"s3cr3t", "alice", "s3cr3t"));
+        assert!(!validate_socks5_credentials(b"bob", b"s3cr3t", "alice", "s3cr3t"));
+    }
 }

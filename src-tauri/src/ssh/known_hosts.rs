@@ -138,10 +138,21 @@ pub fn check_known_hosts(
         Err(e) => return ("failed".into(), format!("Could not read known_hosts: {}", e), None),
     };
 
+    evaluate_known_hosts_content(&content, host, port, key_type, key_b64)
+}
+
+fn evaluate_known_hosts_content(
+    content: &str,
+    host: &str,
+    port: u16,
+    key_type: &str,
+    key_b64: &str,
+) -> (String, String, Option<String>) {
     let target_key = key_b64.trim();
     let mut found_previous_key: Option<String> = None;
     let mut trusted_match = false;
     let mut revoked_match: Option<String> = None;
+    let mut cert_authority_matched = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -170,6 +181,7 @@ pub fn check_known_hosts(
         }
 
         if marker == Some("@cert-authority") {
+            cert_authority_matched = true;
             continue;
         }
 
@@ -204,6 +216,12 @@ pub fn check_known_hosts(
             "changed".into(),
             "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! The server key differs from known_hosts.".into(),
             Some(previous),
+        )
+    } else if cert_authority_matched {
+        (
+            "unsupported_cert_authority".into(),
+            "known_hosts contains a @cert-authority rule for this host; native russh does not validate OpenSSH host certificates. Verify via OpenSSH CLI or trust the server's explicit public key.".into(),
+            None,
         )
     } else {
         (
@@ -517,5 +535,13 @@ mod tests {
     fn negated_host_pattern_overrides_positive_match() {
         assert!(host_field_matches("*.example.com,!blocked.example.com", "db.example.com", 22));
         assert!(!host_field_matches("*.example.com,!blocked.example.com", "blocked.example.com", 22));
+    }
+
+    #[test]
+    fn cert_authority_fails_closed_with_explicit_status() {
+        let content = "@cert-authority *.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockCAKey\n";
+        let (status, msg, _) = evaluate_known_hosts_content(content, "db.example.com", 22, "ssh-ed25519", "AAAAC3NzaC1lZDI1NTE5AAAAIServerKey");
+        assert_eq!(status, "unsupported_cert_authority");
+        assert!(msg.contains("@cert-authority"));
     }
 }

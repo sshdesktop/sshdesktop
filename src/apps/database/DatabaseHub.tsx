@@ -30,8 +30,60 @@ import { CosmosStudio } from './engines/CosmosStudio';
 import { CassandraStudio } from './engines/CassandraStudio';
 import { Db2Studio } from './engines/Db2Studio';
 import { DatabaseErrorBoundary } from './components';
-import { dbConnect, dbDisconnect, sftpReadTextFile, sftpWriteTextFile } from '../../lib/tauri-bridge';
+import {
+  dbConnect,
+  dbDisconnect,
+  sftpReadTextFile,
+  sftpWriteTextFile,
+  storeSecretSave,
+  storeSecretLoad,
+  storeSecretDelete,
+} from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
+
+const UNIMPLEMENTED_ENGINES = new Set<DbEngine>(['oracle', 'dynamodb', 'cosmos', 'cassandra', 'db2']);
+
+function stripProfileSecrets(p: DbConnectionProfile): DbConnectionProfile {
+  const { password: _p, accessKeyId: _a, secretAccessKey: _s, ...safe } = p;
+  return safe;
+}
+
+async function saveProfileSecretsToVault(p: DbConnectionProfile): Promise<void> {
+  const ops: Promise<any>[] = [];
+  if (p.saveCredentials === false) {
+    ops.push(
+      storeSecretDelete(`db-profile:${p.id}:password`),
+      storeSecretDelete(`db-profile:${p.id}:accessKeyId`),
+      storeSecretDelete(`db-profile:${p.id}:secretAccessKey`)
+    );
+  } else {
+    if (p.password !== undefined) {
+      ops.push(p.password ? storeSecretSave(`db-profile:${p.id}:password`, p.password) : storeSecretDelete(`db-profile:${p.id}:password`));
+    }
+    if (p.accessKeyId !== undefined) {
+      ops.push(p.accessKeyId ? storeSecretSave(`db-profile:${p.id}:accessKeyId`, p.accessKeyId) : storeSecretDelete(`db-profile:${p.id}:accessKeyId`));
+    }
+    if (p.secretAccessKey !== undefined) {
+      ops.push(p.secretAccessKey ? storeSecretSave(`db-profile:${p.id}:secretAccessKey`, p.secretAccessKey) : storeSecretDelete(`db-profile:${p.id}:secretAccessKey`));
+    }
+  }
+  await Promise.allSettled(ops);
+}
+
+async function hydrateProfileSecretsFromVault(p: DbConnectionProfile): Promise<DbConnectionProfile> {
+  if (p.saveCredentials === false) return p;
+  const [pwd, accessKey, secretKey] = await Promise.all([
+    !p.password ? storeSecretLoad(`db-profile:${p.id}:password`).catch(() => null) : Promise.resolve(p.password),
+    !p.accessKeyId ? storeSecretLoad(`db-profile:${p.id}:accessKeyId`).catch(() => null) : Promise.resolve(p.accessKeyId),
+    !p.secretAccessKey ? storeSecretLoad(`db-profile:${p.id}:secretAccessKey`).catch(() => null) : Promise.resolve(p.secretAccessKey),
+  ]);
+  return {
+    ...p,
+    ...(pwd ? { password: pwd } : {}),
+    ...(accessKey ? { accessKeyId: accessKey } : {}),
+    ...(secretKey ? { secretAccessKey: secretKey } : {}),
+  };
+}
 
 const ENGINE_BADGES: Record<DbEngine, { label: string; icon: string; color: string }> = {
   postgresql: { label: 'PostgreSQL', icon: '🐘', color: 'from-blue-600/20 to-blue-800/10 border-blue-500/30 text-blue-400' },
@@ -41,11 +93,11 @@ const ENGINE_BADGES: Record<DbEngine, { label: string; icon: string; color: stri
   mssql: { label: 'SQL Server', icon: '🏢', color: 'from-red-600/20 to-red-800/10 border-red-500/30 text-red-400' },
   mongodb: { label: 'MongoDB', icon: '🍃', color: 'from-green-600/20 to-green-800/10 border-green-500/30 text-green-400' },
   redis: { label: 'Redis', icon: '⚡', color: 'from-rose-600/20 to-rose-800/10 border-rose-500/30 text-rose-400' },
-  oracle: { label: 'Oracle Database', icon: '🏛️', color: 'from-orange-600/20 to-orange-800/10 border-orange-500/30 text-orange-400' },
-  dynamodb: { label: 'Amazon DynamoDB', icon: '📦', color: 'from-amber-600/20 to-amber-800/10 border-amber-500/30 text-amber-400' },
-  cosmos: { label: 'Azure Cosmos DB', icon: '🪐', color: 'from-sky-600/20 to-sky-800/10 border-sky-500/30 text-sky-400' },
-  cassandra: { label: 'Apache Cassandra', icon: '👁️', color: 'from-violet-600/20 to-violet-800/10 border-violet-500/30 text-violet-400' },
-  db2: { label: 'IBM DB2', icon: '🔷', color: 'from-indigo-600/20 to-indigo-800/10 border-indigo-500/30 text-indigo-400' },
+  oracle: { label: 'Oracle (Planned)', icon: '🏛️', color: 'from-orange-600/20 to-orange-800/10 border-orange-500/30 text-orange-400' },
+  dynamodb: { label: 'DynamoDB (Planned)', icon: '📦', color: 'from-amber-600/20 to-amber-800/10 border-amber-500/30 text-amber-400' },
+  cosmos: { label: 'Cosmos DB (Planned)', icon: '🪐', color: 'from-sky-600/20 to-sky-800/10 border-sky-500/30 text-sky-400' },
+  cassandra: { label: 'Cassandra (Planned)', icon: '👁️', color: 'from-violet-600/20 to-violet-800/10 border-violet-500/30 text-violet-400' },
+  db2: { label: 'IBM DB2 (Planned)', icon: '🔷', color: 'from-indigo-600/20 to-indigo-800/10 border-indigo-500/30 text-indigo-400' },
 };
 
 export const DatabaseHub: React.FC = () => {
@@ -55,7 +107,21 @@ export const DatabaseHub: React.FC = () => {
   const [profiles, setProfiles] = useState<DbConnectionProfile[]>(() => {
     try {
       const saved = localStorage.getItem('sshdesktop_db_profiles_v2') || localStorage.getItem('clouddesk_db_profiles_v2');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed: DbConnectionProfile[] = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          // One-time migration: move any legacy plaintext secrets from localStorage into the vault
+          parsed.forEach((p) => {
+            if (p.password || p.accessKeyId || p.secretAccessKey) {
+              void saveProfileSecretsToVault(p);
+            }
+          });
+          const sanitized = parsed.map(stripProfileSecrets);
+          localStorage.setItem('sshdesktop_db_profiles_v2', JSON.stringify(sanitized));
+          localStorage.removeItem('clouddesk_db_profiles_v2');
+          return sanitized;
+        }
+      }
     } catch {}
     return [
       {
@@ -140,8 +206,8 @@ export const DatabaseHub: React.FC = () => {
           const parsed = JSON.parse(text);
           if (Array.isArray(parsed) && parsed.length > 0) {
             setProfiles(prev => {
-              const map = new Map(prev.map(p => [p.id, p]));
-              parsed.forEach((p: DbConnectionProfile) => map.set(p.id, p));
+              const map = new Map(prev.map(p => [p.id, stripProfileSecrets(p)]));
+              parsed.forEach((p: DbConnectionProfile) => map.set(p.id, stripProfileSecrets(p)));
               return Array.from(map.values());
             });
           }
@@ -151,36 +217,39 @@ export const DatabaseHub: React.FC = () => {
     loadServerDbProfiles();
   }, [activeSshId, userHome]);
 
-  // Persist database profiles to localStorage and server ~/.sshdesktop/database_profiles.json
+  // Persist non-secret database metadata to localStorage and server ~/.sshdesktop/database_profiles.json.
+  // Secrets (password, accessKeyId, secretAccessKey) are stored strictly in OS Keychain / Server Vault.
   useEffect(() => {
+    const metadataOnly = profiles.map(stripProfileSecrets);
     try {
-      localStorage.setItem('sshdesktop_db_profiles_v2', JSON.stringify(profiles));
+      localStorage.setItem('sshdesktop_db_profiles_v2', JSON.stringify(metadataOnly));
     } catch {}
 
     if (activeSshId) {
-      const toSave = profiles.map(p => {
-        if (p.saveCredentials === false) {
-          const { password, ...rest } = p;
-          return rest;
-        }
-        return p;
-      });
-      sftpWriteTextFile(activeSshId, `${userHome}/.sshdesktop/database_profiles.json`, JSON.stringify(toSave, null, 2)).catch(() => {});
+      sftpWriteTextFile(activeSshId, `${userHome}/.sshdesktop/database_profiles.json`, JSON.stringify(metadataOnly, null, 2)).catch(() => {});
     }
   }, [profiles, activeSshId, userHome]);
 
   const handleOpenStudio = async (p: DbConnectionProfile) => {
+    if (UNIMPLEMENTED_ENGINES.has(p.engine)) {
+      setConnectionError({
+        id: p.id,
+        message: `${ENGINE_BADGES[p.engine]?.label || p.engine} driver is planned and not yet implemented in this release.`,
+      });
+      return;
+    }
     if (connectingId) return;
     setConnectingId(p.id);
     setConnectionError(null);
 
+    const hydrated = await hydrateProfileSecretsFromVault(p);
     // Auto-detect if SSH tunnel is needed
     const currentActiveSshId = useConnectionStore.getState().activeConnectionId;
-    const shouldTunnel = p.useSsh ?? (Boolean(currentActiveSshId) && (p.host === '127.0.0.1' || p.host === 'localhost' || !p.host));
+    const shouldTunnel = hydrated.useSsh ?? (Boolean(currentActiveSshId) && (hydrated.host === '127.0.0.1' || hydrated.host === 'localhost' || !hydrated.host));
     const effectiveProfile: DbConnectionProfile = {
-      ...p,
+      ...hydrated,
       useSsh: shouldTunnel,
-      sshConnectionId: p.sshConnectionId || (currentActiveSshId || undefined),
+      sshConnectionId: hydrated.sshConnectionId || (currentActiveSshId || undefined),
     };
 
     try {
@@ -207,8 +276,9 @@ export const DatabaseHub: React.FC = () => {
         sid: effectiveProfile.sid,
       });
 
-      // Update stored profile with verified connection config
-      setProfiles(prev => prev.map(item => item.id === p.id ? effectiveProfile : item));
+      // Store metadata only in state/storage; secrets stay in vault / in-memory active session
+      const safeMetadata = stripProfileSecrets(effectiveProfile);
+      setProfiles(prev => prev.map(item => item.id === p.id ? safeMetadata : item));
       setActiveProfile(effectiveProfile);
     } catch (err: any) {
       console.error('Failed to connect to database:', err);
@@ -220,14 +290,16 @@ export const DatabaseHub: React.FC = () => {
   };
 
   const handleConnected = (profile: DbConnectionProfile) => {
+    void saveProfileSecretsToVault(profile);
+    const safeMetadata = stripProfileSecrets(profile);
     setProfiles(prev => {
       const existing = prev.findIndex(p => p.id === profile.id);
       if (existing >= 0) {
         const copy = [...prev];
-        copy[existing] = profile;
+        copy[existing] = safeMetadata;
         return copy;
       }
-      return [profile, ...prev];
+      return [safeMetadata, ...prev];
     });
 
     // Auto-open dedicated studio window
@@ -248,6 +320,11 @@ export const DatabaseHub: React.FC = () => {
   const handleDeleteProfile = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     setProfiles(prev => prev.filter(p => p.id !== id));
+    void Promise.allSettled([
+      storeSecretDelete(`db-profile:${id}:password`),
+      storeSecretDelete(`db-profile:${id}:accessKeyId`),
+      storeSecretDelete(`db-profile:${id}:secretAccessKey`),
+    ]);
     if (activeProfile?.id === id) {
       dbDisconnect(id).catch(() => {});
       setActiveProfile(null);
@@ -257,9 +334,10 @@ export const DatabaseHub: React.FC = () => {
     }
   };
 
-  const handleEditProfile = (p: DbConnectionProfile, e: React.MouseEvent) => {
+  const handleEditProfile = async (p: DbConnectionProfile, e: React.MouseEvent) => {
     e.stopPropagation();
-    setEditingProfile(p);
+    const hydrated = await hydrateProfileSecretsFromVault(p);
+    setEditingProfile(hydrated);
     setIsConnectModalOpen(true);
   };
 

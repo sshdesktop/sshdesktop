@@ -77,14 +77,16 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
 
     try {
       const res = await authLogin(username.trim(), password);
-      if (res.success && res.token) {
+      if (res.success) {
         const expiresAt = res.expires_at || (Date.now() + 60 * 60 * 1000);
+        // Never persist bearer/session tokens in browser storage; web sessions use HttpOnly SameSite=Strict cookies
         const payload = JSON.stringify({
           username: res.username,
-          token: res.token,
           loginAt: Date.now(),
           expiresAt
         });
+        localStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
+        sessionStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
         if (rememberMe) {
           localStorage.setItem(AUTH_STORAGE_KEY, payload);
         } else {

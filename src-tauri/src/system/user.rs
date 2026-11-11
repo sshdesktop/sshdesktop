@@ -322,12 +322,35 @@ pub async fn user_delete(
     username: String,
     remove_home: bool,
 ) -> Result<(), String> {
+    crate::store::audit::enforce_policy_permission("user_delete")?;
     if !valid_username(&username) {
         return Err("Invalid username.".into());
     }
-    // Protect critical system users
-    if matches!(username.as_str(), "root" | "daemon" | "bin" | "sys" | "sync") {
+    // Protect critical system accounts and the active authenticated SSH user
+    if matches!(username.as_str(), "root" | "daemon" | "bin" | "sys" | "sync" | "nobody" | "sshd") {
         return Err(format!("Refusing to delete protected system user '{}'.", username));
+    }
+    if let Some(conn) = crate::ssh::connection::resolve_connection(&state, &conn_id) {
+        if conn.config.username.trim() == username {
+            return Err(format!("Refusing to delete the currently connected SSH user '{}'.", username));
+        }
+    }
+
+    let uid_check_cmd = format!(
+        "TARGET_UID=$(id -u '{0}' 2>/dev/null) || {{ echo 'User does not exist or cannot be queried.' >&2; exit 2; }}; \
+         UID_MIN=$(awk '/^UID_MIN[[:space:]]+/ {{print $2; exit}}' /etc/login.defs 2>/dev/null); \
+         UID_MIN=${{UID_MIN:-1000}}; \
+         if [ \"$TARGET_UID\" -eq 0 ] || [ \"$TARGET_UID\" -lt \"$UID_MIN\" ]; then \
+             echo \"Refusing to delete system/service account '{0}' (UID $TARGET_UID < UID_MIN $UID_MIN).\" >&2; exit 3; \
+         fi",
+        username
+    );
+    let (uid_out, uid_code) = run_cmd_priv(&state, &conn_id, &uid_check_cmd).await;
+    if uid_code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if uid_code != 0 {
+        return Err(uid_out.trim().to_string());
     }
 
     let flag = if remove_home { "-r" } else { "" };
@@ -339,6 +362,7 @@ pub async fn user_delete(
     if code != 0 {
         return Err(format!("userdel failed: {}", stdout.trim()));
     }
+    crate::store::audit::append_audit_event("user_delete", "desktop-user", &username, "ok", Some(format!("conn={} remove_home={}", conn_id, remove_home)));
     log::info!("SSH Desktop: Deleted user {}", username);
     Ok(())
 }

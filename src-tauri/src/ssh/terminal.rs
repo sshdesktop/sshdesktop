@@ -139,12 +139,12 @@ pub async fn terminal_create(
                 "\r\n\x1b[1;31m[Network Error]\x1b[0m Failed to reach \x1b[1m{} on port {}\x1b[0m: {}\r\n\r\n\
                  \x1b[1;33mCommon reasons for AWS EC2 ({}) connection failures:\x1b[0m\r\n\
                  \x1b[36m1. AWS Security Group:\x1b[0m In AWS EC2 console -> Security Groups -> Inbound Rules:\r\n\
-                    Add rule for \x1b[32mSSH (TCP Port 22)\x1b[0m with source \x1b[32m0.0.0.0/0\x1b[0m (or your current IP).\r\n\
+                    Add rule for \x1b[32mSSH (TCP Port {})\x1b[0m restricting source to \x1b[32myour current public IP (/32)\x1b[0m or VPN CIDR (avoid 0.0.0.0/0).\r\n\
                  \x1b[36m2. Instance State:\x1b[0m Check AWS Console - is the EC2 instance in 'Running' state?\r\n\
                  \x1b[36m3. Public IP Changed:\x1b[0m If the instance was stopped and restarted, AWS assigns a new Public IP.\r\n\
                     Update the IP in SSH Desktop (Edit Server Details).\r\n\r\n\
                  \x1b[90m[Process exited]\x1b[0m\r\n",
-                host, port, e, host
+                host, port, e, host, target_port
             );
             let _ = app.emit("terminal-output", TerminalOutput {
                 terminal_id: term_id.clone(),
@@ -158,12 +158,12 @@ pub async fn terminal_create(
                 "\r\n\x1b[1;31m[Connection Timed Out]\x1b[0m Server \x1b[1m{}:{}\x1b[0m did not respond within 3.5s.\r\n\r\n\
                  \x1b[1;33mCommon reasons for AWS EC2 ({}) connection timeout:\x1b[0m\r\n\
                  \x1b[36m1. AWS Security Group:\x1b[0m In AWS EC2 console -> Security Groups -> Inbound Rules:\r\n\
-                    Add rule for \x1b[32mSSH (TCP Port 22)\x1b[0m with source \x1b[32m0.0.0.0/0\x1b[0m (or your current IP).\r\n\
+                    Add rule for \x1b[32mSSH (TCP Port {})\x1b[0m restricting source to \x1b[32myour current public IP (/32)\x1b[0m or VPN CIDR (avoid 0.0.0.0/0).\r\n\
                  \x1b[36m2. Instance State:\x1b[0m Check AWS Console - is the EC2 instance in 'Running' state?\r\n\
                  \x1b[36m3. Public IP Changed:\x1b[0m If the instance was stopped and restarted, AWS assigns a new Public IP.\r\n\
                     Update the IP in SSH Desktop (Edit Server Details).\r\n\r\n\
                  \x1b[90m[Process timed out]\x1b[0m\r\n",
-                host, port, host
+                host, port, host, target_port
             );
             let _ = app.emit("terminal-output", TerminalOutput {
                 terminal_id: term_id.clone(),

@@ -32,7 +32,12 @@ pub async fn connect_mssql(
         tiberius_cfg.encryption(tiberius::EncryptionLevel::NotSupported);
     }
 
-    let tcp_addr = format!("{}:{}", effective_host, effective_port);
+    let host_part = if effective_host.contains(':') && !effective_host.starts_with('[') {
+        format!("[{}]", effective_host)
+    } else {
+        effective_host.to_string()
+    };
+    let tcp_addr = format!("{}:{}", host_part, effective_port);
     let tcp = TcpStream::connect(&tcp_addr)
         .await
         .map_err(|e| format!("SQL Server TCP connect error: {}", e))?;
@@ -53,6 +58,38 @@ pub async fn connect_mssql(
     let version_str = row
         .and_then(|r| r.get::<&str, _>(0).map(|s| s.to_string()))
         .unwrap_or_else(|| "Microsoft SQL Server".to_string());
+
+    // In read-only mode, verify whether SQL Server itself enforces read-only (READ_ONLY database
+    // or login without sysadmin/db_owner/db_datawriter/db_ddladmin roles) instead of relying solely
+    // on application-level SQL prefix filtering.
+    if config.read_only {
+        if let Ok(Some(perm_row)) = client
+            .query(
+                "SELECT CAST(DATABASEPROPERTYEX(DB_NAME(), 'Updateability') AS NVARCHAR(32)), \
+                 CAST(COALESCE(IS_SRVROLEMEMBER('sysadmin'), 0) AS INT), \
+                 CAST(COALESCE(IS_ROLEMEMBER('db_owner'), 0) AS INT), \
+                 CAST(COALESCE(IS_ROLEMEMBER('db_datawriter'), 0) AS INT), \
+                 CAST(COALESCE(IS_ROLEMEMBER('db_ddladmin'), 0) AS INT)",
+                &[],
+            )
+            .await
+            .map_err(|e| e.to_string())?
+            .into_row()
+            .await
+        {
+            let updateability = perm_row.get::<&str, _>(0).unwrap_or("READ_WRITE");
+            let write_roles = perm_row.get::<i32, _>(1).unwrap_or(0)
+                + perm_row.get::<i32, _>(2).unwrap_or(0)
+                + perm_row.get::<i32, _>(3).unwrap_or(0)
+                + perm_row.get::<i32, _>(4).unwrap_or(0);
+            if !updateability.eq_ignore_ascii_case("READ_ONLY") && write_roles > 0 {
+                return Err(format!(
+                    "MSSQL read-only mode requires a read-only database or a SQL principal without write roles (user '{}' has write/admin roles on a '{}' database). Connect with a db_datareader/DENY-write login.",
+                    config.username, updateability
+                ));
+            }
+        }
+    }
 
     let capabilities = ServerCapabilities {
         engine: "mssql".to_string(),
@@ -116,6 +153,9 @@ pub async fn execute_query_mssql(
             && !normalized.starts_with("DESCRIBE")
             && !normalized.starts_with("EXPLAIN")
             && !normalized.starts_with("VALUES");
+        if session.config.read_only && (is_mutation || !is_bounded_select) {
+            return Err("MSSQL read-only session permits only single-statement SELECT/WITH read queries without INTO or procedure execution.".into());
+        }
         if is_mutation {
             let result = client.execute(stmt, &[]).await
                 .map_err(|e| format!("MSSQL execution error: {}", e))?;

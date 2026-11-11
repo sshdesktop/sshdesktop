@@ -483,19 +483,10 @@ export const MysqlStudio: React.FC<MysqlStudioProps> = ({ profile, onDisconnect 
 
   const handleOpenDefinition = async (name: string, type: 'table' | 'view' | 'procedure' | 'function' | 'trigger') => {
     try {
-      let ddl = await dbGetObjectDefinition(profile.id, type, name, currentDb);
+      const ddl = await dbGetObjectDefinition(profile.id, type, name, currentDb);
       if (!ddl || ddl.trim().length === 0) {
-        if (type === 'procedure') {
-          ddl = `DELIMITER $$\nCREATE PROCEDURE \`${name}\`()\nBEGIN\n  -- Routine body\n  SELECT 1;\nEND$$\nDELIMITER ;`;
-        } else if (type === 'function') {
-          ddl = `DELIMITER $$\nCREATE FUNCTION \`${name}\`()\nRETURNS INT\nDETERMINISTIC\nBEGIN\n  RETURN 1;\nEND$$\nDELIMITER ;`;
-        } else if (type === 'trigger') {
-          ddl = `CREATE TRIGGER \`${name}\`\nAFTER INSERT ON \`${selectedTable || 'table_name'}\`\nFOR EACH ROW\nBEGIN\n  -- Trigger body\nEND;`;
-        } else if (type === 'view') {
-          ddl = `CREATE OR REPLACE VIEW \`${name}\` AS\nSELECT * FROM \`${selectedTable || 'table_name'}\`;`;
-        } else {
-          ddl = `-- Definition for ${type} ${name}\nSHOW CREATE ${type.toUpperCase()} \`${name}\`;`;
-        }
+        alert(`Server did not return live DDL for ${type} "${name}". Check SHOW CREATE permissions.`);
+        return;
       }
 
       const newId = `tab-${Date.now()}`;

@@ -299,6 +299,9 @@ fn main() {
             store::connections::store_list_connections,
             store::connections::store_delete_connection,
             store::connections::store_update_connection,
+            store::connections::store_secret_save,
+            store::connections::store_secret_load,
+            store::connections::store_secret_delete,
             store::settings::settings_get,
             store::settings::settings_save,
 
@@ -338,6 +341,15 @@ fn main() {
             store::auth::auth_login,
             store::auth::auth_change_credentials,
             store::auth::auth_logout,
+
+            // Audit Log, Security Policy, Capabilities & Workspace Backup
+            store::audit::audit_get_logs,
+            store::audit::audit_verify_chain,
+            store::audit::policy_get_mode,
+            store::audit::policy_set_mode,
+            store::audit::runtime_capabilities,
+            store::audit::backup_export_config,
+            store::audit::backup_import_config,
 
             // Browser Reverse Proxy command
             store::proxy::browser_proxy_fetch,

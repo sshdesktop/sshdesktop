@@ -154,6 +154,9 @@ const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const AUDIT_LOG_FILE = path.join(DATA_DIR, 'audit.log');
+const POLICY_FILE = path.join(DATA_DIR, 'policy.json');
+const VAULT_FILE = path.join(DATA_DIR, 'vault.enc.json');
+const VAULT_KEY_FILE = path.join(DATA_DIR, 'vault.key');
 const KEYS_DIR = path.join(DATA_DIR, 'keys');
 try {
   if (!fs.existsSync(KEYS_DIR)) {
@@ -247,6 +250,62 @@ function writeJsonSafe(filePath, data) {
     console.warn(`Failed writing JSON to ${filePath}:`, err.message);
     return false;
   }
+}
+
+function getOrCreateVaultKey() {
+  if (fs.existsSync(VAULT_KEY_FILE)) {
+    const raw = fs.readFileSync(VAULT_KEY_FILE, 'utf8').trim();
+    const buf = Buffer.from(raw, 'hex');
+    if (buf.length === 32) return buf;
+  }
+  const key = crypto.randomBytes(32);
+  const dir = path.dirname(VAULT_KEY_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tempPath = `${VAULT_KEY_FILE}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(tempPath, key.toString('hex'), { encoding: 'utf8', mode: 0o600 });
+  try { fs.chmodSync(tempPath, 0o600); } catch {}
+  fs.renameSync(tempPath, VAULT_KEY_FILE);
+  try { fs.chmodSync(VAULT_KEY_FILE, 0o600); } catch {}
+  return key;
+}
+
+function validateVaultKeyName(keyName) {
+  const trimmed = String(keyName || '').trim();
+  if (!trimmed || trimmed.length > 256) {
+    throw new Error('Secret identifier must be between 1 and 256 characters.');
+  }
+  if (!trimmed.startsWith('db-profile:') && !trimmed.startsWith('docker-registry:')) {
+    throw new Error("Secret identifier must use the 'db-profile:' or 'docker-registry:' namespace.");
+  }
+  if (!/^[a-zA-Z0-9:._-]+$/.test(trimmed)) {
+    throw new Error('Secret identifier contains disallowed characters.');
+  }
+  return trimmed;
+}
+
+function vaultEncryptValue(plaintext) {
+  const masterKey = getOrCreateVaultKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', masterKey, iv);
+  const enc = Buffer.concat([cipher.update(String(plaintext), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    v: 1,
+    iv: iv.toString('hex'),
+    tag: tag.toString('hex'),
+    data: enc.toString('hex'),
+  };
+}
+
+function vaultDecryptValue(record) {
+  if (!record || typeof record !== 'object') return null;
+  const masterKey = getOrCreateVaultKey();
+  const iv = Buffer.from(String(record.iv || ''), 'hex');
+  const tag = Buffer.from(String(record.tag || ''), 'hex');
+  const data = Buffer.from(String(record.data || ''), 'hex');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', masterKey, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }
 
 // -------------------------------------------------------------
@@ -638,20 +697,117 @@ function validateSafeToken(val, pattern, label) {
   return str;
 }
 
+function computeAuditEntryHash(prevHash, payloadWithoutHash) {
+  return crypto
+    .createHash('sha256')
+    .update(`${prevHash}|${JSON.stringify(payloadWithoutHash)}`)
+    .digest('hex');
+}
+
+function getLastAuditHash() {
+  try {
+    if (!fs.existsSync(AUDIT_LOG_FILE)) return '0'.repeat(64);
+    const lines = fs.readFileSync(AUDIT_LOG_FILE, 'utf8').trim().split('\n').filter(Boolean);
+    if (lines.length === 0) return '0'.repeat(64);
+    const last = JSON.parse(lines[lines.length - 1]);
+    return typeof last.hash === 'string' && last.hash.length === 64 ? last.hash : '0'.repeat(64);
+  } catch {
+    return '0'.repeat(64);
+  }
+}
+
 function appendAuditEvent(event) {
   try {
-    const entry = JSON.stringify({
-      ts: new Date().toISOString(),
-      ...event
-    }) + '\n';
     if (fs.existsSync(AUDIT_LOG_FILE)) {
       const st = fs.statSync(AUDIT_LOG_FILE);
       if (st.size > 10 * 1024 * 1024) {
         try { fs.renameSync(AUDIT_LOG_FILE, `${AUDIT_LOG_FILE}.1`); } catch {}
       }
     }
+    const prev_hash = getLastAuditHash();
+    const base = {
+      ts: new Date().toISOString(),
+      ...event
+    };
+    const hash = computeAuditEntryHash(prev_hash, base);
+    const entry = JSON.stringify({ ...base, prev_hash, hash }) + '\n';
     fs.appendFileSync(AUDIT_LOG_FILE, entry, { encoding: 'utf8', mode: 0o600 });
   } catch {}
+}
+
+function verifyAuditChain() {
+  if (!fs.existsSync(AUDIT_LOG_FILE)) {
+    return { valid: true, total: 0, verified: 0, brokenAt: null };
+  }
+  const lines = fs.readFileSync(AUDIT_LOG_FILE, 'utf8').trim().split('\n').filter(Boolean);
+  let expectedPrev = '0'.repeat(64);
+  let verified = 0;
+  for (let i = 0; i < lines.length; i++) {
+    let parsed;
+    try { parsed = JSON.parse(lines[i]); } catch {
+      return { valid: false, total: lines.length, verified, brokenAt: i + 1, reason: 'Malformed JSON audit record' };
+    }
+    const { prev_hash, hash, ...rest } = parsed;
+    if (!hash || !prev_hash) {
+      // Legacy unchained record written prior to chain upgrade: reset chain baseline if valid JSON
+      expectedPrev = '0'.repeat(64);
+      verified += 1;
+      continue;
+    }
+    if (prev_hash !== expectedPrev) {
+      return { valid: false, total: lines.length, verified, brokenAt: i + 1, reason: 'Previous hash mismatch' };
+    }
+    const calc = computeAuditEntryHash(prev_hash, rest);
+    if (calc !== hash) {
+      return { valid: false, total: lines.length, verified, brokenAt: i + 1, reason: 'Entry hash tamper detected' };
+    }
+    expectedPrev = hash;
+    verified += 1;
+  }
+  return { valid: true, total: lines.length, verified, brokenAt: null };
+}
+
+function getSecurityPolicy() {
+  const policy = readJsonSafe(POLICY_FILE, { role: 'admin', blockMetadataEgress: true });
+  const role = ['admin', 'operator', 'read_only'].includes(policy.role) ? policy.role : 'admin';
+  return {
+    role,
+    blockMetadataEgress: policy.blockMetadataEgress !== false,
+    updatedAt: policy.updatedAt || null,
+    updatedBy: policy.updatedBy || null,
+  };
+}
+
+function enforcePolicyPermission(cmd, args) {
+  const policy = getSecurityPolicy();
+  const readOnlyBlocked = new Set([
+    'firewall_add_rule', 'firewall_add_rule_advanced', 'firewall_delete_rule', 'firewall_delete_rule_advanced',
+    'firewall_toggle', 'firewall_install', 'firewall_set_default_policy', 'firewall_reset',
+    'user_create', 'user_delete', 'user_modify', 'user_lock', 'user_sudo_toggle', 'group_add_user',
+    'disk_create_label', 'disk_create_partition', 'disk_delete_partition', 'disk_resize_partition',
+    'disk_set_partition_flag', 'disk_format_filesystem', 'disk_set_label', 'disk_manage_swap', 'disk_manage_tmp',
+    'service_action', 'package_install', 'package_remove', 'cron_add', 'cron_delete',
+    'sftp_write_file', 'sftp_write_text_file', 'sftp_delete', 'sftp_rename', 'sftp_chmod', 'sftp_chown',
+    'sftp_mkdir', 'sftp_extract_archive_pure', 'backup_import_config'
+  ]);
+  const operatorBlocked = new Set([
+    'firewall_reset', 'firewall_set_default_policy',
+    'disk_create_label', 'disk_create_partition', 'disk_delete_partition', 'disk_format_filesystem',
+    'user_delete', 'user_sudo_toggle'
+  ]);
+  if (policy.role === 'read_only' && readOnlyBlocked.has(cmd)) {
+    const err = new Error(`POLICY_DENIED: Command '${cmd}' is blocked while workspace role is set to 'read_only'.`);
+    err.statusCode = 403;
+    throw err;
+  }
+  if (policy.role === 'operator' && operatorBlocked.has(cmd)) {
+    const err = new Error(`POLICY_DENIED: Destructive command '${cmd}' requires 'admin' role (current role: 'operator').`);
+    err.statusCode = 403;
+    throw err;
+  }
+  if (policy.role === 'read_only' && cmd === 'ssh_exec' && args?.command) {
+    // Allow diagnostic/read inspections; destructive explicit UI actions go through dedicated commands
+  }
 }
 
 // Execute command: remotely over active SSH connection. Never fallback to host execution!
@@ -1324,99 +1480,236 @@ function buildInstallCommand(pm, rawName) {
   return { installCmd, post };
 }
 
-function startSocks5Proxy(sshClient, preferredPort = 1080) {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer(socket => {
-      let state = 'AUTH';
-      let sshStream = null;
+const MAX_SOCKS5_CONCURRENT_STREAMS = 64;
 
+function parseSocks5GreetingFrame(buffer) {
+  if (buffer.length < 2) return { status: 'incomplete' };
+  if (buffer[0] !== 0x05) return { status: 'error', reason: 'Unsupported SOCKS version' };
+  const nmethods = buffer[1];
+  if (nmethods === 0) return { status: 'error', reason: 'No authentication methods offered' };
+  if (buffer.length < 2 + nmethods) return { status: 'incomplete' };
+  const methods = Array.from(buffer.subarray(2, 2 + nmethods));
+  return { status: 'ok', methods, consumed: 2 + nmethods };
+}
+
+function parseSocks5UserPassFrame(buffer) {
+  if (buffer.length < 2) return { status: 'incomplete' };
+  if (buffer[0] !== 0x01) return { status: 'error', reason: 'Unsupported RFC 1929 auth version' };
+  const ulen = buffer[1];
+  if (buffer.length < 2 + ulen + 1) return { status: 'incomplete' };
+  const plen = buffer[2 + ulen];
+  const totalLen = 2 + ulen + 1 + plen;
+  if (buffer.length < totalLen) return { status: 'incomplete' };
+  const username = buffer.subarray(2, 2 + ulen);
+  const password = buffer.subarray(2 + ulen + 1, totalLen);
+  return { status: 'ok', username, password, consumed: totalLen };
+}
+
+function parseSocks5ConnectFrame(buffer) {
+  if (buffer.length < 4) return { status: 'incomplete' };
+  if (buffer[0] !== 0x05) return { status: 'error', reason: 'Invalid SOCKS5 request version' };
+  const cmd = buffer[1];
+  if (cmd !== 0x01) return { status: 'unsupported_cmd', code: 0x07 };
+  const atyp = buffer[3];
+  let destHost = '';
+  let totalLen = 0;
+
+  if (atyp === 0x01) {
+    totalLen = 4 + 4 + 2;
+    if (buffer.length < totalLen) return { status: 'incomplete' };
+    destHost = `${buffer[4]}.${buffer[5]}.${buffer[6]}.${buffer[7]}`;
+  } else if (atyp === 0x03) {
+    if (buffer.length < 5) return { status: 'incomplete' };
+    const domainLen = buffer[4];
+    if (domainLen === 0) return { status: 'bad_addr', code: 0x08 };
+    totalLen = 5 + domainLen + 2;
+    if (buffer.length < totalLen) return { status: 'incomplete' };
+    destHost = buffer.subarray(5, 5 + domainLen).toString('utf8');
+    if (/[\x00-\x20\x7f]/.test(destHost)) return { status: 'bad_addr', code: 0x08 };
+  } else if (atyp === 0x04) {
+    totalLen = 4 + 16 + 2;
+    if (buffer.length < totalLen) return { status: 'incomplete' };
+    const parts = [];
+    for (let i = 4; i < 20; i += 2) {
+      parts.push(buffer.readUInt16BE(i).toString(16));
+    }
+    destHost = parts.join(':');
+  } else {
+    return { status: 'bad_addr', code: 0x08 };
+  }
+
+  const destPort = buffer.readUInt16BE(totalLen - 2);
+  if (destPort === 0) return { status: 'bad_addr', code: 0x08 };
+  return { status: 'ok', destHost, destPort, consumed: totalLen };
+}
+
+function safeEqualUtf8(buf, expectedStr) {
+  const a = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf), 'utf8');
+  const b = Buffer.from(String(expectedStr), 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function startSocks5Proxy(sshClient, preferredPort = 1080, socksAuth = null) {
+  return new Promise((resolve, reject) => {
+    let activeStreams = 0;
+    const server = net.createServer(socket => {
+      if (activeStreams >= MAX_SOCKS5_CONCURRENT_STREAMS) {
+        try { socket.destroy(); } catch {}
+        return;
+      }
+      activeStreams += 1;
+      let decremented = false;
+      const releaseSlot = () => {
+        if (!decremented) {
+          decremented = true;
+          activeStreams = Math.max(0, activeStreams - 1);
+        }
+      };
+
+      let state = 'GREETING';
+      let sshStream = null;
+      let recvBuffer = Buffer.alloc(0);
+
+      const handshakeTimer = setTimeout(() => {
+        if (state !== 'STREAM') {
+          try { socket.destroy(); } catch {}
+        }
+      }, 10000);
+
+      const cleanup = () => {
+        clearTimeout(handshakeTimer);
+        releaseSlot();
+        if (sshStream) try { sshStream.end(); } catch {}
+      };
+
+      socket.on('close', cleanup);
       socket.on('error', () => {
         try { socket.destroy(); } catch {}
-        if (sshStream) try { sshStream.end(); } catch {}
+        cleanup();
       });
 
       socket.on('data', chunk => {
-        if (state === 'AUTH') {
-          if (chunk.length < 2 || chunk[0] !== 0x05) {
-            socket.end();
-            return;
-          }
-          // Reply: [VER (5), METHOD (0 = NO AUTHENTICATION REQUIRED)]
-          socket.write(Buffer.from([0x05, 0x00]));
-          state = 'CMD';
+        if (state === 'STREAM') {
+          return;
+        }
+        recvBuffer = Buffer.concat([recvBuffer, chunk]);
+        if (recvBuffer.length > 16 * 1024) {
+          try { socket.end(); } catch {}
           return;
         }
 
-        if (state === 'CMD') {
-          if (chunk.length < 7 || chunk[0] !== 0x05) {
-            socket.end();
-            return;
-          }
-
-          const cmd = chunk[1];
-          if (cmd !== 0x01) { // 1 = CONNECT
-            socket.write(Buffer.from([0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-            socket.end();
-            return;
-          }
-
-          const atyp = chunk[3];
-          let destHost = '';
-          let destPort = 0;
-          let offset = 4;
-
-          if (atyp === 0x01) {
-            if (chunk.length < 10) { socket.end(); return; }
-            destHost = `${chunk[4]}.${chunk[5]}.${chunk[6]}.${chunk[7]}`;
-            offset = 8;
-          } else if (atyp === 0x03) {
-            const len = chunk[4];
-            if (chunk.length < 5 + len + 2) { socket.end(); return; }
-            destHost = chunk.slice(5, 5 + len).toString('utf8');
-            offset = 5 + len;
-          } else if (atyp === 0x04) {
-            if (chunk.length < 22) { socket.end(); return; }
-            const parts = [];
-            for (let i = 4; i < 20; i += 2) {
-              parts.push(chunk.readUInt16BE(i).toString(16));
+        while (state !== 'STREAM' && state !== 'CONNECTING' && recvBuffer.length > 0) {
+          if (state === 'GREETING') {
+            const parsed = parseSocks5GreetingFrame(recvBuffer);
+            if (parsed.status === 'incomplete') return;
+            if (parsed.status !== 'ok') {
+              try { socket.end(); } catch {}
+              return;
             }
-            destHost = parts.join(':');
-            offset = 20;
-          } else {
-            socket.write(Buffer.from([0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-            socket.end();
-            return;
-          }
-
-          destPort = chunk.readUInt16BE(offset);
-          const srcAddr = socket.remoteAddress || '127.0.0.1';
-          const srcPort = socket.remotePort || 0;
-
-          sshClient.forwardOut(srcAddr, srcPort, destHost, destPort, (err, stream) => {
-            if (err) {
+            recvBuffer = recvBuffer.subarray(parsed.consumed);
+            if (socksAuth) {
+              if (!parsed.methods.includes(0x02)) {
+                socket.write(Buffer.from([0x05, 0xff]));
+                socket.end();
+                return;
+              }
+              socket.write(Buffer.from([0x05, 0x02]));
+              state = 'USERPASS';
+            } else {
+              if (!parsed.methods.includes(0x00)) {
+                socket.write(Buffer.from([0x05, 0xff]));
+                socket.end();
+                return;
+              }
+              socket.write(Buffer.from([0x05, 0x00]));
+              state = 'CMD';
+            }
+          } else if (state === 'USERPASS') {
+            const parsed = parseSocks5UserPassFrame(recvBuffer);
+            if (parsed.status === 'incomplete') return;
+            if (parsed.status !== 'ok') {
               try {
-                socket.write(Buffer.from([0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+                socket.write(Buffer.from([0x01, 0x01]));
                 socket.end();
               } catch {}
               return;
             }
+            recvBuffer = recvBuffer.subarray(parsed.consumed);
+            const ok = socksAuth
+              && safeEqualUtf8(parsed.username, socksAuth.username)
+              && safeEqualUtf8(parsed.password, socksAuth.password);
+            if (!ok) {
+              socket.write(Buffer.from([0x01, 0x01]));
+              socket.end();
+              return;
+            }
+            socket.write(Buffer.from([0x01, 0x00]));
+            state = 'CMD';
+          } else if (state === 'CMD') {
+            const parsed = parseSocks5ConnectFrame(recvBuffer);
+            if (parsed.status === 'incomplete') return;
+            if (parsed.status === 'unsupported_cmd') {
+              socket.write(Buffer.from([0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+              socket.end();
+              return;
+            }
+            if (parsed.status === 'bad_addr' || parsed.status === 'error') {
+              socket.write(Buffer.from([0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+              socket.end();
+              return;
+            }
 
-            sshStream = stream;
-            state = 'STREAM';
+            const parsedHostLower = String(parsed.destHost || '').toLowerCase().replace(/^\[|\]$/g, '');
+            const policy = getSecurityPolicy();
+            if (policy.blockMetadataEgress && (
+              parsedHostLower === '169.254.169.254' ||
+              parsedHostLower === 'fd00:ec2::254' ||
+              parsedHostLower === 'metadata.google.internal' ||
+              parsedHostLower === '169.254.170.2'
+            )) {
+              socket.write(Buffer.from([0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0])); // Connection not allowed by ruleset
+              socket.end();
+              return;
+            }
 
-            // SOCKS5 Success response
-            socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+            recvBuffer = recvBuffer.subarray(parsed.consumed);
+            const initialPayload = recvBuffer;
+            recvBuffer = Buffer.alloc(0);
+            state = 'CONNECTING';
+            socket.pause();
 
-            socket.pipe(sshStream);
-            sshStream.pipe(socket);
+            const srcAddr = socket.remoteAddress || '127.0.0.1';
+            const srcPort = socket.remotePort || 0;
+            sshClient.forwardOut(srcAddr, srcPort, parsed.destHost, parsed.destPort, (err, stream) => {
+              clearTimeout(handshakeTimer);
+              if (err) {
+                try {
+                  socket.write(Buffer.from([0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+                  socket.end();
+                } catch {}
+                return;
+              }
 
-            sshStream.on('error', () => {
-              try { socket.destroy(); } catch {}
+              sshStream = stream;
+              state = 'STREAM';
+              socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+              if (initialPayload.length > 0) {
+                sshStream.write(initialPayload);
+              }
+              socket.pipe(sshStream);
+              sshStream.pipe(socket);
+              socket.resume();
+
+              sshStream.on('error', () => {
+                try { socket.destroy(); } catch {}
+              });
+              sshStream.on('close', () => {
+                try { socket.end(); } catch {}
+              });
             });
-            sshStream.on('close', () => {
-              try { socket.end(); } catch {}
-            });
-          });
+            return;
+          }
         }
       });
     });
@@ -1650,6 +1943,7 @@ function buildSshClientConfig(config, targetId) {
 }
 
 async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = '127.0.0.1') {
+  enforcePolicyPermission(cmd, args);
   const connId = args?.connId;
   const entry = getActiveEntry(connId);
 
@@ -1859,6 +2153,106 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       }
     }
 
+    case 'audit_verify_chain': {
+      return verifyAuditChain();
+    }
+
+    case 'policy_get_mode': {
+      return getSecurityPolicy();
+    }
+
+    case 'policy_set_mode': {
+      const nextRole = validateSafeToken(args?.role || 'admin', /^(?:admin|operator|read_only)$/, 'role');
+      const blockMeta = args?.blockMetadataEgress !== undefined ? Boolean(args.blockMetadataEgress) : getSecurityPolicy().blockMetadataEgress;
+      const updated = {
+        role: nextRole,
+        blockMetadataEgress: blockMeta,
+        updatedAt: new Date().toISOString(),
+        updatedBy: currentSession?.username || 'admin',
+      };
+      if (!writeJsonSafe(POLICY_FILE, updated)) {
+        throw new Error('Failed to persist security policy.');
+      }
+      appendAuditEvent({ event: 'policy_set_mode', username: updated.updatedBy, ip: clientIp, role: nextRole, status: 'ok' });
+      return updated;
+    }
+
+    case 'runtime_capabilities': {
+      return {
+        runtime: 'web',
+        version: VERSION,
+        features: {
+          desktop_notifications: false,
+          native_webview_window: false,
+          putty_launch: false,
+          keyring_vault: true,
+          socks5_auth: true,
+          local_fs: process.env.SSHDESKTOP_ENABLE_LOCAL_FS === 'true',
+          audit_log: true,
+          rbac_policy: true,
+          config_backup: true,
+        },
+        db_engines: {
+          postgresql: false,
+          mysql: false,
+          mariadb: false,
+          sqlite: false,
+          mssql: false,
+          mongodb: false,
+          redis: false,
+          oracle: false,
+          dynamodb: false,
+          cosmos: false,
+          cassandra: false,
+          db2: false,
+        }
+      };
+    }
+
+    case 'backup_export_config': {
+      const conns = readJsonSafe(CONNECTIONS_FILE, []);
+      const sanitizedConns = Array.isArray(conns)
+        ? conns.map(({ password: _p, passphrase: _pp, private_key_content: _pk, ...meta }) => meta)
+        : [];
+      const settings = readJsonSafe(SETTINGS_FILE, {});
+      const policy = getSecurityPolicy();
+      appendAuditEvent({ event: 'backup_export_config', username: currentSession?.username || '', ip: clientIp, status: 'ok' });
+      return {
+        schema: 'sshdesktop-config-v1',
+        exportedAt: new Date().toISOString(),
+        version: VERSION,
+        runtime: 'web',
+        connections: sanitizedConns,
+        settings,
+        policy,
+      };
+    }
+
+    case 'backup_import_config': {
+      const payload = args?.bundle;
+      if (!payload || payload.schema !== 'sshdesktop-config-v1') {
+        throw new Error('Invalid backup bundle schema.');
+      }
+      if (payload.settings && typeof payload.settings === 'object' && !Array.isArray(payload.settings)) {
+        writeJsonSafe(SETTINGS_FILE, payload.settings);
+      }
+      if (Array.isArray(payload.connections)) {
+        const existing = readJsonSafe(CONNECTIONS_FILE, []);
+        const existingMap = new Map(Array.isArray(existing) ? existing.map(c => [c.id, c]) : []);
+        const merged = payload.connections
+          .filter(c => c && typeof c.id === 'string' && typeof c.host === 'string')
+          .map(c => ({
+            ...c,
+            // Preserve existing secret references if present; never import plaintext passwords unless explicitly entered
+            password: existingMap.get(c.id)?.password,
+            passphrase: existingMap.get(c.id)?.passphrase,
+          }));
+        writeJsonSafe(CONNECTIONS_FILE, merged);
+      }
+      appendAuditEvent({ event: 'backup_import_config', username: currentSession?.username || '', ip: clientIp, status: 'ok' });
+      return { imported: true };
+    }
+
     // ==========================================
     // 2. SSH Connection Management
     // ==========================================
@@ -1925,21 +2319,31 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
     case 'ssh_start_socks5': {
       if (!entry) throw new Error('No active SSH connection');
       const preferred = args?.preferredPort ? Number(args.preferredPort) : 1080;
-      
+      const sockUser = args?.username ? String(args.username) : '';
+      const sockPass = args?.password ? String(args.password) : '';
+      const requireAuth = Boolean(args?.requireAuth);
+      if ((sockUser && !sockPass) || (!sockUser && sockPass)) {
+        throw new Error('Both username and password are required when configuring SOCKS5 authentication.');
+      }
+      if (requireAuth && !sockUser) {
+        throw new Error('SOCKS5 authentication was requested without credentials.');
+      }
+      const socksAuth = sockUser ? { username: sockUser, password: sockPass } : null;
+
       if (activeSocksServers.has(connId)) {
         return activeSocksServers.get(connId).port;
       }
 
       try {
-        const { server, port } = await startSocks5Proxy(entry.client, preferred);
-        activeSocksServers.set(connId, { server, port });
-        console.log(`[SSH Desktop SOCKS5] Dynamic proxy active on 127.0.0.1:${port} for connection ${connId}`);
+        const { server, port } = await startSocks5Proxy(entry.client, preferred, socksAuth);
+        activeSocksServers.set(connId, { server, port, authEnabled: Boolean(socksAuth) });
+        console.log(`[SSH Desktop SOCKS5] Dynamic proxy active on 127.0.0.1:${port} for connection ${connId} (auth=${Boolean(socksAuth)})`);
         return port;
       } catch (err) {
         if (err.code === 'EADDRINUSE') {
-          const { server, port } = await startSocks5Proxy(entry.client, 0);
-          activeSocksServers.set(connId, { server, port });
-          console.log(`[SSH Desktop SOCKS5] Dynamic proxy active on 127.0.0.1:${port} (fallback)`);
+          const { server, port } = await startSocks5Proxy(entry.client, 0, socksAuth);
+          activeSocksServers.set(connId, { server, port, authEnabled: Boolean(socksAuth) });
+          console.log(`[SSH Desktop SOCKS5] Dynamic proxy active on 127.0.0.1:${port} (fallback, auth=${Boolean(socksAuth)})`);
           return port;
         }
         throw err;
@@ -1963,7 +2367,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       const tunnelType = String(args?.tunnel_type || args?.tunnelType || 'local').toLowerCase();
 
       if (tunnelType === 'dynamic' || tunnelType === 'socks' || tunnelType === 'socks5') {
-        return await handleInvokeCommand('ssh_start_socks5', { preferredPort: localPort || 1080 }, session);
+        return await handleInvokeCommand('ssh_start_socks5', { ...args, preferredPort: localPort || 1080 }, currentSession, clientIp);
       }
 
       const tunnelId = `tun-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
@@ -2017,7 +2421,10 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
     }
 
     case 'send_desktop_notification': {
-      return true;
+      const err = new Error('UNSUPPORTED_IN_WEB_MODE: Native desktop notifications are not available in web server mode.');
+      err.code = 'UNSUPPORTED_IN_WEB_MODE';
+      err.statusCode = 501;
+      throw err;
     }
 
     case 'ssh_get_socks5': {
@@ -2027,17 +2434,20 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       return null;
     }
 
-    case 'open_browser_window': {
-      return `browser-${Date.now()}`;
-    }
-
+    case 'open_browser_window':
     case 'close_browser_window':
     case 'focus_browser_window': {
-      return true;
+      const err = new Error(`UNSUPPORTED_IN_WEB_MODE: Native WebView command '${cmd}' is only available in the desktop app.`);
+      err.code = 'UNSUPPORTED_IN_WEB_MODE';
+      err.statusCode = 501;
+      throw err;
     }
 
     case 'ssh_launch_putty': {
-      return false;
+      const err = new Error('UNSUPPORTED_IN_WEB_MODE: Launching local PuTTY is not supported in web server mode.');
+      err.code = 'UNSUPPORTED_IN_WEB_MODE';
+      err.statusCode = 501;
+      throw err;
     }
 
     case 'ssh_test_connection': {
@@ -2866,14 +3276,42 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'firewall_toggle': {
       if (!entry) return '';
-      const cmd = args?.enable ? 'ufw --force enable' : 'ufw disable';
-      const res = await runRemotePrivExec(entry, `${cmd} 2>&1`);
+      const detectRes = await runRemoteExec(entry.client, "if command -v ufw >/dev/null 2>&1; then echo 'ufw'; elif command -v firewall-cmd >/dev/null 2>&1; then echo 'firewalld'; elif command -v nft >/dev/null 2>&1; then echo 'nftables'; elif command -v iptables >/dev/null 2>&1; then echo 'iptables'; else echo 'none'; fi");
+      const fw = (detectRes.stdout || '').trim().toLowerCase();
+      const enable = Boolean(args?.enable);
+      let cmd = '';
+      if (fw.includes('ufw')) {
+        cmd = enable ? 'ufw --force enable 2>&1 && ufw status | head -n 1' : 'ufw disable 2>&1 && ufw status | head -n 1';
+      } else if (fw.includes('firewalld')) {
+        cmd = enable ? 'systemctl enable --now firewalld 2>&1 && firewall-cmd --state 2>&1' : 'systemctl stop firewalld 2>&1 && (firewall-cmd --state 2>&1 || echo "not running")';
+      } else if (fw.includes('nftables')) {
+        cmd = enable ? 'systemctl enable --now nftables 2>&1 && nft list tables 2>&1' : 'systemctl stop nftables 2>&1';
+      } else if (fw.includes('iptables')) {
+        cmd = enable
+          ? 'if systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl enable --now iptables 2>&1; elif systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then systemctl enable --now netfilter-persistent 2>&1; else echo "Raw iptables has no unified service daemon." >&2; exit 1; fi'
+          : 'if systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl stop iptables 2>&1; elif systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then systemctl stop netfilter-persistent 2>&1; else echo "Raw iptables cannot be safely disabled via service stop." >&2; exit 1; fi';
+      } else {
+        throw new Error('No supported firewall backend (ufw, firewalld, nftables, iptables) is installed.');
+      }
+      const res = await runRemotePrivExec(entry, cmd);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to toggle firewall');
+      appendAuditEvent({ event: 'firewall_toggle', username: currentSession?.username || '', ip: clientIp, backend: fw, enable, status: 'ok' });
       return res.stdout || 'Firewall toggled';
     }
 
     case 'firewall_reload': {
       if (!entry) return '';
-      const res = await runRemotePrivExec(entry, 'ufw reload 2>&1 || firewall-cmd --reload 2>&1');
+      const detectRes = await runRemoteExec(entry.client, "if command -v ufw >/dev/null 2>&1; then echo 'ufw'; elif command -v firewall-cmd >/dev/null 2>&1; then echo 'firewalld'; elif command -v nft >/dev/null 2>&1; then echo 'nftables'; elif command -v iptables >/dev/null 2>&1; then echo 'iptables'; else echo 'none'; fi");
+      const fw = (detectRes.stdout || '').trim().toLowerCase();
+      let cmd = '';
+      if (fw.includes('firewalld')) cmd = 'firewall-cmd --reload 2>&1';
+      else if (fw.includes('ufw')) cmd = 'ufw reload 2>&1';
+      else if (fw.includes('nftables')) cmd = 'nft -c -f /etc/nftables.conf 2>&1 && systemctl reload nftables 2>&1';
+      else if (fw.includes('iptables')) cmd = 'if command -v netfilter-persistent >/dev/null 2>&1; then netfilter-persistent reload 2>&1; elif systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl reload iptables 2>&1; else echo "No persistent iptables reload helper found." >&2; exit 1; fi';
+      else throw new Error('No supported firewall backend is installed on this host.');
+      const res = await runRemotePrivExec(entry, cmd);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to reload firewall');
+      appendAuditEvent({ event: 'firewall_reload', username: currentSession?.username || '', ip: clientIp, backend: fw, status: 'ok' });
       return res.stdout || 'Reloaded';
     }
 
@@ -2927,13 +3365,46 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       if (!entry) return '';
       const dir = validateSafeToken(args?.direction || 'incoming', /^(?:incoming|outgoing|routed)$/i, 'direction').toLowerCase();
       const pol = validateSafeToken(args?.policy || 'deny', /^(?:allow|deny|reject)$/i, 'policy').toLowerCase();
-      const res = await runRemotePrivExec(entry, `ufw default ${pol} ${dir} 2>&1`);
+      const detectRes = await runRemoteExec(entry.client, "if command -v ufw >/dev/null 2>&1; then echo 'ufw'; elif command -v firewall-cmd >/dev/null 2>&1; then echo 'firewalld'; elif command -v nft >/dev/null 2>&1; then echo 'nftables'; elif command -v iptables >/dev/null 2>&1; then echo 'iptables'; else echo 'none'; fi");
+      const fw = (detectRes.stdout || '').trim().toLowerCase();
+      const sshPort = Number(entry?.config?.port) || 22;
+      let cmd = '';
+      if (fw.includes('ufw')) {
+        cmd = dir === 'incoming' && (pol === 'deny' || pol === 'reject')
+          ? `ufw allow ${sshPort}/tcp 2>&1 && ufw default ${pol} ${dir} 2>&1`
+          : `ufw default ${pol} ${dir} 2>&1`;
+      } else if (fw.includes('iptables')) {
+        if (pol === 'reject') throw new Error('iptables chain default policy supports only ACCEPT or DROP.');
+        const chain = dir === 'incoming' ? 'INPUT' : dir === 'outgoing' ? 'OUTPUT' : 'FORWARD';
+        const target = pol === 'allow' ? 'ACCEPT' : 'DROP';
+        cmd = dir === 'incoming' && pol === 'deny'
+          ? `iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>&1; iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -I INPUT 2 -i lo -j ACCEPT 2>&1; iptables -C INPUT -p tcp --dport ${sshPort} -j ACCEPT 2>/dev/null || iptables -I INPUT 3 -p tcp --dport ${sshPort} -j ACCEPT 2>&1; iptables -P INPUT DROP 2>&1`
+          : `iptables -P ${chain} ${target} 2>&1`;
+      } else {
+        throw new Error(`Default policy switching is not supported on backend '${fw}'.`);
+      }
+      const res = await runRemotePrivExec(entry, cmd);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to set default policy');
+      appendAuditEvent({ event: 'firewall_set_default_policy', username: currentSession?.username || '', ip: clientIp, backend: fw, dir, pol, status: 'ok' });
       return res.stdout || 'Policy set';
     }
 
     case 'firewall_reset': {
       if (!entry) return '';
-      const res = await runRemotePrivExec(entry, 'echo y | ufw reset 2>&1');
+      const detectRes = await runRemoteExec(entry.client, "if command -v ufw >/dev/null 2>&1; then echo 'ufw'; elif command -v firewall-cmd >/dev/null 2>&1; then echo 'firewalld'; elif command -v nft >/dev/null 2>&1; then echo 'nftables'; elif command -v iptables >/dev/null 2>&1; then echo 'iptables'; else echo 'none'; fi");
+      const fw = (detectRes.stdout || '').trim().toLowerCase();
+      const sshPort = Number(entry?.config?.port) || 22;
+      let cmd = '';
+      if (fw.includes('ufw')) {
+        cmd = `echo y | ufw reset 2>&1 && ufw allow ${sshPort}/tcp 2>&1`;
+      } else if (fw.includes('firewalld')) {
+        cmd = 'firewall-cmd --complete-reload 2>&1';
+      } else {
+        throw new Error(`Refusing blind firewall reset on '${fw}' backend to protect active SSH access.`);
+      }
+      const res = await runRemotePrivExec(entry, cmd);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to reset firewall');
+      appendAuditEvent({ event: 'firewall_reset', username: currentSession?.username || '', ip: clientIp, backend: fw, sshPort, status: 'ok' });
       return res.stdout || 'Reset';
     }
 
@@ -3292,8 +3763,20 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     case 'user_delete': {
       if (!entry) return;
       const username = validateSafeToken(args?.username, /^[a-zA-Z_][a-zA-Z0-9._-]{0,31}$/, 'username');
+      if (['root', 'daemon', 'bin', 'sys', 'sync', 'nobody', 'sshd'].includes(username)) {
+        throw new Error(`Refusing to delete protected system user '${username}'.`);
+      }
+      if (entry?.config?.username && String(entry.config.username).trim() === username) {
+        throw new Error(`Refusing to delete currently authenticated SSH user '${username}'.`);
+      }
+      const qUser = shellQuote(username);
+      const uidCheck = `TARGET_UID=$(id -u ${qUser} 2>/dev/null) || { echo 'User not found' >&2; exit 2; }; UID_MIN=$(awk '/^UID_MIN[[:space:]]+/ {print $2; exit}' /etc/login.defs 2>/dev/null); UID_MIN=\${UID_MIN:-1000}; if [ "$TARGET_UID" -eq 0 ] || [ "$TARGET_UID" -lt "$UID_MIN" ]; then echo "Refusing to delete system/service account (UID $TARGET_UID < $UID_MIN)." >&2; exit 3; fi`;
       const rm = args?.removeHome ? '-r' : '';
-      await runRemotePrivExec(entry, `userdel ${rm} -- ${shellQuote(username)}`);
+      const res = await runRemotePrivExec(entry, `${uidCheck} && userdel ${rm} -- ${qUser} 2>&1`);
+      if (res.exit_code !== 0) {
+        throw new Error(res.stderr || res.stdout || 'Failed to delete user');
+      }
+      appendAuditEvent({ event: 'user_delete', username: currentSession?.username || '', ip: clientIp, targetUser: username, removeHome: Boolean(args?.removeHome), status: 'ok' });
       return;
     }
 
@@ -3637,7 +4120,11 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       const { device, labelType = 'gpt' } = args || {};
       const safeDev = validateSafeToken(device, /^\/dev\/[A-Za-z0-9._\/-]+$/, 'device path');
       const safeLabel = validateSafeToken(labelType, /^(?:gpt|msdos|bsd|loop|mac|sun)$/i, 'label type').toLowerCase();
-      const res = await runRemotePrivExec(entry, `parted -s -- ${shellQuote(safeDev)} mklabel ${safeLabel} 2>&1`);
+      const qDev = shellQuote(safeDev);
+      const guard = `set -e; [ -b ${qDev} ]; DEV_REAL=$(readlink -f -- ${qDev}); NODES=$(lsblk -nrpo NAME "$DEV_REAL"); SWAP_NODES=$(swapon --noheadings --raw --show=NAME 2>/dev/null || true); for N in $NODES; do findmnt -rn -S "$N" >/dev/null 2>&1 && { echo "Refusing: $N is mounted" >&2; exit 31; }; for S in $SWAP_NODES; do [ "$(readlink -f -- "$S" 2>/dev/null)" = "$(readlink -f -- "$N" 2>/dev/null)" ] && { echo "Refusing: $N is active swap" >&2; exit 32; }; done; done; command -v parted >/dev/null 2>&1 || { echo "Missing required dependency 'parted'." >&2; exit 127; }`;
+      const res = await runRemotePrivExec(entry, `${guard}; parted -s -- ${qDev} mklabel ${safeLabel} 2>&1`);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to create partition table');
+      appendAuditEvent({ event: 'disk_create_label', username: currentSession?.username || '', ip: clientIp, device: safeDev, labelType: safeLabel, status: 'ok' });
       return res.stdout || 'Label created';
     }
 
@@ -3648,7 +4135,11 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       const safePart = validateSafeToken(partType, /^(?:primary|logical|extended)$/i, 'partition type').toLowerCase();
       const safeStart = validateSafeToken(start, /^[A-Za-z0-9.%+-]+$/, 'start boundary');
       const safeEnd = validateSafeToken(end, /^[A-Za-z0-9.%+-]+$/, 'end boundary');
-      const res = await runRemotePrivExec(entry, `parted -s -- ${shellQuote(safeDev)} mkpart ${safePart} ${shellQuote(safeStart)} ${shellQuote(safeEnd)} 2>&1`);
+      const qDev = shellQuote(safeDev);
+      const guard = `set -e; [ -b ${qDev} ]; DEV_REAL=$(readlink -f -- ${qDev}); NODES=$(lsblk -nrpo NAME "$DEV_REAL"); SWAP_NODES=$(swapon --noheadings --raw --show=NAME 2>/dev/null || true); for N in $NODES; do findmnt -rn -S "$N" >/dev/null 2>&1 && { echo "Refusing: $N is mounted" >&2; exit 31; }; for S in $SWAP_NODES; do [ "$(readlink -f -- "$S" 2>/dev/null)" = "$(readlink -f -- "$N" 2>/dev/null)" ] && { echo "Refusing: $N is active swap" >&2; exit 32; }; done; done; command -v parted >/dev/null 2>&1 || { echo "Missing required dependency 'parted'." >&2; exit 127; }`;
+      const res = await runRemotePrivExec(entry, `${guard}; parted -s -- ${qDev} mkpart ${safePart} ${shellQuote(safeStart)} ${shellQuote(safeEnd)} 2>&1`);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to create partition');
+      appendAuditEvent({ event: 'disk_create_partition', username: currentSession?.username || '', ip: clientIp, device: safeDev, status: 'ok' });
       return res.stdout || 'Partition created';
     }
 
@@ -3657,7 +4148,11 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       const { device, partNumber } = args || {};
       const safeDev = validateSafeToken(device, /^\/dev\/[A-Za-z0-9._\/-]+$/, 'device path');
       const safeNum = validateInt(partNumber, 1, 128, 'partition number');
-      const res = await runRemotePrivExec(entry, `parted -s -- ${shellQuote(safeDev)} rm ${safeNum} 2>&1`);
+      const qDev = shellQuote(safeDev);
+      const guard = `set -e; [ -b ${qDev} ]; DEV_REAL=$(readlink -f -- ${qDev}); NODES=$(lsblk -nrpo NAME "$DEV_REAL"); SWAP_NODES=$(swapon --noheadings --raw --show=NAME 2>/dev/null || true); for N in $NODES; do findmnt -rn -S "$N" >/dev/null 2>&1 && { echo "Refusing: $N is mounted" >&2; exit 31; }; for S in $SWAP_NODES; do [ "$(readlink -f -- "$S" 2>/dev/null)" = "$(readlink -f -- "$N" 2>/dev/null)" ] && { echo "Refusing: $N is active swap" >&2; exit 32; }; done; done; command -v parted >/dev/null 2>&1 || { echo "Missing required dependency 'parted'." >&2; exit 127; }`;
+      const res = await runRemotePrivExec(entry, `${guard}; parted -s -- ${qDev} rm ${safeNum} 2>&1`);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to delete partition');
+      appendAuditEvent({ event: 'disk_delete_partition', username: currentSession?.username || '', ip: clientIp, device: safeDev, partNumber: safeNum, status: 'ok' });
       return res.stdout || 'Partition deleted';
     }
 
@@ -3667,7 +4162,11 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       const safeDev = validateSafeToken(device, /^\/dev\/[A-Za-z0-9._\/-]+$/, 'device path');
       const safeNum = validateInt(partNumber, 1, 128, 'partition number');
       const safeEnd = validateSafeToken(newEnd, /^[A-Za-z0-9.%+-]+$/, 'end boundary');
-      const res = await runRemotePrivExec(entry, `parted -s -- ${shellQuote(safeDev)} resizepart ${safeNum} ${shellQuote(safeEnd)} 2>&1`);
+      const qDev = shellQuote(safeDev);
+      const guard = `set -e; [ -b ${qDev} ]; command -v parted >/dev/null 2>&1 || { echo "Missing required dependency 'parted'." >&2; exit 127; }`;
+      const res = await runRemotePrivExec(entry, `${guard}; parted -s -- ${qDev} resizepart ${safeNum} ${shellQuote(safeEnd)} 2>&1`);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to resize partition');
+      appendAuditEvent({ event: 'disk_resize_partition', username: currentSession?.username || '', ip: clientIp, device: safeDev, partNumber: safeNum, status: 'ok' });
       return res.stdout || 'Partition resized';
     }
 
@@ -3678,7 +4177,8 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       const safeNum = validateInt(partNumber, 1, 128, 'partition number');
       const safeFlag = validateSafeToken(flag, /^[a-z_]+$/, 'partition flag');
       const stateStr = stateOn ? 'on' : 'off';
-      const res = await runRemotePrivExec(entry, `parted -s -- ${shellQuote(safeDev)} set ${safeNum} ${safeFlag} ${stateStr} 2>&1`);
+      const res = await runRemotePrivExec(entry, `command -v parted >/dev/null 2>&1 || { echo "Missing required dependency 'parted'." >&2; exit 127; }; parted -s -- ${shellQuote(safeDev)} set ${safeNum} ${safeFlag} ${stateStr} 2>&1`);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to set partition flag');
       return res.stdout || 'Flag updated';
     }
 
@@ -3689,7 +4189,11 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       const safeFs = validateSafeToken(fstype, /^[a-z0-9._-]+$/i, 'filesystem type');
       const lblOpt = label ? `-L ${shellQuote(String(label).slice(0, 32))}` : '';
       const qOpt = quick ? '-F' : '';
-      const res = await runRemotePrivExec(entry, `mkfs -t ${safeFs} ${lblOpt} ${qOpt} -- ${shellQuote(safeDev)} 2>&1`);
+      const qDev = shellQuote(safeDev);
+      const guard = `set -e; [ -b ${qDev} ]; DEV_REAL=$(readlink -f -- ${qDev}); NODES=$(lsblk -nrpo NAME "$DEV_REAL"); SWAP_NODES=$(swapon --noheadings --raw --show=NAME 2>/dev/null || true); for N in $NODES; do findmnt -rn -S "$N" >/dev/null 2>&1 && { echo "Refusing format: $N is mounted" >&2; exit 31; }; for S in $SWAP_NODES; do [ "$(readlink -f -- "$S" 2>/dev/null)" = "$(readlink -f -- "$N" 2>/dev/null)" ] && { echo "Refusing format: $N is active swap" >&2; exit 32; }; done; done`;
+      const res = await runRemotePrivExec(entry, `${guard}; mkfs -t ${safeFs} ${lblOpt} ${qOpt} -- ${qDev} 2>&1`);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to format filesystem');
+      appendAuditEvent({ event: 'disk_format_filesystem', username: currentSession?.username || '', ip: clientIp, device: safeDev, fstype: safeFs, status: 'ok' });
       return res.stdout || 'Formatted';
     }
 
@@ -4403,11 +4907,46 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       return;
     }
 
+    case 'store_secret_save': {
+      const validKey = validateVaultKeyName(args?.key);
+      const val = String(args?.value ?? '');
+      if (Buffer.byteLength(val, 'utf8') > 64 * 1024) {
+        throw new Error('Secret value exceeds the 64 KiB limit.');
+      }
+      const vault = readJsonSafe(VAULT_FILE, {});
+      if (!val) {
+        delete vault[validKey];
+      } else {
+        vault[validKey] = vaultEncryptValue(val);
+      }
+      if (!writeJsonSafe(VAULT_FILE, vault)) {
+        throw new Error('Failed to persist encrypted credential vault.');
+      }
+      return true;
+    }
+
+    case 'store_secret_load': {
+      const validKey = validateVaultKeyName(args?.key);
+      const vault = readJsonSafe(VAULT_FILE, {});
+      if (!vault[validKey]) return null;
+      return vaultDecryptValue(vault[validKey]);
+    }
+
+    case 'store_secret_delete': {
+      const validKey = validateVaultKeyName(args?.key);
+      const vault = readJsonSafe(VAULT_FILE, {});
+      if (validKey in vault) {
+        delete vault[validKey];
+        writeJsonSafe(VAULT_FILE, vault);
+      }
+      return true;
+    }
+
     // ==========================================
     // 18. API Studio & HTTP Client
     // ==========================================
     case 'network_interfaces': {
-      return await handleInvokeCommand('system_get_network', args, session);
+      return await handleInvokeCommand('system_get_network', args, currentSession, clientIp);
     }
 
     case 'browser_proxy_fetch': {
@@ -4997,7 +5536,7 @@ function buildUpstreamCookieHeader(session, clientCookieHeader) {
       if (eqIdx === -1) continue;
       const k = p.slice(0, eqIdx).trim();
       const v = p.slice(eqIdx + 1).trim();
-      if (k === '__ssh_session' || k === '__ssh_browser_gw') continue;
+      if (k === '__ssh_session' || k === '__ssh_browser_gw' || k === 'sshdesktop_session') continue;
       if (!merged.has(k)) {
         merged.set(k, v);
       }
@@ -5192,7 +5731,7 @@ function handleBrowserGatewayRequest(req, res) {
   const headersToSend = {};
   for (const [k, v] of Object.entries(req.headers)) {
     const lower = k.toLowerCase();
-    if (['connection', 'upgrade', 'keep-alive', 'transfer-encoding', 'host',
+    if (['connection', 'upgrade', 'keep-alive', 'transfer-encoding', 'host', 'authorization', 'x-session-token',
          'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port', 'x-forwarded-prefix'].includes(lower)) {
       continue;
     }
@@ -5258,13 +5797,6 @@ function handleBrowserGatewayRequest(req, res) {
     targetPath = '/' + targetPath.slice('/undefined/'.length);
   } else if (targetPath.includes('/undefined/')) {
     targetPath = targetPath.replace(/\/undefined\//g, '/');
-  }
-
-  // Automatic fix for reCAPTCHA/Captcha proxy requests containing localhost co= parameter
-  if (targetPath.includes('co=') && (targetPath.includes('/recaptcha/') || targetPath.includes('google.com/recaptcha'))) {
-    const targetOriginWithPort = `${proto}://${host}:${port}`;
-    const targetCoBase64 = Buffer.from(targetOriginWithPort).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '.');
-    targetPath = targetPath.replace(/([?&]co=)(?:aHR0cDovL2xvY2FsaG9zd|aHR0cHM6Ly9sb2NhbGhvc3Q|aHR0cDovLzEyNy4w|aHR0cHM6Ly8xMjcuMA)[^&#]*/gi, `$1${targetCoBase64}`);
   }
 
   const isLoopback = host === 'localhost' || host === '127.0.0.1' || host === '::1';
@@ -5509,21 +6041,10 @@ function handleBrowserGatewayRequest(req, res) {
           bodyText = bodyText.replace(/(data-(?:url|href|src)\s*=\s*["'])\/(?!\/|s\/|api\/browser\/gateway\/)([^"']*["'])/gi, `$1${gatewayBase}/$2`);
 
           // 7. Calculate Target Origin & reCAPTCHA / Captcha bypass parameters
-          const targetOriginWithPort = `${proto}://${host}:${port}`;
-          const targetCoBase64 = Buffer.from(targetOriginWithPort)
-            .toString('base64')
-            .replace(/\+/g, '-')
-            .replace(/\//g, '_')
-            .replace(/=/g, '.');
-
-          // Rewrite static / server-rendered reCAPTCHA co= parameters in HTML
-          bodyText = bodyText.replace(/((?:https?:)?\/\/[^"']*(?:recaptcha|google\.com\/recaptcha|recaptcha\.net)[^"']*co=)[^&"'\s]+/gi, '$1' + targetCoBase64);
-
           const interceptScript = `
 <script>
 (function() {
   var GW = ${JSON.stringify(gatewayBase)};
-  var TARGET_CO = ${JSON.stringify(targetCoBase64)};
   var TARGET_ORIGIN = ${JSON.stringify(`${proto}://${host}:${port}`)};
   var TARGET_HOST = ${JSON.stringify(host)};
   var ORIGINS = ${JSON.stringify([
@@ -5539,25 +6060,6 @@ function handleBrowserGatewayRequest(req, res) {
   ])};
 
   function fixCaptchaUrl(url) {
-    if (typeof url !== 'string' || !url) return url;
-    // 1. Google reCAPTCHA (v2, v3, enterprise): Resolves "Localhost is not in the list of supported domains for this site key"
-    if (url.indexOf('recaptcha') !== -1 || url.indexOf('google.com/recaptcha') !== -1 || url.indexOf('recaptcha.net') !== -1) {
-      if (url.indexOf('co=') !== -1) {
-        url = url.replace(/([?&]co=)[^&#]+/g, '$1' + encodeURIComponent(TARGET_CO));
-      }
-    }
-    // 2. hCaptcha
-    if (url.indexOf('hcaptcha.com') !== -1) {
-      if (url.indexOf('host=') !== -1) {
-        url = url.replace(/([?&]host=)[^&#]+/g, '$1' + encodeURIComponent(TARGET_HOST));
-      }
-    }
-    // 3. Cloudflare Turnstile
-    if (url.indexOf('challenges.cloudflare.com') !== -1) {
-      if (url.indexOf('origin=') !== -1) {
-        url = url.replace(/([?&]origin=)[^&#]+/g, '$1' + encodeURIComponent(TARGET_ORIGIN));
-      }
-    }
     return url;
   }
 
@@ -5810,21 +6312,7 @@ function handleBrowserGatewayRequest(req, res) {
     _obs.observe(document.documentElement || document, { childList: true, subtree: true });
   }
 
-  // Intercept Window.prototype.postMessage & window.postMessage to prevent targetOrigin mismatch errors
-  try {
-    var patchPostMsg = function(targetObj) {
-      if (!targetObj || !targetObj.postMessage) return;
-      var _orig = targetObj.postMessage;
-      targetObj.postMessage = function(message, targetOrigin, transfer) {
-        if (targetOrigin && targetOrigin !== '*') {
-          targetOrigin = '*';
-        }
-        return _orig.call(this, message, targetOrigin, transfer);
-      };
-    };
-    if (window.Window && Window.prototype) patchPostMsg(Window.prototype);
-    patchPostMsg(window);
-  } catch(e) {}
+  // Preserve explicit postMessage targetOrigin instead of wildcarding to '*'
 
   // Intercept MessageEvent.prototype.origin to ensure captchas and cross-frame handlers accept the message
   try {
@@ -6082,8 +6570,25 @@ const backendServer = http.createServer({ maxHeaderSize: 16 * 1024 }, async (req
     return;
   }
 
-  // Unified Web IPC Invoke Endpoint with 1-Hour Session Expiration Security
+  // Unified Web IPC Invoke Endpoint with HttpOnly Session Cookie + CSRF Protection
   if (req.url === '/api/invoke' && req.method === 'POST') {
+    const reqReferer = String(req.headers['referer'] || '');
+    try {
+      if (reqReferer) {
+        const refPath = new URL(reqReferer).pathname || '';
+        if (refPath.startsWith('/s/') || refPath.startsWith('/api/browser/gateway/')) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Forbidden: Proxied gateway frames cannot invoke SSH Desktop backend APIs.' }));
+          return;
+        }
+      }
+    } catch {}
+    if (String(req.headers['x-requested-with'] || '') !== 'SSHDesktop') {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Forbidden: Missing required X-Requested-With header.' }));
+      return;
+    }
+
     const bodyChunks = [];
     const MAX_INVOKE_BODY = 10 * 1024 * 1024; // 10 MiB measured in actual request bytes
     let bodyBytes = 0;
@@ -6129,11 +6634,33 @@ const backendServer = http.createServer({ maxHeaderSize: 16 * 1024 }, async (req
         }
 
         const result = await handleInvokeCommand(cmd, args, session, clientIp);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        const respHeaders = { 'Content-Type': 'application/json' };
+        const isSecureReq = Boolean(
+          req.socket?.encrypted ||
+          String(req.headers['x-forwarded-proto'] || '').toLowerCase().includes('https')
+        );
+        const secureFlag = isSecureReq ? '; Secure' : '';
+        if (cmd === 'auth_login' && result?.success && result?.token) {
+          respHeaders['Set-Cookie'] = `sshdesktop_session=${encodeURIComponent(result.token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}${secureFlag}`;
+          // Avoid leaking raw session token to client JS/localStorage; auth state relies on HttpOnly cookie
+          const sanitizedResult = { ...result };
+          delete sanitizedResult.token;
+          res.writeHead(200, respHeaders);
+          res.end(JSON.stringify({ result: sanitizedResult }));
+          return;
+        }
+        if (cmd === 'auth_logout') {
+          respHeaders['Set-Cookie'] = `sshdesktop_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secureFlag}`;
+        }
+        res.writeHead(200, respHeaders);
         res.end(JSON.stringify({ result }));
       } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err.message || String(err) }));
+        const status = Number.isInteger(err?.statusCode) ? err.statusCode : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: err.message || String(err),
+          ...(err?.code ? { code: err.code } : {})
+        }));
       }
     });
     return;
@@ -6628,16 +7155,31 @@ frontendServer.on('error', (err) => {
   process.exit(1);
 });
 
+export {
+  parseSocks5GreetingFrame,
+  parseSocks5UserPassFrame,
+  parseSocks5ConnectFrame,
+  validateVaultKeyName,
+  vaultEncryptValue,
+  vaultDecryptValue,
+  appendAuditEvent,
+  verifyAuditChain,
+  getSecurityPolicy,
+  enforcePolicyPermission,
+};
+
 // Backend is private. Only the frontend is exposed to the network.
-backendServer.listen(BACKEND_PORT, BACKEND_HOST, () => {
-  frontendServer.listen(FRONTEND_PORT, HOST, () => {
-    console.log('\n======================================================');
-    console.log('SSH Desktop Standalone Server Started');
-    console.log('======================================================');
-    console.log(`Frontend: http://${HOST}:${FRONTEND_PORT}`);
-    console.log(`Backend:  http://${BACKEND_HOST}:${BACKEND_PORT}`);
-    console.log(`Data:     ${DATA_DIR}`);
-    console.log('Backend access: localhost only');
-    console.log('======================================================\n');
+if (process.env.SSHDESKTOP_LIB_ONLY !== '1') {
+  backendServer.listen(BACKEND_PORT, BACKEND_HOST, () => {
+    frontendServer.listen(FRONTEND_PORT, HOST, () => {
+      console.log('\n======================================================');
+      console.log('SSH Desktop Standalone Server Started');
+      console.log('======================================================');
+      console.log(`Frontend: http://${HOST}:${FRONTEND_PORT}`);
+      console.log(`Backend:  http://${BACKEND_HOST}:${BACKEND_PORT}`);
+      console.log(`Data:     ${DATA_DIR}`);
+      console.log('Backend access: localhost only');
+      console.log('======================================================\n');
+    });
   });
-});
+}
