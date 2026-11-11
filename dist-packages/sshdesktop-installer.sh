@@ -35,6 +35,8 @@ install -m 0644 "${SCRIPT_DIR}/package.json" /opt/sshdesktop/package.json
 cat << EOF > /etc/systemd/system/sshdesktop.service
 [Unit]
 Description=SSH Desktop Web Desktop Server (Port ${PORT})
+StartLimitIntervalSec=60
+StartLimitBurst=5
 After=network.target
 
 [Service]
@@ -45,8 +47,6 @@ Environment=PORT=${PORT}
 Environment=HOST=0.0.0.0
 ExecStart=$(command -v node) /opt/sshdesktop/server.js
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 Restart=always
 
 [Install]
