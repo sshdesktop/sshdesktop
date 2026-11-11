@@ -211,7 +211,7 @@ pub async fn db_execute_query(
             || normalized.contains("/*")
             || normalized.contains("*/")
             || normalized.contains('#')
-            || normalized.chars().any(|c| c == '\\0' || (c.is_control() && c != '\\n' && c != '\\r' && c != '\\t'))
+            || normalized.chars().any(|c| c == '\0' || (c.is_control() && c != '\n' && c != '\r' && c != '\t'))
         {
             return Err("Read-only mode rejects SQL comments and control characters; use a database account with server-enforced read-only privileges for stronger guarantees.".into());
         }
