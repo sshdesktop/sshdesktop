@@ -271,7 +271,7 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
 }
 
 async function verifyPasswordAsync(auth, password) {
-  if (typeof password !== 'string' || !password) {
+  if (typeof password !== 'string' || !password || Buffer.byteLength(password, 'utf8') > 1024) {
     return false;
   }
   if (auth.password_hash && auth.password_salt) {
@@ -1682,20 +1682,21 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
 
       if (
         typeof newPassword !== 'string' ||
-        newPassword.length < 12
+        newPassword.length < 12 ||
+        Buffer.byteLength(newPassword, 'utf8') > 1024
       ) {
         return {
           success: false,
-          message: 'New password must contain at least 12 characters.'
+          message: 'New password must contain 12 to 1024 UTF-8 bytes.'
         };
       }
 
       const username = String(newUsername || '').trim();
 
-      if (!username) {
+      if (!username || username.length < 3 || username.length > 64 || /[\\x00-\\x1f\\x7f]/.test(username)) {
         return {
           success: false,
-          message: 'Username cannot be empty.'
+          message: 'Username must contain 3 to 64 characters and no control characters.'
         };
       }
 
@@ -1724,6 +1725,23 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
           if (fs.existsSync(p)) fs.unlinkSync(p);
         } catch {}
       }
+
+      // Revoke every other login token after a credential change. Keep only
+      // the authenticated session that performed the change.
+      for (const [activeToken] of activeSessions.entries()) {
+        if (!currentSession?.token || activeToken !== currentSession.token) {
+          activeSessions.delete(activeToken);
+        }
+      }
+      const preservedHash = currentSession?.token ? hashToken(currentSession.token) : null;
+      for (const [storedHash] of hashedSessions.entries()) {
+        if (!preservedHash || storedHash !== preservedHash) hashedSessions.delete(storedHash);
+      }
+      if (currentSession?.token) {
+        currentSession.username = username;
+        activeSessions.set(currentSession.token, currentSession);
+      }
+      persistSessions();
 
       return {
         success: true,
