@@ -342,7 +342,7 @@ pub async fn sftp_read_file(
 
     let escaped = shell_escape(&path);
     // Check the remote size before encoding to avoid transferring an oversized file.
-    let command = format!("head -c 50331649 -- '{}' | base64 | tr -d '\\n'", escaped);
+    let command = format!("size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 50331648 ] || {{ echo 'File exceeds 48 MiB limit' >&2; exit 1; }}; head -c 50331649 '{}' | base64 | tr -d '\\n'", escaped, escaped);
     let (encoded, code) = run_cmd(&state, &conn_id, &command).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
@@ -886,7 +886,7 @@ pub async fn sftp_read_file_base64(
         return Err("Invalid remote file path.".into());
     }
     let escaped = shell_escape(&path);
-    let cmd = format!("size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 50331648 ] || {{ echo 'File exceeds 48 MiB limit' >&2; exit 1; }}; base64 '{}' | tr -d '\\n'", escaped, escaped);
+    let cmd = format!("size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 50331648 ] || {{ echo 'File exceeds 48 MiB limit' >&2; exit 1; }}; head -c 50331649 '{}' | base64 | tr -d '\\n'", escaped, escaped);
     let (stdout, code) = run_cmd(&state, &conn_id, &cmd).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
