@@ -1482,7 +1482,7 @@ function verifySshHostKey(host, port, keyBlob) {
 
 function buildSshClientConfig(config, targetId) {
   const host = String(config.host || '').trim();
-  const port = Number(config.port || 22);
+  const port = config.port === undefined || config.port === null || config.port === '' ? 22 : Number(config.port);
   const username = String(config.username || 'root').trim();
   if (!host || host.length > 253 || /[\s/?#@]/.test(host)) {
     throw new Error('Invalid SSH host name or address.');
