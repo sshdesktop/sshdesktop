@@ -219,7 +219,16 @@ pub async fn ssh_list_local_keys() -> Result<Vec<LocalKeyInfo>, String> {
     if let Ok(entries) = std::fs::read_dir(&ssh_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() {
+            let file_type = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) => {
+                    log::warn!("SSH Desktop: Could not inspect key candidate {}: {}", path.display(), error);
+                    continue;
+                }
+            };
+            // Do not follow symlinks while enumerating private keys: a link in
+            // ~/.ssh could otherwise expose unrelated files outside the key store.
+            if file_type.is_file() {
                 let fname = path.file_name().unwrap_or_default().to_string_lossy();
                 let is_known = candidates.iter().any(|(c, _, _)| *c == fname);
                 if !is_known && (fname.ends_with(".pem") || fname.starts_with("id_")) && !fname.ends_with(".pub") && !fname.ends_with(".known_hosts") && fname != "config" && fname != "known_hosts" {
