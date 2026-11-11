@@ -463,12 +463,26 @@ pub async fn open_sftp(
     Ok(sftp)
 }
 
+fn validate_pty_parameters(term: &str, cols: u32, rows: u32) -> Result<(), &'static str> {
+    if term.is_empty()
+        || term.len() > 64
+        || term.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return Err("Invalid terminal type.");
+    }
+    if !(1..=1000).contains(&cols) || !(1..=1000).contains(&rows) {
+        return Err("Terminal dimensions must be between 1 and 1000.");
+    }
+    Ok(())
+}
+
 pub async fn open_pty_channel(
     handle: &ClientHandle,
     term: &str,
     cols: u32,
     rows: u32,
 ) -> Result<russh::Channel<russh::client::Msg>, Box<dyn std::error::Error + Send + Sync>> {
+    validate_pty_parameters(term, cols, rows)?;
     let channel = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         handle.channel_open_session()
