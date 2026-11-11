@@ -34,6 +34,42 @@ fn format_config_value(value: &str) -> String {
     }
 }
 
+/// Remove an SSH config inline comment without treating '#' inside quotes as a comment.
+fn strip_inline_comment(line: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut previous_was_whitespace = true;
+    for (index, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            previous_was_whitespace = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            previous_was_whitespace = false;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            previous_was_whitespace = false;
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+            previous_was_whitespace = false;
+            continue;
+        }
+        if ch == '#' && previous_was_whitespace {
+            return &line[..index];
+        }
+        previous_was_whitespace = ch.is_whitespace();
+    }
+    line
+}
+
 /// Decode a single SSH config value, preserving whitespace inside quotes.
 fn parse_config_value(raw: &str) -> String {
     let value = raw.trim();
@@ -123,7 +159,7 @@ fn parse_ssh_config_internal(
     };
 
     for raw_line in content.lines() {
-        let line = raw_line.trim();
+        let line = strip_inline_comment(raw_line).trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
