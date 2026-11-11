@@ -62,7 +62,8 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                     return (out, code);
                 }
                 Err(e) => {
-                    log::warn!("SSH Desktop: Persistent channel failed for cmd '{}': {}, falling back...", command, e);
+                    log::warn!("SSH Desktop: Persistent command channel failed for {}: {}; refusing automatic replay", conn_id, e);
+                    return (format!("SSH command channel failed; command was not retried to avoid duplicate execution: {}", e), -1);
                 }
             }
         }
@@ -140,6 +141,11 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
     };
     let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
+    if conn.config.auth_method.as_deref() == Some("key")
+        && selected_key_path.map(|path| path.trim().is_empty()).unwrap_or(true)
+    {
+        return ("Key authentication was selected, but no private key was configured.".into(), -1);
+    }
     if let Some(key_path) = selected_key_path {
         if crate::ssh::connection::resolve_key_path(key_path).is_none() {
             return (format!("Selected SSH identity '{}' could not be found. No alternate key will be used.", key_path), -1);
@@ -300,6 +306,9 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
     // ── 3. PEM / OpenSSH key auth via OpenSSH ──────────────────────────────
     let mut ssh_cmd = tokio::process::Command::new("ssh");
     ssh_cmd.kill_on_drop(true);
+    if !is_key_auth {
+        ssh_cmd.arg("-o").arg("PubkeyAuthentication=no");
+    }
     #[cfg(windows)]
     ssh_cmd.creation_flags(0x08000000);
 
@@ -536,7 +545,8 @@ pub async fn run_cmd_with_stdin(
                     return (stdout, code);
                 }
                 Err(e) => {
-                    log::warn!("SSH Desktop: Persistent channel with stdin failed for cmd '{}': {}, falling back...", command, e);
+                    log::warn!("SSH Desktop: Persistent stdin channel failed for {}: {}; refusing automatic replay", conn_id, e);
+                    return (format!("SSH input channel failed; operation was not retried to avoid duplicate execution: {}", e), -1);
                 }
             }
         }
@@ -559,6 +569,11 @@ pub async fn run_cmd_with_stdin(
         _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
     };
     let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
+    if conn.config.auth_method.as_deref() == Some("key")
+        && selected_key_path.map(|path| path.trim().is_empty()).unwrap_or(true)
+    {
+        return ("Key authentication was selected, but no private key was configured.".into(), -1);
+    }
     if let Some(key_path) = selected_key_path {
         if crate::ssh::connection::resolve_key_path(key_path).is_none() {
             return (format!("Selected SSH identity '{}' could not be found. No alternate key will be used.", key_path), -1);
@@ -763,7 +778,10 @@ pub async fn ssh_exec(
 ) -> Result<CommandResult, String> {
     let start = Instant::now();
     let trimmed = command.trim();
-    
+    if trimmed.is_empty() || command.len() > 1024 * 1024 || command.contains('\0') {
+        return Err("SSH command must be non-empty, contain no NUL bytes, and be at most 1 MiB.".into());
+    }
+
     // First, verify that a connection exists or can be resolved
     if crate::ssh::connection::resolve_connection(&state, &conn_id).is_none() {
         return Err(format!(
@@ -773,7 +791,7 @@ pub async fn ssh_exec(
     }
 
     // If command explicitly starts with sudo or contains sudo in pipeline, execute via run_cmd_priv
-    let needs_priv = trimmed.starts_with("sudo ") || trimmed.contains(" sudo ") || trimmed.contains("| sudo ");
+    let needs_priv = trimmed.starts_with("sudo ");
     let (stdout, stderr, exit_code) = if needs_priv {
         let (out, code) = run_cmd_priv(&state, &conn_id, trimmed).await;
         (out, String::new(), code)
@@ -793,10 +811,11 @@ pub async fn ssh_exec(
         if let Some(handle) = handle_opt {
             let (p_out, p_err, p_code) = match crate::ssh::session::run_exec_channel(&handle, &command).await {
                 Ok((s_out, s_err, s_code)) => (s_out, s_err, s_code),
-                Err(_) => {
-                    let (direct_out, direct_code) = run_cmd(&state, &conn_id, &command).await;
-                    (direct_out, String::new(), direct_code)
-                }
+                Err(error) => (
+                    format!("SSH command channel failed; command was not retried to avoid duplicate execution: {}", error),
+                    String::new(),
+                    -1,
+                ),
             };
 
             let combined = format!("{}\n{}", p_out, p_err);
@@ -816,7 +835,7 @@ pub async fn ssh_exec(
                     .unwrap_or(true);
 
                 if can_elevate {
-                    log::info!("SSH Desktop: Persistent channel detected permission denial for '{}', attempting auto-elevation", command);
+                    log::info!("SSH Desktop: Persistent channel detected a permission denial; attempting configured privilege handling");
                     let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &command).await;
                     if priv_code == 0 || !priv_out.is_empty() {
                         (priv_out, String::new(), priv_code)
@@ -850,7 +869,7 @@ pub async fn ssh_exec(
                     .unwrap_or(true);
 
                 if can_elevate {
-                    log::info!("SSH Desktop: Detected permission denial for '{}', attempting auto-elevation", command);
+                    log::info!("SSH Desktop: Detected a permission denial; attempting configured privilege handling");
                     let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &command).await;
                     if priv_code == 0 || !priv_out.is_empty() {
                         (priv_out, String::new(), priv_code)
@@ -891,7 +910,7 @@ pub async fn ssh_exec_stream(
     {
         return Err("Invalid execution stream ID.".into());
     }
-    if conn_id.trim().is_empty() || command.len() > 1024 * 1024 {
+    if conn_id.trim().is_empty() || command.trim().is_empty() || command.len() > 1024 * 1024 || command.contains('\0') {
         return Err("A connection ID and command (maximum 1 MiB) are required.".into());
     }
     // Reserve the ID under one lock from duplicate check through insertion.
@@ -925,10 +944,20 @@ pub async fn ssh_exec_stream(
         // unprivileged operation and could incorrectly report success.
         if !command_clone.trim_start().starts_with("sudo ") {
             if let Some(handle) = handle_opt {
-                if crate::ssh::session::run_stream_channel(
+                match crate::ssh::session::run_stream_channel(
                     &app_clone, &handle, &stream_id_clone, &command_clone
-                ).await.is_ok() {
-                    return;
+                ).await {
+                    Ok(_) => return,
+                    Err(error) => {
+                        let _ = app_clone.emit("exec-output", StreamChunk {
+                            stream_id: stream_id_clone.clone(),
+                            data: format!("\r\n[SSH stream failed; command was not retried to avoid duplicate execution: {}]\r\n", error),
+                            is_stderr: true,
+                            is_done: true,
+                            exit_code: Some(-1),
+                        });
+                        return;
+                    }
                 }
             }
         }
