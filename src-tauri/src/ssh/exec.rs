@@ -131,7 +131,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
             let is_key_auth = match conn_clone.config.auth_method.as_deref() {
                 Some("password") => false,
                 Some("key") => true,
-                _ => conn_clone.config.private_key_path.is_some(),
+                _ => conn_clone.config.private_key_path.is_some() || conn_clone.config.password.is_none(),
             };
             if let Ok(handle) = crate::ssh::session::connect_session_with_passphrase_auth(
                 &conn_clone.config.host,
@@ -145,7 +145,6 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                 let mut map = state_sessions.lock().await;
                 let arc = std::sync::Arc::new(handle);
                 map.insert(cid, arc.clone());
-                map.entry("default".to_string()).or_insert_with(|| arc.clone());
                 log::info!("SSH Desktop: Lazily established persistent SSH transport for {}", conn_clone.config.host);
             }
         });
@@ -162,17 +161,20 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         Some("key") => true,
         _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
     };
-    let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
+    let configured_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
     if conn.config.auth_method.as_deref() == Some("key")
-        && selected_key_path.map(|path| path.trim().is_empty()).unwrap_or(true)
+        && configured_key_path.map(|path| path.trim().is_empty()).unwrap_or(true)
     {
         return ("Key authentication was selected, but no private key was configured.".into(), -1);
     }
-    if let Some(key_path) = selected_key_path {
-        if crate::ssh::connection::resolve_key_path(key_path).is_none() {
-            return (format!("Selected SSH identity '{}' could not be found. No alternate key will be used.", key_path), -1);
-        }
-    }
+    let resolved_key_path = match configured_key_path {
+        Some(path) => match crate::ssh::connection::resolve_key_path(path) {
+            Some(resolved) => Some(resolved),
+            None => return (format!("Selected SSH identity '{}' could not be found. No alternate key will be used.", path), -1),
+        },
+        None => None,
+    };
+    let selected_key_path = resolved_key_path.as_deref();
 
     // ── 1. Password auth via plink (only if not key auth) ───────────────────
     if !is_key_auth {
@@ -238,10 +240,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                         }
                         Ok(Err(e)) => {
                             log::warn!("SSH Desktop: plink wait error for {}: {}", host, e);
-                            if attempt == 0 {
-                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                                continue;
-                            }
+                            return (format!("Plink reported a wait error after the remote command may have started: {}", e), -1);
                         }
                         Err(_) => {
                             log::warn!("SSH Desktop: plink command timed out for {}", host);
@@ -272,10 +271,8 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                 .arg("-P").arg(&port)
                 .arg("-l").arg(&user);
 
-            if let Some(key_path) = &conn.config.private_key_path {
-                if crate::ssh::connection::resolve_key_path(key_path).is_some() {
-                    cmd.arg("-i").arg(key_path);
-                }
+            if let Some(key_path) = selected_key_path {
+                cmd.arg("-i").arg(key_path);
             }
 
             cmd.arg(&host)
@@ -311,10 +308,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                     }
                     Ok(Err(e)) => {
                         log::warn!("SSH Desktop: plink ppk wait error for {}: {}", host, e);
-                        if attempt == 0 {
-                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                            continue;
-                        }
+                        return (format!("Plink reported a wait error after the remote command may have started: {}", e), -1);
                     }
                     Err(_) => {
                         log::warn!("SSH Desktop: Plink key command timed out for {}", host);
@@ -398,13 +392,13 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
 
     let conn = match conn_opt {
         Some(c) => c,
-        None => return run_cmd(state, conn_id, &normalized_cmd).await,
+        None => return ("No saved SSH connection is available for privileged execution; refusing to run without privilege handling.".into(), -1),
     };
 
     let username = &conn.config.username;
 
     // ── 0th Condition: Fast check if user is already known to lack sudo ────
-    if let Some(priv_info) = crate::ssh::connection::get_cached_user_privilege(conn_id) {
+    if let Some(priv_info) = crate::ssh::connection::get_cached_user_privilege_for_user(conn_id, username) {
         if !priv_info.has_sudo && !priv_info.is_root {
             let msg = format!(
                 "Permission Denied: User '{}' does not have administrator (sudo) privileges on this server.",
@@ -439,7 +433,7 @@ pub async fn run_cmd_priv(state: &AppState, conn_id: &str, command: &str) -> (St
         || lower_out.contains("is not allowed to execute")
         || lower_out.contains("not in sudoers")
     {
-        if let Some(mut p) = crate::ssh::connection::get_cached_user_privilege(conn_id) {
+        if let Some(mut p) = crate::ssh::connection::get_cached_user_privilege_for_user(conn_id, username) {
             p.has_sudo = false;
             p.sudo_type = "none".to_string();
             crate::ssh::connection::set_cached_user_privilege(conn_id, p);
@@ -768,7 +762,7 @@ pub async fn run_cmd_priv_with_stdin(
 
     let conn = match conn_opt {
         Some(c) => c,
-        None => return run_cmd_with_stdin(state, conn_id, raw_cmd, stdin_data).await,
+        None => return ("No saved SSH connection is available for privileged input; refusing to run without privilege handling.".into(), -1),
     };
 
     let username = &conn.config.username;
@@ -805,6 +799,9 @@ pub async fn run_cmd_priv_with_stdin(
                 "sudo -S -p '' -- sh -c '{}' 2>&1",
                 raw_cmd.replace('\'', r"'\''")
             );
+            if pwd.len().saturating_add(1).saturating_add(stdin_data.len()) > MAX_STDIN_BYTES {
+                return ("Privileged SSH input, including the sudo password, exceeds the 64 MiB safety limit.".into(), -1);
+            }
             let mut sudo_input = Vec::with_capacity(pwd.len() + 1 + stdin_data.len());
             sudo_input.extend_from_slice(pwd.as_bytes());
             sudo_input.push(b'\n');
@@ -879,7 +876,7 @@ pub async fn ssh_exec(
             );
 
             if is_permission_denial {
-                let can_elevate = crate::ssh::connection::get_cached_user_privilege(&conn_id)
+                let can_elevate = crate::ssh::connection::get_cached_user_privilege_for_user(&conn_id, &crate::ssh::connection::resolve_connection(&state, &conn_id).map(|c| c.config.username).unwrap_or_default())
                     .map(|p| p.has_sudo || p.is_root)
                     .unwrap_or(true);
 
@@ -913,7 +910,7 @@ pub async fn ssh_exec(
             );
 
             if is_permission_denial {
-                let can_elevate = crate::ssh::connection::get_cached_user_privilege(&conn_id)
+                let can_elevate = crate::ssh::connection::get_cached_user_privilege_for_user(&conn_id, &crate::ssh::connection::resolve_connection(&state, &conn_id).map(|c| c.config.username).unwrap_or_default())
                     .map(|p| p.has_sudo || p.is_root)
                     .unwrap_or(true);
 
