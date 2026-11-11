@@ -316,7 +316,8 @@ pub async fn ssh_trust_host_key(
     let public_key_b64 = public_key_b64.trim();
 
     if host.is_empty()
-        || host.chars().any(|c| c.is_whitespace() || c.is_control() || c == ',' || c == '!')
+        || host.len() > 253
+        || host.chars().any(|c| c.is_whitespace() || c.is_control() || c == ',' || c == '!' || c == '#')
         || port == 0
     {
         return Err("Invalid host or port for known_hosts entry".into());
