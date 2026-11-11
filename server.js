@@ -507,8 +507,6 @@ function extractSessionToken(req, payload) {
   if (req?.url) {
     try {
       const u = new URL(req.url, 'http://localhost');
-      const qToken = u.searchParams.get('token');
-      if (qToken) return qToken.trim();
     } catch {}
   }
   return null;
@@ -5615,7 +5613,7 @@ function handleWsConnection(ws, req) {
   const cookieMatch = req.headers.cookie ? req.headers.cookie.match(/(?:^|;\s*)sshdesktop_session=([^;]+)/) : null;
   const cookieToken = cookieMatch ? decodeURIComponent(cookieMatch[1].trim()) : null;
   const secProtoToken = req.headers['sec-websocket-protocol'] ? req.headers['sec-websocket-protocol'].split(',')[0].trim() : null;
-  const token = secProtoToken || cookieToken || req.headers['x-session-token'] || urlObj.searchParams.get('token');
+  const token = secProtoToken || cookieToken || req.headers['x-session-token'];
   const session = getSession(token);
   if (!session) {
     ws.close(1008, 'Session expired or unauthorized (1 hour limit)');
