@@ -4769,7 +4769,13 @@ function handleBrowserGatewayUpgrade(req, socket, head) {
 function handleBrowserGatewayRequest(req, res) {
   // 1. Query-based proxy redirect: /api/browser/proxy?url=...
   if (req.url.startsWith('/api/browser/proxy')) {
-    const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    let urlObj;
+    try { urlObj = new URL(req.url, 'http://' + (req.headers.host || 'localhost')); }
+    catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid browser proxy request URL.' }));
+      return;
+    }
     const targetUrl = urlObj.searchParams.get('url');
     const connId = urlObj.searchParams.get('connId') || 'default';
     if (!targetUrl) {
@@ -5785,7 +5791,9 @@ backendServer.keepAliveTimeout = 5000;
 const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
 
 function handleWsConnection(ws, req) {
-  const urlObj = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
+  let urlObj;
+  try { urlObj = new URL(req.url, 'http://' + (req.headers.host || 'localhost')); }
+  catch { ws.close(1008, 'Invalid WebSocket request URL'); return; }
   const cookieMatch = req.headers.cookie ? req.headers.cookie.match(/(?:^|;\s*)sshdesktop_session=([^;]+)/) : null;
   let cookieToken = null;
   if (cookieMatch) {
