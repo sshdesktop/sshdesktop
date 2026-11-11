@@ -216,7 +216,7 @@ async fn execute_remote_ssh_request(
         return Err(format!("Unsupported HTTP method '{}'", req.method));
     }
     let timeout_secs = req.timeout_seconds.unwrap_or(30).clamp(1, 300);
-    let mut curl_args = format!("-s -S -i --globoff --proto =http,https --proto-redir =http,https -X {} --max-time {} --max-filesize 10485760", method, timeout_secs);
+    let mut curl_args = format!("-s -S -i --globoff --proto =http,https --proto-redir =http,https -X {} --max-time {} --max-filesize 7340032", method, timeout_secs);
 
     if req.follow_redirects.unwrap_or(true) {
         curl_args.push_str(" -L");
@@ -312,7 +312,7 @@ async fn execute_remote_ssh_request(
     // successful base64 process at the end of the pipeline.
     let pipeline = if let Some(body_bytes) = body_bytes_opt {
         let b64 = to_base64(&body_bytes);
-        format!("printf '%s' '{}' | base64 -d | curl {} --data-binary @- 2>&1 | head -c 10485760 | base64", b64, curl_args)
+        format!("printf '%s' '{}' | base64 -d | curl {} --data-binary @- 2>&1 | head -c 7340032 | base64", b64, curl_args)
     } else {
         format!("curl {} 2>&1 | head -c 10485760 | base64", curl_args)
     };
