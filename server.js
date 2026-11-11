@@ -1443,6 +1443,7 @@ function buildSshClientConfig(config, targetId) {
     connectConfig.tryKeyboard = true;
   } else {
     // STRICT KEY AUTHENTICATION (PEM/PPK: In-Memory string or On-Disk file)
+    connectConfig.tryKeyboard = false;
     if (trimmedKey) {
       if (trimmedKey.includes('PRIVATE KEY') || trimmedKey.includes('\n')) {
         // In-memory PEM string
