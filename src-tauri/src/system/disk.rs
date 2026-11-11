@@ -545,15 +545,18 @@ command -v swapon >/dev/null 2>&1 || {{ echo "swapon is required for partition-t
 DEV_REAL=$(readlink -f -- "$DEV") || exit 33
 DEVICE_NODES=$(lsblk -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate target disk devices; refusing partition-table replacement." >&2; exit 34; }}
 [ -n "$DEVICE_NODES" ] || {{ echo "No block-device tree returned; refusing partition-table replacement." >&2; exit 35; }}
+SWAP_NODES=$(swapon --noheadings --raw --show=NAME 2>/dev/null) || {{ echo "Unable to inspect active swap devices; refusing partition-table replacement." >&2; exit 36; }}
 for NODE in $DEVICE_NODES; do
     if findmnt -rn -S "$NODE" >/dev/null 2>&1; then
         echo "Refusing to replace partition table: $NODE is mounted." >&2
         exit 31
     fi
-    if swapon --noheadings --raw --show=NAME 2>/dev/null | grep -Fxq -- "$NODE"; then
-        echo "Refusing to replace partition table: $NODE is active swap." >&2
-        exit 32
-    fi
+    for SWAP_NODE in $SWAP_NODES; do
+        if [ "$(readlink -f -- "$SWAP_NODE" 2>/dev/null)" = "$(readlink -f -- "$NODE" 2>/dev/null)" ]; then
+            echo "Refusing to replace partition table: $NODE is active swap." >&2
+            exit 32
+        fi
+    done
 done
 {ensure_parted}
 if command -v parted >/dev/null 2>&1; then
@@ -635,15 +638,18 @@ command -v findmnt >/dev/null 2>&1 || {{ echo "findmnt is required for partition
 command -v swapon >/dev/null 2>&1 || {{ echo "swapon is required for partition safety checks." >&2; exit 127; }}
 DEVICE_NODES=$(lsblk -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate target disk devices; refusing partition creation." >&2; exit 36; }}
 [ -n "$DEVICE_NODES" ] || {{ echo "No block-device tree returned; refusing partition creation." >&2; exit 37; }}
+SWAP_NODES=$(swapon --noheadings --raw --show=NAME 2>/dev/null) || {{ echo "Unable to inspect active swap devices; refusing partition creation." >&2; exit 38; }}
 for NODE in $DEVICE_NODES; do
     if findmnt -rn -S "$NODE" >/dev/null 2>&1; then
         echo "Refusing to create a partition: $NODE is mounted." >&2
         exit 34
     fi
-    if swapon --noheadings --raw --show=NAME 2>/dev/null | grep -Fxq -- "$NODE"; then
-        echo "Refusing to create a partition: $NODE is active swap." >&2
-        exit 35
-    fi
+    for SWAP_NODE in $SWAP_NODES; do
+        if [ "$(readlink -f -- "$SWAP_NODE" 2>/dev/null)" = "$(readlink -f -- "$NODE" 2>/dev/null)" ]; then
+            echo "Refusing to create a partition: $NODE is active swap." >&2
+            exit 35
+        fi
+    done
 done
 
 # Partition-table initialization is intentionally a separate, explicit
@@ -838,6 +844,7 @@ command -v swapon >/dev/null 2>&1 || {{ echo "swapon is required for partition d
 DEVICE_NODES=$(lsblk -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate disk descendants; refusing partition deletion." >&2; exit 24; }}
 ANCESTOR_NODES=$(lsblk -s -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate disk ancestors; refusing partition deletion." >&2; exit 25; }}
 [ -n "$DEVICE_NODES" ] || {{ echo "No block-device tree returned; refusing partition deletion." >&2; exit 26; }}
+SWAP_NODES=$(swapon --noheadings --raw --show=NAME 2>/dev/null) || {{ echo "Unable to inspect active swap devices; refusing partition deletion." >&2; exit 28; }}
 PDEV_FOUND=0
 for NODE in $DEVICE_NODES; do
     if [ "$(readlink -f -- "$NODE" 2>/dev/null)" = "$PDEV_REAL" ]; then
@@ -854,10 +861,12 @@ for NODE in $DEVICE_NODES $ANCESTOR_NODES; do
         echo "Refusing partition deletion: $NODE is mounted. Unmount it explicitly first." >&2
         exit 26
     fi
-    if swapon --noheadings --raw --show=NAME 2>/dev/null | grep -Fxq -- "$NODE"; then
-        echo "Refusing partition deletion: $NODE is active swap. Disable it explicitly first." >&2
-        exit 27
-    fi
+    for SWAP_NODE in $SWAP_NODES; do
+        if [ "$(readlink -f -- "$SWAP_NODE" 2>/dev/null)" = "$(readlink -f -- "$NODE" 2>/dev/null)" ]; then
+            echo "Refusing partition deletion: $NODE is active swap. Disable it explicitly first." >&2
+            exit 27
+        fi
+    done
 done
 
 if command -v parted >/dev/null 2>&1; then
@@ -1144,15 +1153,18 @@ command -v swapon >/dev/null 2>&1 || {{ echo "swapon is required for safe filesy
 DEV_REAL=$(readlink -f -- "$DEV") || exit 53
 DEVICE_NODES=$(lsblk -nrpo NAME "$DEV_REAL") || {{ echo "Unable to enumerate target device tree; refusing filesystem formatting." >&2; exit 54; }}
 [ -n "$DEVICE_NODES" ] || {{ echo "No block-device tree returned; refusing filesystem formatting." >&2; exit 55; }}
+SWAP_NODES=$(swapon --noheadings --raw --show=NAME 2>/dev/null) || {{ echo "Unable to inspect active swap devices; refusing filesystem formatting." >&2; exit 56; }}
 for NODE in $DEVICE_NODES; do
     if findmnt -rn -S "$NODE" >/dev/null 2>&1; then
         echo "Refusing to format: $NODE is mounted. Unmount it explicitly first." >&2
         exit 51
     fi
-    if swapon --noheadings --raw --show=NAME 2>/dev/null | grep -Fxq -- "$NODE"; then
-        echo "Refusing to format: $NODE is active swap. Disable it explicitly first." >&2
-        exit 52
-    fi
+    for SWAP_NODE in $SWAP_NODES; do
+        if [ "$(readlink -f -- "$SWAP_NODE" 2>/dev/null)" = "$(readlink -f -- "$NODE" 2>/dev/null)" ]; then
+            echo "Refusing to format: $NODE is active swap. Disable it explicitly first." >&2
+            exit 52
+        fi
+    done
 done
 "#,
         dev_arg
