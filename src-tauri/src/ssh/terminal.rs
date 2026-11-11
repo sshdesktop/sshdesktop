@@ -395,6 +395,9 @@ pub async fn terminal_create(
 
     log::info!("SSH Desktop: Spawning interactive terminal PTY for {}@{}:{}", user, host, port);
 
+    // If terminal setup fails or its owning task is cancelled, do not leave
+    // an orphaned SSH child process running in the background.
+    cmd.kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn SSH process: {}", e))?;
     let child_pid = child.id();
 
