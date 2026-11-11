@@ -596,7 +596,7 @@ function runRemoteExec(client, command, timeoutMs = 60000) {
     let outputBytes = 0;
     let outputTruncated = false;
     const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
-    const TRUNCATION_MARKER = '\\n[Output truncated: size limit reached]';
+    const TRUNCATION_MARKER = '\n[Output truncated: size limit reached]';
 
     const timer = setTimeout(() => {
       timedOut = true;
