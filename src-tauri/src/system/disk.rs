@@ -765,7 +765,7 @@ if [ -n "$FS" ] && [ "$FS" != "none" ]; then
         btrfs) mkfs.btrfs -f "$NEW_PART" ;;
         vfat|fat32) mkfs.vfat -F 32 "$NEW_PART" ;;
         ntfs)  mkfs.ntfs -f -q "$NEW_PART" ;;
-        swap)  mkswap -f "$NEW_PART" ;;
+        swap|linux-swap) mkswap -f "$NEW_PART" ;;
     esac
 fi
 
@@ -1066,11 +1066,11 @@ esac
 partprobe "$DEV" 2>/dev/null || true
 "#,
         ensure_parted = ensure_parted_script(),
-        dev = dev_path,
+        dev = shell_quote(&dev_path),
         num = part_number,
-        end = clean_end,
-        pdev = pdev,
-        fs = fs,
+        end = shell_quote(&clean_end),
+        pdev = shell_quote(&pdev),
+        fs = shell_quote(&fs),
     );
 
     let (stdout, code) = run_sudo(&state, &conn_id, &resize_script).await;
@@ -1378,7 +1378,7 @@ swapoff -a 2>/dev/null || true
 
 if [ "$TARGET_MB" -eq 0 ]; then
     rm -f /swapfile
-    sed -i '\#/swapfile#d' /etc/fstab 2>/dev/null || true
+    sed -i '\|^/swapfile[[:space:]]|d' /etc/fstab 2>/dev/null || true
     echo "Swapfile successfully removed."
     exit 0
 fi
@@ -1473,13 +1473,19 @@ pub async fn disk_manage_tmp(
     persist: bool,
 ) -> Result<String, String> {
     let clean_size = size.trim().to_uppercase();
-    if clean_size.is_empty() {
-        return Err("Size cannot be empty (e.g. '2G', '4G').".to_string());
+    let is_valid_size = !clean_size.is_empty()
+        && clean_size.len() <= 16
+        && clean_size.chars().enumerate().all(|(i, c)| {
+            c.is_ascii_digit() || (i == clean_size.len() - 1 && matches!(c, 'K' | 'M' | 'G' | 'T' | '%'))
+        })
+        && clean_size.chars().next().map_or(false, |c| c.is_ascii_digit());
+    if !is_valid_size {
+        return Err("Invalid /tmp size: expected integer with optional K/M/G/T/% suffix (e.g. '2G', '512M').".to_string());
     }
 
     let script = format!(r#"
 set -e
-SIZE="{size}"
+SIZE={size}
 
 # Check if /tmp is already mounted as tmpfs
 if findmnt -n -o FSTYPE /tmp 2>/dev/null | grep -qi "tmpfs"; then
@@ -1490,8 +1496,8 @@ fi
 
 # Persist in /etc/fstab if requested
 if [ "{persist}" = "true" ]; then
-    if grep -qs '[[:space:]]/tmp[[:space:]]' /etc/fstab; then
-        sed -i "s|.*[[:space:]]/tmp[[:space:]].*|tmpfs /tmp tmpfs defaults,noatime,mode=1777,size=$SIZE 0 0|" /etc/fstab
+    if grep -qEs '^[[:space:]]*[^#].*[[:space:]]/tmp[[:space:]]' /etc/fstab; then
+        sed -i -E "s|^([[:space:]]*[^#].*[[:space:]]/tmp[[:space:]].*)|tmpfs /tmp tmpfs defaults,noatime,mode=1777,size=$SIZE 0 0|" /etc/fstab
     else
         printf '\ntmpfs /tmp tmpfs defaults,noatime,mode=1777,size=%s 0 0\n' "$SIZE" >> /etc/fstab
     fi
@@ -1499,7 +1505,7 @@ fi
 
 systemctl daemon-reload 2>/dev/null || true
 echo "Successfully updated /tmp space to $SIZE (tmpfs active)."
-"#, size = clean_size, persist = persist);
+"#, size = shell_quote(&clean_size), persist = persist);
 
     let (stdout, code) = run_sudo(&state, &conn_id, &script).await;
     if code != 0 {

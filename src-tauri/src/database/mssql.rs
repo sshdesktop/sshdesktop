@@ -22,10 +22,12 @@ pub async fn connect_mssql(
     ));
     tiberius_cfg.database(&config.database);
 
-    // Set encryption according to config.use_ssl
+    // Set encryption according to config.use_ssl without silent cleartext downgrade
     if config.use_ssl {
         tiberius_cfg.encryption(tiberius::EncryptionLevel::Required);
-        tiberius_cfg.trust_cert();
+        if !config.ssl_verify {
+            tiberius_cfg.trust_cert();
+        }
     } else {
         tiberius_cfg.encryption(tiberius::EncryptionLevel::NotSupported);
     }
@@ -36,31 +38,9 @@ pub async fn connect_mssql(
         .map_err(|e| format!("SQL Server TCP connect error: {}", e))?;
     tcp.set_nodelay(true).map_err(|e| e.to_string())?;
 
-    let client_res = TiberiusClient::connect(tiberius_cfg.clone(), tcp.compat_write()).await;
-    let mut client = match client_res {
-        Ok(c) => c,
-        Err(e) => {
-            // Prelogin handshake fallback: toggle encryption mode in case of server-side mismatch
-            let mut alt_cfg = tiberius_cfg.clone();
-            if config.use_ssl {
-                alt_cfg.encryption(tiberius::EncryptionLevel::NotSupported);
-            } else {
-                alt_cfg.encryption(tiberius::EncryptionLevel::Required);
-                alt_cfg.trust_cert();
-            }
-            let alt_tcp = TcpStream::connect(&tcp_addr)
-                .await
-                .map_err(|te| format!("SQL Server TCP connect error: {}", te))?;
-            alt_tcp.set_nodelay(true).map_err(|te| te.to_string())?;
-            match TiberiusClient::connect(alt_cfg.clone(), alt_tcp.compat_write()).await {
-                Ok(c) => {
-                    tiberius_cfg = alt_cfg;
-                    c
-                }
-                Err(_) => return Err(format!("TDS handshake error: {}", e)),
-            }
-        }
-    };
+    let mut client = TiberiusClient::connect(tiberius_cfg.clone(), tcp.compat_write())
+        .await
+        .map_err(|e| format!("TDS handshake error: {}", e))?;
 
     let row = client
         .query("SELECT @@VERSION", &[])
@@ -129,9 +109,8 @@ pub async fn execute_query_mssql(
     for stmt in &statements {
         let stmt_start = Instant::now();
         let normalized = stmt.trim_start().to_ascii_uppercase();
-        let is_bounded_select = normalized.starts_with("SELECT") && !normalized.contains(" INTO ");
+        let is_bounded_select = (normalized.starts_with("SELECT") || normalized.starts_with("WITH")) && !normalized.contains(" INTO ");
         let is_mutation = !is_bounded_select
-            && !normalized.starts_with("WITH")
             && !normalized.starts_with("EXEC")
             && !normalized.starts_with("SHOW")
             && !normalized.starts_with("DESCRIBE")
@@ -162,17 +141,24 @@ pub async fn execute_query_mssql(
                 .await.map_err(|e| format!("MSSQL row limit setup failed: {}", e))?
                 .into_first_result().await.map_err(|e| format!("MSSQL row limit setup failed: {}", e))?;
         }
-        let stream = client
-            .simple_query(stmt)
-            .await
-            .map_err(|e| format!("MSSQL query error: {}", e))?;
-
-        let mut rows = stream.into_first_result().await
-            .map_err(|e| format!("MSSQL result retrieval error: {}", e))?;
+        let query_res = async {
+            let stream = client
+                .simple_query(stmt)
+                .await
+                .map_err(|e| format!("MSSQL query error: {}", e))?;
+            stream
+                .into_first_result()
+                .await
+                .map_err(|e| format!("MSSQL result retrieval error: {}", e))
+        }
+        .await;
         if is_bounded_select {
             client.simple_query("SET ROWCOUNT 0").await
                 .map_err(|e| format!("MSSQL row limit reset failed: {}", e))?
                 .into_first_result().await.map_err(|e| format!("MSSQL row limit reset failed: {}", e))?;
+        }
+        let mut rows = query_res?;
+        if is_bounded_select {
             if rows.len() > remaining_rows {
                 rows.truncate(remaining_rows);
                 warnings.push(format!("Statement result truncated to {} rows.", remaining_rows));

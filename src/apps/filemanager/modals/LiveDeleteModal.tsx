@@ -69,6 +69,8 @@ export const LiveDeleteModal: React.FC<LiveDeleteModalProps> = ({
             }
           }
           if (chunk.is_done) {
+            unlisten?.();
+            unlisten = null;
             if (chunk.exit_code === 0) {
               setStatus('completed');
               setLogLines((prev) => [...prev, `[SUCCESS] Successfully removed all ${items.length} item(s).`]);

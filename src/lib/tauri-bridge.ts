@@ -192,6 +192,10 @@ function setupWebTerminalSocket(termId: string, connId: string, cols: number, ro
     const session = getStoredSession();
     const wsUrl = `${protocol}//${window.location.host}/ws/terminal?termId=${encodeURIComponent(termId)}&connId=${encodeURIComponent(connId)}&cols=${cols}&rows=${rows}`;
     lastKnownTerminalSizes.set(termId, { rows, cols });
+    const oldWs = webTerminalSockets.get(termId);
+    if (oldWs && oldWs.readyState !== WebSocket.CLOSED) {
+      try { oldWs.close(); } catch {}
+    }
     const ws = new WebSocket(wsUrl, session?.token ? [session.token] : undefined);
 
     ws.onopen = () => {
@@ -331,6 +335,7 @@ export async function terminalResize(terminalId: string, rows: number, cols: num
 }
 
 export async function terminalClose(terminalId: string): Promise<void> {
+  lastKnownTerminalSizes.delete(terminalId);
   if (!isTauri()) {
     const ws = webTerminalSockets.get(terminalId);
     if (ws) {

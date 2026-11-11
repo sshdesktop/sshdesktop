@@ -464,10 +464,16 @@ pub async fn ssh_start_tunnel(
 
         cmd.arg("-p").arg(&ssh_port)
             .arg("-o").arg("StrictHostKeyChecking=yes")
+            .arg("-o").arg("BatchMode=yes")
+            .arg("-o").arg("IdentitiesOnly=yes")
             .arg("-o").arg("ExitOnForwardFailure=yes")
             .arg("-o").arg("ConnectTimeout=10")
             .arg("-o").arg("ServerAliveInterval=30")
             .arg("-o").arg("ServerAliveCountMax=3");
+
+        if !is_key_auth {
+            cmd.arg("-o").arg("PubkeyAuthentication=no");
+        }
 
         if let Some(key) = selected_key_path {
             cmd.arg("-i").arg(key);
@@ -724,7 +730,7 @@ pub async fn ssh_stop_tunnel(tunnel_id: String) -> Result<(), String> {
                 *k == &tunnel_id 
                 || v.info.tunnel_id == tunnel_id 
                 || v.info.local_port.to_string() == tunnel_id
-                || k.contains(&tunnel_id)
+                || v.info.conn_id == tunnel_id
             }).map(|(k, _)| k.clone());
             if let Some(k) = matching_key {
                 if let Some(mut active) = lock.remove(&k) {
@@ -864,10 +870,16 @@ pub async fn ssh_start_socks5(
             .arg("-D").arg(format!("127.0.0.1:{}", effective_local_port))
             .arg("-p").arg(&ssh_port)
             .arg("-o").arg("StrictHostKeyChecking=yes")
+            .arg("-o").arg("BatchMode=yes")
+            .arg("-o").arg("IdentitiesOnly=yes")
             .arg("-o").arg("ExitOnForwardFailure=yes")
             .arg("-o").arg("ConnectTimeout=10")
             .arg("-o").arg("ServerAliveInterval=30")
             .arg("-o").arg("ServerAliveCountMax=3");
+
+        if !is_key_auth {
+            cmd.arg("-o").arg("PubkeyAuthentication=no");
+        }
 
         if let Some(key) = selected_key_path {
             cmd.arg("-i").arg(key);

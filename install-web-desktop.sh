@@ -74,6 +74,11 @@ if [ -f "$CURRENT_DIR/server.js" ] && [ -d "$CURRENT_DIR/dist" ]; then
   cp -r "$CURRENT_DIR/dist" "$INSTALL_DIR/"
   cp "$CURRENT_DIR/server.js" "$INSTALL_DIR/"
   cp "$CURRENT_DIR/package.json" "$INSTALL_DIR/"
+  if [ -f "$CURRENT_DIR/embedded-dist.js" ]; then
+    cp "$CURRENT_DIR/embedded-dist.js" "$INSTALL_DIR/"
+  else
+    echo 'export const EMBEDDED_FILES = {};' > "$INSTALL_DIR/embedded-dist.js"
+  fi
 else
   # Running from standalone 1-liner: ensure dist and server.js exist
   if [ -d "./dist" ]; then
@@ -82,6 +87,18 @@ else
   if [ -f "./server.js" ]; then
     cp ./server.js "$INSTALL_DIR/"
   fi
+  if [ -f "./package.json" ]; then
+    cp ./package.json "$INSTALL_DIR/"
+  fi
+  if [ -f "./embedded-dist.js" ]; then
+    cp ./embedded-dist.js "$INSTALL_DIR/"
+  elif [ ! -f "$INSTALL_DIR/embedded-dist.js" ]; then
+    echo 'export const EMBEDDED_FILES = {};' > "$INSTALL_DIR/embedded-dist.js"
+  fi
+fi
+
+if [ -f "$INSTALL_DIR/package.json" ] && command -v npm >/dev/null 2>&1; then
+  (cd "$INSTALL_DIR" && npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1 || true)
 fi
 
 echo -e "${BLUE}[3/5] 🛡️ Opening Port ${PORT} in Firewall...${NC}"
@@ -106,13 +123,21 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=${INSTALL_DIR}
+DynamicUser=yes
+StateDirectory=sshdesktop
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/sshdesktop
 Environment=PORT=${PORT}
 Environment=HOST=0.0.0.0
-ExecStart=$(which node) ${INSTALL_DIR}/server.js
+Environment=BACKEND_HOST=127.0.0.1
+Environment=SSHDESKTOP_DATA_DIR=/var/lib/sshdesktop
+ExecStart=$(which node) ${INSTALL_DIR}/server.js --data-dir /var/lib/sshdesktop
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target

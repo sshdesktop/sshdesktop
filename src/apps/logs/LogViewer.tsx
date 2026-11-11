@@ -133,7 +133,9 @@ export default function LogViewer() {
       } else if (selectedSource?.path) {
         raw = await logsFile(activeConnId, selectedSource.path);
       } else if (customPath) {
-        const res = await sshExec(activeConnId, `tail -n ${tailLines} ${customPath}`);
+        const safeLines = Math.max(1, Math.min(10000, Math.floor(Number(tailLines) || 100)));
+        const qPath = `'${String(customPath).replace(/'/g, "'\\''")}'`;
+        const res = await sshExec(activeConnId, `tail -n ${safeLines} -- ${qPath}`);
         raw = res.stdout || '';
       }
 

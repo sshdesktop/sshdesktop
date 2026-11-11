@@ -598,8 +598,8 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                 .arg("ConnectTimeout=6");
 
             if let Some(key) = &config.private_key_path {
-                if resolve_key_path(key).is_some() {
-                    ssh_test.arg("-i").arg(key);
+                if let Some(resolved_key) = resolve_key_path(key) {
+                    ssh_test.arg("-i").arg(resolved_key);
                 }
             }
 
@@ -885,8 +885,22 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
         return Err("Invalid host or port configuration".into());
     }
 
+    struct ProbeKeyGuard(Option<String>);
+    impl Drop for ProbeKeyGuard {
+        fn drop(&mut self) {
+            if let Some(p) = &self.0 {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    let mut _probe_key_guard = ProbeKeyGuard(None);
     if let Some(raw_key) = &config.private_key_path {
-        if let Some(existing_path) = ensure_key_file("test-probe", raw_key) {
+        if raw_key.contains("PRIVATE KEY") || raw_key.contains('\n') {
+            if let Some(existing_path) = ensure_key_file(&format!("test-probe-{}", uuid::Uuid::new_v4().simple()), raw_key) {
+                _probe_key_guard.0 = Some(existing_path.clone());
+                config.private_key_path = Some(existing_path);
+            }
+        } else if let Some(existing_path) = ensure_key_file("test-probe", raw_key) {
             config.private_key_path = Some(existing_path);
         }
     }
@@ -990,10 +1004,11 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
         cmd.arg("-p").arg(&port)
             .arg("-o").arg("StrictHostKeyChecking=yes")
             .arg("-o").arg("BatchMode=yes")
+            .arg("-o").arg("IdentitiesOnly=yes")
             .arg("-o").arg("ConnectTimeout=6");
         if let Some(k) = &config.private_key_path {
-            if resolve_key_path(k).is_some() {
-                cmd.arg("-i").arg(k);
+            if let Some(resolved_k) = resolve_key_path(k) {
+                cmd.arg("-i").arg(resolved_k);
             }
         }
         cmd.arg(format!("{}@{}", user, host)).arg("echo sshdesktop-ok");

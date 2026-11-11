@@ -530,7 +530,7 @@ export default function ResponseViewer({ response, isLoading, error }: ResponseV
               srcDoc={response.body}
               title="HTML Response Preview"
               className="w-full flex-1 bg-white rounded-xl border border-white/15 shadow-2xl"
-              sandbox="allow-same-origin allow-scripts"
+              sandbox="allow-scripts"
             />
           </div>
         )}

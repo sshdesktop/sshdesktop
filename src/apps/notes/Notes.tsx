@@ -58,8 +58,12 @@ export default function Notes() {
   const [activeFolderId, setActiveFolderId] = useState<string>('all');
   
   const [notes, setNotes] = useState<NoteItem[]>(() => {
-    const saved = localStorage.getItem('sshdesktop_notes_studio_v2') || localStorage.getItem('clouddesk_notes_studio_v2');
-    return saved ? JSON.parse(saved) : DEFAULT_NOTES;
+    try {
+      const saved = localStorage.getItem('sshdesktop_notes_studio_v2') || localStorage.getItem('clouddesk_notes_studio_v2');
+      return saved ? JSON.parse(saved) : DEFAULT_NOTES;
+    } catch {
+      return DEFAULT_NOTES;
+    }
   });
   
   const [activeNoteId, setActiveNoteId] = useState<string>(notes[0]?.id || '');

@@ -104,10 +104,6 @@ pub async fn logs_file(
         return Err("No active SSH connection.".into());
     }
 
-    if stdout.contains("No such file") || stdout.contains("Permission denied") {
-        return Err(stdout.trim().to_string());
-    }
-
     if code != 0 {
         return Err(format!("Unable to read log file '{}': {}", path, stdout.trim()));
     }

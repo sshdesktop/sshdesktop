@@ -426,8 +426,9 @@ export const useApiStore = create<ApiStore>((set, get) => {
       let resolved = input;
       for (const v of currentEnv.variables) {
         if (v.enabled && v.key.trim()) {
-          const pattern = new RegExp(`{{\\s*${v.key.trim()}\\s*}}`, 'g');
-          resolved = resolved.replace(pattern, v.value);
+          const escapedKey = v.key.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const pattern = new RegExp(`{{\\s*${escapedKey}\\s*}}`, 'g');
+          resolved = resolved.replace(pattern, () => v.value);
         }
       }
       return resolved;

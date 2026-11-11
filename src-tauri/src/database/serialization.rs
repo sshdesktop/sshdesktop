@@ -461,22 +461,25 @@ pub fn split_sql_statements_for_engine(input: &str, engine: &str) -> Vec<String>
             }
         }
 
-        // Check for DELIMITER keyword
+        // Check for DELIMITER keyword (char-indexed O(1) prefix scan avoids O(N^2) allocation and UTF-8 byte/char mismatch)
         let is_at_start = current_stmt.trim().is_empty();
-        if is_at_start {
-            let remaining: String = chars[i..].iter().collect();
-            let upper = remaining.to_uppercase();
-            if upper.starts_with("DELIMITER ") || upper.starts_with("DELIMITER\t") {
-                let after_kw = &remaining["DELIMITER".len()..];
-                let trimmed_after = after_kw.trim_start();
-                let delim_token: String = trimmed_after
-                    .chars()
-                    .take_while(|c| !c.is_whitespace() && *c != '\n' && *c != '\r')
-                    .collect();
-                if !delim_token.is_empty() {
-                    current_delimiter = delim_token.clone();
-                    let skip_len = "DELIMITER".len() + (after_kw.len() - trimmed_after.len()) + delim_token.len();
-                    i += skip_len;
+        if is_at_start && i + 10 <= len {
+            let matches_kw = chars[i..i + 9]
+                .iter()
+                .zip("DELIMITER".chars())
+                .all(|(c, k)| c.to_ascii_uppercase() == k);
+            if matches_kw && (chars[i + 9] == ' ' || chars[i + 9] == '\t') {
+                let mut k = i + 9;
+                while k < len && (chars[k] == ' ' || chars[k] == '\t') {
+                    k += 1;
+                }
+                let start_tok = k;
+                while k < len && !chars[k].is_whitespace() && chars[k] != '\n' && chars[k] != '\r' {
+                    k += 1;
+                }
+                if k > start_tok {
+                    current_delimiter = chars[start_tok..k].iter().collect();
+                    i = k;
                     while i < len && (chars[i] == ' ' || chars[i] == '\t' || chars[i] == '\r') {
                         i += 1;
                     }

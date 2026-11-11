@@ -338,8 +338,8 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         .arg("-o").arg("ServerAliveCountMax=2");
 
     if let Some(key_path) = selected_key_path {
-        if crate::ssh::connection::resolve_key_path(key_path).is_some() {
-            ssh_cmd.arg("-i").arg(key_path);
+        if let Some(resolved_key) = crate::ssh::connection::resolve_key_path(key_path) {
+            ssh_cmd.arg("-i").arg(resolved_key);
         }
     }
 
@@ -661,8 +661,8 @@ pub async fn run_cmd_with_stdin(
             .arg("-P").arg(&port)
             .arg("-l").arg(&user);
         if let Some(key_path) = &conn.config.private_key_path {
-            if crate::ssh::connection::resolve_key_path(key_path).is_some() {
-                cmd.arg("-i").arg(key_path);
+            if let Some(resolved_key) = crate::ssh::connection::resolve_key_path(key_path) {
+                cmd.arg("-i").arg(resolved_key);
             }
         }
         cmd.arg(&host)
@@ -709,8 +709,8 @@ pub async fn run_cmd_with_stdin(
     }
 
     if let Some(key_path) = selected_key_path {
-        if crate::ssh::connection::resolve_key_path(key_path).is_some() {
-            ssh_cmd.arg("-i").arg(key_path);
+        if let Some(resolved_key) = crate::ssh::connection::resolve_key_path(key_path) {
+            ssh_cmd.arg("-i").arg(resolved_key);
         }
     }
 
@@ -771,7 +771,7 @@ pub async fn run_cmd_priv_with_stdin(
     let username = &conn.config.username;
 
     // Fast check if user is known to lack sudo
-    if let Some(priv_info) = crate::ssh::connection::get_cached_user_privilege(conn_id) {
+    if let Some(priv_info) = crate::ssh::connection::get_cached_user_privilege_for_user(conn_id, username) {
         if !priv_info.has_sudo && !priv_info.is_root {
             return (format!("Permission Denied: User '{}' does not have administrator (sudo) privileges on this server.", username), 126);
         }
@@ -796,6 +796,9 @@ pub async fn run_cmd_priv_with_stdin(
 
     if let Some(ref pwd) = conn.config.password {
         if !pwd.is_empty() {
+            if pwd.contains('\n') || pwd.contains('\r') {
+                return ("Refusing sudo elevation: password contains invalid newline characters.".into(), 1);
+            }
             // Never place the sudo password in a remote shell command or process
             // argument list. Send it through the SSH channel stdin instead.
             let sudo_s_cmd = format!(
@@ -809,10 +812,7 @@ pub async fn run_cmd_priv_with_stdin(
             sudo_input.extend_from_slice(pwd.as_bytes());
             sudo_input.push(b'\n');
             sudo_input.extend_from_slice(stdin_data);
-            let (s_out, s_code) = run_cmd_with_stdin(state, conn_id, &sudo_s_cmd, &sudo_input).await;
-            if s_code == 0 {
-                return (s_out, s_code);
-            }
+            return run_cmd_with_stdin(state, conn_id, &sudo_s_cmd, &sudo_input).await;
         }
     }
 

@@ -307,19 +307,23 @@ pub async fn docker_image_remove(
     let image_arg = shell_quote(&image_id);
 
     // Safety check: verify no active or stopped containers use this image
-    let (chk, chk_code) = run_cmd(
+    let (chk_ids, chk_code) = run_cmd(
         &state,
         &conn_id,
-        &format!("docker ps -a --filter ancestor={} --format '{{{{.Names}}}} ({{{{.Status}}}})' 2>&1", image_arg),
+        &format!("docker ps -a -q --filter ancestor={} 2>&1", image_arg),
     ).await;
     if chk_code != 0 {
-        return Err(format!("Cannot safely check whether image is in use: {}", chk.trim()));
+        return Err(format!("Cannot safely check whether image is in use: {}", chk_ids.trim()));
     }
-    let chk_trimmed = chk.trim();
-    if !chk_trimmed.is_empty() && !chk_trimmed.contains("error") && !chk_trimmed.contains("unknown flag") {
+    if !chk_ids.trim().is_empty() {
+        let (chk_names, _) = run_cmd(
+            &state,
+            &conn_id,
+            &format!("docker ps -a --filter ancestor={} --format '{{{{.Names}}}} ({{{{.Status}}}})' 2>&1", image_arg),
+        ).await;
         return Err(format!(
             "Cannot delete image: It is currently used by container(s):\n{}",
-            chk_trimmed
+            if chk_names.trim().is_empty() { chk_ids.trim() } else { chk_names.trim() }
         ));
     }
 

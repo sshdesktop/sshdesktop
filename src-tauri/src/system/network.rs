@@ -328,22 +328,22 @@ if [ "$PID" != "none" ]; then
         *" $PID "*) kill -"$SIG" "$PID" 2>/dev/null || true ;;
         *) echo "PID $PID is not listening on $PROTO port $PORT" >&2; exit 1 ;;
     esac
-fi
+else
+    # 2. Try fuser if available
+    if command -v fuser >/dev/null 2>&1; then
+        fuser -k -"$SIG" "$PORT/$PROTO" 2>/dev/null || true
+    fi
 
-# 2. Try fuser if available
-if command -v fuser >/dev/null 2>&1; then
-    fuser -k -"$SIG" "$PORT/$PROTO" 2>/dev/null || true
-fi
+    # 3. Try lsof if available
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -ti{lsof_proto}:$PORT 2>/dev/null | xargs -r kill -"$SIG" 2>/dev/null || true
+    fi
 
-# 3. Try lsof if available
-if command -v lsof >/dev/null 2>&1; then
-    lsof -ti{lsof_proto}:$PORT 2>/dev/null | xargs -r kill -"$SIG" 2>/dev/null || true
+    # 4. Signal all remaining listeners identified for this port and protocol
+    for P in $PIDS; do
+        if [ -n "$P" ]; then kill -"$SIG" "$P" 2>/dev/null || true; fi
+    done
 fi
-
-# 4. Signal all remaining listeners identified for this port and protocol
-for P in $PIDS; do
-    if [ -n "$P" ]; then kill -"$SIG" "$P" 2>/dev/null || true; fi
-done
 
 # Wait up to two seconds and verify the listener actually disappeared.
 RECHECK=1

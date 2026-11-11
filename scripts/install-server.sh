@@ -16,7 +16,7 @@ if ! [[ "${PORT}" =~ ^[0-9]{1,5}$ ]] || [ "${PORT}" -lt 1 ] || [ "${PORT}" -gt 6
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/opt/sshdesktop"
-CONFIG_DIR="/etc/sshdesktop"
+CONFIG_DIR="/var/lib/sshdesktop"
 AUTH_FILE="${CONFIG_DIR}/auth.json"
 SERVICE_NAME="sshdesktop"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -36,42 +36,8 @@ if ! command -v systemctl >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[1/5] Setting up secure configuration directory..."
-mkdir -p "${CONFIG_DIR}"
-chmod 700 "${CONFIG_DIR}"
-
-# Initialize /etc/sshdesktop/auth.json if not present
-if [ ! -f "${AUTH_FILE}" ]; then
-  echo "[2/5] Initializing default security credentials in ${AUTH_FILE}..."
-  SALT=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N)
-  
-  # Generate salted SHA-256 for default 'admin' password
-  if command -v openssl >/dev/null 2>&1; then
-    PASS_HASH=$(printf "%s::sshdesktop_secure_auth_v2::admin" "${SALT}" | openssl dgst -sha256 | awk '{print $NF}')
-  elif command -v sha256sum >/dev/null 2>&1; then
-    PASS_HASH=$(printf "%s::sshdesktop_secure_auth_v2::admin" "${SALT}" | sha256sum | awk '{print $1}')
-  else
-    echo "Error: openssl or sha256sum is required to initialize credentials safely."
-    exit 1
-  fi
-
-  cat <<EOF > "${AUTH_FILE}"
-{
-  "username": "admin",
-  "password_hash": "${PASS_HASH}",
-  "salt": "${SALT}",
-  "must_change_password": true,
-  "created_at": $(date +%s),
-  "last_login_at": null
-}
-EOF
-
-  chmod 600 "${AUTH_FILE}"
-  echo "  -> Created ${AUTH_FILE} with strict permissions (chmod 600)."
-else
-  echo "[2/5] Existing credentials detected at ${AUTH_FILE}. Preserving configuration."
-  chmod 600 "${AUTH_FILE}"
-fi
+echo "[1/5] Preparing state configuration directory..."
+echo "  -> Authentication will be initialized with scrypt on first start under ${CONFIG_DIR}."
 
 echo "[3/5] Setting up application binary in ${INSTALL_DIR}..."
 mkdir -p "${INSTALL_DIR}"
@@ -96,11 +62,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/sshdesktop --server --port ${PORT}
+DynamicUser=yes
+StateDirectory=sshdesktop
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/sshdesktop
+Environment=SSHDESKTOP_DATA_DIR=/var/lib/sshdesktop
+ExecStart=${INSTALL_DIR}/sshdesktop --port ${PORT} --data-dir /var/lib/sshdesktop
 Restart=on-failure
-RestartSec=5
 RestartSec=5
 LimitNOFILE=65536
 StandardOutput=journal
@@ -108,8 +76,9 @@ StandardError=journal
 SyslogIdentifier=sshdesktop
 
 # Security Sandboxing & Hardening
-ProtectHome=read-only
-ReadWritePaths=/etc/sshdesktop /var/log
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
 PrivateTmp=true
 
 [Install]

@@ -40,6 +40,7 @@ mkdir -p "${TAR_DIR}/share/icons/hicolor/128x128/apps"
 cp -r dist "${TAR_DIR}/share/sshdesktop/"
 cp server.js "${TAR_DIR}/share/sshdesktop/"
 cp package.json "${TAR_DIR}/share/sshdesktop/"
+if [ -f "embedded-dist.js" ]; then cp embedded-dist.js "${TAR_DIR}/share/sshdesktop/"; else echo 'export const EMBEDDED_FILES = {};' > "${TAR_DIR}/share/sshdesktop/embedded-dist.js"; fi
 
 if [ -f "src-tauri/icons/128x128.png" ]; then
   cp src-tauri/icons/128x128.png "${TAR_DIR}/share/icons/hicolor/128x128/apps/sshdesktop.png"
@@ -130,6 +131,7 @@ EOF
 cp -r dist "${DEB_DIR}/opt/sshdesktop/"
 cp server.js "${DEB_DIR}/opt/sshdesktop/"
 cp package.json "${DEB_DIR}/opt/sshdesktop/"
+if [ -f "embedded-dist.js" ]; then cp embedded-dist.js "${DEB_DIR}/opt/sshdesktop/"; else echo 'export const EMBEDDED_FILES = {};' > "${DEB_DIR}/opt/sshdesktop/embedded-dist.js"; fi
 cp "${TAR_DIR}/bin/sshdesktop" "${DEB_DIR}/usr/local/bin/sshdesktop"
 cp "${TAR_DIR}/share/applications/sshdesktop.desktop" "${DEB_DIR}/usr/share/applications/"
 if [ -f "src-tauri/icons/128x128.png" ]; then
@@ -144,12 +146,20 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/opt/sshdesktop
+DynamicUser=yes
+StateDirectory=sshdesktop
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/sshdesktop
 Environment=PORT=2222
 Environment=HOST=0.0.0.0
-ExecStart=/usr/bin/node /opt/sshdesktop/server.js
+Environment=BACKEND_HOST=127.0.0.1
+Environment=SSHDESKTOP_DATA_DIR=/var/lib/sshdesktop
+ExecStart=/usr/bin/node /opt/sshdesktop/server.js --data-dir /var/lib/sshdesktop
 Restart=always
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target

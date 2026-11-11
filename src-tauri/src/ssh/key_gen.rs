@@ -84,7 +84,17 @@ pub async fn ssh_generate_key_pair(
     let target_priv_str = target_priv.to_str()
         .ok_or_else(|| "SSH key path contains characters that cannot be represented by ssh-keygen.".to_string())?;
 
-    // 1. Try native ssh-keygen binary first
+    // 1. Try native ssh-keygen binary first without exposing passphrase in CLI arguments
+    struct TempFileCleanup(Vec<std::path::PathBuf>);
+    impl Drop for TempFileCleanup {
+        fn drop(&mut self) {
+            for p in &self.0 {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    let mut cleanup_guard = TempFileCleanup(Vec::new());
+
     let mut cmd = tokio::process::Command::new("ssh-keygen");
     cmd.kill_on_drop(true);
     cmd.stdin(std::process::Stdio::null());
@@ -94,13 +104,65 @@ pub async fn ssh_generate_key_pair(
     cmd.arg("-t")
         .arg("ed25519")
         .arg("-C")
-        .arg(&comm)
-        .arg("-N")
-        .arg(&pass)
-        .arg("-f")
-        .arg(target_priv_str);
+        .arg(&comm);
+
+    if pass.is_empty() {
+        cmd.arg("-N").arg("");
+    } else {
+        let askpass_id = uuid::Uuid::new_v4().simple().to_string();
+        let pass_file = std::env::temp_dir().join(format!("sshdesktop_kp_{}.txt", askpass_id));
+        #[cfg(unix)]
+        let askpass_script = std::env::temp_dir().join(format!("sshdesktop_ask_{}.sh", askpass_id));
+        #[cfg(not(unix))]
+        let askpass_script = std::env::temp_dir().join(format!("sshdesktop_ask_{}.cmd", askpass_id));
+
+        cleanup_guard.0.push(pass_file.clone());
+        cleanup_guard.0.push(askpass_script.clone());
+
+        {
+            use std::io::Write;
+            #[cfg(unix)]
+            let mut pf = {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&pass_file)
+                    .map_err(|e| format!("Failed to prepare key passphrase helper: {}", e))?
+            };
+            #[cfg(not(unix))]
+            let mut pf = std::fs::OpenOptions::new().write(true).create_new(true).open(&pass_file)
+                .map_err(|e| format!("Failed to prepare key passphrase helper: {}", e))?;
+            pf.write_all(pass.as_bytes()).map_err(|e| format!("Failed writing passphrase helper: {}", e))?;
+        }
+
+        {
+            use std::io::Write;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                let escaped_pf = pass_file.to_string_lossy().replace('\'', r"'\''");
+                let script_body = format!("#!/bin/sh\ncat '{}'\n", escaped_pf);
+                let mut sf = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o700).open(&askpass_script)
+                    .map_err(|e| format!("Failed to prepare askpass script: {}", e))?;
+                sf.write_all(script_body.as_bytes()).map_err(|e| format!("Failed writing askpass script: {}", e))?;
+            }
+            #[cfg(not(unix))]
+            {
+                let pf_str = pass_file.to_string_lossy().replace('"', "");
+                let script_body = format!("@echo off\r\ntype \"{}\"\r\n", pf_str);
+                let mut sf = std::fs::OpenOptions::new().write(true).create_new(true).open(&askpass_script)
+                    .map_err(|e| format!("Failed to prepare askpass script: {}", e))?;
+                sf.write_all(script_body.as_bytes()).map_err(|e| format!("Failed writing askpass script: {}", e))?;
+            }
+        }
+
+        cmd.env("SSH_ASKPASS", &askpass_script)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", "sshdesktop:0");
+    }
+
+    cmd.arg("-f").arg(target_priv_str);
 
     let output = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output()).await;
+    drop(cleanup_guard);
 
     let success = match output {
         Ok(Ok(out)) => out.status.success() && target_priv.exists() && target_pub.exists(),
@@ -239,7 +301,10 @@ pub async fn ssh_list_local_keys() -> Result<Vec<LocalKeyInfo>, String> {
                 let is_known = candidates.iter().any(|(c, _, _)| *c == fname);
                 if !is_known && (fname.ends_with(".pem") || fname.starts_with("id_")) && !fname.ends_with(".pub") && !fname.ends_with(".known_hosts") && fname != "config" && fname != "known_hosts" {
                     let pub_p = ssh_dir.join(format!("{}.pub", fname));
-                    let pub_content = if pub_p.exists() {
+                    let pub_is_regular = std::fs::symlink_metadata(&pub_p)
+                        .map(|m| m.file_type().is_file())
+                        .unwrap_or(false);
+                    let pub_content = if pub_is_regular {
                         std::fs::read_to_string(&pub_p).ok().map(|s| s.trim().to_string())
                     } else {
                         None
@@ -247,7 +312,7 @@ pub async fn ssh_list_local_keys() -> Result<Vec<LocalKeyInfo>, String> {
                     keys.push(LocalKeyInfo {
                         name: fname.to_string(),
                         path: path.to_string_lossy().to_string(),
-                        public_key_path: if pub_p.exists() { Some(pub_p.to_string_lossy().to_string()) } else { None },
+                        public_key_path: if pub_is_regular { Some(pub_p.to_string_lossy().to_string()) } else { None },
                         public_key_content: pub_content,
                         key_type: if fname.contains("ed25519") { "ED25519".into() } else { "Custom".into() },
                         is_default: false,

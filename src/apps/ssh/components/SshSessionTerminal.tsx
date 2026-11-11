@@ -111,6 +111,8 @@ export default function SshSessionTerminal({
 
   const { terminalFontSize, terminalTheme, setTerminalFontSize, addAuditLog } = useSshStore();
   const [isRecording, setIsRecording] = useState(false);
+  const isRecordingRef = useRef(false);
+  useEffect(() => { isRecordingRef.current = isRecording; }, [isRecording]);
   const [recordedLines, setRecordedLines] = useState<string[]>([]);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [latency, setLatency] = useState<number>(session.latencyMs || Math.floor(12 + Math.random() * 15));
@@ -149,7 +151,7 @@ export default function SshSessionTerminal({
       const text = await navigator.clipboard.readText();
       if (text) {
         const bytes = Array.from(new TextEncoder().encode(text));
-        await terminalWrite(session.connId, bytes);
+        await terminalWrite(session.terminalId, bytes);
       }
     } catch (err) {
       console.warn('Clipboard paste notice:', err);
@@ -165,7 +167,7 @@ export default function SshSessionTerminal({
   const handleClearScreen = () => {
     termRef.current?.clear();
     const bytes = Array.from(new TextEncoder().encode('clear\r'));
-    terminalWrite(session.connId, bytes).catch(() => {});
+    terminalWrite(session.terminalId, bytes).catch(() => {});
     setContextMenu(null);
   };
 
@@ -318,7 +320,7 @@ export default function SshSessionTerminal({
     const onDataDisposable = term.onData((data) => {
       const bytes = Array.from(new TextEncoder().encode(data));
       terminalWrite(session.terminalId, bytes).catch(() => {});
-      if (isRecording) {
+      if (isRecordingRef.current) {
         setRecordedLines(prev => [...prev, data]);
       }
     });
@@ -334,7 +336,7 @@ export default function SshSessionTerminal({
 
       if (payload.text) {
         termRef.current.write(payload.text);
-        if (isRecording) {
+        if (isRecordingRef.current) {
           setRecordedLines(prev => [...prev, payload.text]);
         }
       } else if (payload.data && Array.isArray(payload.data)) {

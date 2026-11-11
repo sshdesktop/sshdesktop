@@ -86,6 +86,7 @@ pub async fn setup_ssh_tunnel(
 
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let target_host_clone = target_host.clone();
+        let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(64));
 
         tokio::spawn(async move {
             loop {
@@ -97,16 +98,30 @@ pub async fn setup_ssh_tunnel(
                     res = listener.accept() => {
                         match res {
                             Ok((mut local_stream, _)) => {
+                                let permit = match conn_semaphore.clone().try_acquire_owned() {
+                                    Ok(p) => p,
+                                    Err(_) => {
+                                        log::warn!("DB SSH tunnel concurrency limit (64) reached on port {}; dropping connection", local_port);
+                                        continue;
+                                    }
+                                };
                                 let h = handle.clone();
                                 let r_host = target_host_clone.clone();
                                 tokio::spawn(async move {
-                                    match h.channel_open_direct_tcpip(&r_host, target_port as u32, "127.0.0.1", local_port as u32).await {
-                                        Ok(channel) => {
+                                    let _permit = permit;
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_secs(15),
+                                        h.channel_open_direct_tcpip(&r_host, target_port as u32, "127.0.0.1", local_port as u32),
+                                    ).await {
+                                        Ok(Ok(channel)) => {
                                             let mut ssh_stream = channel.into_stream();
                                             let _ = tokio::io::copy_bidirectional(&mut local_stream, &mut ssh_stream).await;
                                         }
-                                        Err(e) => {
+                                        Ok(Err(e)) => {
                                             log::error!("Failed to open direct-tcpip channel to {}:{}: {}", r_host, target_port, e);
+                                        }
+                                        Err(_) => {
+                                            log::error!("Timed out opening direct-tcpip channel to {}:{}", r_host, target_port);
                                         }
                                     }
                                 });

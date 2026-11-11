@@ -53,6 +53,16 @@ pub async fn app_request_shutdown(
         futures::future::join_all(disconnect_futs),
     ).await;
 
+    // 1.5 Drain DatabaseManager tunnels and active sessions
+    if let Some(db_mgr) = app.try_state::<Arc<crate::database::types::DatabaseManager>>() {
+        let mut db_sessions = db_mgr.sessions.lock().await;
+        for (_, sess) in db_sessions.drain() {
+            if let Some(tx) = sess.tunnel_shutdown.lock().await.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
     // 2. Clear state registries
     {
         let mut conns = state.connections.lock();

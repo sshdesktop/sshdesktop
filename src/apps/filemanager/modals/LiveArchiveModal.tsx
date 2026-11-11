@@ -91,6 +91,8 @@ export const LiveArchiveModal: React.FC<LiveArchiveModalProps> = ({
             }
           }
           if (chunk.is_done) {
+            unlisten?.();
+            unlisten = null;
             if (chunk.exit_code === 0) {
               setStatus('completed');
               setLogLines((prev) => [...prev, `[SUCCESS] Created archive: ${archiveNameInput}`]);
@@ -156,6 +158,8 @@ export const LiveArchiveModal: React.FC<LiveArchiveModalProps> = ({
             }
           }
           if (chunk.is_done) {
+            unlisten?.();
+            unlisten = null;
             if (chunk.exit_code === 0) {
               setStatus('completed');
               setLogLines((prev) => [...prev, `[SUCCESS] Extracted archive completely.`]);

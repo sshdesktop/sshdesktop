@@ -22,6 +22,8 @@ mkdir -p /opt/sshdesktop
 cp -r ./dist /opt/sshdesktop/ 2>/dev/null || true
 cp ./server.js /opt/sshdesktop/ 2>/dev/null || true
 cp ./package.json /opt/sshdesktop/ 2>/dev/null || true
+if [ -f ./embedded-dist.js ]; then cp ./embedded-dist.js /opt/sshdesktop/; else echo 'export const EMBEDDED_FILES = {};' > /opt/sshdesktop/embedded-dist.js; fi
+if [ -f /opt/sshdesktop/package.json ] && command -v npm >/dev/null 2>&1; then (cd /opt/sshdesktop && npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1 || true); fi
 
 # Systemd service
 cat << EOF > /etc/systemd/system/sshdesktop.service
@@ -31,11 +33,20 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/opt/sshdesktop
+DynamicUser=yes
+StateDirectory=sshdesktop
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/sshdesktop
+Environment=BACKEND_HOST=127.0.0.1
+Environment=SSHDESKTOP_DATA_DIR=/var/lib/sshdesktop
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Hardened StateDirectory used as WorkingDirectory
 Environment=PORT=\${PORT}
 Environment=HOST=0.0.0.0
-ExecStart=$(which node) /opt/sshdesktop/server.js
+ExecStart=$(which node) /opt/sshdesktop/server.js --data-dir /var/lib/sshdesktop
 Restart=always
 
 [Install]

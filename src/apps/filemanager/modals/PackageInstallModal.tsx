@@ -127,6 +127,8 @@ export const PackageInstallModal: React.FC<PackageInstallModalProps> = ({
             }
           }
           if (chunk.is_done) {
+            unlisten?.();
+            unlisten = null;
             if (chunk.exit_code === 0) {
               setInstallStatus('completed');
               setLogLines((prev) => [...prev, `[SUCCESS] Package installation completed successfully!`]);

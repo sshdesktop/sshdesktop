@@ -353,8 +353,9 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
     }
     setIsSearchingGlobal(true);
     try {
-      const cleanQ = query.trim().replace(/['"\\]/g, '');
-      const cmd = `find '${currentPath}' -maxdepth 4 -iname '*${cleanQ}*' 2>/dev/null | head -n 120`;
+      const cleanQ = query.trim().replace(/[^a-zA-Z0-9._-]/g, '');
+      const sq = (s: string) => `'${String(s || '').replace(/'/g, "'\\''")}'`;
+      const cmd = `find ${sq(currentPath)} -maxdepth 4 -iname ${sq(`*${cleanQ}*`)} 2>/dev/null | head -n 120`;
       const res = await sshExec(activeConnId, cmd);
       if (res.stdout) {
         const lines = res.stdout.split('\n').map(l => l.trim()).filter(Boolean);
@@ -1253,7 +1254,8 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
         const copyName = getNextAvailableCopyName(name, currentNames);
         currentNames.push(copyName);
         const dest = currentPath === '/' ? `/${copyName}` : `${currentPath}/${copyName}`;
-        await sshExec(activeConnId, `cp -r '${src}' '${dest}'`);
+        const sq = (s: string) => `'${String(s || '').replace(/'/g, "'\\''")}'`;
+        await sshExec(activeConnId, `cp -r -- ${sq(src)} ${sq(dest)}`);
 
         setTransferState(prev => prev ? {
           ...prev,

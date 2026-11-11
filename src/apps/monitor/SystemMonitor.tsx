@@ -137,7 +137,7 @@ function formatBytes(bytes: number, decimals: number = 1): string {
 export default function SystemMonitor() {
   const [activeTab, setActiveTab] = useState<'cpu' | 'memory' | 'energy' | 'disk' | 'network'>('cpu');
   const [history, setHistory] = useState<HistoryPoint[]>(generateInitialHistory);
-  const [prevNet, setPrevNet] = useState<{ rx: number; tx: number; time: number } | null>(null);
+  const prevNetRef = useRef<{ rx: number; tx: number; time: number } | null>(null);
   const [disks, setDisks] = useState<DiskInfo[]>([]);
   const [selectedDiskIndex, setSelectedDiskIndex] = useState<number>(0);
   const [diskViewMode, setDiskViewMode] = useState<'io' | 'capacity'>('io');
@@ -368,6 +368,7 @@ export default function SystemMonitor() {
         let rxRate = 0;
         let txRate = 0;
 
+        const prevNet = prevNetRef.current;
         if (prevNet && now > prevNet.time) {
           const dt = (now - prevNet.time) / 1000;
           if (dt > 0) {
@@ -375,7 +376,7 @@ export default function SystemMonitor() {
             txRate = Math.max(0, Math.round(((totalTx - prevNet.tx) / 1024) / dt));
           }
         }
-        setPrevNet({ rx: totalRx, tx: totalTx, time: now });
+        prevNetRef.current = { rx: totalRx, tx: totalTx, time: now };
 
         // Disk Read/Write throughput calculation
         const estimatedDiskRead = Math.max(1, Math.round(avgCpu * 0.4 + (Math.random() * 3) + 1));
@@ -461,7 +462,7 @@ export default function SystemMonitor() {
       setIsLoading(false);
       isFetchingRef.current = false;
     }
-  }, [activeConnId, activeServer, prevNet]);
+  }, [activeConnId, activeServer]);
 
   useEffect(() => {
     fetchData();

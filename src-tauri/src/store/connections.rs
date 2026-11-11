@@ -279,11 +279,11 @@ fn sanitize_connection_secrets(connection: &mut SavedConnection) {
 }
 
 pub fn save_or_update_connection_on_disk(mut connection: SavedConnection) -> Result<String, String> {
-    sanitize_connection_secrets(&mut connection);
-    let mut list = try_read_connections_from_disk()?;
     if connection.id.is_empty() {
         connection.id = uuid::Uuid::new_v4().to_string();
     }
+    sanitize_connection_secrets(&mut connection);
+    let mut list = try_read_connections_from_disk()?;
     let id = connection.id.clone();
     match connection.password.as_deref() {
         Some(password) if !password.is_empty() => store_connection_password(&id, password)?,
@@ -329,6 +329,9 @@ pub async fn store_delete_connection(_state: tauri::State<'_, AppState>, id: Str
 
 #[tauri::command]
 pub async fn store_update_connection(_state: tauri::State<'_, AppState>, mut connection: SavedConnection) -> Result<(), String> {
+    if connection.id.trim().is_empty() {
+        return Err("Connection identifier cannot be empty.".into());
+    }
     sanitize_connection_secrets(&mut connection);
     let mut list = try_read_connections_from_disk()?;
     match connection.password.as_deref() {

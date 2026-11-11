@@ -181,7 +181,7 @@ pub fn check_known_hosts(
             }
         }
 
-        if key_type_field == key_type && marker.is_none() {
+        if marker.is_none() {
             found_previous_key = Some(key_field.to_string());
         }
     }

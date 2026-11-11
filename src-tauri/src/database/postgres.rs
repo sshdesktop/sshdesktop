@@ -24,13 +24,19 @@ pub async fn connect_postgres(
         config.database.trim()
     };
 
+    let host_part = if effective_host.contains(':') && !effective_host.starts_with('[') {
+        format!("[{}]", effective_host)
+    } else {
+        effective_host.to_string()
+    };
+
     let url = format!(
         "postgres://{}:{}@{}:{}/{}{}",
         urlencoding(&config.username),
         urlencoding(pwd),
-        effective_host,
+        host_part,
         effective_port,
-        db_name,
+        urlencoding(db_name),
         ssl_param
     );
 

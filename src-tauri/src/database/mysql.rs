@@ -18,13 +18,19 @@ pub async fn connect_mysql(
         "?ssl-mode=Disabled"
     };
 
+    let host_part = if effective_host.contains(':') && !effective_host.starts_with('[') {
+        format!("[{}]", effective_host)
+    } else {
+        effective_host.to_string()
+    };
+
     let db_name = config.database.trim();
     let url = if db_name.is_empty() {
         format!(
             "mysql://{}:{}@{}:{}{}",
             urlencoding(&config.username),
             urlencoding(pwd),
-            effective_host,
+            host_part,
             effective_port,
             ssl_param
         )
@@ -33,9 +39,9 @@ pub async fn connect_mysql(
             "mysql://{}:{}@{}:{}/{}{}",
             urlencoding(&config.username),
             urlencoding(pwd),
-            effective_host,
+            host_part,
             effective_port,
-            db_name,
+            urlencoding(db_name),
             ssl_param
         )
     };

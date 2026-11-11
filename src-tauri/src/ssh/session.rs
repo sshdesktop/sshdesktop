@@ -244,7 +244,10 @@ pub async fn run_stream_channel(
             ChannelMsg::ExitStatus { exit_status } => {
                 exit_code = Some(exit_status as i32);
             }
-            ChannelMsg::Eof | ChannelMsg::Close => {
+            ChannelMsg::Eof => {
+                // RFC 4254 sends EOF before ExitStatus and Close; keep reading until Close.
+            }
+            ChannelMsg::Close => {
                 break;
             }
             _ => {}

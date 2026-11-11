@@ -226,11 +226,17 @@ export default function NetworkManager() {
   };
 
   const runPing = async () => {
-    if (!pingHost.trim()) return;
+    const cleanHost = pingHost.trim();
+    if (!cleanHost || !/^[A-Za-z0-9._:-]+$/.test(cleanHost)) {
+      setPingResults(['Invalid hostname or IP address.']);
+      return;
+    }
+    const safeCount = Math.max(1, Math.min(20, Math.floor(Number(pingCount) || 4)));
     setPinging(true);
-    setPingResults([`PING ${pingHost} (${pingCount} packets) from Linux server...`]);
+    setPingResults([`PING ${cleanHost} (${safeCount} packets) from Linux server...`]);
     try {
-      const res = await sshExec(activeConnId, `ping -c ${pingCount} ${pingHost.trim()}`);
+      const qHost = `'${cleanHost.replace(/'/g, "'\\''")}'`;
+      const res = await sshExec(activeConnId, `ping -c ${safeCount} -- ${qHost}`);
       const output = res.stdout || res.stderr || 'No response.';
       const lines = output.split('\n').filter(Boolean);
       setPingResults(lines);
@@ -242,11 +248,16 @@ export default function NetworkManager() {
   };
 
   const runDnsLookup = async () => {
-    if (!dnsDomain.trim()) return;
+    const cleanDomain = dnsDomain.trim();
+    if (!cleanDomain || !/^[A-Za-z0-9._:-]+$/.test(cleanDomain)) {
+      setDnsResults('Invalid domain name or IP address.');
+      return;
+    }
     setDnsLoading(true);
     setDnsResults('Running DNS query on Linux server...');
     try {
-      const res = await sshExec(activeConnId, `dig +noall +answer ${dnsDomain.trim()} ANY || nslookup ${dnsDomain.trim()}`);
+      const qDomain = `'${cleanDomain.replace(/'/g, "'\\''")}'`;
+      const res = await sshExec(activeConnId, `dig +noall +answer ${qDomain} ANY || nslookup -- ${qDomain}`);
       setDnsResults(res.stdout || res.stderr || 'No DNS records found.');
     } catch (err: any) {
       setDnsResults(`DNS lookup error: ${err?.message || err}`);

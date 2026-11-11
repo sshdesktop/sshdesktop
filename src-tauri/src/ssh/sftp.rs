@@ -164,19 +164,16 @@ pub async fn sftp_list_dir(
                 .map_err(|_| format!("SFTP directory listing timed out for '{}'.", clean_path))?
                 .map_err(|e| format!("SFTP could not list '{}': {}", clean_path, e))?;
             const MAX_DIR_ENTRIES: usize = 10000;
-            if dir_entries.len() > MAX_DIR_ENTRIES {
-                return Err(format!("Directory contains more than {} entries; narrow the directory before listing.", MAX_DIR_ENTRIES));
-            }
             let mut entries = Vec::new();
-                for entry in dir_entries {
-                    if entries.len() >= MAX_DIR_ENTRIES {
-                        break;
-                    }
-                    let file_name = entry.file_name();
-                    if file_name == "." || file_name == ".." {
-                        continue;
-                    }
-                    let is_dir = entry.metadata().is_dir();
+            for entry in dir_entries {
+                let file_name = entry.file_name();
+                if file_name == "." || file_name == ".." {
+                    continue;
+                }
+                if entries.len() >= MAX_DIR_ENTRIES {
+                    return Err(format!("Directory contains more than {} entries; narrow the directory before listing.", MAX_DIR_ENTRIES));
+                }
+                let is_dir = entry.metadata().is_dir();
                     let is_symlink = entry.metadata().is_symlink();
                     let size = entry.metadata().size.unwrap_or(0);
                     let modified = entry.metadata().mtime.unwrap_or(0) as i64;
@@ -449,41 +446,54 @@ pub async fn sftp_write_bytes(
             let tmp_name = format!(".upload-{}.tmp", uuid::Uuid::new_v4().simple());
             let tmp_path = if parent == "/" { format!("/{}", tmp_name) } else { format!("{}/{}", parent.trim_end_matches('/'), tmp_name) };
 
-            let mut file = tokio::time::timeout(std::time::Duration::from_secs(15), sftp.create(&tmp_path)).await
+            if let Ok(mut file) = tokio::time::timeout(std::time::Duration::from_secs(15), sftp.create(&tmp_path)).await
                 .map_err(|_| "Timed out creating temporary remote upload file.".to_string())?
-                .map_err(|e| format!("Failed to create temporary remote upload file: {}", e))?;
-            let transfer_res = tokio::time::timeout(
-                std::time::Duration::from_secs(300),
-                async { file.write_all(bytes).await?; file.flush().await }
-            ).await;
-            drop(file);
-            match transfer_res {
-                Ok(Ok(())) => {},
-                Ok(Err(e)) => {
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;
-                    return Err(format!("SFTP upload or flush failed: {}", e));
-                },
-                Err(_) => {
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;
-                    return Err("SFTP upload timed out after 300 seconds.".into());
+            {
+                let transfer_res = tokio::time::timeout(
+                    std::time::Duration::from_secs(300),
+                    async { file.write_all(bytes).await?; file.flush().await }
+                ).await;
+                drop(file);
+                match transfer_res {
+                    Ok(Ok(())) => {},
+                    Ok(Err(e)) => {
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;
+                        return Err(format!("SFTP upload or flush failed: {}", e));
+                    },
+                    Err(_) => {
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;
+                        return Err("SFTP upload timed out after 300 seconds.".into());
+                    }
+                }
+                match tokio::time::timeout(std::time::Duration::from_secs(30), sftp.rename(&tmp_path, clean_path)).await {
+                    Ok(Ok(())) => return Ok(()),
+                    Ok(Err(e)) => {
+                        // SFTP v3 rename fails on OpenSSH when destination exists; try atomic mv -f if target exists
+                        let escaped_tmp = shell_escape(&tmp_path);
+                        let escaped_clean = shell_escape(clean_path);
+                        let mv_cmd = format!("mv -f -- '{}' '{}'", escaped_tmp, escaped_clean);
+                        let (_, mv_code) = crate::ssh::exec::run_cmd(state, conn_id, &mv_cmd).await;
+                        if mv_code == 0 {
+                            return Ok(());
+                        }
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;
+                        return Err(format!("SFTP could not atomically publish uploaded file: {}", e));
+                    },
+                    Err(_) => {
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;
+                        return Err("Timed out publishing uploaded file over SFTP.".into());
+                    }
                 }
             }
-            match tokio::time::timeout(std::time::Duration::from_secs(30), sftp.rename(&tmp_path, clean_path)).await {
-                Ok(Ok(())) => return Ok(()),
-                Ok(Err(e)) => {
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;
-                    return Err(format!("SFTP could not atomically publish uploaded file: {}", e));
-                },
-                Err(_) => {
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;
-                    return Err("Timed out publishing uploaded file over SFTP.".into());
-                }
-            }
+            // Fall through to shell/sudo fallback if sftp.create failed (e.g. permission denied in root-owned directory)
         }
     }
 
     let escaped_path = shell_escape(clean_path);
     let b64 = to_base64(bytes);
+    if b64.len() > 64 * 1024 * 1024 {
+        return Err("Encoded payload exceeds the 64 MiB shell fallback limit; ensure SFTP subsystem is available.".into());
+    }
     let parent = clean_path.rsplit_once('/').map(|(p, _)| if p.is_empty() { "/" } else { p }).unwrap_or("/");
     let tmp_name = format!(".sshdesktop-upload-{}", uuid::Uuid::new_v4().simple());
     let local_tmp = format!("{}/{}", parent.trim_end_matches('/'), tmp_name);
@@ -508,18 +518,25 @@ pub async fn sftp_write_bytes(
         return Ok(());
     }
 
-    // If the destination directory is privileged, stage in /tmp and move with sudo.
+    let lower_err = stdout.to_lowercase();
+    let is_perm_err = lower_err.contains("permission denied") || lower_err.contains("operation not permitted") || lower_err.contains("read-only");
+    if code == -1 || !is_perm_err {
+        let _ = crate::ssh::exec::run_cmd(state, conn_id, &format!("rm -f -- '{}'", escaped_tmp)).await;
+        return Err(format!("Failed to write remote file '{}': {}", clean_path, stdout.trim()));
+    }
+
+    // If the destination directory is privileged, stage in /tmp and move with sudo, preserving/setting root ownership.
     let tmp_file = format!("/tmp/.sshdesktop-upload-{}", uuid::Uuid::new_v4().simple());
     let escaped_tmp_file = shell_escape(&tmp_file);
     let tmp_cmd = format!("umask 077 && {} > '{}'", decode_base64, escaped_tmp_file);
     let (tmp_out, tmp_code) = crate::ssh::exec::run_cmd_with_stdin(state, conn_id, &tmp_cmd, b64.as_bytes()).await;
     if tmp_code != 0 {
-        let _ = crate::ssh::exec::run_cmd(state, conn_id, &format!("rm -f -- '{}'", escaped_tmp)).await;
+        let _ = crate::ssh::exec::run_cmd(state, conn_id, &format!("rm -f -- '{}' '{}'", escaped_tmp, escaped_tmp_file)).await;
         return Err(format!("Failed to stage remote upload: {}", tmp_out.trim()));
     }
 
     let preserve_tmp_mode = format!(
-        "if [ -f '{0}' ] && [ ! -L '{0}' ]; then mode=$(stat -c '%a' '{0}' 2>/dev/null || stat -f '%Lp' '{0}' 2>/dev/null) || exit 1; case \"$mode\" in *[!0-7]*|'') exit 1;; esac; chmod \"$mode\" '{1}'; fi",
+        "if [ -f '{0}' ] && [ ! -L '{0}' ]; then mode=$(stat -c '%a' '{0}' 2>/dev/null || stat -f '%Lp' '{0}' 2>/dev/null) || exit 1; case \"$mode\" in *[!0-7]*|'') exit 1;; esac; chmod \"$mode\" '{1}'; owner=$(stat -c '%u:%g' '{0}' 2>/dev/null || stat -f '%u:%g' '{0}' 2>/dev/null); [ -n \"$owner\" ] && chown \"$owner\" '{1}' 2>/dev/null || true; else chown 0:0 '{1}' 2>/dev/null || true; fi",
         escaped_path, escaped_tmp_file
     );
     let mv_cmd = format!(
@@ -867,7 +884,7 @@ pub async fn sftp_upload(
         return Err("Remote file upload is limited to 256 MiB per operation.".into());
     }
     use tokio::io::AsyncReadExt;
-    let mut file = tokio::fs::File::open(&local_path).await
+    let file = tokio::fs::File::open(&local_path).await
         .map_err(|e| format!("Failed to open local upload file '{}': {}", local_path, e))?;
     let opened_metadata = file.metadata().await
         .map_err(|e| format!("Failed to inspect opened upload file '{}': {}", local_path, e))?;

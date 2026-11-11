@@ -530,6 +530,8 @@ export default function Desktop() {
     }
   };
 
+  const sq = (s: string) => `'${String(s || '').replace(/'/g, "'\\''")}'`;
+
   const handleDuplicateDesktopItem = async (item: DesktopItem) => {
     if (!item.path || !activeConnectionId) return;
     const parentDir = item.path.substring(0, item.path.lastIndexOf('/'));
@@ -538,9 +540,9 @@ export default function Desktop() {
     const copyPath = `${parentDir}/${copyName}`;
     try {
       if (item.kind === 'folder') {
-        await sshExec(activeConnectionId, `cp -r "${item.path}" "${copyPath}"`);
+        await sshExec(activeConnectionId, `cp -r -- ${sq(item.path)} ${sq(copyPath)}`);
       } else {
-        await sshExec(activeConnectionId, `cp "${item.path}" "${copyPath}"`);
+        await sshExec(activeConnectionId, `cp -- ${sq(item.path)} ${sq(copyPath)}`);
       }
       await loadDesktopFolder();
       window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
@@ -556,8 +558,8 @@ export default function Desktop() {
     const archiveName = format === 'zip' ? `${item.label}.zip` : `${item.label}.tar.gz`;
     try {
       const cmd = format === 'zip'
-        ? `cd "${parentDir}" && zip -r "${archiveName}" "${item.label}"`
-        : `cd "${parentDir}" && tar -czvf "${archiveName}" "${item.label}"`;
+        ? `cd -- ${sq(parentDir)} && zip -r -- ${sq(archiveName)} ${sq(item.label)}`
+        : `cd -- ${sq(parentDir)} && tar -czvf ${sq(archiveName)} -- ${sq(item.label)}`;
       await sshExec(activeConnectionId, cmd);
       await loadDesktopFolder();
       window.dispatchEvent(new CustomEvent('sshdesktop:files-changed'));
@@ -574,9 +576,9 @@ export default function Desktop() {
       const lower = item.label.toLowerCase();
       let cmd = '';
       if (lower.endsWith('.zip')) {
-        cmd = `cd "${parentDir}" && unzip -o "${item.label}"`;
+        cmd = `cd -- ${sq(parentDir)} && unzip -o -- ${sq(item.label)}`;
       } else {
-        cmd = `cd "${parentDir}" && tar -xzvf "${item.label}"`;
+        cmd = `cd -- ${sq(parentDir)} && tar -xzvf ${sq(item.label)}`;
       }
       await sshExec(activeConnectionId, cmd);
       await loadDesktopFolder();
@@ -593,7 +595,7 @@ export default function Desktop() {
     try {
       if (itemToDelete.path) {
         if (itemToDelete.kind === 'folder') {
-          await sshExec(activeConnectionId, `rm -rf "${itemToDelete.path}"`);
+          await sshExec(activeConnectionId, `rm -rf -- ${sq(itemToDelete.path)}`);
         } else {
           await sftpDelete(activeConnectionId, itemToDelete.path);
         }
@@ -632,9 +634,9 @@ export default function Desktop() {
         }
         const destPath = `${dest}/${targetName}`;
         if (clipboard.isCut) {
-          await sshExec(activeConnectionId, `mv "${item.path}" "${destPath}"`);
+          await sshExec(activeConnectionId, `mv -- ${sq(item.path)} ${sq(destPath)}`);
         } else {
-          await sshExec(activeConnectionId, `cp -r "${item.path}" "${destPath}"`);
+          await sshExec(activeConnectionId, `cp -r -- ${sq(item.path)} ${sq(destPath)}`);
         }
       }
       if (clipboard.isCut) {

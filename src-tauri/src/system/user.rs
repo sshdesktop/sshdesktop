@@ -65,10 +65,14 @@ pub async fn user_list(
             let user = parts[0].trim();
             let hash = parts[1].trim();
             // Locked if hash starts with '!' or '*'
-            // Or if field 8 (expiration date in days since epoch) is 1 or in past
+            // Or if field 8 (expiration date in days since Unix epoch) is in the past
+            let now_days = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| (d.as_secs() / 86400) as i64)
+                .unwrap_or(i64::MAX);
             let is_expired = if parts.len() >= 8 && !parts[7].trim().is_empty() {
                 if let Ok(exp_days) = parts[7].trim().parse::<i64>() {
-                    exp_days > 0 && exp_days <= 100 // e.g. 1 means expired in 1970
+                    exp_days > 0 && exp_days < now_days
                 } else {
                     false
                 }
@@ -209,7 +213,8 @@ pub async fn user_add(
                 &state, &conn_id, "chpasswd", password_input.as_bytes()
             ).await;
             if password_code != 0 {
-                return Err(format!("User was created, but setting its password failed: {}", password_out.trim()));
+                let _ = run_cmd_priv(&state, &conn_id, &format!("userdel -r '{}'", username)).await;
+                return Err(format!("Failed setting password; user creation rolled back: {}", password_out.trim()));
             }
         }
     }

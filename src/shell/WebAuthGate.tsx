@@ -77,11 +77,11 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
 
     try {
       const res = await authLogin(username.trim(), password);
-      if (res.success) {
+      if (res.success && res.token) {
         const expiresAt = res.expires_at || (Date.now() + 60 * 60 * 1000);
         const payload = JSON.stringify({
           username: res.username,
-          token: res.token || ('ssh_token_' + Date.now()),
+          token: res.token,
           loginAt: Date.now(),
           expiresAt
         });
@@ -466,7 +466,7 @@ export function isWebAuthenticated(): boolean {
       localStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
       return false;
     }
-    return Boolean(parsed.token || parsed.username);
+    return Boolean(parsed && typeof parsed.token === 'string' && parsed.token.length > 0);
   } catch {
     return false;
   }

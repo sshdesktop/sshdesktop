@@ -27,6 +27,12 @@ elif [ -f "$DIR/bin/sshdesktop-linux-x64" ]; then
 elif [ -f "$DIR/server.js" ] && command -v node >/dev/null 2>&1; then
   mkdir -p /opt/sshdesktop
   cp -r "$DIR/." /opt/sshdesktop/
+  if [ ! -f /opt/sshdesktop/embedded-dist.js ]; then
+    echo 'export const EMBEDDED_FILES = {};' > /opt/sshdesktop/embedded-dist.js
+  fi
+  if [ -f /opt/sshdesktop/package.json ] && command -v npm >/dev/null 2>&1; then
+    (cd /opt/sshdesktop && npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1 || true)
+  fi
   cat << 'EOF' > "$INSTALL_BIN"
 #!/usr/bin/env bash
 exec node /opt/sshdesktop/server.js "$@"
@@ -48,14 +54,22 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/root
+DynamicUser=yes
+StateDirectory=sshdesktop
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/sshdesktop
 Environment=FRONTEND_PORT=2222
 Environment=BACKEND_PORT=2020
+Environment=BACKEND_HOST=127.0.0.1
 Environment=HOST=0.0.0.0
-ExecStart=/usr/local/bin/sshdesktop
+Environment=SSHDESKTOP_DATA_DIR=/var/lib/sshdesktop
+ExecStart=/usr/local/bin/sshdesktop --data-dir /var/lib/sshdesktop
 Restart=always
 RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
 LimitNOFILE=65536
 StandardOutput=journal
 StandardError=journal

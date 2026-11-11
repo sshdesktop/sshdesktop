@@ -608,8 +608,41 @@ function getSftp(client) {
   });
 }
 
+function shellQuote(val) {
+  return `'${String(val ?? '').replace(/'/g, "'\\''")}'`;
+}
+
+function escapeHtml(val) {
+  return String(val ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function validateInt(val, min, max, label) {
+  const num = Number(val);
+  if (!Number.isInteger(num) || num < min || num > max) {
+    throw new Error(`Invalid ${label}: expected integer between ${min} and ${max}`);
+  }
+  return num;
+}
+
+function validateSafeToken(val, pattern, label) {
+  const str = String(val ?? '').trim();
+  if (!str || !pattern.test(str)) {
+    throw new Error(`Invalid ${label}`);
+  }
+  return str;
+}
+
 // Execute command: remotely over active SSH connection. Never fallback to host execution!
 function runRemoteExec(client, command, timeoutMs = 60000) {
+  return runRemoteExecWithStdin(client, command, null, timeoutMs);
+}
+
+function runRemoteExecWithStdin(client, command, stdinData = null, timeoutMs = 60000) {
   if (!client) {
     return Promise.resolve({
       stdout: '',
@@ -656,6 +689,14 @@ function runRemoteExec(client, command, timeoutMs = 60000) {
       }
 
       streamRef = stream;
+      if (stdinData !== null && stdinData !== undefined) {
+        try {
+          stream.write(stdinData);
+        } catch {}
+        try {
+          stream.end();
+        } catch {}
+      }
 
       const appendOutput = (which, chunk) => {
         if (outputTruncated) return;
@@ -706,19 +747,13 @@ function runRemoteExec(client, command, timeoutMs = 60000) {
 }
 
 // Execute privileged command with automatic sudo elevation (mirrors src-tauri run_cmd_priv)
-async function runRemotePrivExec(entry, command, timeoutMs = 60000) {
+async function runRemotePrivExec(entry, command, timeoutMs = 60000, stdinData = null) {
   if (!command || typeof command !== 'string') {
     return { stdout: '', stderr: '', exit_code: 0, duration_ms: 0 };
   }
 
   const trimmedCmd = command.trim();
-  const rawCmd = trimmedCmd.startsWith('sudo ') ? trimmedCmd.slice(5).trim() : trimmedCmd;
-  // Normalize nested sudo in pipes/chains since subshell will be elevated
-  const normalizedCmd = rawCmd
-    .replace(/\|\s*sudo\s+/g, '| ')
-    .replace(/;\s*sudo\s+/g, '; ')
-    .replace(/&&\s*sudo\s+/g, '&& ')
-    .replace(/\|\|\s*sudo\s+/g, '|| ');
+  const normalizedCmd = trimmedCmd.startsWith('sudo ') ? trimmedCmd.slice(5).trim() : trimmedCmd;
 
   if (!entry || !entry.client) {
     return await runRemoteExec(null, normalizedCmd, timeoutMs);
@@ -728,13 +763,13 @@ async function runRemotePrivExec(entry, command, timeoutMs = 60000) {
 
   // 1st Condition: Is the user root?
   if (username === 'root' || (entry.privilege && entry.privilege.is_root)) {
-    return await runRemoteExec(entry.client, normalizedCmd, timeoutMs);
+    return await runRemoteExecWithStdin(entry.client, normalizedCmd, stdinData, timeoutMs);
   }
 
   // 2nd Condition: Passwordless Sudo (sudo -n)
   const escapedRaw = normalizedCmd.replace(/'/g, "'\\''");
   const sudoNCmd = `sudo -n -- sh -c '${escapedRaw}' 2>&1`;
-  const nRes = await runRemoteExec(entry.client, sudoNCmd, timeoutMs);
+  const nRes = await runRemoteExecWithStdin(entry.client, sudoNCmd, stdinData, timeoutMs);
 
   if (nRes.exit_code === 0) {
     return nRes;
@@ -773,12 +808,20 @@ async function runRemotePrivExec(entry, command, timeoutMs = 60000) {
     };
   }
 
-  // 3C. User requires password for sudo (sudo -S)
+  // 3C. User requires password for sudo (sudo -S via SSH channel stdin, never CLI args)
   const pwd = entry.config?.password;
   if (pwd && typeof pwd === 'string' && pwd.length > 0) {
-    const escapedPwd = pwd.replace(/'/g, "'\\''");
-    const sudoSCmd = `printf '%s\\n' '${escapedPwd}' | sudo -S -p '' -- sh -c '${escapedRaw}' 2>&1`;
-    const sRes = await runRemoteExec(entry.client, sudoSCmd, timeoutMs);
+    if (pwd.includes('\n') || pwd.includes('\r')) {
+      return {
+        stdout: '',
+        stderr: 'Refusing sudo elevation: password contains invalid newline characters.',
+        exit_code: 1,
+        duration_ms: 0
+      };
+    }
+    const sudoSCmd = `sudo -S -p '' -- sh -c '${escapedRaw}' 2>&1`;
+    const combinedStdin = stdinData ? `${pwd}\n${stdinData}` : `${pwd}\n`;
+    const sRes = await runRemoteExecWithStdin(entry.client, sudoSCmd, combinedStdin, timeoutMs);
 
     if (sRes.exit_code === 0) {
       return sRes;
@@ -2040,12 +2083,11 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
         hasSudo = true;
         sudoType = 'passwordless';
       } else {
-        // Test password sudo if session has password
+        // Test password sudo if session has password (via stdin, never CLI arguments)
         const pwd = entry?.config?.password;
-        if (pwd && typeof pwd === 'string' && pwd.length > 0) {
-          const escapedPwd = pwd.replace(/'/g, "'\\''");
-          const testPwdCmd = `printf '%s\\n' '${escapedPwd}' | sudo -S -k -p '' true 2>&1`;
-          const pwdRes = await runRemoteExec(entry.client, testPwdCmd, 8000);
+        if (pwd && typeof pwd === 'string' && pwd.length > 0 && !pwd.includes('\n') && !pwd.includes('\r')) {
+          const testPwdCmd = `sudo -S -k -p '' true 2>&1`;
+          const pwdRes = await runRemoteExecWithStdin(entry.client, testPwdCmd, `${pwd}\n`, 8000);
           if (pwdRes.exit_code === 0) {
             hasSudo = true;
             sudoType = 'password';
@@ -2484,14 +2526,20 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'process_kill': {
       if (!entry) return;
-      const sig = args?.signal || 9;
-      await runRemotePrivExec(entry, `kill -${sig} ${args?.pid}`);
+      const pid = validateInt(args?.pid, 1, 4194304, 'PID');
+      const rawSig = args?.signal ?? 9;
+      const sig = typeof rawSig === 'number'
+        ? validateInt(rawSig, 1, 64, 'signal')
+        : validateSafeToken(rawSig, /^(?:[1-9]|[1-5]\d|6[0-4]|SIG[A-Z0-9]+|[A-Z0-9]+)$/, 'signal');
+      await runRemotePrivExec(entry, `kill -${sig} ${pid}`);
       return;
     }
 
     case 'process_renice': {
       if (!entry) return;
-      await runRemotePrivExec(entry, `renice ${args?.priority || 0} -p ${args?.pid}`);
+      const pid = validateInt(args?.pid, 1, 4194304, 'PID');
+      const prio = validateInt(args?.priority ?? 0, -20, 20, 'priority');
+      await runRemotePrivExec(entry, `renice ${prio} -p ${pid}`);
       return;
     }
 
@@ -2567,23 +2615,26 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     case 'service_action': {
       if (!entry) return '';
       const { action, name, serviceName } = args || {};
-      const target = name || serviceName;
-      const res = await runRemotePrivExec(entry, `systemctl ${action} "${target}" 2>&1`);
+      const allowedActions = ['start', 'stop', 'restart', 'reload', 'enable', 'disable', 'mask', 'unmask'];
+      const safeAction = String(action || '').toLowerCase().trim();
+      if (!allowedActions.includes(safeAction)) throw new Error('Invalid service action');
+      const target = validateSafeToken(name || serviceName, /^[A-Za-z0-9@._:-]+$/, 'service name');
+      const res = await runRemotePrivExec(entry, `systemctl ${safeAction} ${shellQuote(target)} 2>&1`);
       return res.stdout || res.stderr || 'Success';
     }
 
     case 'service_status': {
       if (!entry) return '';
-      const target = args?.name || args?.serviceName;
-      const res = await runRemoteExec(entry.client, `systemctl status "${target}" --no-pager 2>&1`);
+      const target = validateSafeToken(args?.name || args?.serviceName, /^[A-Za-z0-9@._:-]+$/, 'service name');
+      const res = await runRemoteExec(entry.client, `systemctl status ${shellQuote(target)} --no-pager 2>&1`);
       return res.stdout || res.stderr;
     }
 
     case 'service_logs': {
       if (!entry) return '';
-      const target = args?.name || args?.serviceName;
-      const lines = args?.lines || 100;
-      const res = await runRemoteExec(entry.client, `journalctl -u "${target}" -n ${lines} --no-pager 2>&1`);
+      const target = validateSafeToken(args?.name || args?.serviceName, /^[A-Za-z0-9@._:-]+$/, 'service name');
+      const lines = validateInt(args?.lines ?? 100, 1, 10000, 'lines');
+      const res = await runRemoteExec(entry.client, `journalctl -u ${shellQuote(target)} -n ${lines} --no-pager 2>&1`);
       return res.stdout || res.stderr;
     }
 
@@ -2592,22 +2643,23 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     // ==========================================
     case 'logs_journal': {
       if (!entry) return '';
-      const lines = args?.lines || 100;
-      const unit = args?.unit ? `-u '${args.unit}'` : '';
+      const lines = validateInt(args?.lines ?? 100, 1, 10000, 'lines');
+      const unit = args?.unit ? `-u ${shellQuote(validateSafeToken(args.unit, /^[A-Za-z0-9@._:-]+$/, 'unit'))}` : '';
       const res = await runRemoteExec(entry.client, `journalctl --no-pager -n ${lines} ${unit} 2>&1`);
       return res.stdout || res.stderr;
     }
 
     case 'logs_file': {
       if (!entry) return '';
-      const lines = args?.lines || 100;
-      const res = await runRemoteExec(entry.client, `tail -n ${lines} "${args?.path}" 2>&1`);
+      const lines = validateInt(args?.lines ?? 100, 1, 10000, 'lines');
+      if (!args?.path || typeof args.path !== 'string') throw new Error('Invalid log file path');
+      const res = await runRemoteExec(entry.client, `tail -n ${lines} -- ${shellQuote(args.path)} 2>&1`);
       return res.stdout || res.stderr;
     }
 
     case 'logs_dmesg': {
       if (!entry) return '';
-      const lines = args?.lines || 100;
+      const lines = validateInt(args?.lines ?? 100, 1, 10000, 'lines');
       const res = await runRemoteExec(entry.client, `dmesg -T 2>/dev/null | tail -n ${lines}`);
       return res.stdout || res.stderr;
     }
@@ -2670,19 +2722,22 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'network_ping': {
       if (!entry) return '';
-      const res = await runRemoteExec(entry.client, `ping -c 4 "${args?.host}" 2>&1`);
+      const host = validateSafeToken(args?.host, /^[A-Za-z0-9._:-]+$/, 'host');
+      const res = await runRemoteExec(entry.client, `ping -c 4 -- ${shellQuote(host)} 2>&1`);
       return res.stdout || res.stderr;
     }
 
     case 'network_dns_lookup': {
       if (!entry) return '';
-      const res = await runRemoteExec(entry.client, `nslookup "${args?.host}" 2>&1 || host "${args?.host}" 2>&1`);
+      const host = validateSafeToken(args?.host, /^[A-Za-z0-9._:-]+$/, 'host');
+      const qHost = shellQuote(host);
+      const res = await runRemoteExec(entry.client, `nslookup -- ${qHost} 2>&1 || host -- ${qHost} 2>&1`);
       return res.stdout || res.stderr;
     }
 
     case 'network_kill_port': {
       if (!entry) return '';
-      const port = args?.port;
+      const port = validateInt(args?.port, 1, 65535, 'port');
       const res = await runRemotePrivExec(entry, `fuser -k ${port}/tcp 2>/dev/null || (lsof -i :${port} -t | xargs -r kill -9)`);
       return res.stdout || 'Port killed';
     }
@@ -2761,16 +2816,18 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'firewall_add_rule': {
       if (!entry) return '';
-      const port = args?.port || args?.to_port;
-      const proto = args?.protocol || 'tcp';
-      const action = (args?.action || 'allow').toLowerCase();
-      const res = await runRemotePrivExec(entry, `ufw ${action} ${port}/${proto} 2>&1`);
+      const port = validateInt(args?.port || args?.to_port, 1, 65535, 'port');
+      const proto = validateSafeToken(args?.protocol || 'tcp', /^(?:tcp|udp|any)$/i, 'protocol').toLowerCase();
+      const action = validateSafeToken(args?.action || 'allow', /^(?:allow|deny|reject|limit)$/i, 'action').toLowerCase();
+      const targetSpec = proto === 'any' ? String(port) : `${port}/${proto}`;
+      const res = await runRemotePrivExec(entry, `ufw ${action} ${targetSpec} 2>&1`);
       return res.stdout || 'Rule added';
     }
 
     case 'firewall_delete_rule': {
       if (!entry) return '';
-      const res = await runRemotePrivExec(entry, `ufw --force delete ${args?.number} 2>&1`);
+      const num = validateInt(args?.number, 1, 100000, 'rule number');
+      const res = await runRemotePrivExec(entry, `ufw --force delete ${num} 2>&1`);
       return res.stdout || 'Rule deleted';
     }
 
@@ -2793,9 +2850,9 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     case 'firewall_add_rule_advanced': {
       if (!entry) return '';
       const payload = args?.payload || args || {};
-      const port = payload.port || payload.to_port;
-      const proto = payload.protocol || 'tcp';
-      const action = (payload.action || 'allow').toLowerCase();
+      const port = validateInt(payload.port || payload.to_port, 1, 65535, 'port');
+      const proto = validateSafeToken(payload.protocol || 'tcp', /^(?:tcp|udp)$/i, 'protocol').toLowerCase();
+      const action = validateSafeToken(payload.action || 'allow', /^(?:allow|deny|reject|limit)$/i, 'action').toLowerCase();
       const res = await runRemotePrivExec(entry, `ufw ${action} ${port}/${proto} 2>&1 || firewall-cmd --permanent --add-port=${port}/${proto} 2>&1`);
       return res.stdout || 'Rule added';
     }
@@ -2803,10 +2860,20 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     case 'firewall_delete_rule_advanced': {
       if (!entry) return '';
       const ruleNum = args?.rule_number || args?.ruleNumber;
-      const port = args?.port;
-      const proto = args?.protocol || 'tcp';
-      let cmd = ruleNum ? `ufw --force delete ${ruleNum} 2>&1` : `ufw delete allow ${port}/${proto} 2>&1`;
-      if (port) cmd += ` || firewall-cmd --permanent --remove-port=${port}/${proto} 2>&1`;
+      const rawPort = args?.port;
+      const proto = validateSafeToken(args?.protocol || 'tcp', /^(?:tcp|udp)$/i, 'protocol').toLowerCase();
+      let cmd = '';
+      if (ruleNum) {
+        const num = validateInt(ruleNum, 1, 100000, 'rule number');
+        cmd = `ufw --force delete ${num} 2>&1`;
+      } else {
+        const port = validateInt(rawPort, 1, 65535, 'port');
+        cmd = `ufw delete allow ${port}/${proto} 2>&1`;
+      }
+      if (rawPort) {
+        const port = validateInt(rawPort, 1, 65535, 'port');
+        cmd += ` || firewall-cmd --permanent --remove-port=${port}/${proto} 2>&1`;
+      }
       const res = await runRemotePrivExec(entry, cmd);
       return res.stdout || 'Rule deleted';
     }
@@ -2825,8 +2892,8 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'firewall_set_default_policy': {
       if (!entry) return '';
-      const dir = (args?.direction || 'incoming').toLowerCase();
-      const pol = (args?.policy || 'deny').toLowerCase();
+      const dir = validateSafeToken(args?.direction || 'incoming', /^(?:incoming|outgoing|routed)$/i, 'direction').toLowerCase();
+      const pol = validateSafeToken(args?.policy || 'deny', /^(?:allow|deny|reject)$/i, 'policy').toLowerCase();
       const res = await runRemotePrivExec(entry, `ufw default ${pol} ${dir} 2>&1`);
       return res.stdout || 'Policy set';
     }
@@ -3144,71 +3211,95 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'user_add': {
       if (!entry) return;
-      const { username, password, shell, groups } = args || {};
-      const sh = shell || '/bin/bash';
-      await runRemotePrivExec(entry, `useradd -m -s "${sh}" "${username}"`);
-      if (password) await runRemotePrivExec(entry, `echo "${username}:${password}" | chpasswd`);
-      if (Array.isArray(groups) && groups.length > 0) {
-        await runRemotePrivExec(entry, `usermod -aG "${groups.join(',')}" "${username}"`);
+      const username = validateSafeToken(args?.username, /^[a-zA-Z_][a-zA-Z0-9._-]{0,31}$/, 'username');
+      const password = args?.password;
+      const sh = args?.shell ? String(args.shell).trim() : '/bin/bash';
+      if (password && (typeof password !== 'string' || password.includes('\n') || password.includes('\r'))) {
+        throw new Error('Invalid password: control characters not allowed');
+      }
+      const addRes = await runRemotePrivExec(entry, `useradd -m -s ${shellQuote(sh)} -- ${shellQuote(username)}`);
+      if (addRes.exit_code !== 0) throw new Error(addRes.stderr || addRes.stdout || 'Failed to add user');
+      if (password) {
+        const pwdRes = await runRemotePrivExec(entry, 'chpasswd', 60000, `${username}:${password}\n`);
+        if (pwdRes.exit_code !== 0) {
+          await runRemotePrivExec(entry, `userdel -r -- ${shellQuote(username)}`);
+          throw new Error(pwdRes.stderr || pwdRes.stdout || 'Failed to set password; rolled back user creation');
+        }
+      }
+      if (Array.isArray(args?.groups) && args.groups.length > 0) {
+        const validGroups = args.groups.map(g => validateSafeToken(g, /^[a-zA-Z0-9._-]+$/, 'group')).join(',');
+        await runRemotePrivExec(entry, `usermod -aG ${shellQuote(validGroups)} -- ${shellQuote(username)}`);
       }
       return;
     }
 
     case 'user_set_password': {
       if (!entry) return;
-      await runRemotePrivExec(entry, `echo "${args?.username}:${args?.password}" | chpasswd`);
+      const username = validateSafeToken(args?.username, /^[a-zA-Z_][a-zA-Z0-9._-]{0,31}$/, 'username');
+      const password = String(args?.password ?? '');
+      if (!password || password.includes('\n') || password.includes('\r')) {
+        throw new Error('Invalid password');
+      }
+      await runRemotePrivExec(entry, 'chpasswd', 60000, `${username}:${password}\n`);
       return;
     }
 
     case 'user_toggle_sudo': {
       if (!entry) return;
-      const { username, grant } = args || {};
-      if (grant) {
-        await runRemotePrivExec(entry, `usermod -aG sudo "${username}" 2>/dev/null || usermod -aG wheel "${username}" 2>/dev/null`);
+      const username = validateSafeToken(args?.username, /^[a-zA-Z_][a-zA-Z0-9._-]{0,31}$/, 'username');
+      const qUser = shellQuote(username);
+      if (args?.grant) {
+        await runRemotePrivExec(entry, `usermod -aG sudo -- ${qUser} 2>/dev/null || usermod -aG wheel -- ${qUser} 2>/dev/null`);
       } else {
-        await runRemotePrivExec(entry, `gpasswd -d "${username}" sudo 2>/dev/null || gpasswd -d "${username}" wheel 2>/dev/null`);
+        await runRemotePrivExec(entry, `gpasswd -d ${qUser} sudo 2>/dev/null || gpasswd -d ${qUser} wheel 2>/dev/null`);
       }
       return;
     }
 
     case 'user_delete': {
       if (!entry) return;
+      const username = validateSafeToken(args?.username, /^[a-zA-Z_][a-zA-Z0-9._-]{0,31}$/, 'username');
       const rm = args?.removeHome ? '-r' : '';
-      await runRemotePrivExec(entry, `userdel ${rm} "${args?.username}"`);
+      await runRemotePrivExec(entry, `userdel ${rm} -- ${shellQuote(username)}`);
       return;
     }
 
     case 'user_lock': {
       if (!entry) return;
-      await runRemotePrivExec(entry, `usermod -L "${args?.username}"`);
+      const username = validateSafeToken(args?.username, /^[a-zA-Z_][a-zA-Z0-9._-]{0,31}$/, 'username');
+      await runRemotePrivExec(entry, `usermod -L -- ${shellQuote(username)}`);
       return;
     }
 
     case 'user_modify': {
       if (!entry) return;
-      const { username, shell, home } = args || {};
-      if (shell) await runRemotePrivExec(entry, `usermod -s "${shell}" "${username}"`);
-      if (home) await runRemotePrivExec(entry, `usermod -d "${home}" -m "${username}"`);
+      const username = validateSafeToken(args?.username, /^[a-zA-Z_][a-zA-Z0-9._-]{0,31}$/, 'username');
+      const qUser = shellQuote(username);
+      if (args?.shell) await runRemotePrivExec(entry, `usermod -s ${shellQuote(args.shell)} -- ${qUser}`);
+      if (args?.home) await runRemotePrivExec(entry, `usermod -d ${shellQuote(args.home)} -m -- ${qUser}`);
       return true;
     }
 
     case 'group_add_user': {
       if (!entry) return;
-      const { group, username } = args || {};
-      await runRemotePrivExec(entry, `usermod -aG "${group}" "${username}"`);
+      const group = validateSafeToken(args?.group, /^[a-zA-Z0-9._-]+$/, 'group');
+      const username = validateSafeToken(args?.username, /^[a-zA-Z_][a-zA-Z0-9._-]{0,31}$/, 'username');
+      await runRemotePrivExec(entry, `usermod -aG ${shellQuote(group)} -- ${shellQuote(username)}`);
       return true;
     }
 
     case 'group_remove_user': {
       if (!entry) return;
-      const { group, username } = args || {};
-      await runRemotePrivExec(entry, `gpasswd -d "${username}" "${group}"`);
+      const group = validateSafeToken(args?.group, /^[a-zA-Z0-9._-]+$/, 'group');
+      const username = validateSafeToken(args?.username, /^[a-zA-Z_][a-zA-Z0-9._-]{0,31}$/, 'username');
+      await runRemotePrivExec(entry, `gpasswd -d ${shellQuote(username)} ${shellQuote(group)}`);
       return true;
     }
 
     case 'user_unlock': {
       if (!entry) return;
-      await runRemotePrivExec(entry, `usermod -U "${args?.username}"`);
+      const username = validateSafeToken(args?.username, /^[a-zA-Z_][a-zA-Z0-9._-]{0,31}$/, 'username');
+      await runRemotePrivExec(entry, `usermod -U -- ${shellQuote(username)}`);
       return;
     }
 
@@ -3231,13 +3322,15 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'group_add': {
       if (!entry) return;
-      await runRemotePrivExec(entry, `groupadd "${args?.name}"`);
+      const group = validateSafeToken(args?.name, /^[a-zA-Z0-9._-]+$/, 'group');
+      await runRemotePrivExec(entry, `groupadd -- ${shellQuote(group)}`);
       return;
     }
 
     case 'group_delete': {
       if (!entry) return;
-      await runRemotePrivExec(entry, `groupdel "${args?.name}"`);
+      const group = validateSafeToken(args?.name, /^[a-zA-Z0-9._-]+$/, 'group');
+      await runRemotePrivExec(entry, `groupdel -- ${shellQuote(group)}`);
       return;
     }
 
@@ -3281,15 +3374,20 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'cron_add': {
       if (!entry) return;
-      const { schedule, command } = args || {};
-      await runRemoteExec(entry.client, `(crontab -l 2>/dev/null; echo "${schedule} ${command}") | crontab -`);
+      const schedule = String(args?.schedule ?? '').trim();
+      const command = String(args?.command ?? '').trim();
+      if (!schedule || !command || /[\r\n\0]/.test(schedule) || /[\r\n\0]/.test(command)) {
+        throw new Error('Invalid cron schedule or command');
+      }
+      await runRemoteExec(entry.client, `(crontab -l 2>/dev/null; printf '%s\\n' ${shellQuote(`${schedule} ${command}`)}) | crontab -`);
       return;
     }
 
     case 'cron_remove': {
       if (!entry) return;
       const cmdToRemove = (args?.command || '').trim();
-      await runRemoteExec(entry.client, `crontab -l 2>/dev/null | grep -vF "${cmdToRemove}" | crontab -`);
+      if (!cmdToRemove || /[\r\n\0]/.test(cmdToRemove)) throw new Error('Invalid cron pattern');
+      await runRemoteExec(entry.client, `crontab -l 2>/dev/null | grep -vF -- ${shellQuote(cmdToRemove)} | crontab -`);
       return;
     }
 
@@ -3323,19 +3421,22 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'docker_action': {
       if (!entry) return '';
-      let res = await runRemoteExec(entry.client, `docker ${args?.action} "${args?.containerId}" 2>&1`);
+      const action = validateSafeToken(args?.action, /^(?:start|stop|restart|pause|unpause|rm|kill|unpause)$/i, 'docker action').toLowerCase();
+      const cid = validateSafeToken(args?.containerId, /^[A-Za-z0-9_.:-]+$/, 'container ID');
+      let res = await runRemoteExec(entry.client, `docker ${action} -- ${shellQuote(cid)} 2>&1`);
       if (res.exit_code !== 0 && (res.stdout + res.stderr).toLowerCase().includes('permission denied')) {
-        res = await runRemotePrivExec(entry, `docker ${args?.action} "${args?.containerId}" 2>&1`);
+        res = await runRemotePrivExec(entry, `docker ${action} -- ${shellQuote(cid)} 2>&1`);
       }
       return res.stdout || res.stderr || 'Action executed';
     }
 
     case 'docker_logs': {
       if (!entry) return '';
-      const lines = args?.lines || 100;
-      let res = await runRemoteExec(entry.client, `docker logs --tail ${lines} "${args?.containerId}" 2>&1`);
+      const lines = validateInt(args?.lines ?? 100, 1, 10000, 'lines');
+      const cid = validateSafeToken(args?.containerId, /^[A-Za-z0-9_.:-]+$/, 'container ID');
+      let res = await runRemoteExec(entry.client, `docker logs --tail ${lines} -- ${shellQuote(cid)} 2>&1`);
       if (res.exit_code !== 0 && (res.stdout + res.stderr).toLowerCase().includes('permission denied')) {
-        res = await runRemotePrivExec(entry, `docker logs --tail ${lines} "${args?.containerId}" 2>&1`);
+        res = await runRemotePrivExec(entry, `docker logs --tail ${lines} -- ${shellQuote(cid)} 2>&1`);
       }
       return res.stdout || res.stderr;
     }
@@ -3366,9 +3467,12 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'docker_exec': {
       if (!entry) return '';
-      let res = await runRemoteExec(entry.client, `docker exec "${args?.containerId}" ${args?.command} 2>&1`);
+      const cid = validateSafeToken(args?.containerId, /^[A-Za-z0-9_.:-]+$/, 'container ID');
+      const command = String(args?.command || '').trim();
+      if (!command) throw new Error('Missing container command');
+      let res = await runRemoteExec(entry.client, `docker exec -- ${shellQuote(cid)} sh -c ${shellQuote(command)} 2>&1`);
       if (res.exit_code !== 0 && (res.stdout + res.stderr).toLowerCase().includes('permission denied')) {
-        res = await runRemotePrivExec(entry, `docker exec "${args?.containerId}" ${args?.command} 2>&1`);
+        res = await runRemotePrivExec(entry, `docker exec -- ${shellQuote(cid)} sh -c ${shellQuote(command)} 2>&1`);
       }
       return res.stdout || res.stderr;
     }
@@ -3390,9 +3494,10 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'docker_image_remove': {
       if (!entry) return '';
-      let res = await runRemoteExec(entry.client, `docker rmi "${args?.imageId}" 2>&1`);
+      const imgId = validateSafeToken(args?.imageId, /^[A-Za-z0-9_.:\-\/@]+$/, 'image ID');
+      let res = await runRemoteExec(entry.client, `docker rmi -- ${shellQuote(imgId)} 2>&1`);
       if (res.exit_code !== 0 && (res.stdout + res.stderr).toLowerCase().includes('permission denied')) {
-        res = await runRemotePrivExec(entry, `docker rmi "${args?.imageId}" 2>&1`);
+        res = await runRemotePrivExec(entry, `docker rmi -- ${shellQuote(imgId)} 2>&1`);
       }
       return res.stdout || res.stderr;
     }
@@ -3431,20 +3536,25 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'disk_smart': {
       if (!entry) return '';
-      const res = await runRemotePrivExec(entry, `smartctl -a "${args?.device}" 2>&1`);
+      const device = validateSafeToken(args?.device, /^\/dev\/[A-Za-z0-9._\/-]+$/, 'device path');
+      const res = await runRemotePrivExec(entry, `smartctl -a -- ${shellQuote(device)} 2>&1`);
       return res.stdout || res.stderr;
     }
 
     case 'disk_largest_dirs': {
       if (!entry) return '';
-      const res = await runRemoteExec(entry.client, `du -h --max-depth=1 "${args?.path || '/'}" 2>/dev/null | sort -hr | head -n 20`);
+      const targetPath = String(args?.path || '/').trim();
+      const res = await runRemoteExec(entry.client, `du -h --max-depth=1 -- ${shellQuote(targetPath)} 2>/dev/null | sort -hr | head -n 20`);
       return res.stdout;
     }
 
     case 'disk_mount': {
       if (!entry) return '';
-      const opt = args?.options ? `-o ${args.options}` : '';
-      const res = await runRemotePrivExec(entry, `mount ${opt} "${args?.device}" "${args?.mountPoint}" 2>&1`);
+      const device = String(args?.device || '').trim();
+      const mp = String(args?.mountPoint || '').trim();
+      if (!device || !mp) throw new Error('Invalid mount parameters');
+      const opt = args?.options ? `-o ${shellQuote(validateSafeToken(args.options, /^[A-Za-z0-9,_=.-]+$/, 'mount options'))}` : '';
+      const res = await runRemotePrivExec(entry, `mount ${opt} -- ${shellQuote(device)} ${shellQuote(mp)} 2>&1`);
       return res.stdout || 'Mounted';
     }
 
@@ -3452,15 +3562,18 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       if (!entry) return '';
       const f = args?.force ? '-f' : '';
       const l = args?.lazy ? '-l' : '';
-      const res = await runRemotePrivExec(entry, `umount ${f} ${l} "${args?.target}" 2>&1`);
+      const target = String(args?.target || '').trim();
+      if (!target) throw new Error('Invalid unmount target');
+      const res = await runRemotePrivExec(entry, `umount ${f} ${l} -- ${shellQuote(target)} 2>&1`);
       return res.stdout || 'Unmounted';
     }
 
     case 'disk_remount': {
       if (!entry) return '';
-      const opts = args?.options || 'defaults';
-      const mp = args?.mountPoint || '';
-      const res = await runRemotePrivExec(entry, `mount -o remount,${opts} "${mp}" 2>&1`);
+      const opts = validateSafeToken(args?.options || 'defaults', /^[A-Za-z0-9,_=.-]+$/, 'mount options');
+      const mp = String(args?.mountPoint || '').trim();
+      if (!mp) throw new Error('Invalid mount point');
+      const res = await runRemotePrivExec(entry, `mount -o ${shellQuote(`remount,${opts}`)} -- ${shellQuote(mp)} 2>&1`);
       return res.stdout || 'Remounted';
     }
 
@@ -3489,45 +3602,61 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     case 'disk_create_label': {
       if (!entry) return '';
       const { device, labelType = 'gpt' } = args || {};
-      const res = await runRemotePrivExec(entry, `parted -s "${device}" mklabel ${labelType} 2>&1`);
+      const safeDev = validateSafeToken(device, /^\/dev\/[A-Za-z0-9._\/-]+$/, 'device path');
+      const safeLabel = validateSafeToken(labelType, /^(?:gpt|msdos|bsd|loop|mac|sun)$/i, 'label type').toLowerCase();
+      const res = await runRemotePrivExec(entry, `parted -s -- ${shellQuote(safeDev)} mklabel ${safeLabel} 2>&1`);
       return res.stdout || 'Label created';
     }
 
     case 'disk_create_partition': {
       if (!entry) return '';
       const { device, partType = 'primary', start = '1MiB', end = '100%' } = args || {};
-      const res = await runRemotePrivExec(entry, `parted -s "${device}" mkpart ${partType} ${start} ${end} 2>&1`);
+      const safeDev = validateSafeToken(device, /^\/dev\/[A-Za-z0-9._\/-]+$/, 'device path');
+      const safePart = validateSafeToken(partType, /^(?:primary|logical|extended)$/i, 'partition type').toLowerCase();
+      const safeStart = validateSafeToken(start, /^[A-Za-z0-9.%+-]+$/, 'start boundary');
+      const safeEnd = validateSafeToken(end, /^[A-Za-z0-9.%+-]+$/, 'end boundary');
+      const res = await runRemotePrivExec(entry, `parted -s -- ${shellQuote(safeDev)} mkpart ${safePart} ${shellQuote(safeStart)} ${shellQuote(safeEnd)} 2>&1`);
       return res.stdout || 'Partition created';
     }
 
     case 'disk_delete_partition': {
       if (!entry) return '';
       const { device, partNumber } = args || {};
-      const res = await runRemotePrivExec(entry, `parted -s "${device}" rm ${partNumber} 2>&1`);
+      const safeDev = validateSafeToken(device, /^\/dev\/[A-Za-z0-9._\/-]+$/, 'device path');
+      const safeNum = validateInt(partNumber, 1, 128, 'partition number');
+      const res = await runRemotePrivExec(entry, `parted -s -- ${shellQuote(safeDev)} rm ${safeNum} 2>&1`);
       return res.stdout || 'Partition deleted';
     }
 
     case 'disk_resize_partition': {
       if (!entry) return '';
       const { device, partNumber, newEnd = '100%' } = args || {};
-      const res = await runRemotePrivExec(entry, `parted -s "${device}" resizepart ${partNumber} ${newEnd} 2>&1`);
+      const safeDev = validateSafeToken(device, /^\/dev\/[A-Za-z0-9._\/-]+$/, 'device path');
+      const safeNum = validateInt(partNumber, 1, 128, 'partition number');
+      const safeEnd = validateSafeToken(newEnd, /^[A-Za-z0-9.%+-]+$/, 'end boundary');
+      const res = await runRemotePrivExec(entry, `parted -s -- ${shellQuote(safeDev)} resizepart ${safeNum} ${shellQuote(safeEnd)} 2>&1`);
       return res.stdout || 'Partition resized';
     }
 
     case 'disk_set_partition_flag': {
       if (!entry) return '';
       const { device, partNumber, flag, stateOn } = args || {};
+      const safeDev = validateSafeToken(device, /^\/dev\/[A-Za-z0-9._\/-]+$/, 'device path');
+      const safeNum = validateInt(partNumber, 1, 128, 'partition number');
+      const safeFlag = validateSafeToken(flag, /^[a-z_]+$/, 'partition flag');
       const stateStr = stateOn ? 'on' : 'off';
-      const res = await runRemotePrivExec(entry, `parted -s "${device}" set ${partNumber} ${flag} ${stateStr} 2>&1`);
+      const res = await runRemotePrivExec(entry, `parted -s -- ${shellQuote(safeDev)} set ${safeNum} ${safeFlag} ${stateStr} 2>&1`);
       return res.stdout || 'Flag updated';
     }
 
     case 'disk_format_filesystem': {
       if (!entry) return '';
       const { device, fstype = 'ext4', label, quick } = args || {};
-      const lblOpt = label ? `-L "${label}"` : '';
+      const safeDev = validateSafeToken(device, /^\/dev\/[A-Za-z0-9._\/-]+$/, 'device path');
+      const safeFs = validateSafeToken(fstype, /^[a-z0-9._-]+$/i, 'filesystem type');
+      const lblOpt = label ? `-L ${shellQuote(String(label).slice(0, 32))}` : '';
       const qOpt = quick ? '-F' : '';
-      const res = await runRemotePrivExec(entry, `mkfs -t ${fstype} ${lblOpt} ${qOpt} "${device}" 2>&1`);
+      const res = await runRemotePrivExec(entry, `mkfs -t ${safeFs} ${lblOpt} ${qOpt} -- ${shellQuote(safeDev)} 2>&1`);
       return res.stdout || 'Formatted';
     }
 
@@ -3797,47 +3926,57 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'sftp_mkdir': {
       if (!entry) return;
-      const res = await runRemoteExec(entry.client, `mkdir -p "${args?.path}" 2>&1`);
+      const qPath = shellQuote(args?.path);
+      const res = await runRemoteExec(entry.client, `mkdir -p -- ${qPath} 2>&1`);
       if (res.exit_code !== 0) {
-        await runRemotePrivExec(entry, `mkdir -p "${args?.path}"`);
+        await runRemotePrivExec(entry, `mkdir -p -- ${qPath}`);
       }
       return;
     }
 
     case 'sftp_delete': {
       if (!entry) return;
-      const res = await runRemoteExec(entry.client, `rm -rf "${args?.path}" 2>&1`);
+      const target = String(args?.path || '').trim();
+      if (!target || target === '/') throw new Error('Refusing unsafe delete target');
+      const qPath = shellQuote(target);
+      const res = await runRemoteExec(entry.client, `rm -rf -- ${qPath} 2>&1`);
       if (res.exit_code !== 0) {
-        await runRemotePrivExec(entry, `rm -rf "${args?.path}"`);
+        await runRemotePrivExec(entry, `rm -rf -- ${qPath}`);
       }
       return;
     }
 
     case 'sftp_rename': {
       if (!entry) return;
-      const res = await runRemoteExec(entry.client, `mv "${args?.oldPath}" "${args?.newPath}" 2>&1`);
+      const qOld = shellQuote(args?.oldPath);
+      const qNew = shellQuote(args?.newPath);
+      const res = await runRemoteExec(entry.client, `mv -- ${qOld} ${qNew} 2>&1`);
       if (res.exit_code !== 0) {
-        await runRemotePrivExec(entry, `mv "${args?.oldPath}" "${args?.newPath}"`);
+        await runRemotePrivExec(entry, `mv -- ${qOld} ${qNew}`);
       }
       return;
     }
 
     case 'sftp_chmod': {
       if (!entry) return;
-      const octal = (args?.mode & 0o777).toString(8);
-      const res = await runRemoteExec(entry.client, `chmod ${octal} "${args?.path}" 2>&1`);
+      const octal = (Number(args?.mode) & 0o777).toString(8);
+      const qPath = shellQuote(args?.path);
+      const res = await runRemoteExec(entry.client, `chmod ${octal} -- ${qPath} 2>&1`);
       if (res.exit_code !== 0) {
-        await runRemotePrivExec(entry, `chmod ${octal} "${args?.path}"`);
+        await runRemotePrivExec(entry, `chmod ${octal} -- ${qPath}`);
       }
       return;
     }
 
     case 'sftp_chown': {
       if (!entry) return;
-      const ownership = args?.group ? `${args.owner}:${args.group}` : args.owner;
-      const res = await runRemoteExec(entry.client, `chown ${ownership} "${args?.path}" 2>&1`);
+      const owner = validateSafeToken(args?.owner, /^[a-zA-Z0-9._-]+$/, 'owner');
+      const group = args?.group ? validateSafeToken(args.group, /^[a-zA-Z0-9._-]+$/, 'group') : '';
+      const ownership = group ? `${owner}:${group}` : owner;
+      const qPath = shellQuote(args?.path);
+      const res = await runRemoteExec(entry.client, `chown -- ${shellQuote(ownership)} ${qPath} 2>&1`);
       if (res.exit_code !== 0) {
-        await runRemotePrivExec(entry, `chown ${ownership} "${args?.path}"`);
+        await runRemotePrivExec(entry, `chown -- ${shellQuote(ownership)} ${qPath}`);
       }
       return;
     }
@@ -3925,7 +4064,7 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'sftp_folder_size': {
       if (!entry) return '—';
-      const res = await runRemoteExec(entry.client, `du -sh "${args?.path}" 2>/dev/null | cut -f1`);
+      const res = await runRemoteExec(entry.client, `du -sh -- ${shellQuote(args?.path)} 2>/dev/null | cut -f1`);
       return res.stdout.trim() || '—';
     }
 
@@ -3937,6 +4076,9 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       const termId = terminalId || `term-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
 
       if (!entry || !entry.client) {
+        if (process.env.SSHDESKTOP_ENABLE_LOCAL_SHELL !== 'true') {
+          throw new Error('No active SSH connection available. Local host shell execution is disabled.');
+        }
         // Local interactive shell fallback
         return new Promise((resolve) => {
           const shellCmd = process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || '/bin/bash');
@@ -4116,21 +4258,59 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
     }
 
     case 'browser_proxy_fetch': {
-      const url = args?.url;
-      if (!url) throw new Error('Missing URL');
+      const rawUrl = args?.url;
+      if (!rawUrl) throw new Error('Missing URL');
+      let parsedUrl;
       try {
-        const resp = await fetch(url, {
+        parsedUrl = new URL(String(rawUrl));
+      } catch {
+        throw new Error('Invalid URL');
+      }
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        throw new Error('Only HTTP and HTTPS protocols are supported');
+      }
+      const hostname = parsedUrl.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+      const isInternal = hostname === 'localhost' || hostname === '::1' || hostname.startsWith('127.') ||
+        hostname.startsWith('169.254.') || hostname.startsWith('10.') || hostname.startsWith('192.168.') ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) || hostname === '0.0.0.0' || hostname.endsWith('.internal') || hostname.endsWith('.local');
+      if (isInternal) {
+        throw new Error('Direct host fetch to internal or loopback addresses is disabled; use the SSH browser gateway.');
+      }
+      const MAX_PROXY_BYTES = 10 * 1024 * 1024;
+      try {
+        const resp = await fetch(parsedUrl.toString(), {
+          redirect: 'manual',
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
           }
         });
         const status = resp.status;
-        const final_url = resp.url || url;
+        const final_url = resp.url || parsedUrl.toString();
         const contentType = resp.headers.get('content-type') || 'text/html';
-        let body = await resp.text();
+        let body = '';
+        if (resp.body && typeof resp.body.getReader === 'function') {
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          let received = 0;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            received += value ? value.length : 0;
+            if (received > MAX_PROXY_BYTES) {
+              try { reader.cancel(); } catch {}
+              throw new Error('Proxy response exceeded 10 MiB limit');
+            }
+            if (value) body += decoder.decode(value, { stream: true });
+          }
+        } else {
+          body = await resp.text();
+          if (Buffer.byteLength(body, 'utf8') > MAX_PROXY_BYTES) {
+            body = body.slice(0, MAX_PROXY_BYTES);
+          }
+        }
 
         if (contentType.includes('text/html')) {
-          const baseTag = `<base href="${final_url}" />\n`;
+          const baseTag = `<base href="${escapeHtml(final_url)}" />\n`;
           const headMatch = body.match(/<head\b[^>]*>/i);
           if (headMatch && headMatch.index !== undefined) {
             const insertIdx = headMatch.index + headMatch[0].length;
@@ -4156,8 +4336,8 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
         return {
           status: 500,
           content_type: 'text/html',
-          body: `<html><body><h3>Proxy request to '${url}' failed: ${err.message}</h3></body></html>`,
-          final_url: url
+          body: `<html><body><h3>Proxy request to '${escapeHtml(rawUrl)}' failed: ${escapeHtml(err.message)}</h3></body></html>`,
+          final_url: String(rawUrl)
         };
       }
     }
@@ -4706,6 +4886,8 @@ function handleBrowserGatewayUpgrade(req, socket, head) {
 
   const connectTarget = (cb) => {
     const destHost = host === 'localhost' ? '127.0.0.1' : host;
+    const isLoopback = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+    const strictTls = !(isLoopback && Boolean(entry && entry.client));
     entry.client.forwardOut('127.0.0.1', 0, destHost, port, (err, stream) => {
       if (err) return cb(err);
       if (proto === 'https') {
@@ -4838,7 +5020,7 @@ function handleBrowserGatewayRequest(req, res) {
   let entry = null;
   if (connId && connId !== 'default' && connId !== 'local' && activeConnections.has(connId)) {
     entry = activeConnections.get(connId);
-  } else if (activeConnections.size > 0) {
+  } else if (connId === 'default' && activeConnections.size === 1) {
     entry = activeConnections.values().next().value;
   }
 
@@ -5161,21 +5343,21 @@ function handleBrowserGatewayRequest(req, res) {
           const interceptScript = `
 <script>
 (function() {
-  var GW = "${gatewayBase}";
-  var TARGET_CO = "${targetCoBase64}";
-  var TARGET_ORIGIN = "${proto}://${host}:${port}";
-  var TARGET_HOST = "${host}";
-  var ORIGINS = [
-    "${proto}://${host}:${port}",
-    "${proto}://${host}",
-    "${proto}://localhost:${port}",
-    "${proto}://localhost",
-    "${proto}://127.0.0.1:${port}",
-    "${proto}://127.0.0.1",
-    "//${host}:${port}",
-    "//localhost:${port}",
-    "//127.0.0.1:${port}"
-  ];
+  var GW = ${JSON.stringify(gatewayBase)};
+  var TARGET_CO = ${JSON.stringify(targetCoBase64)};
+  var TARGET_ORIGIN = ${JSON.stringify(`${proto}://${host}:${port}`)};
+  var TARGET_HOST = ${JSON.stringify(host)};
+  var ORIGINS = ${JSON.stringify([
+    `${proto}://${host}:${port}`,
+    `${proto}://${host}`,
+    `${proto}://localhost:${port}`,
+    `${proto}://localhost`,
+    `${proto}://127.0.0.1:${port}`,
+    `${proto}://127.0.0.1`,
+    `//${host}:${port}`,
+    `//localhost:${port}`,
+    `//127.0.0.1:${port}`
+  ])};
 
   function fixCaptchaUrl(url) {
     if (typeof url !== 'string' || !url) return url;
@@ -5272,7 +5454,7 @@ function handleBrowserGatewayRequest(req, res) {
         var parsed = new URL(u);
         var pProto = parsed.protocol.replace(':', '');
         var pPort = parsed.port || (pProto === 'https' ? '443' : '80');
-        return '/api/browser/gateway/' + encodeURIComponent("${encodeURIComponent(connId)}") + '/' + pProto + '/' + parsed.hostname + ':' + pPort + (parsed.pathname || '/') + parsed.search + (parsed.hash || '');
+        return '/api/browser/gateway/' + encodeURIComponent(${JSON.stringify(connId)}) + '/' + pProto + '/' + parsed.hostname + ':' + pPort + (parsed.pathname || '/') + parsed.search + (parsed.hash || '');
       } catch(e) {}
     }
     // Handle root-relative paths (e.g. /watch?v=..., /login, /assets/...)
@@ -5668,8 +5850,8 @@ function handleBrowserGatewayRequest(req, res) {
 <body>
   <div class="card">
     <h2>SSH Gateway Connection Failed</h2>
-    <p>Could not connect to target service at <code>${proto}://${host}:${port}${targetPath}</code> via SSH Server.</p>
-    <p><strong>Error:</strong> <code>${err.message}</code></p>
+    <p>Could not connect to target service at <code>${escapeHtml(`${proto}://${host}:${port}${targetPath}`)}</code> via SSH Server.</p>
+    <p><strong>Error:</strong> <code>${escapeHtml(err.message)}</code></p>
     <p>Ensure the remote port is actively listening and the SSH connection is open.</p>
   </div>
 </body>
