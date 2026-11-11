@@ -59,7 +59,7 @@ pub async fn run_exec_channel(
     ).await.map_err(|_| "Timed out starting remote command")??;
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let mut exit_code = -1;
+    let mut exit_code: Option<i32> = None;
     const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
     let completed = tokio::time::timeout(std::time::Duration::from_secs(120), async {
@@ -80,7 +80,7 @@ pub async fn run_exec_channel(
                     }
                 }
                 ChannelMsg::ExitStatus { exit_status } => {
-                    exit_code = exit_status as i32;
+                    exit_code = Some(exit_status as i32);
                 }
                 _ => {}
             }
@@ -94,6 +94,7 @@ pub async fn run_exec_channel(
         Ok(false) => {}
     }
 
+    let exit_code = exit_code.ok_or("SSH channel closed without a remote exit status")?;
     let clean_stdout = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
     let clean_stderr = String::from_utf8_lossy(&stderr).replace("\r\n", "\n");
     Ok((clean_stdout, clean_stderr, exit_code))
@@ -121,13 +122,15 @@ pub async fn run_exec_channel_with_stdin(
 
         // SSH channel packets are small; send large file payloads in bounded chunks.
         for chunk in stdin_data.chunks(32 * 1024) {
-            channel.data(chunk).await?;
+            tokio::time::timeout(std::time::Duration::from_secs(15), channel.data(chunk))
+                .await.map_err(|_| "Timed out sending SSH command input")??;
         }
-        channel.eof().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), channel.eof())
+            .await.map_err(|_| "Timed out closing SSH command input")??;
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let mut exit_code = -1;
+        let mut exit_code: Option<i32> = None;
         const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
         while let Some(msg) = channel.wait().await {
             match msg {
@@ -143,10 +146,11 @@ pub async fn run_exec_channel_with_stdin(
                     }
                     stderr.extend_from_slice(data);
                 }
-                ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status as i32,
+                ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status as i32),
                 _ => {}
             }
         }
+        let exit_code = exit_code.ok_or("SSH input channel closed without a remote exit status")?;
         let clean_stdout = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
         let clean_stderr = String::from_utf8_lossy(&stderr).replace("\r\n", "\n");
         let clean_out = if !clean_stderr.is_empty() && !clean_stdout.is_empty() {
@@ -162,7 +166,7 @@ pub async fn run_exec_channel_with_stdin(
     match result {
         Ok(inner) => inner,
         Err(_) => {
-            log::warn!("SSH Desktop: run_exec_channel_with_stdin timed out after 300s for cmd: {}", cmd);
+            log::warn!("SSH Desktop: run_exec_channel_with_stdin timed out after 300s");
             Err("Command timed out while sending input or waiting for remote completion.".into())
         }
     }
@@ -387,12 +391,17 @@ pub async fn connect_session_with_passphrase_auth(
             }
             // 3. Try reading file on disk then decoding content
             if !authenticated {
-                if let Ok(content) = std::fs::read_to_string(trimmed_key) {
-                    if let Ok(key) = russh_keys::decode_secret_key(&content, passphrase) {
+                if let Ok(metadata) = std::fs::symlink_metadata(trimmed_key) {
+                    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
+                        return Err("Selected SSH identity is not a regular file or exceeds 16 MiB".into());
+                    }
+                    if let Ok(content) = std::fs::read_to_string(trimmed_key) {
+                        if let Ok(key) = russh_keys::decode_secret_key(&content, passphrase) {
                         authenticated = tokio::time::timeout(
                             std::time::Duration::from_secs(15),
                             handle.authenticate_publickey(user, Arc::new(key))
                         ).await.ok().and_then(Result::ok).unwrap_or(false);
+                        }
                     }
                 }
             }
@@ -414,7 +423,10 @@ pub async fn connect_session_with_passphrase_auth(
             let default_keys = ["id_ed25519", "id_rsa", "id_ecdsa"];
             for key_name in default_keys {
                 let candidate = ssh_dir.join(key_name);
-                if candidate.exists() {
+                if let Ok(metadata) = std::fs::symlink_metadata(&candidate) {
+                    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
+                        continue;
+                    }
                     if let Ok(key) = russh_keys::load_secret_key(&candidate, passphrase) {
                         if tokio::time::timeout(
                             std::time::Duration::from_secs(15),
