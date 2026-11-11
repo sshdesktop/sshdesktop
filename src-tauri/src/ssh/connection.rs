@@ -144,8 +144,8 @@ impl Drop for SshPasswordFile {
 }
 
 pub fn create_password_file(password: &str) -> Result<SshPasswordFile, String> {
-    if password.bytes().any(|byte| byte == 10 || byte == 13) {
-        return Err("SSH passwords containing newline characters cannot be passed safely to PuTTY".into());
+    if password.len() > 16 * 1024 || password.bytes().any(|byte| matches!(byte, 0 | 10 | 13)) {
+        return Err("SSH password is too large or contains unsupported control characters.".into());
     }
     let path = std::env::temp_dir().join(format!("sshdesktop-pw-{}.tmp", Uuid::new_v4()));
     #[cfg(unix)]
@@ -212,9 +212,13 @@ pub fn is_ppk_key(path_or_content: &str) -> bool {
     if trimmed.contains("PuTTY-User-Key-File") {
         return true;
     }
-    if let Ok(content) = std::fs::read_to_string(trimmed) {
-        if content.contains("PuTTY-User-Key-File") {
-            return true;
+    if let Ok(metadata) = std::fs::metadata(trimmed) {
+        if metadata.is_file() && metadata.len() <= 1024 * 1024 {
+            if let Ok(content) = std::fs::read_to_string(trimmed) {
+                if content.contains("PuTTY-User-Key-File") {
+                    return true;
+                }
+            }
         }
     }
     false
@@ -230,11 +234,15 @@ pub fn secure_windows_private_key(path: &std::path::Path) -> Result<(), String> 
     }
     let path_str = path.to_string_lossy();
     // Strip pre-existing inherited and explicit ACEs before applying owner-only DACL
-    let _ = std::process::Command::new("icacls.exe")
+    let reset = std::process::Command::new("icacls.exe")
         .arg(&*path_str)
         .arg("/reset")
         .creation_flags(0x08000000)
-        .output();
+        .output()
+        .map_err(|e| format!("Failed to reset inherited private-key ACLs: {}", e))?;
+    if !reset.status.success() {
+        return Err(format!("Could not reset existing private-key ACLs: {}", String::from_utf8_lossy(&reset.stderr).trim()));
+    }
 
     let output = std::process::Command::new("icacls.exe")
         .arg(&*path_str)
@@ -261,6 +269,11 @@ pub fn secure_windows_private_key(_path: &std::path::Path) -> Result<(), String>
 }
 
 pub fn secure_private_key_permissions(path: &std::path::Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("Could not inspect private key path: {}", e))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("Refusing to use a private key path that is not a regular non-symlink file.".into());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -275,6 +288,9 @@ pub fn secure_private_key_permissions(path: &std::path::Path) -> Result<(), Stri
 }
 
 pub fn write_secure_private_key(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    if data.is_empty() || data.len() > 16 * 1024 * 1024 {
+        return Err("Private-key data must be between 1 byte and 16 MiB.".into());
+    }
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -346,7 +362,11 @@ pub fn resolve_key_path(key_input: &str) -> Option<String> {
     }
 
     let path = std::path::Path::new(trimmed);
-    if path.exists() && path.is_file() {
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
+            log::error!("SSH Desktop: Refusing invalid, symlinked, or oversized private key: {}", path.display());
+            return None;
+        }
         if secure_private_key_permissions(path).is_err() {
             log::error!("SSH Desktop: Refusing to use private key because permissions could not be secured: {}", path.display());
             return None;
@@ -376,7 +396,11 @@ pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
 
     // 1. If it's already an existing file on disk, return its path
     let p = std::path::Path::new(trimmed);
-    if p.exists() && p.is_file() {
+    if let Ok(metadata) = std::fs::symlink_metadata(p) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
+            log::error!("SSH Desktop: Refusing invalid, symlinked, or oversized private key: {}", p.display());
+            return None;
+        }
         if secure_private_key_permissions(p).is_err() {
             log::error!("SSH Desktop: Refusing to use private key because permissions could not be secured: {}", p.display());
             return None;
@@ -385,6 +409,10 @@ pub fn ensure_key_file(conn_id: &str, key_input: &str) -> Option<String> {
     }
 
     // 2. If it is raw key content (PEM or PPK)
+    if trimmed.len() > 1024 * 1024 {
+        log::error!("SSH Desktop: Refusing oversized inline private-key material.");
+        return None;
+    }
     if trimmed.contains("PRIVATE KEY") || trimmed.contains("PuTTY-User-Key-File") || trimmed.lines().count() > 1 {
         if let Some(base) = directories::BaseDirs::new() {
             let keys_dir = base.home_dir().join(".sshdesktop").join("keys");
