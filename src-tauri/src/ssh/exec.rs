@@ -527,6 +527,10 @@ pub async fn run_cmd_with_stdin(
     command: &str,
     stdin_data: &[u8],
 ) -> (String, i32) {
+    const MAX_STDIN_BYTES: usize = 64 * 1024 * 1024;
+    if stdin_data.len() > MAX_STDIN_BYTES {
+        return ("SSH command input exceeds the 64 MiB safety limit.".into(), -1);
+    }
     // 0. Primary Fast Path: Execute directly over active persistent in-memory SSH transport
     {
         let handle_opt = {
@@ -713,6 +717,10 @@ pub async fn run_cmd_priv_with_stdin(
     command: &str,
     stdin_data: &[u8],
 ) -> (String, i32) {
+    const MAX_STDIN_BYTES: usize = 64 * 1024 * 1024;
+    if stdin_data.len() > MAX_STDIN_BYTES {
+        return ("Privileged SSH command input exceeds the 64 MiB safety limit.".into(), -1);
+    }
     let conn_opt = crate::ssh::connection::resolve_connection(state, conn_id);
     let trimmed_cmd = command.trim();
     let raw_cmd = trimmed_cmd.strip_prefix("sudo ").unwrap_or(trimmed_cmd).trim();
