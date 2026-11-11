@@ -807,9 +807,6 @@ pub async fn sftp_download_to_downloads(
     conn_id: String,
     remote_path: String,
 ) -> Result<String, String> {
-    let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
-        .ok_or_else(|| "No active SSH connection.".to_string())?;
-
     if !remote_path.starts_with('/') || remote_path.len() > 4096 || remote_path.ends_with('/')
         || remote_path.chars().any(|ch| ch.is_control())
         || remote_path.split('/').any(|part| part == "." || part == "..")
