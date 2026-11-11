@@ -848,7 +848,11 @@ pub async fn sftp_download_to_downloads(
 
     tokio::fs::create_dir_all(&download_dir).await
         .map_err(|e| format!("Failed to create Downloads directory: {}", e))?;
-    run_scp_transfer(&conn, &local_dest_str, &remote_path, false).await?;
+    // Use the bounded SFTP read path here as well; SCP must not bypass the
+    // shared 48 MiB binary-transfer limit.
+    let bytes = sftp_read_file(state.clone(), conn_id.clone(), remote_path.clone()).await?;
+    tokio::fs::write(&local_dest, &bytes).await
+        .map_err(|e| format!("Failed to save downloaded file '{}': {}", local_dest_str, e))?;
     log::info!("SSH Desktop: Downloaded {} to {}", remote_path, local_dest_str);
     Ok(local_dest_str)
 }
