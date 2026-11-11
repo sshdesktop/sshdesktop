@@ -365,9 +365,47 @@ pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
         let _ = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600));
     }
 
-    if let Err(e) = std::fs::rename(&temp_path, &config_path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(format!("Failed to atomically update {}: {}", config_path.display(), e));
+    #[cfg(windows)]
+    {
+        // std::fs::rename cannot replace an existing destination on Windows.
+        // Stage the old config and restore it if installing the new file fails.
+        if config_path.exists() {
+            let backup_path = ssh_dir.join(format!("config.{}.bak", uuid::Uuid::new_v4()));
+            if let Err(error) = std::fs::rename(&config_path, &backup_path) {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(format!(
+                    "Failed to stage existing SSH config {}: {}",
+                    config_path.display(), error
+                ));
+            }
+            if let Err(error) = std::fs::rename(&temp_path, &config_path) {
+                let restore_error = std::fs::rename(&backup_path, &config_path).err();
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(match restore_error {
+                    Some(restore) => format!(
+                        "Failed to install SSH config: {}. Restoring the previous config also failed: {}",
+                        error, restore
+                    ),
+                    None => format!(
+                        "Failed to install SSH config; previous config restored: {}",
+                        error
+                    ),
+                });
+            }
+            // The new config is installed; the backup is no longer needed.
+            let _ = std::fs::remove_file(&backup_path);
+        } else if let Err(error) = std::fs::rename(&temp_path, &config_path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(format!("Failed to install SSH config {}: {}", config_path.display(), error));
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Err(error) = std::fs::rename(&temp_path, &config_path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(format!("Failed to atomically update {}: {}", config_path.display(), error));
+        }
     }
 
     #[cfg(unix)]
