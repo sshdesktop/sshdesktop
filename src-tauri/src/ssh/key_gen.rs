@@ -196,9 +196,15 @@ pub async fn ssh_list_local_keys() -> Result<Vec<LocalKeyInfo>, String> {
     // 1. Check standard default identity files
     for (name, ktype, is_def) in candidates {
         let priv_p = ssh_dir.join(name);
-        if priv_p.exists() {
+        let is_regular_private_key = std::fs::symlink_metadata(&priv_p)
+            .map(|metadata| metadata.file_type().is_file())
+            .unwrap_or(false);
+        if is_regular_private_key {
             let pub_p = ssh_dir.join(format!("{}.pub", name));
-            let pub_content = if pub_p.exists() {
+            let pub_content = if std::fs::symlink_metadata(&pub_p)
+                .map(|metadata| metadata.file_type().is_file())
+                .unwrap_or(false)
+            {
                 std::fs::read_to_string(&pub_p).ok().map(|s| s.trim().to_string())
             } else {
                 None
