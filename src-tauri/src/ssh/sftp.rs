@@ -159,6 +159,9 @@ pub async fn sftp_list_dir(
         if let Ok(sftp) = crate::ssh::session::open_sftp(&handle).await {
             if let Ok(dir_entries) = sftp.read_dir(clean_path).await {
                 const MAX_DIR_ENTRIES: usize = 10000;
+                if dir_entries.len() > MAX_DIR_ENTRIES {
+                    return Err(format!("Directory contains more than {} entries; narrow the directory before listing.", MAX_DIR_ENTRIES));
+                }
                 let mut entries = Vec::new();
                 for entry in dir_entries {
                     if entries.len() >= MAX_DIR_ENTRIES {
@@ -426,29 +429,43 @@ pub async fn sftp_write_bytes(
     };
 
     if let Some(handle) = handle_opt {
+        // Only fall back to the shell when the SFTP subsystem cannot be opened.
+        // Once SFTP is available, report operation failures instead of hiding them.
         if let Ok(sftp) = crate::ssh::session::open_sftp(&handle).await {
             use tokio::io::AsyncWriteExt;
             let parent = clean_path.rsplit_once('/').map(|(p, _)| if p.is_empty() { "/" } else { p }).unwrap_or("/");
             let tmp_name = format!(".upload-{}.tmp", uuid::Uuid::new_v4().simple());
             let tmp_path = if parent == "/" { format!("/{}", tmp_name) } else { format!("{}/{}", parent.trim_end_matches('/'), tmp_name) };
 
-            if let Ok(mut file) = sftp.create(&tmp_path).await {
-                // Bound the complete transfer, including flush: a successful write_all
-                // does not guarantee the remote SFTP server has accepted all buffered data.
-                let transfer_res = tokio::time::timeout(
-                    std::time::Duration::from_secs(60),
-                    async {
-                        file.write_all(bytes).await?;
-                        file.flush().await
-                    },
-                ).await;
-                if matches!(transfer_res, Ok(Ok(()))) {
-                    drop(file);
-                    if sftp.rename(&tmp_path, clean_path).await.is_ok() {
-                        return Ok(());
-                    }
+            let mut file = tokio::time::timeout(std::time::Duration::from_secs(15), sftp.create(&tmp_path)).await
+                .map_err(|_| "Timed out creating temporary remote upload file.".to_string())?
+                .map_err(|e| format!("Failed to create temporary remote upload file: {}", e))?;
+            let transfer_res = tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                async { file.write_all(bytes).await?; file.flush().await }
+            ).await;
+            drop(file);
+            match transfer_res {
+                Ok(Ok(())) => {},
+                Ok(Err(e)) => {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;
+                    return Err(format!("SFTP upload or flush failed: {}", e));
+                },
+                Err(_) => {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;
+                    return Err("SFTP upload timed out after 300 seconds.".into());
                 }
-                let _ = sftp.remove_file(&tmp_path).await;
+            }
+            match tokio::time::timeout(std::time::Duration::from_secs(30), sftp.rename(&tmp_path, clean_path)).await {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(e)) => {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;
+                    return Err(format!("SFTP could not atomically publish uploaded file: {}", e));
+                },
+                Err(_) => {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;
+                    return Err("Timed out publishing uploaded file over SFTP.".into());
+                }
             }
         }
     }
