@@ -384,3 +384,48 @@ pub fn generate_drop_index_sql(engine: &str, table: &str, index_name: &str) -> R
     })
 }
 
+
+#[cfg(test)]
+mod schema_identifier_validation_tests {
+    use super::*;
+    use crate::database::types::ColumnSpec;
+
+    fn column(name: &str) -> ColumnSpec {
+        ColumnSpec {
+            name: name.to_string(),
+            data_type: "INTEGER".to_string(),
+            nullable: false,
+            primary_key: false,
+            auto_increment: false,
+            default_value: None,
+        }
+    }
+
+    #[test]
+    fn rejects_empty_and_control_character_identifiers() {
+        assert!(generate_create_table_sql("postgres", " ", &[column("id")]).is_err());
+        assert!(generate_create_table_sql("postgres", "users", &[column("bad\nname")]).is_err());
+        assert!(generate_drop_sql("postgres", "table", "bad\0name").is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_columns_case_insensitively() {
+        assert!(generate_create_table_sql("postgres", "users", &[column("ID"), column("id")]).is_err());
+    }
+
+    #[test]
+    fn enforces_table_column_and_index_limits() {
+        let too_many = (0..257).map(|i| column(&format!("c{}", i))).collect::<Vec<_>>();
+        assert!(generate_create_table_sql("postgres", "users", &too_many).is_err());
+        let too_many_index_columns = (0..65).map(|i| format!("c{}", i)).collect::<Vec<_>>();
+        assert!(generate_create_index_sql("postgres", "users", "idx", &too_many_index_columns, false).is_err());
+    }
+
+    #[test]
+    fn validates_identifiers_for_all_drop_and_truncate_helpers() {
+        assert!(generate_truncate_table_sql("postgres", "").is_err());
+        assert!(generate_drop_column_sql("postgres", "users", "").is_err());
+        assert!(generate_drop_index_sql("postgres", "users", "").is_err());
+        assert!(generate_rename_sql("postgres", "table", "users", "").is_err());
+    }
+}
