@@ -311,8 +311,13 @@ pub async fn get_object_definition_redis(
     name: &str,
 ) -> Result<String, String> {
     let mut con = client.get_multiplexed_tokio_connection().await.map_err(|e| e.to_string())?;
-    let k_type: String = redis::cmd("TYPE").arg(name).query_async(&mut con).await.unwrap_or_else(|_| "unknown".to_string());
-    let ttl: i64 = redis::cmd("TTL").arg(name).query_async(&mut con).await.unwrap_or(-1);
+    if name.is_empty() || name.len() > 1024 || name.chars().any(|c| c == '\0') {
+        return Err("Redis key must contain 1–1024 bytes and no NUL characters.".into());
+    }
+    let k_type: String = redis::cmd("TYPE").arg(name).query_async(&mut con).await
+        .map_err(|e| format!("Redis TYPE failed: {}", e))?;
+    let ttl: i64 = redis::cmd("TTL").arg(name).query_async(&mut con).await
+        .map_err(|e| format!("Redis TTL failed: {}", e))?;
     Ok(format!("// Redis Key: {}\n// Type: {}\n// TTL: {}\nGET \"{}\"", name, k_type, ttl, name))
 }
 
@@ -325,90 +330,116 @@ pub async fn redis_scan_keys(
     pattern: Option<String>,
     count: Option<u32>,
 ) -> Result<Vec<RedisKeyItem>, String> {
-    let lock = db_mgr.sessions.lock().await;
-    let session = lock
-        .get(&connection_id)
-        .ok_or_else(|| "Database connection not active".to_string())?;
+    let session = {
+        let lock = db_mgr.sessions.lock().await;
+        lock.get(&connection_id).cloned()
+            .ok_or_else(|| "Database connection not active".to_string())?
+    };
+    let client = match &session.driver {
+        DriverInstance::Redis(client) => client.clone(),
+        _ => return Err("Active connection is not Redis".to_string()),
+    };
 
-    if let DriverInstance::Redis(client) = &session.driver {
-        let mut con = client.get_multiplexed_tokio_connection().await.map_err(|e| e.to_string())?;
-        let pat = pattern.unwrap_or_else(|| "*".to_string());
-        let cnt = count.unwrap_or(200);
-
-        let mut cmd = redis::cmd("SCAN");
-        cmd.arg(0).arg("MATCH").arg(pat).arg("COUNT").arg(cnt);
-
-        let res: (u64, Vec<String>) = cmd.query_async(&mut con).await.map_err(|e| e.to_string())?;
-
-        let mut items = Vec::new();
-        for k in res.1 {
-            let ty: String = redis::cmd("TYPE").arg(&k).query_async(&mut con).await.unwrap_or_default();
-            let ttl: i64 = redis::cmd("TTL").arg(&k).query_async(&mut con).await.unwrap_or(-1);
-
-            items.push(RedisKeyItem {
-                key: k,
-                key_type: ty,
-                ttl,
-                size: None,
-            });
-        }
-        Ok(items)
-    } else {
-        Err("Active connection is not Redis".to_string())
+    let pat = pattern.unwrap_or_else(|| "*".to_string());
+    if pat.len() > 1024 || pat.chars().any(|c| c.is_control()) {
+        return Err("Redis key pattern must be at most 1024 bytes and contain no control characters.".into());
     }
+    let cnt = count.unwrap_or(200).clamp(1, 1000);
+    let mut con = client.get_multiplexed_tokio_connection().await
+        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let res: (u64, Vec<String>) = redis::cmd("SCAN")
+        .arg(0).arg("MATCH").arg(&pat).arg("COUNT").arg(cnt)
+        .query_async(&mut con).await
+        .map_err(|e| format!("Redis SCAN failed: {}", e))?;
+
+    let mut items = Vec::with_capacity(res.1.len());
+    for key in res.1.into_iter().take(1000) {
+        let ty: String = redis::cmd("TYPE").arg(&key).query_async(&mut con).await
+            .map_err(|e| format!("Redis TYPE failed for key '{}': {}", key, e))?;
+        let ttl: i64 = redis::cmd("TTL").arg(&key).query_async(&mut con).await
+            .map_err(|e| format!("Redis TTL failed for key '{}': {}", key, e))?;
+        items.push(RedisKeyItem { key, key_type: ty, ttl, size: None });
+    }
+    Ok(items)
 }
 
+#[tauri::command]
 #[tauri::command]
 pub async fn redis_get_value(
     db_mgr: tauri::State<'_, Arc<DatabaseManager>>,
     connection_id: String,
     key: String,
 ) -> Result<RedisValueItem, String> {
-    let lock = db_mgr.sessions.lock().await;
-    let session = lock
-        .get(&connection_id)
-        .ok_or_else(|| "Database connection not active".to_string())?;
-
-    if let DriverInstance::Redis(client) = &session.driver {
-        let mut con = client.get_multiplexed_tokio_connection().await.map_err(|e| e.to_string())?;
-        let ty: String = redis::cmd("TYPE").arg(&key).query_async(&mut con).await.map_err(|e| e.to_string())?;
-        let ttl: i64 = redis::cmd("TTL").arg(&key).query_async(&mut con).await.unwrap_or(-1);
-
-        let val: serde_json::Value = match ty.as_str() {
-            "string" => {
-                let s: String = redis::cmd("GET").arg(&key).query_async(&mut con).await.unwrap_or_default();
-                serde_json::Value::String(s)
-            }
-            "hash" => {
-                let map: HashMap<String, String> = redis::cmd("HGETALL").arg(&key).query_async(&mut con).await.unwrap_or_default();
-                serde_json::to_value(map).unwrap_or(serde_json::Value::Null)
-            }
-            "list" => {
-                let items: Vec<String> = redis::cmd("LRANGE").arg(&key).arg(0).arg(-1).query_async(&mut con).await.unwrap_or_default();
-                serde_json::to_value(items).unwrap_or(serde_json::Value::Null)
-            }
-            "set" => {
-                let items: Vec<String> = redis::cmd("SMEMBERS").arg(&key).query_async(&mut con).await.unwrap_or_default();
-                serde_json::to_value(items).unwrap_or(serde_json::Value::Null)
-            }
-            "zset" => {
-                let items: Vec<(String, f64)> = redis::cmd("ZRANGE").arg(&key).arg(0).arg(-1).arg("WITHSCORES").query_async(&mut con).await.unwrap_or_default();
-                serde_json::to_value(items).unwrap_or(serde_json::Value::Null)
-            }
-            _ => serde_json::Value::Null,
-        };
-
-        Ok(RedisValueItem {
-            key,
-            key_type: ty,
-            ttl,
-            value: val,
-        })
-    } else {
-        Err("Active connection is not Redis".to_string())
+    if key.is_empty() || key.len() > 1024 || key.chars().any(|c| c == '\0') {
+        return Err("Redis key must contain 1–1024 bytes and no NUL characters.".into());
     }
+    let session = {
+        let lock = db_mgr.sessions.lock().await;
+        lock.get(&connection_id).cloned()
+            .ok_or_else(|| "Database connection not active".to_string())?
+    };
+    let client = match &session.driver {
+        DriverInstance::Redis(client) => client.clone(),
+        _ => return Err("Active connection is not Redis".to_string()),
+    };
+    let mut con = client.get_multiplexed_tokio_connection().await
+        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let ty: String = redis::cmd("TYPE").arg(&key).query_async(&mut con).await
+        .map_err(|e| format!("Redis TYPE failed: {}", e))?;
+    let ttl: i64 = redis::cmd("TTL").arg(&key).query_async(&mut con).await
+        .map_err(|e| format!("Redis TTL failed: {}", e))?;
+
+    const MAX_ITEMS: usize = 10_000;
+    let val: serde_json::Value = match ty.as_str() {
+        "string" => {
+            let value: Vec<u8> = redis::cmd("GET").arg(&key).query_async(&mut con).await
+                .map_err(|e| format!("Redis GET failed: {}", e))?;
+            if value.len() > 16 * 1024 * 1024 {
+                return Err("Redis value exceeds the 16 MiB display limit.".into());
+            }
+            serde_json::Value::String(String::from_utf8_lossy(&value).to_string())
+        }
+        "hash" => {
+            let size: usize = redis::cmd("HLEN").arg(&key).query_async(&mut con).await
+                .map_err(|e| format!("Redis HLEN failed: {}", e))?;
+            if size > MAX_ITEMS { return Err("Redis hash exceeds the 10,000-field display limit.".into()); }
+            let map: HashMap<String, String> = redis::cmd("HGETALL").arg(&key).query_async(&mut con).await
+                .map_err(|e| format!("Redis HGETALL failed: {}", e))?;
+            serde_json::to_value(map).map_err(|e| format!("Could not serialize Redis hash: {}", e))?
+        }
+        "list" => {
+            let size: usize = redis::cmd("LLEN").arg(&key).query_async(&mut con).await
+                .map_err(|e| format!("Redis LLEN failed: {}", e))?;
+            if size > MAX_ITEMS { return Err("Redis list exceeds the 10,000-item display limit.".into()); }
+            let items: Vec<String> = redis::cmd("LRANGE").arg(&key).arg(0).arg((MAX_ITEMS - 1) as isize)
+                .query_async(&mut con).await.map_err(|e| format!("Redis LRANGE failed: {}", e))?;
+            serde_json::to_value(items).map_err(|e| format!("Could not serialize Redis list: {}", e))?
+        }
+        "set" => {
+            let size: usize = redis::cmd("SCARD").arg(&key).query_async(&mut con).await
+                .map_err(|e| format!("Redis SCARD failed: {}", e))?;
+            if size > MAX_ITEMS { return Err("Redis set exceeds the 10,000-member display limit.".into()); }
+            let items: Vec<String> = redis::cmd("SMEMBERS").arg(&key).query_async(&mut con).await
+                .map_err(|e| format!("Redis SMEMBERS failed: {}", e))?;
+            serde_json::to_value(items).map_err(|e| format!("Could not serialize Redis set: {}", e))?
+        }
+        "zset" => {
+            let size: usize = redis::cmd("ZCARD").arg(&key).query_async(&mut con).await
+                .map_err(|e| format!("Redis ZCARD failed: {}", e))?;
+            if size > MAX_ITEMS { return Err("Redis sorted set exceeds the 10,000-member display limit.".into()); }
+            let items: Vec<(String, f64)> = redis::cmd("ZRANGE").arg(&key).arg(0).arg((MAX_ITEMS - 1) as isize)
+                .arg("WITHSCORES").query_async(&mut con).await
+                .map_err(|e| format!("Redis ZRANGE failed: {}", e))?;
+            serde_json::to_value(items).map_err(|e| format!("Could not serialize Redis sorted set: {}", e))?
+        }
+        "none" => serde_json::Value::Null,
+        other => return Err(format!("Unsupported Redis key type '{}'.", other)),
+    };
+
+    Ok(RedisValueItem { key, key_type: ty, ttl, value: val })
 }
 
+#[tauri::command]
 #[tauri::command]
 pub async fn redis_set_value(
     db_mgr: tauri::State<'_, Arc<DatabaseManager>>,
@@ -417,50 +448,64 @@ pub async fn redis_set_value(
     value: String,
     ttl: Option<i64>,
 ) -> Result<(), String> {
-    let lock = db_mgr.sessions.lock().await;
-    let session = lock
-        .get(&connection_id)
-        .ok_or_else(|| "Database connection not active".to_string())?;
-
+    if key.is_empty() || key.len() > 1024 || key.chars().any(|c| c == '\0') {
+        return Err("Redis key must contain 1–1024 bytes and no NUL characters.".into());
+    }
+    if value.len() > 16 * 1024 * 1024 {
+        return Err("Redis value exceeds the 16 MiB input limit.".into());
+    }
+    if ttl.map(|seconds| seconds <= 0).unwrap_or(false) {
+        return Err("Redis TTL must be a positive number of seconds.".into());
+    }
+    let session = {
+        let lock = db_mgr.sessions.lock().await;
+        lock.get(&connection_id).cloned()
+            .ok_or_else(|| "Database connection not active".to_string())?
+    };
     if session.config.read_only {
         return Err("Database session is in read-only mode".to_string());
     }
-
-    if let DriverInstance::Redis(client) = &session.driver {
-        let mut con = client.get_multiplexed_tokio_connection().await.map_err(|e| e.to_string())?;
-        if let Some(t) = ttl {
-            if t > 0 {
-                let _: () = redis::cmd("SETEX").arg(&key).arg(t).arg(&value).query_async(&mut con).await.map_err(|e| e.to_string())?;
-                return Ok(());
-            }
-        }
-        let _: () = redis::cmd("SET").arg(&key).arg(&value).query_async(&mut con).await.map_err(|e| e.to_string())?;
-        Ok(())
+    let client = match &session.driver {
+        DriverInstance::Redis(client) => client.clone(),
+        _ => return Err("Active connection is not Redis".to_string()),
+    };
+    let mut con = client.get_multiplexed_tokio_connection().await
+        .map_err(|e| format!("Redis connection error: {}", e))?;
+    if let Some(seconds) = ttl {
+        let _: () = redis::cmd("SETEX").arg(&key).arg(seconds).arg(&value)
+            .query_async(&mut con).await.map_err(|e| format!("Redis SETEX failed: {}", e))?;
     } else {
-        Err("Active connection is not Redis".to_string())
+        let _: () = redis::cmd("SET").arg(&key).arg(&value)
+            .query_async(&mut con).await.map_err(|e| format!("Redis SET failed: {}", e))?;
     }
+    Ok(())
 }
 
+#[tauri::command]
 #[tauri::command]
 pub async fn redis_delete_key(
     db_mgr: tauri::State<'_, Arc<DatabaseManager>>,
     connection_id: String,
     key: String,
 ) -> Result<bool, String> {
-    let lock = db_mgr.sessions.lock().await;
-    let session = lock
-        .get(&connection_id)
-        .ok_or_else(|| "Database connection not active".to_string())?;
-
+    if key.is_empty() || key.len() > 1024 || key.chars().any(|c| c == '\0') {
+        return Err("Redis key must contain 1–1024 bytes and no NUL characters.".into());
+    }
+    let session = {
+        let lock = db_mgr.sessions.lock().await;
+        lock.get(&connection_id).cloned()
+            .ok_or_else(|| "Database connection not active".to_string())?
+    };
     if session.config.read_only {
         return Err("Database session is in read-only mode".to_string());
     }
-
-    if let DriverInstance::Redis(client) = &session.driver {
-        let mut con = client.get_multiplexed_tokio_connection().await.map_err(|e| e.to_string())?;
-        let deleted: i64 = redis::cmd("DEL").arg(&key).query_async(&mut con).await.map_err(|e| e.to_string())?;
-        Ok(deleted > 0)
-    } else {
-        Err("Active connection is not Redis".to_string())
-    }
+    let client = match &session.driver {
+        DriverInstance::Redis(client) => client.clone(),
+        _ => return Err("Active connection is not Redis".to_string()),
+    };
+    let mut con = client.get_multiplexed_tokio_connection().await
+        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let deleted: i64 = redis::cmd("DEL").arg(&key).query_async(&mut con).await
+        .map_err(|e| format!("Redis DEL failed: {}", e))?;
+    Ok(deleted > 0)
 }
