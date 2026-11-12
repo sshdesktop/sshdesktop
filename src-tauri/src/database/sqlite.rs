@@ -803,7 +803,6 @@ mod remote_sqlite_safety_tests {
 mod sqlite_sync_validation_tests {
     use super::*;
 
-    #[test]
     fn valid_test_sqlite_header() -> Vec<u8> {
         let mut header = b"SQLite format 3\0".to_vec();
         header.resize(100, 0);
