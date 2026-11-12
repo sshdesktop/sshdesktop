@@ -382,6 +382,17 @@ pub async fn connect_session_with_passphrase(
     connect_session_with_passphrase_auth(host, port, user, password, key_path, passphrase, true).await
 }
 
+async fn close_rejected_ssh_handle(handle: &ClientHandle) {
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(800),
+        handle.disconnect(
+            russh::Disconnect::ByApplication,
+            "SSH authentication was not completed",
+            "en",
+        ),
+    ).await;
+}
+
 pub async fn connect_session_with_passphrase_auth(
     host: &str,
     port: u16,
@@ -411,7 +422,8 @@ pub async fn connect_session_with_passphrase_auth(
             // not a filesystem path and simply produces a NotFound result here.
             if let Ok(metadata) = std::fs::symlink_metadata(trimmed_key) {
                 if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
-                    return Err("Selected SSH identity is not a regular non-symlink file or exceeds 16 MiB".into());
+                    close_rejected_ssh_handle(&handle).await;
+                return Err("Selected SSH identity is not a regular non-symlink file or exceeds 16 MiB".into());
                 }
             }
             // 1. Try loading from file path
@@ -434,6 +446,7 @@ pub async fn connect_session_with_passphrase_auth(
             if !authenticated {
                 if let Ok(metadata) = std::fs::symlink_metadata(trimmed_key) {
                     if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
+                        close_rejected_ssh_handle(&handle).await;
                         return Err("Selected SSH identity is not a regular file or exceeds 16 MiB".into());
                     }
                     if let Ok(content) = std::fs::read_to_string(trimmed_key) {
@@ -452,6 +465,7 @@ pub async fn connect_session_with_passphrase_auth(
     // An explicitly selected identity is an authentication boundary. Never
     // silently substitute another local key or a password if that identity fails.
     if key_path.map(|p| !p.trim().is_empty()).unwrap_or(false) && !authenticated {
+        close_rejected_ssh_handle(&handle).await;
         return Err("Authentication failed: the explicitly selected SSH key was rejected or could not be loaded. No alternate credentials were attempted.".into());
     }
 
@@ -498,6 +512,7 @@ pub async fn connect_session_with_passphrase_auth(
     if authenticated {
         Ok(handle)
     } else {
+        close_rejected_ssh_handle(&handle).await;
         Err("Authentication failed: No valid SSH keys or password accepted by server".into())
     }
 }
