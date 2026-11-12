@@ -631,7 +631,7 @@ mod remote_sqlite_safety_tests {
         let path = std::env::temp_dir().join(format!("sshdesktop-wal-test-{}.db", uuid::Uuid::new_v4()));
         assert!(ensure_no_pending_local_wal(&path).is_ok());
         let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
-        std::fs::write(&wal, []).expect("create empty WAL");
+        std::fs::write(&wal, b"").expect("create empty WAL");
         assert!(ensure_no_pending_local_wal(&path).is_ok());
         std::fs::write(&wal, b"pending wal").expect("write WAL");
         assert!(ensure_no_pending_local_wal(&path).is_err());
