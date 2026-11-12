@@ -1,6 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use std::future::Future;
+
+async fn mongo_operation_timeout<T, E, F>(operation: &str, timeout_secs: u64, future: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let timeout_secs = timeout_secs.clamp(3, 120);
+    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), future)
+        .await
+        .map_err(|_| format!("MongoDB {} timed out after {} seconds.", operation, timeout_secs))?
+        .map_err(|e| format!("MongoDB {} failed: {}", operation, e))
+}
 use super::types::{
     ActiveDatabaseSession, BatchStatementResult, ColumnMeta, DatabaseConnectionConfig,
     DatabaseManager, DatabaseObject, DatabaseOperation, DriverInstance, OperationResult,
@@ -2851,7 +2864,8 @@ pub async fn list_collections_mongo(
 ) -> Result<Vec<DatabaseObject>, String> {
     let db_name = get_effective_mongo_db(&session.config.database);
     let db = client.database(db_name);
-    let collections = db.list_collection_names(None).await.map_err(|e| e.to_string())?;
+    let timeout_secs = session.config.timeout_seconds.unwrap_or(30).clamp(3, 120);
+    let collections = mongo_operation_timeout("collection listing", timeout_secs, db.list_collection_names(None)).await?;
     if collections.len() > 10_000 {
         return Err("MongoDB database contains more than 10,000 collections; narrow the database scope.".into());
     }
@@ -2879,7 +2893,8 @@ pub async fn get_collection_columns_mongo(
     let coll = db.collection::<mongodb::bson::Document>(table_name);
     use futures::StreamExt;
     let find_opts = mongodb::options::FindOptions::builder().limit(Some(5)).build();
-    let mut cursor = coll.find(None, find_opts).await.map_err(|e| e.to_string())?;
+    let timeout_secs = session.config.timeout_seconds.unwrap_or(30).clamp(3, 120);
+    let mut cursor = mongo_operation_timeout("schema sampling query", timeout_secs, coll.find(None, find_opts)).await?;
 
     let mut key_order = Vec::new();
     let mut key_types: HashMap<String, String> = HashMap::new();
@@ -3051,8 +3066,8 @@ pub async fn get_object_definition_mongo(
     validate_mongo_name(name, "collection name")?;
     let db = client.database(get_effective_mongo_db(&session.config.database));
     let coll = db.collection::<mongodb::bson::Document>(name);
-    let count = coll.count_documents(mongodb::bson::doc! {}, None).await
-        .map_err(|e| format!("MongoDB collection count failed: {}", e))?;
+    let timeout_secs = session.config.timeout_seconds.unwrap_or(30).clamp(3, 120);
+    let count = mongo_operation_timeout("collection document count", timeout_secs, coll.count_documents(mongodb::bson::doc! {}, None)).await?;
     Ok(format!("// MongoDB Collection: {}\n// Document Count: {}\ndb.getCollection('{}').find({{}});", name, count, name))
 }
 
@@ -3075,7 +3090,8 @@ pub async fn mongodb_list_collections(
         let db_target = database.as_deref().unwrap_or(&session.config.database);
         validate_mongo_name(get_effective_mongo_db(db_target), "database name")?;
         let db = client.database(get_effective_mongo_db(db_target));
-        let names = db.list_collection_names(None).await.map_err(|e| e.to_string())?;
+        let timeout_secs = session.config.timeout_seconds.unwrap_or(30).clamp(3, 120);
+        let names = mongo_operation_timeout("collection listing", timeout_secs, db.list_collection_names(None)).await?;
         if names.len() > 10_000 {
             return Err("MongoDB database contains more than 10,000 collections; narrow the database scope.".into());
         }
@@ -3130,8 +3146,11 @@ pub async fn mongodb_find_documents(
         find_options.limit = Some(safe_limit);
 
         let start = Instant::now();
-        let mut cursor = coll.find(filter_doc, find_options).await.map_err(|e| e.to_string())?;
-        collect_mongo_cursor_results(&mut cursor, "MongoDB Find", start, Some(session.capabilities.server_version.clone()), safe_limit as usize).await
+        let timeout_secs = session.config.timeout_seconds.unwrap_or(30).clamp(3, 120);
+        mongo_operation_timeout("document search", timeout_secs, async {
+            let mut cursor = coll.find(filter_doc, find_options).await.map_err(|e| e.to_string())?;
+            collect_mongo_cursor_results(&mut cursor, "MongoDB Find", start, Some(session.capabilities.server_version.clone()), safe_limit as usize).await
+        }).await
     } else {
         Err("Active connection is not MongoDB".to_string())
     }
@@ -3174,7 +3193,8 @@ pub async fn mongodb_insert_document(
             return Err("MongoDB BSON document exceeds the 15 MiB desktop limit.".into());
         }
         crate::store::audit::enforce_policy_permission("db_execute_operation")?;
-        let res = coll.insert_one(doc, None).await.map_err(|e| e.to_string())?;
+        let timeout_secs = session.config.timeout_seconds.unwrap_or(30).clamp(3, 120);
+        let res = mongo_operation_timeout("document insert", timeout_secs, coll.insert_one(doc, None)).await?;
 
         Ok(format!("{:?}", res.inserted_id))
     } else {
