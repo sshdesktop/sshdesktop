@@ -13,8 +13,10 @@ static IS_AUTHENTICATED: AtomicBool = AtomicBool::new(false);
 // all pass the check and perform unbounded Argon2 work.
 const LOGIN_RATE_LIMIT: usize = 5;
 const LOGIN_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
-static LOGIN_ATTEMPTS: std::sync::LazyLock<std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+lazy_static::lazy_static! {
+    static ref LOGIN_ATTEMPTS: std::sync::Mutex<std::collections::VecDeque<std::time::Instant>> =
+        std::sync::Mutex::new(std::collections::VecDeque::new());
+}
 
 fn check_login_rate_limit() -> Result<(), String> {
     let now = std::time::Instant::now();
