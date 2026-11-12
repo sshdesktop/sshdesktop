@@ -57,9 +57,13 @@ pub async fn ssh_generate_key_pair(
 
     let priv_path = ssh_dir.join(&base_name);
     let pub_path = ssh_dir.join(format!("{}.pub", base_name));
+    // exists() follows symlinks and returns false for dangling links. Inspect
+    // directory entries themselves so a dangling symlink is never treated as
+    // a free destination for ssh-keygen.
+    let path_entry_exists = |path: &Path| std::fs::symlink_metadata(path).is_ok();
 
     // If key already exists, generate with unique suffix
-    let (target_priv, target_pub) = if priv_path.exists() || pub_path.exists() {
+    let (target_priv, target_pub) = if path_entry_exists(&priv_path) || path_entry_exists(&pub_path) {
         // A timestamp-only suffix collides when multiple keys are generated in
         // the same second. UUID suffixes avoid accidental key replacement.
         let suffix = uuid::Uuid::new_v4().simple().to_string();
@@ -69,7 +73,7 @@ pub async fn ssh_generate_key_pair(
     } else {
         (priv_path, pub_path)
     };
-    if target_priv.exists() || target_pub.exists() {
+    if path_entry_exists(&target_priv) || path_entry_exists(&target_pub) {
         return Err("Generated SSH key destination already exists; refusing to overwrite it.".into());
     }
 
