@@ -361,6 +361,17 @@ pub fn resolve_key_path(key_input: &str) -> Option<String> {
         return None;
     }
 
+    // Expand OpenSSH-style home-relative identity paths before filesystem
+    // validation so CLI backends and native russh resolve the same key.
+    let expanded = if trimmed == "~" {
+        directories::BaseDirs::new()?.home_dir().to_string_lossy().to_string()
+    } else if trimmed.starts_with("~/") || trimmed.starts_with("~\\") {
+        let home = directories::BaseDirs::new()?.home_dir();
+        home.join(&trimmed[2..]).to_string_lossy().to_string()
+    } else {
+        trimmed.to_string()
+    };
+    let trimmed = expanded.as_str();
     let path = std::path::Path::new(trimmed);
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
