@@ -554,9 +554,9 @@ pub fn relax_to_strict_json(input: &str) -> String {
                     i = j;
                     if d_str.trim().is_empty() {
                         let now = chrono::Utc::now().to_rfc3339();
-                        out.push_str(&format!("{{\"$date\":\"{}\"}}", now));
+                        out.push_str(&format!("{{\"$date\":{}}}", serde_json::to_string(&now).map_err(|e| e.to_string())?));
                     } else {
-                        out.push_str(&format!("{{\"$date\":\"{}\"}}", d_str.trim()));
+                        out.push_str(&format!("{{\"$date\":{}}}", serde_json::to_string(d_str.trim()).map_err(|e| e.to_string())?));
                     }
                     continue;
                 }
@@ -3236,6 +3236,27 @@ mod mongo_input_validation_tests {
     fn collection_names_reject_surrounding_whitespace() {
         assert!(validate_mongo_name(" users ", "collection name").is_err());
         assert!(validate_mongo_name("users.items", "collection name").is_ok());
+    }
+
+    #[test]
+    fn non_finite_bson_doubles_serialize_as_null() {
+        assert_eq!(bson_to_clean_json(mongodb::bson::Bson::Double(f64::NAN)), serde_json::Value::Null);
+        assert_eq!(bson_to_clean_json(mongodb::bson::Bson::Double(f64::INFINITY)), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn relaxed_extended_json_values_are_escaped() {
+        let oid = relax_to_strict_json(r#"ObjectId("a\\\"b")"#);
+        let parsed: serde_json::Value = serde_json::from_str(&oid).expect("escaped ObjectId JSON");
+        assert_eq!(parsed["$oid"], "a\\\"b");
+        let date = relax_to_strict_json(r#"ISODate("2026-01-01\\\"T00:00:00Z")"#);
+        let parsed: serde_json::Value = serde_json::from_str(&date).expect("escaped ISODate JSON");
+        assert_eq!(parsed["$date"], "2026-01-01\\\"T00:00:00Z");
+    }
+
+    #[test]
+    fn rejects_unclosed_method_argument_lists() {
+        assert!(extract_paren_args("find({", "find").is_err());
     }
 
     #[test]
