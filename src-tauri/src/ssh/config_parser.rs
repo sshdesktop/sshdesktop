@@ -141,6 +141,10 @@ fn parse_ssh_config_internal(
     let mut current_aliases: Vec<String> = Vec::new();
     let mut current_template: Option<SshConfigHost> = None;
     let mut global_defaults: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // OpenSSH applies the first obtained value for most scalar options. Keep
+    // block state even for wildcard-only Host patterns, which have no UI alias.
+    let mut in_host_block = false;
+    let mut seen_host_options: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let flush_aliases = |template: &Option<SshConfigHost>, aliases: &[String], list: &mut Vec<SshConfigHost>| {
         if let Some(ref tmpl) = template {
@@ -174,6 +178,8 @@ fn parse_ssh_config_internal(
         if key == "host" {
             // Flush any previously collected host block
             flush_aliases(&current_template, &current_aliases, &mut hosts);
+            in_host_block = true;
+            seen_host_options.clear();
 
             let tokens: Vec<String> = value
                 .split_whitespace()
@@ -210,25 +216,27 @@ fn parse_ssh_config_internal(
                 });
             }
         } else if let Some(ref mut host) = current_template {
-            match key.as_str() {
-                "hostname" => host.hostname = value,
-                "user" => host.user = Some(value),
-                "port" => {
-                    if let Ok(p) = value.parse::<u16>() {
-                        host.port = Some(p);
+            if seen_host_options.insert(key.clone()) {
+                match key.as_str() {
+                    "hostname" => host.hostname = value,
+                    "user" => host.user = Some(value),
+                    "port" => {
+                        if let Ok(p) = value.parse::<u16>() {
+                            host.port = Some(p);
+                        }
                     }
+                    "identityfile" => {
+                        host.raw_identity_file = Some(value.clone());
+                        host.identity_file = Some(expand_tilde(&value));
+                    }
+                    "identitiesonly" => {
+                        host.identities_only = Some(value.to_lowercase() == "yes");
+                    }
+                    "proxyjump" => {
+                        host.proxy_jump = Some(value);
+                    }
+                    _ => {}
                 }
-                "identityfile" => {
-                    host.raw_identity_file = Some(value.clone());
-                    host.identity_file = Some(expand_tilde(&value));
-                }
-                "identitiesonly" => {
-                    host.identities_only = Some(value.to_lowercase() == "yes");
-                }
-                "proxyjump" => {
-                    host.proxy_jump = Some(value);
-                }
-                _ => {}
             }
         } else if key == "include" {
             if depth < 5 {
@@ -281,9 +289,11 @@ fn parse_ssh_config_internal(
                     }
                 }
             }
-        } else {
-            // Outside of a specific host block: global defaults
-            global_defaults.insert(key, value);
+        } else if !in_host_block {
+            // Only directives before the first Host block are global defaults.
+            // Options under wildcard-only Host blocks must never leak into later
+            // concrete hosts.
+            global_defaults.entry(key).or_insert(value);
         }
     }
 
@@ -514,4 +524,39 @@ pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
 
     log::info!("SSH Desktop: Successfully saved host '{}' to {}", entry.name, config_path.display());
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wildcard_host_options_do_not_leak_into_concrete_hosts() {
+        let hosts = parse_ssh_config_content(
+            "Host *.internal\\n    User wildcard-user\\nHost app-prod\\n    HostName 10.0.0.8\\n"
+        );
+        let app = hosts.iter().find(|host| host.name == "app-prod").unwrap();
+        assert_eq!(app.user, None);
+        assert_eq!(app.hostname, "10.0.0.8");
+    }
+
+    #[test]
+    fn first_scalar_host_option_wins_like_openssh() {
+        let hosts = parse_ssh_config_content(
+            "Host app-prod\\n    User first-user\\n    User second-user\\n    HostName first.example.com\\n    HostName second.example.com\\n"
+        );
+        let app = hosts.iter().find(|host| host.name == "app-prod").unwrap();
+        assert_eq!(app.user.as_deref(), Some("first-user"));
+        assert_eq!(app.hostname, "first.example.com");
+    }
+
+    #[test]
+    fn first_global_scalar_default_wins() {
+        let hosts = parse_ssh_config_content(
+            "User global-first\\nUser global-second\\nHost app-prod\\n    HostName app.example.com\\n"
+        );
+        let app = hosts.iter().find(|host| host.name == "app-prod").unwrap();
+        assert_eq!(app.user.as_deref(), Some("global-first"));
+    }
 }
