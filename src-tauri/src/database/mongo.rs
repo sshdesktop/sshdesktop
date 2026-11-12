@@ -3252,10 +3252,10 @@ mod mongo_input_validation_tests {
 
     #[test]
     fn relaxed_extended_json_values_are_escaped() {
-        let oid = relax_to_strict_json(r#"ObjectId("a\\"b")"#);
+        let oid = relax_to_strict_json(r#"ObjectId("a\"b")"#);
         let parsed: serde_json::Value = serde_json::from_str(&oid).expect("escaped ObjectId JSON");
         assert_eq!(parsed["$oid"], "a\"b");
-        let date = relax_to_strict_json(r#"ISODate("2026-01-01\\"T00:00:00Z")"#);
+        let date = relax_to_strict_json(r#"ISODate("2026-01-01\"T00:00:00Z")"#);
         let parsed: serde_json::Value = serde_json::from_str(&date).expect("escaped ISODate JSON");
         assert_eq!(parsed["$date"], "2026-01-01\"T00:00:00Z");
     }
