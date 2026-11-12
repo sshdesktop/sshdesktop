@@ -144,7 +144,9 @@ pub async fn connect_mongo(
 
 pub fn bson_to_clean_json(bson: mongodb::bson::Bson) -> serde_json::Value {
     match bson {
-        mongodb::bson::Bson::Double(d) => serde_json::json!(d),
+        mongodb::bson::Bson::Double(d) => serde_json::Number::from_f64(d)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
         mongodb::bson::Bson::String(s) => serde_json::Value::String(s),
         mongodb::bson::Bson::Array(arr) => {
             serde_json::Value::Array(arr.into_iter().map(bson_to_clean_json).collect())
@@ -390,7 +392,7 @@ pub fn extract_paren_args(s: &str, method_name: &str) -> Result<String, String> 
         }
         i += 1;
     }
-    Ok(after.trim().trim_end_matches(')').trim().to_string())
+    Err(format!("Unclosed {}(...) argument list", method_name))
 }
 
 pub fn relax_to_strict_json(input: &str) -> String {
@@ -506,7 +508,7 @@ pub fn relax_to_strict_json(input: &str) -> String {
                 if i < n && chars[i] == quote { i += 1; }
                 while i < n && chars[i] != ')' { i += 1; }
                 if i < n && chars[i] == ')' { i += 1; }
-                out.push_str(&format!("{{\"$oid\":\"{}\"}}", oid_str.trim()));
+                out.push_str(&format!("{{\"$oid\":{}}}", serde_json::to_string(oid_str.trim()).map_err(|e| e.to_string())?));
                 continue;
             }
         }
@@ -526,7 +528,7 @@ pub fn relax_to_strict_json(input: &str) -> String {
                 if i < n && chars[i] == quote { i += 1; }
                 while i < n && chars[i] != ')' { i += 1; }
                 if i < n && chars[i] == ')' { i += 1; }
-                out.push_str(&format!("{{\"$date\":\"{}\"}}", date_str.trim()));
+                out.push_str(&format!("{{\"$date\":{}}}", serde_json::to_string(date_str.trim()).map_err(|e| e.to_string())?));
                 continue;
             }
         }
@@ -2899,8 +2901,13 @@ pub async fn get_collection_columns_mongo(
     let mut key_order = Vec::new();
     let mut key_types: HashMap<String, String> = HashMap::new();
 
-    while let Some(doc_res) = cursor.next().await {
+    while let Some(doc_res) = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cursor.next()).await
+        .map_err(|_| format!("MongoDB schema sampling timed out after {} seconds.", timeout_secs))? {
         let doc = doc_res.map_err(|e| format!("MongoDB schema sampling failed: {}", e))?;
+        let sample_bytes = mongodb::bson::to_vec(&doc).map_err(|e| format!("Could not measure MongoDB schema sample: {}", e))?.len();
+        if sample_bytes > 8 * 1024 * 1024 {
+            return Err("MongoDB schema sample document exceeds the 8 MiB inspection limit.".into());
+        }
         for (k, v) in doc {
                 if !key_types.contains_key(&k) {
                     if k == "_id" {
@@ -3068,7 +3075,8 @@ pub async fn get_object_definition_mongo(
     let coll = db.collection::<mongodb::bson::Document>(name);
     let timeout_secs = session.config.timeout_seconds.unwrap_or(30).clamp(3, 120);
     let count = mongo_operation_timeout("collection document count", timeout_secs, coll.count_documents(mongodb::bson::doc! {}, None)).await?;
-    Ok(format!("// MongoDB Collection: {}\n// Document Count: {}\ndb.getCollection('{}').find({{}});", name, count, name))
+    let collection_literal = serde_json::to_string(name).map_err(|e| format!("Could not encode collection name: {}", e))?;
+    Ok(format!("// MongoDB Collection: {}\n// Document Count: {}\ndb.getCollection({}).find({{}});", name, count, collection_literal))
 }
 
 // ─── MongoDB Specific Tauri Commands ─────────────────────────────────
