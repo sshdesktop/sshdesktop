@@ -1,3 +1,10 @@
+fn validate_sqlite_identifier(value: &str, kind: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 255 || value.chars().any(|c| c.is_control() || c == '\0') {
+        return Err(format!("SQLite {} must be 1–255 bytes and contain no control characters.", kind));
+    }
+    Ok(())
+}
+
 fn secure_sqlite_cache_file(path: &std::path::Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -20,10 +27,14 @@ fn sqlite_cache_path(config: &DatabaseConnectionConfig, remote_path: &str) -> Re
             .map_err(|e| format!("Failed to secure SQLite cache directory: {}", e))?;
     }
     let mut hasher = Sha256::new();
-    // Key by the remote target server and file path rather than connection instance ID,
-    // ensuring concurrent sessions to the same database share a coherent local cache.
-    let target_key = config.ssh_connection_id.as_deref().unwrap_or(&config.host);
-    hasher.update(target_key.as_bytes());
+    // Include endpoint identity so reused connection IDs cannot collide across hosts.
+    hasher.update(config.host.as_bytes());
+    hasher.update([0]);
+    hasher.update(config.port.to_be_bytes());
+    hasher.update([0]);
+    hasher.update(config.username.as_bytes());
+    hasher.update([0]);
+    if let Some(id) = config.ssh_connection_id.as_deref() { hasher.update(id.as_bytes()); }
     hasher.update([0]);
     hasher.update(remote_path.as_bytes());
     let digest = format!("{:x}", hasher.finalize());
@@ -120,13 +131,13 @@ pub async fn connect_sqlite(
         .await
         .map_err(|e| format!("SQLite connection error: {}", e))?;
 
-    // Enable foreign keys
-    let _ = sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await;
-
-    let version_row: (String,) = sqlx::query_as("SELECT sqlite_version()")
-        .fetch_one(&pool)
-        .await
-        .unwrap_or_else(|_| ("SQLite 3".to_string(),));
+    sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await
+        .map_err(|e| format!("Failed to enable SQLite foreign-key enforcement: {}", e))?;
+    let fk_enabled: (i64,) = sqlx::query_as("PRAGMA foreign_keys").fetch_one(&pool).await
+        .map_err(|e| format!("Could not verify SQLite foreign-key enforcement: {}", e))?;
+    if fk_enabled.0 != 1 { pool.close().await; return Err("SQLite foreign-key enforcement could not be enabled.".into()); }
+    let version_row: (String,) = sqlx::query_as("SELECT sqlite_version()").fetch_one(&pool).await
+        .map_err(|e| format!("Could not read SQLite server version: {}", e))?;
 
     let capabilities = ServerCapabilities {
         engine: "sqlite".to_string(),
@@ -157,10 +168,11 @@ pub async fn execute_query_sqlite(
     state: &crate::AppState,
     start: Instant,
 ) -> Result<QueryResult, String> {
+    if query.len() > 5 * 1024 * 1024 { return Err("SQLite query exceeds the 5 MiB input limit.".into()); }
     let statements = split_sql_statements_for_engine(query, "sqlite");
-    if statements.is_empty() {
-        return Err("Query string is empty".to_string());
-    }
+    if statements.is_empty() { return Err("Query string is empty".to_string()); }
+    if statements.len() > 100 { return Err("SQLite batch exceeds the 100-statement limit.".into()); }
+    let limit = limit.clamp(1, 10_000);
 
     let mut final_cols = Vec::new();
     let mut final_rows = Vec::new();
@@ -196,7 +208,7 @@ pub async fn execute_query_sqlite(
                 .map_err(|e| format!("SQLite error (statement {}/{}): {}", stmt_idx + 1, num_stmts, e))?;
 
             let aff = res.rows_affected();
-            total_affected += aff;
+            total_affected = total_affected.saturating_add(aff);
             let id = res.last_insert_rowid();
             let id_opt = if id > 0 {
                 last_insert_id = Some(id);
@@ -235,12 +247,17 @@ pub async fn execute_query_sqlite(
 
             let mut cols_meta = Vec::new();
             let mut json_rows = Vec::new();
+            let mut statement_result_bytes = 0usize;
 
             for (idx, row) in rows.iter().enumerate() {
                 if idx >= limit {
                     break;
                 }
                 let (meta, val) = serialize_sqlite_row(row);
+                let row_bytes = serde_json::to_vec(&val).map_err(|e| format!("Could not serialize SQLite result row: {}", e))?.len();
+                if row_bytes > 8 * 1024 * 1024 { return Err("SQLite result row exceeds the 8 MiB display limit.".into()); }
+                statement_result_bytes = statement_result_bytes.saturating_add(row_bytes);
+                if statement_result_bytes > 12 * 1024 * 1024 { return Err("SQLite statement result exceeds the 12 MiB display limit; reduce selected columns.".into()); }
                 if idx == 0 {
                     cols_meta = meta;
                 }
@@ -257,7 +274,7 @@ pub async fn execute_query_sqlite(
                 final_rows = json_rows.clone();
             }
             let stmt_affected = if is_write_query { rows.len() as u64 } else { 0 };
-            total_affected += stmt_affected;
+            total_affected = total_affected.saturating_add(stmt_affected);
 
             batch_results.push(BatchStatementResult {
                 statement: stmt.to_string(),
@@ -298,28 +315,14 @@ pub async fn execute_query_sqlite(
 
 pub async fn list_tables_sqlite(pool: &sqlx::SqlitePool) -> Result<Vec<DatabaseObject>, String> {
     use sqlx::Row;
-    let rows = sqlx::query(
-        "SELECT name, type FROM sqlite_master WHERE type in ('table','view') ORDER BY name",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(rows
-        .into_iter()
-        .filter_map(|r| {
-            let name: Option<String> = r.try_get(0).ok();
-            let obj_type: String = r.try_get(1).unwrap_or_else(|_| "table".to_string());
-            name.map(|n| DatabaseObject {
-                name: n,
-                object_type: obj_type,
-                schema: None,
-                row_count: None,
-                size_bytes: None,
-                definition: None,
-            })
-        })
-        .collect())
+    let rows = sqlx::query("SELECT name, type FROM sqlite_master WHERE type in ('table','view') ORDER BY name")
+        .fetch_all(pool).await.map_err(|e| format!("SQLite table listing failed: {}", e))?;
+    if rows.len() > 10_000 { return Err("SQLite database contains more than 10,000 tables and views.".into()); }
+    rows.into_iter().map(|r| {
+        let name: String = r.try_get(0).map_err(|e| format!("Invalid SQLite schema name: {}", e))?;
+        let obj_type: String = r.try_get(1).map_err(|e| format!("Invalid SQLite object type: {}", e))?;
+        Ok(DatabaseObject { name, object_type: obj_type, schema: None, row_count: None, size_bytes: None, definition: None })
+    }).collect()
 }
 
 pub async fn get_table_columns_sqlite(
@@ -327,13 +330,15 @@ pub async fn get_table_columns_sqlite(
     table_name: &str,
 ) -> Result<Vec<ColumnMeta>, String> {
     use sqlx::Row;
+    validate_sqlite_identifier(table_name, "table name")?;
     let fk_q = format!("PRAGMA foreign_key_list('{}');", table_name.replace('\'', "''"));
-    let fk_rows = sqlx::query(&fk_q).fetch_all(pool).await.unwrap_or_default();
+    let fk_rows = sqlx::query(&fk_q).fetch_all(pool).await
+        .map_err(|e| format!("SQLite foreign-key metadata query failed: {}", e))?;
     let mut fk_map: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
     for fkr in fk_rows {
-        let from_col: String = fkr.try_get("from").unwrap_or_default();
-        let to_table: String = fkr.try_get("table").unwrap_or_default();
-        let to_col: String = fkr.try_get("to").unwrap_or_default();
+        let from_col: String = fkr.try_get("from").map_err(|e| format!("Invalid SQLite foreign-key column metadata: {}", e))?;
+        let to_table: String = fkr.try_get("table").map_err(|e| format!("Invalid SQLite foreign-key table metadata: {}", e))?;
+        let to_col: String = fkr.try_get("to").map_err(|e| format!("Invalid SQLite foreign-key target metadata: {}", e))?;
         if !from_col.is_empty() {
             fk_map.insert(from_col, (to_table, to_col));
         }
@@ -344,11 +349,11 @@ pub async fn get_table_columns_sqlite(
 
     let mut cols = Vec::new();
     for r in rows {
-        let name: String = r.try_get("name").unwrap_or_default();
-        let ty: String = r.try_get("type").unwrap_or_else(|_| "TEXT".to_string());
-        let notnull: i64 = r.try_get("notnull").unwrap_or(0);
-        let pk: i64 = r.try_get("pk").unwrap_or(0);
-        let dflt: Option<String> = r.try_get("dflt_value").ok();
+        let name: String = r.try_get("name").map_err(|e| format!("Invalid SQLite column name metadata: {}", e))?;
+        let ty: String = r.try_get("type").map_err(|e| format!("Invalid SQLite column type metadata: {}", e))?;
+        let notnull: i64 = r.try_get("notnull").map_err(|e| format!("Invalid SQLite nullability metadata: {}", e))?;
+        let pk: i64 = r.try_get("pk").map_err(|e| format!("Invalid SQLite primary-key metadata: {}", e))?;
+        let dflt: Option<String> = r.try_get("dflt_value").map_err(|e| format!("Invalid SQLite default metadata: {}", e))?;
 
         let fk_info = fk_map.get(&name);
 
@@ -373,9 +378,9 @@ pub async fn execute_operation_sqlite(
     session: &ActiveDatabaseSession,
     state: &crate::AppState,
 ) -> Result<u64, String> {
-    if session.config.read_only {
-        return Err("This SQLite connection is read-only.".into());
-    }
+    if session.config.read_only { return Err("This SQLite connection is read-only.".into()); }
+    if sql.trim().is_empty() { return Err("SQLite operation SQL is empty.".into()); }
+    if sql.len() > 5 * 1024 * 1024 { return Err("SQLite operation SQL exceeds the 5 MiB input limit.".into()); }
     let res = sqlx::raw_sql(sql).execute(pool).await.map_err(|e| e.to_string())?;
     if session.config.use_ssh {
         let conn_id = session.config.ssh_connection_id.as_deref()
@@ -397,7 +402,8 @@ pub async fn get_object_definition_sqlite(
 ) -> Result<String, String> {
     use sqlx::Row;
     let q = "SELECT sql FROM sqlite_master WHERE name = ?;";
+    validate_sqlite_identifier(name, "object name")?;
     let row = sqlx::query(q).bind(name).fetch_one(pool).await.map_err(|e| e.to_string())?;
-    let def: String = row.try_get(0).unwrap_or_default();
-    Ok(def)
+    let def: Option<String> = row.try_get(0).map_err(|e| format!("Invalid SQLite object definition: {}", e))?;
+    def.ok_or_else(|| format!("SQLite object '{}' has no stored SQL definition.", name))
 }
