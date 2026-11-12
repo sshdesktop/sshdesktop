@@ -676,7 +676,8 @@ pub async fn package_upgradable(
             &conn_id,
             "yum list updates 2>/dev/null | tail -n +2",
         ).await,
-        _ => return Ok(vec![]), // pacman: no easy list; return empty
+        "pacman" => return Ok(vec![]), // pacman has no built-in upgradable-list command.
+        _ => return Err(format!("Upgradable package listing is not supported for package manager '{}'.", pm)),
     };
 
     if code == -1 {
