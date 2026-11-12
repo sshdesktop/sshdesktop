@@ -93,6 +93,27 @@ fn validate_remote_sqlite_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_wal_checkpoint_status(busy: i64, log_frames: i64, checkpointed_frames: i64, phase: &str) -> Result<(), String> {
+    if busy != 0 {
+        return Err(format!("SQLite WAL checkpoint is busy during {}; refusing remote synchronization.", phase));
+    }
+    if log_frames >= 0 && checkpointed_frames >= 0 && checkpointed_frames < log_frames {
+        return Err(format!("SQLite WAL checkpoint was incomplete during {} ({} of {} frames); refusing remote synchronization.", phase, checkpointed_frames, log_frames));
+    }
+    Ok(())
+}
+
+fn validate_single_operation_sql(sql: &str) -> Result<(), String> {
+    if sql.trim().is_empty() { return Err("SQLite operation SQL is empty.".into()); }
+    if sql.len() > 5 * 1024 * 1024 { return Err("SQLite operation SQL exceeds the 5 MiB input limit.".into()); }
+    if sql.chars().any(|c| c == '\0') { return Err("SQLite operation SQL contains a NUL byte.".into()); }
+    let statements = split_sql_statements_for_engine(sql, "sqlite");
+    if statements.len() != 1 {
+        return Err("A SQLite schema operation must contain exactly one SQL statement.".into());
+    }
+    Ok(())
+}
+
 async fn run_checked_wal_checkpoint(pool: &sqlx::SqlitePool, phase: &str) -> Result<(), String> {
     use sqlx::Row;
     let row = tokio::time::timeout(
@@ -103,13 +124,7 @@ async fn run_checked_wal_checkpoint(pool: &sqlx::SqlitePool, phase: &str) -> Res
     let busy: i64 = row.try_get(0).map_err(|e| format!("Could not read SQLite WAL checkpoint busy status: {}", e))?;
     let log_frames: i64 = row.try_get(1).map_err(|e| format!("Could not read SQLite WAL frame count: {}", e))?;
     let checkpointed_frames: i64 = row.try_get(2).map_err(|e| format!("Could not read SQLite checkpointed frame count: {}", e))?;
-    if busy != 0 {
-        return Err(format!("SQLite WAL checkpoint is busy during {}; refusing remote synchronization.", phase));
-    }
-    if log_frames >= 0 && checkpointed_frames >= 0 && checkpointed_frames < log_frames {
-        return Err(format!("SQLite WAL checkpoint was incomplete during {} ({} of {} frames); refusing remote synchronization.", phase, checkpointed_frames, log_frames));
-    }
-    Ok(())
+    validate_wal_checkpoint_status(busy, log_frames, checkpointed_frames, phase)
 }
 
 async fn prepare_remote_sqlite_sync(pool: &sqlx::SqlitePool) -> Result<(), String> {
@@ -581,13 +596,7 @@ pub async fn execute_operation_sqlite(
     state: &crate::AppState,
 ) -> Result<u64, String> {
     if session.config.read_only { return Err("This SQLite connection is read-only.".into()); }
-    if sql.trim().is_empty() { return Err("SQLite operation SQL is empty.".into()); }
-    if sql.len() > 5 * 1024 * 1024 { return Err("SQLite operation SQL exceeds the 5 MiB input limit.".into()); }
-    if sql.chars().any(|c| c == '\0') { return Err("SQLite operation SQL contains a NUL byte.".into()); }
-    let operation_statements = split_sql_statements_for_engine(sql, "sqlite");
-    if operation_statements.len() != 1 {
-        return Err("A SQLite schema operation must contain exactly one SQL statement.".into());
-    }
+    validate_single_operation_sql(sql)?;
     let remote_conn_id = if session.config.use_ssh {
         Some(session.config.ssh_connection_id.as_deref().filter(|id| !id.trim().is_empty())
             .ok_or_else(|| "Remote SQLite operation has no explicit SSH connection ID.".to_string())?)
@@ -706,5 +715,68 @@ mod remote_sqlite_safety_tests {
         let guard = lock.try_lock().expect("new lock should be available");
         drop(guard);
         assert!(Arc::strong_count(&lock) >= 1);
+    }
+}
+
+
+#[cfg(test)]
+mod sqlite_sync_validation_tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_file_header_accepts_empty_and_valid_database() {
+        assert!(validate_sqlite_file_header(&[]).is_ok());
+        let mut header = b"SQLite format 3\0".to_vec();
+        header.resize(100, 0);
+        assert!(validate_sqlite_file_header(&header).is_ok());
+    }
+
+    #[test]
+    fn sqlite_file_header_rejects_invalid_and_truncated_files() {
+        assert!(validate_sqlite_file_header(b"not a database").is_err());
+        assert!(validate_sqlite_file_header(b"SQLite format 3\0").is_err());
+        assert!(validate_sqlite_file_header(&vec![0u8; 100]).is_err());
+    }
+
+    #[test]
+    fn wal_checkpoint_rejects_busy_state() {
+        assert!(validate_wal_checkpoint_status(1, 10, 10, "test").is_err());
+    }
+
+    #[test]
+    fn wal_checkpoint_rejects_incomplete_frames() {
+        assert!(validate_wal_checkpoint_status(0, 10, 9, "test").is_err());
+    }
+
+    #[test]
+    fn wal_checkpoint_accepts_completed_and_no_wal_states() {
+        assert!(validate_wal_checkpoint_status(0, 10, 10, "test").is_ok());
+        assert!(validate_wal_checkpoint_status(0, -1, -1, "test").is_ok());
+    }
+
+    #[test]
+    fn operation_sql_rejects_empty_input() {
+        assert!(validate_single_operation_sql("  \n ").is_err());
+    }
+
+    #[test]
+    fn operation_sql_rejects_nul_bytes() {
+        assert!(validate_single_operation_sql("CREATE TABLE t(a);\0").is_err());
+    }
+
+    #[test]
+    fn operation_sql_rejects_multiple_statements() {
+        assert!(validate_single_operation_sql("CREATE TABLE a(x); DROP TABLE b;").is_err());
+    }
+
+    #[test]
+    fn operation_sql_accepts_single_statement() {
+        assert!(validate_single_operation_sql("CREATE TABLE test_table(id INTEGER PRIMARY KEY);").is_ok());
+    }
+
+    #[test]
+    fn operation_sql_enforces_byte_limit() {
+        let sql = format!("SELECT '{}';", "x".repeat(5 * 1024 * 1024));
+        assert!(validate_single_operation_sql(&sql).is_err());
     }
 }
