@@ -935,7 +935,20 @@ pub fn unpack_mongo_command_result(
             let mut key_order = Vec::new();
             let mut key_types = HashMap::new();
 
+            if first_batch.len() > 10_000 {
+                return Err("MongoDB command returned more than 10,000 documents; narrow the command scope.".into());
+            }
+            let mut result_bytes = 0usize;
             for item in first_batch {
+                let item_bytes = mongodb::bson::to_vec(&mongodb::bson::doc! { "value": item.clone() })
+                    .map_err(|e| format!("Could not measure MongoDB command result: {}", e))?.len();
+                if item_bytes > 8 * 1024 * 1024 {
+                    return Err("MongoDB command result document exceeds the 8 MiB display limit.".into());
+                }
+                result_bytes = result_bytes.saturating_add(item_bytes);
+                if result_bytes > 12 * 1024 * 1024 {
+                    return Err("MongoDB command result exceeds the 12 MiB display limit.".into());
+                }
                 if let Some(item_doc) = item.as_document() {
                     for (k, v) in item_doc {
                         if !key_types.contains_key(k) {
@@ -1014,8 +1027,18 @@ pub fn unpack_mongo_command_result(
 
     // Unpack databases array from listDatabases command
     if let Ok(db_arr) = doc.get_array("databases") {
+        if db_arr.len() > 10_000 {
+            return Err("MongoDB command returned more than 10,000 databases; narrow the command scope.".into());
+        }
         let mut rows = Vec::new();
+        let mut result_bytes = 0usize;
         for item in db_arr {
+            let item_bytes = mongodb::bson::to_vec(&mongodb::bson::doc! { "value": item.clone() })
+                .map_err(|e| format!("Could not measure MongoDB database result: {}", e))?.len();
+            result_bytes = result_bytes.saturating_add(item_bytes);
+            if result_bytes > 12 * 1024 * 1024 {
+                return Err("MongoDB database result exceeds the 12 MiB display limit.".into());
+            }
             if let Some(item_doc) = item.as_document() {
                 rows.push(bson_to_clean_json(mongodb::bson::Bson::Document(item_doc.clone())));
             } else {
@@ -2037,7 +2060,13 @@ pub async fn execute_mongodb_single_command(
                     return Err("replaceOne requires (filter, replacement) arguments".to_string());
                 }
                 let filter_doc = parse_relaxed_document(&args[0])?;
+                if filter_doc.is_empty() {
+                    return Err("MongoDB replaceOne requires a non-empty filter.".into());
+                }
                 let replacement_doc = parse_relaxed_document(&args[1])?;
+                if replacement_doc.is_empty() {
+                    return Err("MongoDB replaceOne requires a non-empty replacement document.".into());
+                }
                 let res = coll.replace_one(filter_doc, replacement_doc, None).await.map_err(|e| format!("MongoDB replaceOne error: {}", e))?;
                 return Ok(QueryResult {
                     columns: vec![
@@ -2268,6 +2297,10 @@ pub async fn execute_mongodb_single_command(
                                 }
                                 "updateOne" => {
                                     let filter = op_body.get("filter").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                                    if filter.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+                                        errors.push(format!("Op {}: updateOne requires a non-empty filter.", idx));
+                                        continue;
+                                    }
                                     let update = op_body.get("update").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                                     let upsert = op_body.get("upsert").and_then(|v| v.as_bool()).unwrap_or(false);
                                     let opts = mongodb::options::UpdateOptions::builder().upsert(Some(upsert)).build();
@@ -2310,6 +2343,10 @@ pub async fn execute_mongodb_single_command(
                                 }
                                 "deleteOne" => {
                                     let filter = op_body.get("filter").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                                    if filter.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+                                        errors.push(format!("Op {}: deleteOne requires a non-empty filter.", idx));
+                                        continue;
+                                    }
                                     match json_to_bson_document(filter) {
                                         Ok(f) => match coll.delete_one(f, None).await {
                                             Ok(res) => deleted_count += res.deleted_count,
@@ -2334,7 +2371,15 @@ pub async fn execute_mongodb_single_command(
                                 }
                                 "replaceOne" => {
                                     let filter = op_body.get("filter").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                                    if filter.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+                                        errors.push(format!("Op {}: replaceOne requires a non-empty filter.", idx));
+                                        continue;
+                                    }
                                     let replacement = op_body.get("replacement").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                                    if replacement.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+                                        errors.push(format!("Op {}: replaceOne requires a non-empty replacement.", idx));
+                                        continue;
+                                    }
                                     let upsert = op_body.get("upsert").and_then(|v| v.as_bool()).unwrap_or(false);
                                     let opts = mongodb::options::ReplaceOptions::builder().upsert(Some(upsert)).build();
                                     match (json_to_bson_document(filter), json_to_bson_document(replacement)) {
@@ -2952,7 +2997,13 @@ pub async fn mongodb_find_documents(
     };
 
     if let DriverInstance::Mongo(client) = &session.driver {
-        let db = client.database(get_effective_mongo_db(&session.config.database));
+        let effective_db = get_effective_mongo_db(&session.config.database);
+        validate_mongo_name(effective_db, "database name")?;
+        validate_mongo_name(&collection, "collection name")?;
+        if filter_json.as_ref().map(|v| v.len() > 1024 * 1024).unwrap_or(false) {
+            return Err("MongoDB filter exceeds the 1 MiB input limit.".into());
+        }
+        let db = client.database(effective_db);
         let coll = db.collection::<mongodb::bson::Document>(&collection);
 
         let filter_doc = if let Some(ref fj) = filter_json {
@@ -2965,10 +3016,6 @@ pub async fn mongodb_find_documents(
             mongodb::bson::doc! {}
         };
 
-        validate_mongo_name(&collection, "collection name")?;
-        if filter_json.as_ref().map(|v| v.len() > 1024 * 1024).unwrap_or(false) {
-            return Err("MongoDB filter exceeds the 1 MiB input limit.".into());
-        }
         if skip.unwrap_or(0) > 1_000_000_000 {
             return Err("MongoDB skip value exceeds the supported limit.".into());
         }
@@ -3004,19 +3051,24 @@ pub async fn mongodb_insert_document(
     }
 
     if let DriverInstance::Mongo(client) = &session.driver {
-        let db = client.database(get_effective_mongo_db(&session.config.database));
-        let coll = db.collection::<mongodb::bson::Document>(&collection);
-
+        let effective_db = get_effective_mongo_db(&session.config.database);
+        validate_mongo_name(effective_db, "database name")?;
         validate_mongo_name(&collection, "collection name")?;
+        let db = client.database(effective_db);
+        let coll = db.collection::<mongodb::bson::Document>(&collection);
         if doc_json.len() > 15 * 1024 * 1024 {
             return Err("MongoDB document input exceeds the 15 MiB desktop limit.".into());
         }
         let doc: mongodb::bson::Document = serde_json::from_str(&doc_json).map_err(|e| e.to_string())?;
+        if doc.is_empty() {
+            return Err("MongoDB insert requires a non-empty document.".into());
+        }
         let bson_size = mongodb::bson::to_vec(&doc)
             .map_err(|e| format!("Could not validate MongoDB document size: {}", e))?.len();
         if bson_size > 15 * 1024 * 1024 {
             return Err("MongoDB BSON document exceeds the 15 MiB desktop limit.".into());
         }
+        crate::store::audit::enforce_policy_permission("db_execute_operation")?;
         let res = coll.insert_one(doc, None).await.map_err(|e| e.to_string())?;
 
         Ok(format!("{:?}", res.inserted_id))
