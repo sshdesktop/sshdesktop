@@ -72,8 +72,11 @@ pub async fn package_list(
         _ => return Err("No supported package manager found (apt/dnf/yum/pacman/zypper/apk).".into()),
     };
 
-    if code == -1 && stdout.is_empty() {
+    if code == -1 {
         return Err("No active SSH connection.".into());
+    }
+    if code != 0 {
+        return Err(format!("Failed to list installed packages (exit code {}): {}", code, stdout.trim()));
     }
 
     let mut list = Vec::new();
@@ -535,6 +538,9 @@ pub async fn package_install(
     let package_arg = shell_quote(&name);
 
     let pm = detect_pkg_manager(&state, &conn_id).await;
+    if pm == "unknown" {
+        return Err("No supported package manager found; installation was not attempted.".into());
+    }
     let (install_cmd, post_setup) = build_install_command(&pm, &name);
 
     let full_cmd = if let Some(post) = post_setup {
@@ -636,6 +642,10 @@ pub async fn package_update(
     }
 
     // apt-get update exits 0 on success; dnf/yum check-update exits 100 if updates available
+    let expected_update_available = matches!(pm.as_str(), "dnf" | "yum") && code == 100;
+    if code != 0 && !expected_update_available {
+        return Err(format!("Package repository update failed (exit code {}): {}", code, stdout.trim()));
+    }
     if !stdout.is_empty() {
         return Ok(stdout);
     }
@@ -672,6 +682,9 @@ pub async fn package_upgradable(
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
+    if code != 0 {
+        return Err(format!("Failed to check upgradable packages (exit code {}): {}", code, stdout.trim()));
+    }
 
     let mut list = Vec::new();
     for line in stdout.lines() {
@@ -684,8 +697,11 @@ pub async fn package_upgradable(
         if parts.is_empty() { continue; }
 
         let raw_name = parts[0];
-        let name = raw_name.split('/').next().unwrap_or(raw_name)
-            .split('.').next().unwrap_or(raw_name)
+        let name = raw_name.split('/').next().unwrap_or(raw_name);
+        let name = ["x86_64", "aarch64", "noarch", "i686", "i386", "armv7hl", "ppc64le", "s390x"]
+            .iter()
+            .find_map(|arch| name.strip_suffix(&format!(".{}", arch)))
+            .unwrap_or(name)
             .to_string();
         let version = parts.get(1).copied().unwrap_or("latest").to_string();
 
