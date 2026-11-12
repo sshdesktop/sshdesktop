@@ -31,7 +31,7 @@ pub async fn service_list(
     let (combined_out, code) = run_cmd(
         &state,
         &conn_id,
-        "systemctl list-units --type=service --all --no-pager --plain 2>&1; echo '---FILES---'; systemctl list-unit-files --type=service --all --no-pager --plain 2>&1",
+        "systemctl list-units --type=service --all --no-pager --plain 2>&1 && printf '%s\\n' '---FILES---' && systemctl list-unit-files --type=service --all --no-pager --plain 2>&1",
     ).await;
 
     if code == -1 {
@@ -59,7 +59,8 @@ pub async fn service_list(
     for line in files_out.lines().skip(1) {
         let p: Vec<&str> = line.split_whitespace().collect();
         if p.len() >= 2 && p[0].ends_with(".service") {
-            let is_enabled = matches!(p[1], "enabled" | "enabled-runtime" | "static");
+            if !valid_service_name(p[0]) { continue; }
+            let is_enabled = matches!(p[1], "enabled" | "enabled-runtime");
             files_map.insert(p[0].to_string(), (is_enabled, p[1].to_string()));
         }
     }
@@ -82,9 +83,9 @@ pub async fn service_list(
         if p.first().copied() == Some("●") || p.first().copied() == Some("*") {
             p.remove(0);
         }
-        if p.len() >= 4 && p[0].ends_with(".service") {
-            let name        = p[0].to_string();
-            seen.insert(name.clone());
+        if p.len() >= 4 && p[0].ends_with(".service") && valid_service_name(p[0]) {
+            let name = p[0].to_string();
+            if !seen.insert(name.clone()) { continue; }
             let load_state  = p[1].to_string();
             let active_state = p[2].to_string();
             let sub_state   = p[3].to_string();
@@ -104,7 +105,7 @@ pub async fn service_list(
 
     // Include all installed service unit files from disk that are not yet loaded in systemd memory (e.g. newly installed packages)
     for (name, (is_enabled, state_str)) in &files_map {
-        if !seen.contains(name) && !name.contains("@.") && state_str != "alias" {
+        if !seen.contains(name) && valid_service_name(name) && !name.contains("@.") && state_str != "alias" {
             seen.insert(name.clone());
             let clean_desc = name.trim_end_matches(".service").to_string();
             list.push(ServiceInfo {
@@ -118,8 +119,14 @@ pub async fn service_list(
         }
     }
 
-    list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    list.sort_by(|a, b| {
+        a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())
+            .then_with(|| a.name.cmp(&b.name))
+    });
 
+    if list.len() > 20_000 {
+        return Err("Remote service listing exceeds the 20,000-unit safety limit.".into());
+    }
     if list.is_empty() {
         return Err("No services found. Ensure systemd is running on the remote server.".into());
     }
@@ -138,7 +145,7 @@ pub async fn service_action(
     let safe_action = match action.as_str() {
         "start" | "stop" | "restart" | "reload" | "enable" | "disable"
         | "mask" | "unmask" => action.as_str(),
-        _ => return Err(format!("Invalid service action: {}", action)),
+        _ => return Err("Invalid service action.".into()),
     };
 
     if !valid_service_name(&name) {
@@ -203,12 +210,13 @@ pub async fn service_logs(
     if !valid_service_name(&name) {
         return Err("Invalid service name.".into());
     }
+    let safe_lines = lines.clamp(1, 1000);
     let service_arg = shell_quote(&name);
 
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        &format!("journalctl -u {} -n {} --no-pager 2>&1", service_arg, lines.min(1000)),
+        &format!("journalctl -u {} -n {} --no-pager 2>&1", service_arg, safe_lines),
     ).await;
 
     if code == -1 {
@@ -219,6 +227,10 @@ pub async fn service_logs(
         return Err(format!("Failed to read journal logs for service '{}': {}", name, stdout.trim()));
     }
     if !stdout.is_empty() {
+        const MAX_LOG_BYTES: usize = 4 * 1024 * 1024;
+        if stdout.len() > MAX_LOG_BYTES {
+            return Err("Service log output exceeds the 4 MiB display limit; request fewer lines.".into());
+        }
         return Ok(stdout);
     }
 
