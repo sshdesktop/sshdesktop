@@ -335,6 +335,7 @@ pub async fn ssh_install_public_key(
     conn_id: String,
     public_key: String,
 ) -> Result<bool, String> {
+    crate::store::audit::enforce_policy_permission("ssh_install_public_key")?;
     let clean_key = public_key.trim();
     if clean_key.len() > 64 * 1024 || clean_key.chars().any(|ch| ch.is_control() && ch != '\t') {
         return Err("SSH public key must be a single line no larger than 64 KiB.".into());
