@@ -628,10 +628,23 @@ pub async fn ssh_launch_putty(
 
     // PuTTY is launched interactively: let it prompt for a password rather than
     // exposing credentials in its process arguments.
-    let selected_key_path = conn.config.private_key_path.as_deref();
+    // Respect the explicitly selected authentication method. A saved identity
+    // must not silently override password authentication in the PuTTY launcher.
+    let selected_key_path = match conn.config.auth_method.as_deref() {
+        Some("password") => None,
+        Some("key") => conn.config.private_key_path.as_deref(),
+        _ => conn.config.private_key_path.as_deref(),
+    };
+    if conn.config.auth_method.as_deref() == Some("key")
+        && selected_key_path.map(|key| key.trim().is_empty()).unwrap_or(true)
+    {
+        return Err("Key authentication was selected, but no private key was configured.".into());
+    }
     if let Some(key) = selected_key_path {
-        if !key.is_empty() {
-            cmd.arg("-i").arg(key);
+        if !key.trim().is_empty() {
+            let resolved_key = crate::ssh::connection::resolve_key_path(key)
+                .ok_or_else(|| format!("Selected SSH identity '{}' could not be found.", key))?;
+            cmd.arg("-i").arg(resolved_key);
         }
     }
 
