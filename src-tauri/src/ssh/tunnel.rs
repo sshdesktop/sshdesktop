@@ -19,6 +19,7 @@ pub struct ActiveTunnel {
     pub info: TunnelInfo,
     pub child: Option<tokio::process::Child>,
     pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    pub task_alive: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub password_file: Option<Arc<crate::ssh::connection::SshPasswordFile>>,
 }
 
@@ -278,7 +279,9 @@ pub async fn ssh_start_tunnel(
                     _ => false,
                 }
             } else if active.shutdown_tx.is_some() {
-                true
+                active.task_alive.as_ref()
+                    .map(|alive| alive.load(std::sync::atomic::Ordering::Acquire))
+                    .unwrap_or(false)
             } else {
                 false
             };
@@ -477,6 +480,8 @@ pub async fn ssh_start_tunnel(
             let target_port = remote_port;
             let local_p = effective_local_port;
             let conn_sem = Arc::new(tokio::sync::Semaphore::new(128));
+            let task_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let task_alive_guard = task_alive.clone();
 
             tokio::spawn(async move {
                 loop {
@@ -526,6 +531,7 @@ pub async fn ssh_start_tunnel(
                         }
                     }
                 }
+                task_alive_guard.store(false, std::sync::atomic::Ordering::Release);
             });
 
             let tunnel_info = TunnelInfo {
@@ -543,6 +549,7 @@ pub async fn ssh_start_tunnel(
                     info: tunnel_info,
                     child: None,
                     shutdown_tx: Some(shutdown_tx),
+                    task_alive: Some(task_alive),
                     password_file: None,
                 });
             }
@@ -812,6 +819,7 @@ pub async fn ssh_start_tunnel(
             info: tunnel_info,
             child: child_handle,
             shutdown_tx: None,
+            task_alive: None,
             password_file: password_file.clone(),
         });
     }
@@ -920,8 +928,15 @@ pub async fn ssh_start_socks5(
     let mut stale_socks_shutdown = None;
     {
         let mut lock = ACTIVE_SOCKS5.lock();
-        if let Some(active) = lock.get(&conn_id) {
-            if std::net::TcpStream::connect(("127.0.0.1", active.info.local_port)).is_ok() {
+        if let Some(active) = lock.get_mut(&conn_id) {
+            let is_alive = if let Some(child) = active.child.as_mut() {
+                matches!(child.try_wait(), Ok(None))
+            } else {
+                active.task_alive.as_ref()
+                    .map(|alive| alive.load(std::sync::atomic::Ordering::Acquire))
+                    .unwrap_or(false)
+            };
+            if is_alive {
                 log::info!("SSH Desktop: Reusing active SOCKS5 proxy on 127.0.0.1:{}", active.info.local_port);
                 return Ok(active.info.local_port);
             } else {
@@ -980,6 +995,8 @@ pub async fn ssh_start_socks5(
         let auth_enabled = socks_auth.is_some();
         let auth_arc = socks_auth.map(Arc::new);
         let listen_port = effective_local_port;
+        let task_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let task_alive_guard = task_alive.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -1002,6 +1019,7 @@ pub async fn ssh_start_socks5(
                     }
                 }
             }
+            task_alive_guard.store(false, std::sync::atomic::Ordering::Release);
         });
         let tunnel_info = TunnelInfo {
             tunnel_id: format!("socks5:{}", conn_id),
@@ -1017,6 +1035,7 @@ pub async fn ssh_start_socks5(
                 info: tunnel_info,
                 child: None,
                 shutdown_tx: Some(shutdown_tx),
+                task_alive: Some(task_alive),
                 password_file: None,
             });
         }
@@ -1260,6 +1279,7 @@ pub async fn ssh_start_socks5(
             info: tunnel_info,
             child: child_handle,
             shutdown_tx: None,
+            task_alive: None,
             password_file: password_file.clone(),
         });
     }
