@@ -126,7 +126,9 @@ pub async fn connect_sqlite(
         .create_if_missing(!config.read_only)
         .read_only(config.read_only);
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(5)
+        // SQLite foreign_keys is connection-local; a single pooled connection keeps
+        // the verified PRAGMA enabled for every query on this pool.
+        .max_connections(1)
         .connect_with(options)
         .await
         .map_err(|e| format!("SQLite connection error: {}", e))?;
