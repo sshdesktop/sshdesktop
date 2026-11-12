@@ -111,24 +111,32 @@ pub fn expand_tilde(path_str: &str) -> String {
 }
 
 fn wildcard_match(pattern: &str, text: &str) -> bool {
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() == 1 {
-        return pattern == text;
-    }
-    if !text.starts_with(parts[0]) || !text.ends_with(parts[parts.len() - 1]) {
-        return false;
-    }
-    let mut current_idx = parts[0].len();
-    for part in &parts[1..parts.len() - 1] {
-        if part.is_empty() {
-            continue;
+    // OpenSSH Include globs support both '*' and '?'. Work on Unicode scalar
+    // values rather than byte offsets so a wildcard match cannot panic on a
+    // non-ASCII filename.
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti, mut star, mut retry) = (0usize, 0usize, None, 0usize);
+    while ti < text.len() {
+        if pi < pattern.len() && (pattern[pi] == '?' || pattern[pi] == text[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < pattern.len() && pattern[pi] == '*' {
+            star = Some(pi);
+            pi += 1;
+            retry = ti;
+        } else if let Some(star_index) = star {
+            pi = star_index + 1;
+            retry += 1;
+            ti = retry;
+        } else {
+            return false;
         }
-        match text[current_idx..].find(part) {
-            Some(idx) => current_idx += idx + part.len(),
-            None => return false,
-        }
     }
-    true
+    while pi < pattern.len() && pattern[pi] == '*' {
+        pi += 1;
+    }
+    pi == pattern.len()
 }
 
 fn parse_ssh_config_internal(
@@ -265,7 +273,7 @@ fn parse_ssh_config_internal(
                     }
                 } else if let Some(parent) = inc_path.parent() {
                     if let Some(file_pattern) = inc_path.file_name().and_then(|n| n.to_str()) {
-                        if file_pattern.contains('*') && parent.is_dir() {
+                        if (file_pattern.contains('*') || file_pattern.contains('?')) && parent.is_dir() {
                             if let Ok(entries) = std::fs::read_dir(parent) {
                                 for entry in entries.flatten() {
                                     let p = entry.path();
@@ -558,5 +566,20 @@ mod tests {
         );
         let app = hosts.iter().find(|host| host.name == "app-prod").unwrap();
         assert_eq!(app.user.as_deref(), Some("global-first"));
+    }
+}
+
+
+#[cfg(test)]
+mod include_glob_tests {
+    use super::wildcard_match;
+
+    #[test]
+    fn include_globs_support_single_character_wildcards() {
+        assert!(wildcard_match("config?.conf", "config1.conf"));
+        assert!(!wildcard_match("config?.conf", "config12.conf"));
+        assert!(wildcard_match("hosts/*.conf", "hosts/prod.conf"));
+        assert!(wildcard_match("hosts/?.conf", "hosts/é.conf"));
+        assert!(!wildcard_match("hosts/?.conf", "hosts/prod.conf"));
     }
 }
