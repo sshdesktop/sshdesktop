@@ -480,7 +480,20 @@ export const useConnectionStore = create<ConnectionState>()(
     }),
     {
       name: 'connection-storage',
-      partialize: (state) => ({ connections: state.connections, activeConnectionId: state.activeConnectionId }),
+      // Connection profiles may contain SSH passwords or other authentication
+      // material. Persist only the selected profile ID; the native Rust store
+      // is the sole source of persisted connection profiles and stores secrets
+      // in the operating-system credential manager.
+      partialize: (state) => ({ activeConnectionId: state.activeConnectionId }),
+      // Remove connection profiles written by older versions from localStorage.
+      // Zustand invokes migrate when it encounters the previous (unversioned)
+      // persisted format.
+      version: 1,
+      migrate: (persistedState: any) => {
+        if (!persistedState || typeof persistedState !== 'object') return {};
+        const { connections: _legacyConnections, ...safeState } = persistedState;
+        return safeState;
+      },
       onRehydrateStorage: () => (state) => {
         storeListConnections().then((saved) => {
           if (saved && Array.isArray(saved) && saved.length > 0 && state) {
