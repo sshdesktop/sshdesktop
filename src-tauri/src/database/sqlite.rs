@@ -735,6 +735,9 @@ mod remote_sqlite_safety_tests {
     fn remote_path_requires_absolute_normalized_posix_path() {
         assert!(validate_remote_sqlite_path("/var/lib/app/data.db").is_ok());
         assert!(validate_remote_sqlite_path("/tmp/数据库.db").is_ok());
+        assert!(validate_remote_sqlite_path("/").is_err());
+        assert!(validate_remote_sqlite_path("/tmp//data.db").is_err());
+        assert!(validate_remote_sqlite_path("/tmp/data.db/").is_err());
         assert!(validate_remote_sqlite_path("").is_err());
         assert!(validate_remote_sqlite_path("relative.db").is_err());
         assert!(validate_remote_sqlite_path("/tmp/../etc/passwd").is_err());
@@ -782,11 +785,22 @@ mod sqlite_sync_validation_tests {
     use super::*;
 
     #[test]
-    fn sqlite_file_header_accepts_empty_and_valid_database() {
-        assert!(validate_sqlite_file_header(&[]).is_ok());
+    fn valid_test_sqlite_header() -> Vec<u8> {
         let mut header = b"SQLite format 3\0".to_vec();
         header.resize(100, 0);
-        assert!(validate_sqlite_file_header(&header).is_ok());
+        header[16..18].copy_from_slice(&4096u16.to_be_bytes());
+        header[18] = 1;
+        header[19] = 1;
+        header[21] = 64;
+        header[22] = 32;
+        header[23] = 32;
+        header
+    }
+
+    #[test]
+    fn sqlite_file_header_accepts_empty_and_valid_database() {
+        assert!(validate_sqlite_file_header(&[]).is_ok());
+        assert!(validate_sqlite_file_header(&valid_test_sqlite_header()).is_ok());
     }
 
     #[test]
@@ -794,6 +808,18 @@ mod sqlite_sync_validation_tests {
         assert!(validate_sqlite_file_header(b"not a database").is_err());
         assert!(validate_sqlite_file_header(b"SQLite format 3\0").is_err());
         assert!(validate_sqlite_file_header(&vec![0u8; 100]).is_err());
+        let mut bad_page_size = valid_test_sqlite_header();
+        bad_page_size[16..18].copy_from_slice(&1000u16.to_be_bytes());
+        assert!(validate_sqlite_file_header(&bad_page_size).is_err());
+        let mut bad_format = valid_test_sqlite_header();
+        bad_format[18] = 3;
+        assert!(validate_sqlite_file_header(&bad_format).is_err());
+        let mut bad_fraction = valid_test_sqlite_header();
+        bad_fraction[21] = 63;
+        assert!(validate_sqlite_file_header(&bad_fraction).is_err());
+        let mut bad_reserved = valid_test_sqlite_header();
+        bad_reserved[20] = 4096u8.saturating_sub(480) as u8;
+        assert!(validate_sqlite_file_header(&bad_reserved).is_err());
     }
 
     #[test]
