@@ -92,32 +92,56 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                         }
                     };
 
-                    {
-                        let mut sessions = state.sessions.lock().await;
-                        sessions.retain(|_, candidate| !std::sync::Arc::ptr_eq(candidate, &handle));
-                    }
-
+                    let mut connection_guard = None;
                     if let Some(ref id) = target_id {
-                        let mut map = state.connections.lock();
-                        if let Some(connection) = map.get_mut(id) {
-                            connection.connected = false;
-                        }
-                        if map.get("default").map(|connection| connection.id == *id).unwrap_or(false) {
-                            if let Some(default_connection) = map.get_mut("default") {
-                                default_connection.connected = false;
+                        let connection_lock = {
+                            let mut locks = state.connection_locks.lock();
+                            locks.retain(|_, weak_lock| weak_lock.strong_count() > 0);
+                            match locks.get(id).and_then(std::sync::Weak::upgrade) {
+                                Some(existing) => existing,
+                                None => {
+                                    let created = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                                    locks.insert(id.clone(), std::sync::Arc::downgrade(&created));
+                                    created
+                                }
                             }
-                        }
-                        crate::ssh::connection::invalidate_user_privilege_cache(id);
+                        };
+                        connection_guard = Some(connection_lock.lock_owned().await);
                     }
 
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_millis(800),
-                        handle.disconnect(
-                            russh::Disconnect::ByApplication,
-                            "SSH transport became unhealthy",
-                            "en",
-                        ),
-                    ).await;
+                    let was_current = {
+                        let mut sessions = state.sessions.lock().await;
+                        let found = sessions.values().any(|candidate| std::sync::Arc::ptr_eq(candidate, &handle));
+                        if found {
+                            sessions.retain(|_, candidate| !std::sync::Arc::ptr_eq(candidate, &handle));
+                        }
+                        found
+                    };
+
+                    if was_current {
+                        if let Some(ref id) = target_id {
+                            let mut map = state.connections.lock();
+                            if let Some(connection) = map.get_mut(id) {
+                                connection.connected = false;
+                            }
+                            if map.get("default").map(|connection| connection.id == *id).unwrap_or(false) {
+                                if let Some(default_connection) = map.get_mut("default") {
+                                    default_connection.connected = false;
+                                }
+                            }
+                            crate::ssh::connection::invalidate_user_privilege_cache(id);
+                        }
+
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(800),
+                            handle.disconnect(
+                                russh::Disconnect::ByApplication,
+                                "SSH transport became unhealthy",
+                                "en",
+                            ),
+                        ).await;
+                    }
+                    drop(connection_guard);
 
                     log::warn!("SSH Desktop: Persistent SSH transport evicted after command channel failure for {}: {}; command was not replayed", conn_id, e);
                     return (format!("SSH connection is no longer healthy; command was not retried to avoid duplicate execution: {}", e), -1);
