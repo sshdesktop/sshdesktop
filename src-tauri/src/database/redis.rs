@@ -364,7 +364,6 @@ pub async fn redis_scan_keys(
 }
 
 #[tauri::command]
-#[tauri::command]
 pub async fn redis_get_value(
     db_mgr: tauri::State<'_, Arc<DatabaseManager>>,
     connection_id: String,
@@ -440,7 +439,6 @@ pub async fn redis_get_value(
 }
 
 #[tauri::command]
-#[tauri::command]
 pub async fn redis_set_value(
     db_mgr: tauri::State<'_, Arc<DatabaseManager>>,
     connection_id: String,
@@ -481,7 +479,6 @@ pub async fn redis_set_value(
     Ok(())
 }
 
-#[tauri::command]
 #[tauri::command]
 pub async fn redis_delete_key(
     db_mgr: tauri::State<'_, Arc<DatabaseManager>>,
