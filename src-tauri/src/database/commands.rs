@@ -48,6 +48,44 @@ use super::others::{
 pub use super::mongo::{mongodb_find_documents, mongodb_insert_document, mongodb_list_collections};
 pub use super::redis::{redis_delete_key, redis_get_value, redis_scan_keys, redis_set_value};
 
+// Validate shared connection input before opening tunnels or drivers.
+fn validate_database_config(config: &DatabaseConnectionConfig) -> Result<(), String> {
+    let id = config.id.trim();
+    if id.is_empty() || id.len() > 128 || id.chars().any(|c| c.is_control()) {
+        return Err("Database connection ID must be 1–128 bytes and contain no control characters.".into());
+    }
+    let engine = config.engine.trim();
+    if engine.is_empty() || engine.len() > 32 || engine.chars().any(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-') {
+        return Err("Database engine identifier is invalid.".into());
+    }
+    let is_sqlite = matches!(engine.to_ascii_lowercase().as_str(), "sqlite" | "sqlite3");
+    if !is_sqlite {
+        let host = config.host.trim();
+        if host.is_empty() || host.len() > 253 || host.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return Err("Database host must be 1–253 bytes and contain no whitespace or control characters.".into());
+        }
+        if config.port == 0 {
+            return Err("Database port must be between 1 and 65535.".into());
+        }
+    }
+    if config.database.len() > 512 || config.database.chars().any(|c| c == '\\0' || c.is_control()) {
+        return Err("Database name exceeds 512 bytes or contains control characters.".into());
+    }
+    if config.username.len() > 256 || config.username.chars().any(|c| c == '\\0' || c.is_control()) {
+        return Err("Database username exceeds 256 bytes or contains control characters.".into());
+    }
+    if config.password.as_ref().map(|v| v.len() > 64 * 1024).unwrap_or(false)
+        || config.secret_access_key.as_ref().map(|v| v.len() > 64 * 1024).unwrap_or(false)
+        || config.access_key_id.as_ref().map(|v| v.len() > 4096).unwrap_or(false)
+    {
+        return Err("Database credential input exceeds the supported size limit.".into());
+    }
+    if config.use_ssh && config.ssh_connection_id.as_deref().map(str::trim).filter(|v| !v.is_empty()).is_none() {
+        return Err("Select an SSH connection for this database tunnel.".into());
+    }
+    Ok(())
+}
+
 // ─── Tauri Command Implementations ─────────────────────────────────
 
 async fn dispatch_db_query(
@@ -79,6 +117,10 @@ pub async fn db_connect(
     config: DatabaseConnectionConfig,
 ) -> Result<ServerCapabilities, String> {
     let mut config = config;
+    validate_database_config(&config)?;
+    // Keep driver connection waits bounded even if a malformed/stale profile
+    // contains an extreme timeout value.
+    config.timeout_seconds = Some(config.timeout_seconds.unwrap_or(8).clamp(3, 120));
     let engine_lower = config.engine.trim().to_lowercase();
     if config.database.trim().is_empty() {
         match engine_lower.as_str() {
