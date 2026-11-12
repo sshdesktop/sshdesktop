@@ -97,11 +97,11 @@ pub async fn docker_containers(
     }
 
     if list.is_empty() && !stdout.trim().is_empty() {
-        // docker ps returned something but no JSON — might be a different format or error
+        // A compatibility fallback is allowed only for multi-line tabular output.
         if stdout.lines().count() > 1 {
-            // Possibly tabular output fallback
             return parse_docker_ps_tabular(&stdout);
         }
+        return Err(format!("Could not parse Docker container listing: {}", stdout.trim()));
     }
 
     // Optionally enrich with docker stats (non-blocking, ignore failure)
@@ -119,11 +119,11 @@ pub async fn docker_containers(
                     let cpu_str  = cols[1].trim().trim_end_matches('%');
                     let mem_str  = cols[2].trim();
                     for c in &mut list {
-                        if c.id.starts_with(stats_id) || stats_id.starts_with(&c.id[..8.min(c.id.len())]) {
+                        if stats_id.len() >= 12 && c.id.starts_with(stats_id) {
                             c.cpu_percent = cpu_str.parse::<f32>().ok()
                                 .filter(|value| value.is_finite() && *value >= 0.0)
                                 .unwrap_or(0.0);
-                            c.mem_usage   = mem_str.to_string();
+                            c.mem_usage   = mem_str.chars().take(256).collect();
                         }
                     }
                 }
