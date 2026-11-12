@@ -999,7 +999,7 @@ pub async fn ssh_exec(
             if is_permission_denial {
                 let can_elevate = crate::ssh::connection::get_cached_user_privilege_for_user(&conn_id, &crate::ssh::connection::resolve_connection(&state, &conn_id).map(|c| c.config.username).unwrap_or_default())
                     .map(|p| p.has_sudo || p.is_root)
-                    .unwrap_or(true);
+                    .unwrap_or(false);
 
                 if can_elevate {
                     log::info!("SSH Desktop: Persistent channel detected a permission denial; attempting configured privilege handling");
@@ -1033,7 +1033,7 @@ pub async fn ssh_exec(
             if is_permission_denial {
                 let can_elevate = crate::ssh::connection::get_cached_user_privilege_for_user(&conn_id, &crate::ssh::connection::resolve_connection(&state, &conn_id).map(|c| c.config.username).unwrap_or_default())
                     .map(|p| p.has_sudo || p.is_root)
-                    .unwrap_or(true);
+                    .unwrap_or(false);
 
                 if can_elevate {
                     log::info!("SSH Desktop: Detected a permission denial; attempting configured privilege handling");
@@ -1157,11 +1157,31 @@ pub async fn ssh_exec_stream(
             );
 
             if is_permission_denial {
-                run_cmd_priv(
+                // Auto-elevation is allowed only when remote privilege detection
+                // positively confirms root or sudo access. Unknown/stale privilege
+                // state must never trigger an implicit sudo attempt.
+                let can_elevate = crate::ssh::connection::resolve_connection(
                     &app_clone.state::<AppState>(),
                     &conn_id_clone,
-                    &command_clone,
-                ).await
+                )
+                .and_then(|conn| {
+                    crate::ssh::connection::get_cached_user_privilege_for_user(
+                        &conn_id_clone,
+                        &conn.config.username,
+                    )
+                })
+                .map(|priv_info| priv_info.has_sudo || priv_info.is_root)
+                .unwrap_or(false);
+
+                if can_elevate {
+                    run_cmd_priv(
+                        &app_clone.state::<AppState>(),
+                        &conn_id_clone,
+                        &command_clone,
+                    ).await
+                } else {
+                    (direct_out, direct_code)
+                }
             } else {
                 (direct_out, direct_code)
             }
