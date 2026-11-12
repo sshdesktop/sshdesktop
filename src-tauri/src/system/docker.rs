@@ -120,7 +120,9 @@ pub async fn docker_containers(
                     let mem_str  = cols[2].trim();
                     for c in &mut list {
                         if c.id.starts_with(stats_id) || stats_id.starts_with(&c.id[..8.min(c.id.len())]) {
-                            c.cpu_percent = cpu_str.parse().unwrap_or(0.0);
+                            c.cpu_percent = cpu_str.parse::<f32>().ok()
+                                .filter(|value| value.is_finite() && *value >= 0.0)
+                                .unwrap_or(0.0);
                             c.mem_usage   = mem_str.to_string();
                         }
                     }
@@ -173,7 +175,9 @@ pub async fn docker_action(
     }
     let container_arg = shell_quote(&container_id);
 
-    let force = if safe_action == "rm" { " -f" } else { "" };
+    // A normal remove must not silently force-delete a running container.
+    // Force removal is available only when the caller explicitly requests "rm -f".
+    let force = if action_clean == "rm -f" { " -f" } else { "" };
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
@@ -206,7 +210,7 @@ pub async fn docker_logs(
     let (stdout, code) = run_cmd(
         &state,
         &conn_id,
-        &format!("docker logs --tail {} {} 2>&1", lines.min(2000), container_arg),
+        &format!("docker logs --tail {} {} 2>&1", lines.clamp(1, 2000), container_arg),
     ).await;
 
     if code == -1 {
@@ -270,6 +274,9 @@ pub async fn docker_exec(
 ) -> Result<String, String> {
     if !valid_container_ref(&container_id) {
         return Err("Invalid container ID or name.".into());
+    }
+    if command.is_empty() || command.len() > 64 * 1024 || command.contains('\0') {
+        return Err("Container command must be between 1 byte and 64 KiB and contain no NUL characters.".into());
     }
     let container_arg = shell_quote(&container_id);
     let (stdout, code) = run_cmd(
