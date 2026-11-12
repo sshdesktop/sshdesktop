@@ -63,6 +63,9 @@ pub async fn connect_sqlite(
     if raw_path.len() > 4096 || raw_path.chars().any(|c| c.is_control() || c == '\0') {
         return Err("SQLite database path exceeds 4096 bytes or contains control characters.".into());
     }
+    if config.use_ssh && !raw_path.starts_with('/') {
+        return Err("Remote SQLite requires an absolute POSIX file path.".into());
+    }
     if raw_path.is_empty() {
         return Err("SQLite file path is empty. Please specify a database file path.".to_string());
     }
@@ -91,6 +94,13 @@ pub async fn connect_sqlite(
             }
 
             let local_cache = sqlite_cache_path(config, raw_path)?;
+            // A non-empty SQLite WAL may contain committed changes absent from the main file.
+            let wal_path = format!("{}-wal", escaped);
+            let wal_cmd = format!("if [ -s '{}' ]; then echo WAL_ACTIVE; else echo WAL_CLEAR; fi", wal_path);
+            let (wal_out, wal_code) = crate::ssh::exec::run_cmd(app_state, &conn_id, &wal_cmd).await;
+            if wal_code != 0 || !wal_out.contains("WAL_CLEAR") {
+                return Err("Remote SQLite database has an active or unreadable WAL sidecar. Checkpoint it on the server before connecting; main-file-only synchronization is unsafe while WAL data exists.".into());
+            }
 
             if test_out.contains("MISSING") {
                 if config.read_only {
@@ -157,13 +167,19 @@ pub async fn connect_sqlite(
         .await
         .map_err(|e| format!("SQLite connection error: {}", e))?;
 
-    sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await
-        .map_err(|e| format!("Failed to enable SQLite foreign-key enforcement: {}", e))?;
-    let fk_enabled: (i64,) = sqlx::query_as("PRAGMA foreign_keys").fetch_one(&pool).await
-        .map_err(|e| format!("Could not verify SQLite foreign-key enforcement: {}", e))?;
+    if let Err(e) = sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await {
+        pool.close().await;
+        return Err(format!("Failed to enable SQLite foreign-key enforcement: {}", e));
+    }
+    let fk_enabled: (i64,) = match sqlx::query_as("PRAGMA foreign_keys").fetch_one(&pool).await {
+        Ok(value) => value,
+        Err(e) => { pool.close().await; return Err(format!("Could not verify SQLite foreign-key enforcement: {}", e)); }
+    };
     if fk_enabled.0 != 1 { pool.close().await; return Err("SQLite foreign-key enforcement could not be enabled.".into()); }
-    let version_row: (String,) = sqlx::query_as("SELECT sqlite_version()").fetch_one(&pool).await
-        .map_err(|e| format!("Could not read SQLite server version: {}", e))?;
+    let version_row: (String,) = match sqlx::query_as("SELECT sqlite_version()").fetch_one(&pool).await {
+        Ok(value) => value,
+        Err(e) => { pool.close().await; return Err(format!("Could not read SQLite server version: {}", e)); }
+    };
 
     let capabilities = ServerCapabilities {
         engine: "sqlite".to_string(),
