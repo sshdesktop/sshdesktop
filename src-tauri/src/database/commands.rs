@@ -68,10 +68,10 @@ fn validate_database_config(config: &DatabaseConnectionConfig) -> Result<(), Str
             return Err("Database port must be between 1 and 65535.".into());
         }
     }
-    if config.database.len() > 512 || config.database.chars().any(|c| c == '\\0' || c.is_control()) {
+    if config.database.len() > 512 || config.database.chars().any(|c| c == '\0' || c.is_control()) {
         return Err("Database name exceeds 512 bytes or contains control characters.".into());
     }
-    if config.username.len() > 256 || config.username.chars().any(|c| c == '\\0' || c.is_control()) {
+    if config.username.len() > 256 || config.username.chars().any(|c| c == '\0' || c.is_control()) {
         return Err("Database username exceeds 256 bytes or contains control characters.".into());
     }
     if config.password.as_ref().map(|v| v.len() > 64 * 1024).unwrap_or(false)
