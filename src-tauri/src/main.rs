@@ -18,6 +18,9 @@ pub struct AppState {
     pub connections: Arc<Mutex<HashMap<String, ssh::connection::SshConnection>>>,
     pub terminals: Arc<Mutex<HashMap<String, ssh::terminal::TerminalSession>>>,
     pub sessions: Arc<tokio::sync::Mutex<HashMap<String, Arc<ssh::session::ClientHandle>>>>,
+    // Per-connection serialization prevents overlapping reconnects from racing
+    // while authenticating and replacing the same session ID.
+    pub connection_locks: Arc<Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
 }
 
 #[tauri::command]
@@ -145,6 +148,7 @@ fn main() {
         connections: Arc::new(Mutex::new(HashMap::new())),
         terminals: Arc::new(Mutex::new(HashMap::new())),
         sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        connection_locks: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let db_manager = Arc::new(database::DatabaseManager::new());
