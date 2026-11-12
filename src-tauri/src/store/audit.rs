@@ -269,6 +269,7 @@ pub fn check_policy_permission_for_role(role: &str, action: &str) -> Result<(), 
             | "disk_manage_tmp"
             | "db_execute_operation"
             | "backup_import_config"
+            | "ssh_install_public_key"
     );
     let operator_blocked = matches!(
         action,
