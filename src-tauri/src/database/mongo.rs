@@ -818,6 +818,7 @@ pub async fn collect_mongo_cursor_results(
     limit: usize,
 ) -> Result<QueryResult, String> {
     use futures::StreamExt;
+    let limit = limit.clamp(1, 10_000);
     let mut rows = Vec::new();
     let mut key_order = Vec::new();
     let mut key_types: HashMap<String, String> = HashMap::new();
@@ -2541,10 +2542,10 @@ pub async fn execute_mongodb_query(
     server_version: Option<String>,
 ) -> Result<QueryResult, String> {
     let start = Instant::now();
-    let statements = split_mongo_statements(raw_query);
     if raw_query.len() > 5 * 1024 * 1024 {
         return Err("MongoDB query exceeds the 5 MiB input limit.".into());
     }
+    let statements = split_mongo_statements(raw_query);
     if statements.is_empty() {
         return Err("MongoDB query is empty".to_string());
     }
@@ -2649,6 +2650,9 @@ pub async fn list_collections_mongo(
     let db_name = get_effective_mongo_db(&session.config.database);
     let db = client.database(db_name);
     let collections = db.list_collection_names(None).await.map_err(|e| e.to_string())?;
+    if collections.len() > 10_000 {
+        return Err("MongoDB database contains more than 10,000 collections; narrow the database scope.".into());
+    }
     Ok(collections
         .into_iter()
         .map(|c| DatabaseObject {
@@ -2966,5 +2970,24 @@ pub async fn mongodb_insert_document(
         Ok(format!("{:?}", res.inserted_id))
     } else {
         Err("Active connection is not MongoDB".to_string())
+    }
+}
+
+#[cfg(test)]
+mod mongo_input_validation_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_oversized_and_control_character_names() {
+        assert!(validate_mongo_name("", "collection name").is_err());
+        assert!(validate_mongo_name(&"x".repeat(256), "collection name").is_err());
+        assert!(validate_mongo_name("users\\nadmin", "collection name").is_err());
+        assert!(validate_mongo_name("users\\0admin", "collection name").is_err());
+    }
+
+    #[test]
+    fn accepts_normal_database_and_collection_names() {
+        assert!(validate_mongo_name("application_db", "database name").is_ok());
+        assert!(validate_mongo_name("user_profiles", "collection name").is_ok());
     }
 }
