@@ -1314,6 +1314,9 @@ pub async fn execute_mongodb_single_command(
             if args.is_empty() {
                 return Err("createCollection requires collection name, e.g. db.createCollection(\"name\")".to_string());
             }
+            if args.len() > 2 {
+                return Err("createCollection accepts only a collection name and optional options document.".into());
+            }
             let coll_name = args[0].trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
             validate_mongo_name(coll_name, "collection name")?;
             let mut cmd = mongodb::bson::Document::new();
@@ -1337,8 +1340,8 @@ pub async fn execute_mongodb_single_command(
             crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let inner = extract_paren_args(after_db, "createView")?;
             let args = split_top_level_args(&inner);
-            if args.len() < 3 {
-                return Err("createView requires (viewName, viewOn, pipeline) arguments".to_string());
+            if args.len() < 3 || args.len() > 4 {
+                return Err("createView requires (viewName, viewOn, pipeline[, options]) arguments.".to_string());
             }
             let view_name = args[0].trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
             let view_on = args[1].trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
@@ -1492,6 +1495,7 @@ pub async fn execute_mongodb_single_command(
 
         // db.rotateLogs()
         if after_db.starts_with("rotateLogs(") || after_db == "rotateLogs" {
+            crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let admin_db = client.database("admin");
             let res = admin_db.run_command(mongodb::bson::doc! { "logRotate": 1 }, None).await.map_err(|e| format!("MongoDB logRotate error: {}", e))?;
             return unpack_mongo_command_result(res, "MongoDB LogRotate", start, server_version);
@@ -1509,6 +1513,9 @@ pub async fn execute_mongodb_single_command(
             crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let inner = extract_paren_args(after_db, "setProfilingLevel")?;
             let args = split_top_level_args(&inner);
+            if args.is_empty() || args.len() > 2 {
+                return Err("setProfilingLevel accepts (level[, slowms]) only.".into());
+            }
             let level: i32 = args.get(0).ok_or_else(|| "setProfilingLevel requires a level from 0 to 2.".to_string())?
                 .trim().parse().map_err(|_| "Profiling level must be an integer from 0 to 2.".to_string())?;
             if !(0..=2).contains(&level) {
@@ -2240,6 +2247,9 @@ pub async fn execute_mongodb_single_command(
             "createIndex" | "createIndexes" => {
                 crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let doc = parse_relaxed_document(primary_args)?;
+                if doc.is_empty() || doc.len() > 64 {
+                    return Err("MongoDB createIndex requires 1–64 index key fields.".into());
+                }
                 let db = client.database(database_name);
                 let res = db.run_command(mongodb::bson::doc! {
                     "createIndexes": &coll_name,
@@ -2256,6 +2266,9 @@ pub async fn execute_mongodb_single_command(
             "dropIndex" | "dropIndexes" => {
                 crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let idx_name = primary_args.trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
+                if idx_name.is_empty() || idx_name.len() > 255 || idx_name.chars().any(|c| c.is_control()) {
+                    return Err("MongoDB dropIndex requires a valid index name or '*', up to 255 bytes.".into());
+                }
                 let db = client.database(database_name);
                 let res = db.run_command(mongodb::bson::doc! {
                     "dropIndexes": &coll_name,
@@ -2486,14 +2499,18 @@ pub async fn execute_mongodb_single_command(
             "renameCollection" | "rename" => {
                 crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let args = split_top_level_args(primary_args);
-                if args.is_empty() {
-                    return Err("renameCollection requires new collection name".to_string());
+                if args.is_empty() || args.len() > 2 {
+                    return Err("renameCollection requires a target name and optional dropTarget boolean.".to_string());
                 }
                 let target_name = args[0].trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
                 validate_mongo_name(target_name, "collection name")?;
                 validate_mongo_name(database_name, "database name")?;
                 let drop_target = if args.len() > 1 {
-                    args[1].trim() == "true"
+                    match args[1].trim() {
+                        "true" => true,
+                        "false" => false,
+                        _ => return Err("renameCollection dropTarget must be true or false.".into()),
+                    }
                 } else {
                     false
                 };
@@ -2530,11 +2547,9 @@ pub async fn execute_mongodb_single_command(
                 let db = client.database(database_name);
                 let res = db.run_command(mongodb::bson::doc! {
                     "collStats": &coll_name
-                }, None).await;
-                let is_capped = match res {
-                    Ok(doc) => doc.get_bool("capped").unwrap_or(false),
-                    Err(_) => false,
-                };
+                }, None).await.map_err(|e| format!("MongoDB isCapped lookup failed: {}", e))?;
+                let is_capped = res.get_bool("capped")
+                    .map_err(|e| format!("MongoDB isCapped response was invalid: {}", e))?;
                 return Ok(QueryResult {
                     columns: vec![ColumnMeta { name: "isCapped".to_string(), data_type: "Boolean".to_string(), nullable: false, is_primary_key: false, is_foreign_key: false, referenced_table: None, referenced_column: None, default_value: None, extra: None }],
                     rows: vec![serde_json::json!({ "isCapped": is_capped })],
