@@ -93,16 +93,45 @@ fn validate_remote_sqlite_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+async fn run_checked_wal_checkpoint(pool: &sqlx::SqlitePool, phase: &str) -> Result<(), String> {
+    use sqlx::Row;
+    let row = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").fetch_one(pool),
+    ).await.map_err(|_| format!("SQLite WAL checkpoint timed out during {}.", phase))?
+        .map_err(|e| format!("Could not checkpoint the local SQLite WAL during {}: {}", phase, e))?;
+    let busy: i64 = row.try_get(0).map_err(|e| format!("Could not read SQLite WAL checkpoint busy status: {}", e))?;
+    let log_frames: i64 = row.try_get(1).map_err(|e| format!("Could not read SQLite WAL frame count: {}", e))?;
+    let checkpointed_frames: i64 = row.try_get(2).map_err(|e| format!("Could not read SQLite checkpointed frame count: {}", e))?;
+    if busy != 0 {
+        return Err(format!("SQLite WAL checkpoint is busy during {}; refusing remote synchronization.", phase));
+    }
+    if log_frames >= 0 && checkpointed_frames >= 0 && checkpointed_frames < log_frames {
+        return Err(format!("SQLite WAL checkpoint was incomplete during {} ({} of {} frames); refusing remote synchronization.", phase, checkpointed_frames, log_frames));
+    }
+    Ok(())
+}
+
 async fn prepare_remote_sqlite_sync(pool: &sqlx::SqlitePool) -> Result<(), String> {
-    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").fetch_one(pool).await
-        .map_err(|e| format!("Could not checkpoint the local SQLite WAL before remote sync: {}", e))?;
-    let mode: (String,) = sqlx::query_as("PRAGMA journal_mode=DELETE").fetch_one(pool).await
+    run_checked_wal_checkpoint(pool, "pre-sync").await?;
+    let mode: (String,) = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        sqlx::query_as("PRAGMA journal_mode=DELETE").fetch_one(pool),
+    ).await.map_err(|_| "Switching SQLite journal mode timed out.".to_string())?
         .map_err(|e| format!("Could not switch local SQLite journal mode to DELETE: {}", e))?;
     if !mode.0.eq_ignore_ascii_case("delete") {
         return Err(format!("Remote SQLite sync requires DELETE journal mode; SQLite returned '{}'.", mode.0));
     }
-    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").fetch_one(pool).await
-        .map_err(|e| format!("Could not finalize SQLite WAL checkpoint: {}", e))?;
+    run_checked_wal_checkpoint(pool, "final-sync").await?;
+    Ok(())
+}
+
+fn validate_sqlite_file_header(bytes: &[u8]) -> Result<(), String> {
+    // A zero-byte file is SQLite's valid newly-created empty database state.
+    if bytes.is_empty() { return Ok(()); }
+    if bytes.len() < 100 || !bytes.starts_with(b"SQLite format 3\0") {
+        return Err("Remote file is not a valid SQLite 3 database header.".into());
+    }
     Ok(())
 }
 
@@ -209,6 +238,7 @@ pub async fn connect_sqlite(
                 if bytes.len() > 256 * 1024 * 1024 {
                     return Err("Decoded remote SQLite database exceeds the 256 MiB cache limit.".into());
                 }
+                validate_sqlite_file_header(&bytes)?;
                 let temp_cache = local_cache.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
                 let write_result = (|| -> Result<(), String> {
                     use std::io::Write;
@@ -449,8 +479,14 @@ pub async fn execute_query_sqlite(
             let local_cache = remote_cache_path.as_ref().ok_or_else(|| "Remote SQLite cache path was not initialized.".to_string())?;
             prepare_remote_sqlite_sync(pool).await?;
             ensure_no_pending_local_wal(local_cache)?;
+            let metadata = std::fs::symlink_metadata(local_cache)
+                .map_err(|e| format!("Could not inspect updated SQLite cache: {}", e))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 256 * 1024 * 1024 {
+                return Err("Updated SQLite cache is not a regular file within the 256 MiB synchronization limit.".into());
+            }
             let bytes = std::fs::read(local_cache)
                 .map_err(|e| format!("Failed to read updated local SQLite cache: {}", e))?;
+            validate_sqlite_file_header(&bytes)?;
             crate::ssh::sftp::sftp_write_bytes(state, conn_id, raw_path, &bytes).await
                 .map_err(|e| format!("SQLite changes were applied locally but remote sync failed: {}", e))?;
         }
@@ -556,8 +592,14 @@ pub async fn execute_operation_sqlite(
         let local_cache = remote_cache_path.as_ref().ok_or_else(|| "Remote SQLite cache path was not initialized.".to_string())?;
         prepare_remote_sqlite_sync(pool).await?;
         ensure_no_pending_local_wal(local_cache)?;
+        let metadata = std::fs::symlink_metadata(local_cache)
+            .map_err(|e| format!("Could not inspect updated SQLite cache: {}", e))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 256 * 1024 * 1024 {
+            return Err("Updated SQLite cache is not a regular file within the 256 MiB synchronization limit.".into());
+        }
         let bytes = std::fs::read(local_cache)
             .map_err(|e| format!("Failed to read updated local SQLite cache: {}", e))?;
+        validate_sqlite_file_header(&bytes)?;
         crate::ssh::sftp::sftp_write_bytes(state, conn_id, raw_path, &bytes).await
             .map_err(|e| format!("SQLite operation succeeded locally but remote sync failed: {}", e))?;
     }
