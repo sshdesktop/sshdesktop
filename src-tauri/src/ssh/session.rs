@@ -284,7 +284,14 @@ pub async fn run_log_stream_channel(
     let mut exit_code = -1;
     let mut total_streamed: usize = 0;
     const MAX_LOG_STREAM_BYTES: usize = 64 * 1024 * 1024;
-    while let Some(msg) = channel.wait().await {
+    loop {
+        let msg = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            channel.wait()
+        )
+        .await
+        .map_err(|_| "SSH log stream was idle for 5 minutes")?;
+        let Some(msg) = msg else { break };
         match msg {
             ChannelMsg::Data { ref data } => {
                 total_streamed = total_streamed.saturating_add(data.len());
