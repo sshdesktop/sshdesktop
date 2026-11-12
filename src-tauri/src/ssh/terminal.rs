@@ -553,11 +553,12 @@ pub async fn terminal_resize(
     let mut terminals = state.terminals.lock();
     let term = terminals.get_mut(&terminal_id)
         .ok_or_else(|| format!("Terminal session '{}' not found.", terminal_id))?;
-    if let Some(ref action_tx) = term.action_tx {
-        action_tx.try_send(TerminalAction::Resize { rows, cols })
-            .map_err(|e| format!("Terminal resize could not be queued: {}", e))?;
-    }
-    // Update the stored dimensions only after the live PTY accepted the resize.
+    let action_tx = term.action_tx.as_ref().ok_or_else(|| {
+        "Terminal resize is unavailable for the external SSH process backend.".to_string()
+    })?;
+    action_tx.try_send(TerminalAction::Resize { rows, cols })
+        .map_err(|e| format!("Terminal resize could not be queued: {}", e))?;
+    // Update the stored dimensions only after the native PTY accepted the resize request.
     term.rows = rows;
     term.cols = cols;
     Ok(())
