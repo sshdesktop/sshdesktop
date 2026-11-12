@@ -865,46 +865,72 @@ pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnecti
 
 #[tauri::command]
 pub async fn ssh_disconnect(state: tauri::State<'_, AppState>, conn_id: String) -> Result<(), String> {
+    // Resolve the default alias to its owning connection ID so disconnect and
+    // reconnect for that server share the same per-ID lock.
+    let target_id = if conn_id == "default" {
+        state.connections.lock()
+            .get("default")
+            .map(|connection| connection.id.clone())
+            .unwrap_or_else(|| "default".to_string())
+    } else {
+        conn_id.clone()
+    };
+
+    let connection_lock = {
+        let mut locks = state.connection_locks.lock();
+        locks.retain(|_, weak_lock| weak_lock.strong_count() > 0);
+        match locks.get(&target_id).and_then(std::sync::Weak::upgrade) {
+            Some(existing) => existing,
+            None => {
+                let created = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(target_id.clone(), std::sync::Arc::downgrade(&created));
+                created
+            }
+        }
+    };
+    let _connection_guard = connection_lock.lock_owned().await;
+
     let handle_to_disconnect = {
         let mut sessions = state.sessions.lock().await;
-        let removed = sessions.remove(&conn_id);
-        if conn_id == "default" {
-            sessions.remove("default").or(removed)
+        let removed = if conn_id == "default" {
+            sessions.get("default").cloned()
         } else {
-            if let (Some(ref r), Some(default)) = (removed.as_ref(), sessions.get("default")) {
-                if std::sync::Arc::ptr_eq(r, default) {
-                    sessions.remove("default");
-                }
-            }
-            removed
+            sessions.remove(&target_id)
+        };
+
+        if let Some(ref handle) = removed {
+            // Remove every alias to this exact transport, including the default
+            // alias, without affecting a different server's active session.
+            sessions.retain(|_, candidate| !std::sync::Arc::ptr_eq(candidate, handle));
+        } else if conn_id == "default" {
+            sessions.remove("default");
         }
-        // Do not silently retarget the default alias to another server after disconnect.
+        removed
     };
+
     if let Some(handle) = handle_to_disconnect {
-        tokio::spawn(async move {
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_millis(800),
-                handle.disconnect(russh::Disconnect::ByApplication, "User Disconnect", "en"),
-            ).await;
-        });
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            handle.disconnect(russh::Disconnect::ByApplication, "User Disconnect", "en"),
+        ).await;
     }
+
     {
         let mut map = state.connections.lock();
-        map.remove(&conn_id);
-        if conn_id == "default" || map.get("default").map(|c| c.id == conn_id).unwrap_or(false) {
+        map.remove(&target_id);
+        if map.get("default").map(|connection| connection.id == target_id).unwrap_or(false)
+            || conn_id == "default"
+        {
             map.remove("default");
         }
-        // The default alias stays unset until the user explicitly connects/selects a server.
     }
     {
         let mut priv_map = USER_PRIVILEGE_CACHE.lock();
-        priv_map.remove(&conn_id);
-        // The alias may refer to the disconnected connection; invalidate it rather
-        // than risk returning privilege data for a different active session.
+        priv_map.remove(&target_id);
         priv_map.remove("default");
     }
-    let _ = crate::ssh::tunnel::ssh_stop_socks5(conn_id.clone()).await;
-    log::info!("SSH Desktop: SSH Session disconnected for ID: {}", conn_id);
+    let _ = crate::ssh::tunnel::ssh_stop_socks5(target_id.clone()).await;
+    log::info!("SSH Desktop: SSH Session disconnected for ID: {}", target_id);
     Ok(())
 }
 
