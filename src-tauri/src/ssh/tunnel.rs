@@ -80,11 +80,20 @@ async fn handle_socks5_client(
                 return Err("Unsupported SOCKS5 auth subnegotiation version".into());
             }
             let ulen = sub_hdr[1] as usize;
+            if ulen == 0 {
+                let _ = stream.write_all(&[0x01, 0x01]).await;
+                return Err("SOCKS5 username must not be empty".into());
+            }
             let mut ubuf = vec![0u8; ulen];
             stream.read_exact(&mut ubuf).await?;
             let mut plen_buf = [0u8; 1];
             stream.read_exact(&mut plen_buf).await?;
-            let mut pbuf = vec![0u8; plen_buf[0] as usize];
+            let password_len = plen_buf[0] as usize;
+            if password_len == 0 {
+                let _ = stream.write_all(&[0x01, 0x01]).await;
+                return Err("SOCKS5 password must not be empty".into());
+            }
+            let mut pbuf = vec![0u8; password_len];
             stream.read_exact(&mut pbuf).await?;
 
             if !validate_socks5_credentials(&ubuf, &pbuf, expected_user, expected_pass) {
