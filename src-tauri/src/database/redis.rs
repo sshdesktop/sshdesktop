@@ -250,10 +250,15 @@ pub async fn list_tables_redis(client: &redis::Client) -> Result<Vec<DatabaseObj
     let mut keys = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut cursor: u64 = 0;
+    let mut pages = 0usize;
     loop {
-        let (next, mut batch): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor).arg("MATCH").arg("*").arg("COUNT").arg(500)
-            .query_async(&mut con).await.map_err(|e| format!("Redis SCAN failed: {}", e))?;
+        pages += 1;
+        if pages > 1000 { return Err("Redis key listing exceeded the 1000-page safety limit.".into()); }
+        let (next, batch): (u64, Vec<String>) = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            redis::cmd("SCAN").arg(cursor).arg("MATCH").arg("*").arg("COUNT").arg(500).query_async(&mut con),
+        ).await.map_err(|_| "Redis SCAN page timed out.".to_string())?
+            .map_err(|e| format!("Redis SCAN failed: {}", e))?;
         for key in batch {
             if seen.insert(key.clone()) {
                 keys.push(key);
@@ -356,8 +361,11 @@ async fn redis_hscan_bounded(
 ) -> Result<HashMap<String, String>, String> {
     const MAX_FIELDS: usize = 10_000;
     let mut cursor = 0u64;
+    let mut pages = 0usize;
     let mut fields = HashMap::new();
     loop {
+        pages += 1;
+        if pages > 1000 { return Err("Redis hash scan exceeded the 1000-page safety limit.".into()); }
         let (next, batch): (u64, Vec<(String, String)>) = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             redis::cmd("HSCAN").arg(key).arg(cursor).arg("COUNT").arg(1000).query_async(con),
@@ -379,9 +387,12 @@ async fn redis_sscan_bounded(
 ) -> Result<Vec<String>, String> {
     const MAX_MEMBERS: usize = 10_000;
     let mut cursor = 0u64;
+    let mut pages = 0usize;
     let mut seen = std::collections::HashSet::new();
     let mut members = Vec::new();
     loop {
+        pages += 1;
+        if pages > 1000 { return Err("Redis set scan exceeded the 1000-page safety limit.".into()); }
         let (next, batch): (u64, Vec<String>) = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             redis::cmd("SSCAN").arg(key).arg(cursor).arg("COUNT").arg(1000).query_async(con),
@@ -448,9 +459,12 @@ pub async fn redis_scan_keys(
     const MAX_SCAN_KEYS: usize = 10_000;
     let scan_result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         let mut cursor = 0u64;
+        let mut pages = 0usize;
         let mut seen = std::collections::HashSet::new();
         let mut keys = Vec::new();
         loop {
+            pages += 1;
+            if pages > 1000 { return Err("Redis pattern scan exceeded the 1000-page safety limit.".into()); }
             let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
                 .arg(cursor).arg("MATCH").arg(&pat).arg("COUNT").arg(cnt)
                 .query_async(&mut con).await
