@@ -26,7 +26,7 @@ pub fn validate_mongo_name(value: &str, kind: &str) -> Result<(), String> {
         return Err(format!("MongoDB {} must be 1–255 bytes, have no surrounding whitespace, and contain no control characters.", kind));
     }
     if kind.eq_ignore_ascii_case("database name")
-        && value.chars().any(|c| matches!(c, '/' | '\\\\' | '.' | '"' | '
+        && value.chars().any(|c| matches!(c, '/' | '\\' | '.' | '"' | '
 
 pub async fn connect_mongo(
     effective_host: &str,
