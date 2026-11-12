@@ -182,6 +182,8 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
     if should_spawn {
         let conn_clone = conn.clone();
         let state_sessions = state.sessions.clone();
+        let state_connections = state.connections.clone();
+        let connection_locks = state.connection_locks.clone();
         let cid = conn_id.to_string();
         tokio::spawn(async move {
             struct InFlightGuard(String);
@@ -197,7 +199,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                 Some("key") => true,
                 _ => conn_clone.config.private_key_path.is_some() || conn_clone.config.password.is_none(),
             };
-            if let Ok(handle) = crate::ssh::session::connect_session_with_passphrase_auth(
+            let handle = match crate::ssh::session::connect_session_with_passphrase_auth(
                 &conn_clone.config.host,
                 conn_clone.config.port,
                 &conn_clone.config.username,
@@ -206,11 +208,63 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                 conn_clone.config.passphrase.as_deref(),
                 conn_clone.config.auth_method.as_deref() != Some("password"),
             ).await {
-                let mut map = state_sessions.lock().await;
-                let arc = std::sync::Arc::new(handle);
-                map.insert(cid, arc.clone());
-                log::info!("SSH Desktop: Lazily established persistent SSH transport for {}", conn_clone.config.host);
+                Ok(handle) => handle,
+                Err(error) => {
+                    log::warn!("SSH Desktop: Lazy persistent connection failed for {}: {}", conn_clone.config.host, error);
+                    return;
+                }
+            };
+
+            // Use the same per-connection lock as explicit connect/disconnect.
+            // This prevents a background lazy connect from resurrecting a session
+            // after disconnect or overwriting a newer authenticated transport.
+            let connection_lock = {
+                let mut locks = connection_locks.lock();
+                locks.retain(|_, weak_lock| weak_lock.strong_count() > 0);
+                match locks.get(&cid).and_then(std::sync::Weak::upgrade) {
+                    Some(existing) => existing,
+                    None => {
+                        let created = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                        locks.insert(cid.clone(), std::sync::Arc::downgrade(&created));
+                        created
+                    }
+                }
+            };
+            let _connection_guard = connection_lock.lock_owned().await;
+
+            let still_configured = state_connections.lock()
+                .get(&cid)
+                .map(|current| current.config.host == conn_clone.config.host
+                    && current.config.port == conn_clone.config.port
+                    && current.config.username == conn_clone.config.username)
+                .unwrap_or(false);
+            if !still_configured {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(800),
+                    handle.disconnect(russh::Disconnect::ByApplication, "Lazy SSH connection became stale", "en"),
+                ).await;
+                return;
             }
+
+            let mut map = state_sessions.lock().await;
+            if map.contains_key(&cid) {
+                // An explicit reconnect won the race; never replace its transport.
+                drop(map);
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(800),
+                    handle.disconnect(russh::Disconnect::ByApplication, "Superseded lazy SSH connection", "en"),
+                ).await;
+                return;
+            }
+            map.insert(cid.clone(), std::sync::Arc::new(handle));
+            if let Some(connection) = state_connections.lock().get_mut(&cid) {
+                connection.connected = true;
+                connection.connected_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_secs() as i64)
+                    .unwrap_or(0);
+            }
+            log::info!("SSH Desktop: Lazily established persistent SSH transport for {}", conn_clone.config.host);
         });
     }
 
