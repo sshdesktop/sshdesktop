@@ -392,6 +392,7 @@ pub async fn firewall_add_rule_advanced(
     conn_id: String,
     payload: AddRulePayload,
 ) -> Result<String, String> {
+    crate::store::audit::enforce_policy_permission("firewall_add_rule_advanced")?;
     let port = payload.port.trim();
     if !valid_firewall_port_or_service(port) {
         return Err("Invalid port or service name.".into());
@@ -572,6 +573,7 @@ pub async fn firewall_delete_rule_advanced(
     backend: Option<String>,
     zone: Option<String>,
 ) -> Result<String, String> {
+    crate::store::audit::enforce_policy_permission("firewall_delete_rule_advanced")?;
     if rule_number == 0 {
         return Err("Invalid firewall rule number.".into());
     }
@@ -696,6 +698,7 @@ pub async fn firewall_install(
     conn_id: String,
     tool: String, // "ufw" or "firewalld"
 ) -> Result<String, String> {
+    crate::store::audit::enforce_policy_permission("firewall_install")?;
     let tool_name = tool.trim().to_lowercase();
     if !matches!(tool_name.as_str(), "ufw" | "firewalld") {
         return Err("Firewall installer supports only ufw or firewalld.".into());
@@ -823,6 +826,7 @@ pub async fn firewall_reload(
     state: tauri::State<'_, AppState>,
     conn_id: String,
 ) -> Result<String, String> {
+    crate::store::audit::enforce_policy_permission("firewall_reload")?;
     let fw = detect_firewall(&state, &conn_id).await;
     let cmd = match fw {
         "firewalld" => "firewall-cmd --reload 2>&1 && firewall-cmd --state 2>&1",
