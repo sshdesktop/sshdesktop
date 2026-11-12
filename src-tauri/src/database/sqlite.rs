@@ -181,8 +181,12 @@ pub async fn execute_query_sqlite(
     let mut warnings = Vec::new();
     let mut batch_results = Vec::new();
     let mut had_mutation = false;
+    let mut total_result_bytes = 0usize;
     let num_stmts = statements.len();
-
+    let remote_sync_id = if session.config.use_ssh {
+        Some(session.config.ssh_connection_id.as_deref().filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| "Remote SQLite query requires an explicit SSH connection ID.".to_string())?)
+    } else { None };
     let mut remaining_rows = limit;
     for (stmt_idx, stmt) in statements.iter().enumerate() {
         let stmt_start = Instant::now();
@@ -194,7 +198,10 @@ pub async fn execute_query_sqlite(
             || s_upper.starts_with("CREATE")
             || s_upper.starts_with("DROP")
             || s_upper.starts_with("ALTER")
-            || (s_upper.starts_with("WITH") && (s_upper.contains("INSERT") || s_upper.contains("UPDATE") || s_upper.contains("DELETE")));
+            || s_upper.starts_with("REINDEX") || s_upper.starts_with("VACUUM")
+            || s_upper.starts_with("ANALYZE") || s_upper.starts_with("ATTACH")
+            || s_upper.starts_with("DETACH") || s_upper.starts_with("PRAGMA")
+            || (s_upper.starts_with("WITH") && (s_upper.contains("INSERT") || s_upper.contains("UPDATE") || s_upper.contains("DELETE") || s_upper.contains("REPLACE")));
 
         if is_write_query {
             had_mutation = true;
@@ -257,7 +264,9 @@ pub async fn execute_query_sqlite(
                 let row_bytes = serde_json::to_vec(&val).map_err(|e| format!("Could not serialize SQLite result row: {}", e))?.len();
                 if row_bytes > 8 * 1024 * 1024 { return Err("SQLite result row exceeds the 8 MiB display limit.".into()); }
                 statement_result_bytes = statement_result_bytes.saturating_add(row_bytes);
+                total_result_bytes = total_result_bytes.saturating_add(row_bytes);
                 if statement_result_bytes > 12 * 1024 * 1024 { return Err("SQLite statement result exceeds the 12 MiB display limit; reduce selected columns.".into()); }
+                if total_result_bytes > 16 * 1024 * 1024 { return Err("SQLite batch result exceeds the 16 MiB IPC limit; reduce statements or selected columns.".into()); }
                 if idx == 0 {
                     cols_meta = meta;
                 }
@@ -290,8 +299,9 @@ pub async fn execute_query_sqlite(
 
     // If SQLite is on remote host and mutation occurred, sync cache back via SFTP
     if had_mutation && session.config.use_ssh {
-        if let Some(conn_id) = &session.config.ssh_connection_id {
+        if let Some(conn_id) = remote_sync_id {
             let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
+            if raw_path.is_empty() { return Err("Remote SQLite sync requires a non-empty remote file path.".into()); }
             let local_cache = sqlite_cache_path(&session.config, raw_path)?;
             let bytes = std::fs::read(&local_cache)
                 .map_err(|e| format!("Failed to read updated local SQLite cache: {}", e))?;
@@ -381,11 +391,12 @@ pub async fn execute_operation_sqlite(
     if session.config.read_only { return Err("This SQLite connection is read-only.".into()); }
     if sql.trim().is_empty() { return Err("SQLite operation SQL is empty.".into()); }
     if sql.len() > 5 * 1024 * 1024 { return Err("SQLite operation SQL exceeds the 5 MiB input limit.".into()); }
+    let remote_conn_id = if session.config.use_ssh {
+        Some(session.config.ssh_connection_id.as_deref().filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| "Remote SQLite operation has no explicit SSH connection ID.".to_string())?)
+    } else { None };
     let res = sqlx::raw_sql(sql).execute(pool).await.map_err(|e| e.to_string())?;
-    if session.config.use_ssh {
-        let conn_id = session.config.ssh_connection_id.as_deref()
-            .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| "Remote SQLite operation has no explicit SSH connection ID.".to_string())?;
+    if let Some(conn_id) = remote_conn_id {
         let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
         let local_cache = sqlite_cache_path(&session.config, raw_path)?;
         let bytes = std::fs::read(&local_cache)
