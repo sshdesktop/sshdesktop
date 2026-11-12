@@ -502,6 +502,9 @@ pub fn relax_to_strict_json(input: &str) -> String {
                 let quote = if i < n && (chars[i] == '"' || chars[i] == '\'') { let q = chars[i]; i += 1; q } else { ' ' };
                 let mut oid_str = String::new();
                 while i < n && chars[i] != quote && chars[i] != ')' {
+                    if chars[i] == '\\' && i + 1 < n {
+                        i += 1;
+                    }
                     oid_str.push(chars[i]);
                     i += 1;
                 }
@@ -522,6 +525,9 @@ pub fn relax_to_strict_json(input: &str) -> String {
                 let quote = if i < n && (chars[i] == '"' || chars[i] == '\'') { let q = chars[i]; i += 1; q } else { ' ' };
                 let mut date_str = String::new();
                 while i < n && chars[i] != quote && chars[i] != ')' {
+                    if chars[i] == '\\' && i + 1 < n {
+                        i += 1;
+                    }
                     date_str.push(chars[i]);
                     i += 1;
                 }
@@ -3246,12 +3252,12 @@ mod mongo_input_validation_tests {
 
     #[test]
     fn relaxed_extended_json_values_are_escaped() {
-        let oid = relax_to_strict_json(r#"ObjectId("a\\\"b")"#);
+        let oid = relax_to_strict_json(r#"ObjectId("a\\"b")"#);
         let parsed: serde_json::Value = serde_json::from_str(&oid).expect("escaped ObjectId JSON");
-        assert_eq!(parsed["$oid"], "a\\\"b");
-        let date = relax_to_strict_json(r#"ISODate("2026-01-01\\\"T00:00:00Z")"#);
+        assert_eq!(parsed["$oid"], "a\"b");
+        let date = relax_to_strict_json(r#"ISODate("2026-01-01\\"T00:00:00Z")"#);
         let parsed: serde_json::Value = serde_json::from_str(&date).expect("escaped ISODate JSON");
-        assert_eq!(parsed["$date"], "2026-01-01\\\"T00:00:00Z");
+        assert_eq!(parsed["$date"], "2026-01-01\"T00:00:00Z");
     }
 
     #[test]
