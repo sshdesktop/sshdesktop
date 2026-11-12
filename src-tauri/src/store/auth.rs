@@ -8,6 +8,36 @@ use argon2::password_hash::SaltString;
 
 static IS_AUTHENTICATED: AtomicBool = AtomicBool::new(false);
 
+// Process-wide rolling-window limiter for the local authentication endpoint.
+// Count attempts before password verification so concurrent requests cannot
+// all pass the check and perform unbounded Argon2 work.
+const LOGIN_RATE_LIMIT: usize = 5;
+const LOGIN_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+static LOGIN_ATTEMPTS: std::sync::LazyLock<std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+
+fn check_login_rate_limit() -> Result<(), String> {
+    let now = std::time::Instant::now();
+    let mut attempts = LOGIN_ATTEMPTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    while attempts.front().is_some_and(|time| now.duration_since(*time) >= LOGIN_RATE_WINDOW) {
+        attempts.pop_front();
+    }
+    if attempts.len() >= LOGIN_RATE_LIMIT {
+        let retry_after = attempts.front()
+            .map(|time| LOGIN_RATE_WINDOW.saturating_sub(now.duration_since(*time)).as_secs().max(1))
+            .unwrap_or(1);
+        return Err(format!("Too many login attempts. Please try again in {} seconds.", retry_after));
+    }
+    attempts.push_back(now);
+    Ok(())
+}
+
+fn reset_login_rate_limit() {
+    LOGIN_ATTEMPTS.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
 // Persist credential changes through a same-directory temporary file so readers
 // never observe a partially-written JSON document. The temporary file is
 // private on Unix and renamed only after its contents have been flushed.
@@ -268,6 +298,7 @@ pub async fn auth_login(username: String, password: String) -> Result<AuthAction
     if username.len() > 128 || password.len() > 4096 || username.chars().any(char::is_control) {
         return Err("Username or password exceeds the allowed input size or contains invalid characters.".into());
     }
+    check_login_rate_limit()?;
     let (mut config, path) = load_or_init_auth_config()?;
     let trimmed_user = username.trim();
 
@@ -302,6 +333,7 @@ pub async fn auth_login(username: String, password: String) -> Result<AuthAction
     persist_auth_config(&path, &json)?;
     enforce_strict_permissions(&path)?;
     IS_AUTHENTICATED.store(true, Ordering::SeqCst);
+    reset_login_rate_limit();
     crate::store::audit::append_audit_event("auth_login", &config.username, "desktop-auth", "ok", None);
 
     log::info!("SSH Desktop: Web session authenticated for user '{}'", config.username);
@@ -407,6 +439,16 @@ mod tests {
         let legacy = legacy_sha256_password("legacy-password", salt);
         assert!(verify_password("legacy-password", salt, &legacy));
         assert!(!verify_password("incorrect", salt, &legacy));
+    }
+
+    #[test]
+    fn login_rate_limit_rejects_sixth_attempt_within_window() {
+        reset_login_rate_limit();
+        for _ in 0..LOGIN_RATE_LIMIT {
+            assert!(check_login_rate_limit().is_ok());
+        }
+        assert!(check_login_rate_limit().unwrap_err().contains("Too many login attempts"));
+        reset_login_rate_limit();
     }
 
     #[test]
