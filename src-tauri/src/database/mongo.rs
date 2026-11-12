@@ -1791,17 +1791,25 @@ pub async fn execute_mongodb_single_command(
                     let strict = relax_to_strict_json(primary_args);
                     let val: serde_json::Value = serde_json::from_str(&strict)
                         .map_err(|e| format!("Invalid MongoDB aggregate pipeline: {}", e))?;
-                    if let serde_json::Value::Array(items) = val {
-                        let mut docs = Vec::new();
-                        for item in items {
-                            docs.push(json_to_bson_document(item)?);
-                        }
-                        docs
-                    } else {
-                        Vec::new()
+                    let items = val.as_array().ok_or_else(|| "MongoDB aggregate pipeline must be an array.".to_string())?;
+                    if items.is_empty() || items.len() > 100 {
+                        return Err("MongoDB aggregate pipeline must contain 1–100 stages.".into());
                     }
+                    let mut docs = Vec::with_capacity(items.len());
+                    for item in items {
+                        let stage = json_to_bson_document(item.clone())?;
+                        if stage.len() != 1 {
+                            return Err("Each MongoDB aggregate stage must contain exactly one operator.".into());
+                        }
+                        docs.push(stage);
+                    }
+                    docs
                 } else {
-                    vec![parse_relaxed_document(primary_args)?]
+                    let stage = parse_relaxed_document(primary_args)?;
+                    if stage.len() != 1 {
+                        return Err("Each MongoDB aggregate stage must contain exactly one operator.".into());
+                    }
+                    vec![stage]
                 };
 
                 let mut cursor = coll.aggregate(pipeline, None).await.map_err(|e| format!("MongoDB aggregate error: {}", e))?;
@@ -2620,14 +2628,27 @@ pub async fn execute_mongodb_single_command(
                     } else if next_m == "aggregate" {
                         let pipeline = if next_args.trim().starts_with('[') {
                             let strict = relax_to_strict_json(next_args);
-                            let val: serde_json::Value = serde_json::from_str(&strict).unwrap_or(serde_json::Value::Array(Vec::new()));
-                            if let serde_json::Value::Array(items) = val {
-                                items.into_iter().filter_map(|it| json_to_bson_document(it).ok()).map(mongodb::bson::Bson::Document).collect()
-                            } else {
-                                Vec::new()
+                            let val: serde_json::Value = serde_json::from_str(&strict)
+                                .map_err(|e| format!("Invalid MongoDB explain aggregate pipeline: {}", e))?;
+                            let items = val.as_array().ok_or_else(|| "MongoDB explain pipeline must be an array.".to_string())?;
+                            if items.is_empty() || items.len() > 100 {
+                                return Err("MongoDB explain pipeline must contain 1–100 stages.".into());
                             }
+                            let mut stages = Vec::with_capacity(items.len());
+                            for item in items {
+                                let stage = json_to_bson_document(item.clone())?;
+                                if stage.len() != 1 {
+                                    return Err("Each MongoDB explain stage must contain exactly one operator.".into());
+                                }
+                                stages.push(mongodb::bson::Bson::Document(stage));
+                            }
+                            stages
                         } else {
-                            vec![mongodb::bson::Bson::Document(parse_relaxed_document(next_args)?)]
+                            let stage = parse_relaxed_document(next_args)?;
+                            if stage.len() != 1 {
+                                return Err("Each MongoDB explain stage must contain exactly one operator.".into());
+                            }
+                            vec![mongodb::bson::Bson::Document(stage)]
                         };
                         let explain_cmd = mongodb::bson::doc! {
                             "explain": mongodb::bson::doc! {
