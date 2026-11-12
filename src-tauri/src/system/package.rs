@@ -726,3 +726,64 @@ pub async fn package_detect_manager(
 ) -> Result<String, String> {
     Ok(detect_pkg_manager(&state, &conn_id).await)
 }
+
+fn build_preview_command(pm: &str, name: &str, action: &str) -> Result<String, String> {
+    let package_arg = shell_quote(name);
+    let cmd = match (pm, action) {
+        ("apt", "install") => format!("DEBIAN_FRONTEND=noninteractive apt-get -s install {} 2>&1", package_arg),
+        ("apt", "remove") => format!("DEBIAN_FRONTEND=noninteractive apt-get -s remove {} 2>&1", package_arg),
+        ("dnf", "install") => format!("dnf install --assumeno {} 2>&1 || true", package_arg),
+        ("dnf", "remove") => format!("dnf remove --assumeno {} 2>&1 || true", package_arg),
+        ("yum", "install") => format!("yum install --assumeno {} 2>&1 || true", package_arg),
+        ("yum", "remove") => format!("yum remove --assumeno {} 2>&1 || true", package_arg),
+        ("pacman", "install") => format!("pacman -Sp --print-format '%n %v %s' {} 2>&1", package_arg),
+        ("pacman", "remove") => format!("pacman -Rsp --print-format '%n %v %s' {} 2>&1", package_arg),
+        ("zypper", "install") => format!("zypper --non-interactive install --dry-run {} 2>&1", package_arg),
+        ("zypper", "remove") => format!("zypper --non-interactive rm --dry-run {} 2>&1", package_arg),
+        ("apk", "install") => format!("apk add --simulate {} 2>&1", package_arg),
+        ("apk", "remove") => format!("apk del --simulate {} 2>&1", package_arg),
+        _ => return Err(format!("Dependency simulation preview is unsupported for package manager '{}'.", pm)),
+    };
+    Ok(cmd)
+}
+
+#[tauri::command]
+pub async fn package_preview(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+    name: String,
+    action: String,
+) -> Result<String, String> {
+    if !valid_package_name(&name) {
+        return Err("Invalid package name.".into());
+    }
+    let clean_action = match action.trim().to_ascii_lowercase().as_str() {
+        "install" => "install",
+        "remove" => "remove",
+        _ => return Err("Action must be 'install' or 'remove'.".into()),
+    };
+    let pm = detect_pkg_manager(&state, &conn_id).await;
+    let cmd = build_preview_command(&pm, &name, clean_action)?;
+    let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    Ok(if stdout.trim().is_empty() {
+        format!("No additional dependency changes reported for {} ({}).", name, clean_action)
+    } else {
+        stdout
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_command_uses_non_destructive_dry_run_flags() {
+        assert!(build_preview_command("apt", "nginx", "install").unwrap().contains("apt-get -s install"));
+        assert!(build_preview_command("dnf", "nginx", "remove").unwrap().contains("--assumeno"));
+        assert!(build_preview_command("apk", "curl", "install").unwrap().contains("--simulate"));
+        assert!(build_preview_command("unknown", "curl", "install").is_err());
+    }
+}

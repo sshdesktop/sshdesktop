@@ -12,7 +12,7 @@ import {
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
 import { 
-  terminalCreate, terminalWrite, terminalResize, terminalClose, sshLaunchPutty 
+  isTauri, terminalCreate, terminalWrite, terminalResize, terminalClose, sshLaunchPutty, recordingsSave 
 } from '../../lib/tauri-bridge';
 import { listen } from '@tauri-apps/api/event';
 import { PortalContextMenu } from '../../components/PortalContextMenu';
@@ -394,11 +394,19 @@ export default function TerminalApp() {
       if (!payload || !payload.terminal_id) return;
       const instance = tabInstances.current.get(payload.terminal_id);
       if (instance && !instance.disposed) {
+        let decodedText = '';
         if (payload.text) {
+          decodedText = payload.text;
           instance.term.write(payload.text);
         } else if (payload.data && Array.isArray(payload.data)) {
           const u8 = new Uint8Array(payload.data);
+          decodedText = new TextDecoder().decode(u8);
           instance.term.write(u8);
+        }
+        const rec = recordingRef.current;
+        if (rec && rec.active && rec.tabId === payload.terminal_id && decodedText && rec.frames.length < 50000) {
+          const elapsed = Math.max(0, (Date.now() - rec.startedAt) / 1000);
+          rec.frames.push([Number(elapsed.toFixed(4)), 'o', decodedText]);
         }
       }
     };
@@ -961,10 +969,67 @@ export default function TerminalApp() {
     inst?.term.focus();
   };
 
+  const [recordingActive, setRecordingActive] = useState(false);
+  const recordingRef = useRef<{ active: boolean; tabId: string; startedAt: number; frames: Array<[number, 'o', string]> } | null>(null);
+
+  const handleToggleRecording = async () => {
+    const inst = tabInstances.current.get(activeTab);
+    if (!recordingActive) {
+      recordingRef.current = { active: true, tabId: activeTab, startedAt: Date.now(), frames: [] };
+      setRecordingActive(true);
+      inst?.term.writeln('\r\n\x1b[35m[Audit Recording Started - asciicast v2]\x1b[0m');
+      return;
+    }
+    const rec = recordingRef.current;
+    recordingRef.current = null;
+    setRecordingActive(false);
+    if (!rec || rec.frames.length === 0) {
+      inst?.term.writeln('\r\n\x1b[33m[Audit Recording Stopped - no output captured]\x1b[0m\r\n');
+      return;
+    }
+    const currentTab = tabs.find(t => t.id === activeTab);
+    const conn = connections.find(c => c.id === (currentTab?.connId || activeConnectionId));
+    const hostLabel = conn?.name || conn?.host || 'localhost';
+    const header = JSON.stringify({
+      version: 2,
+      width: inst?.term.cols || 80,
+      height: inst?.term.rows || 24,
+      timestamp: Math.floor(rec.startedAt / 1000),
+      title: `SSH Session - ${hostLabel}`,
+    });
+    const castContent = [header, ...rec.frames.map(f => JSON.stringify(f))].join('\n') + '\n';
+    try {
+      const saved = await recordingsSave(`SSH Session (${hostLabel})`, hostLabel, castContent);
+      inst?.term.writeln(`\r\n\x1b[32m[Session recording saved cleanly (${saved.bytes} bytes, id=${saved.id.slice(0, 8)})]\x1b[0m\r\n`);
+    } catch (err: any) {
+      inst?.term.writeln(`\r\n\x1b[31m[Failed saving recording: ${err?.message || err}]\x1b[0m\r\n`);
+    }
+  };
+
+  const handleReconnectTab = async () => {
+    const inst = tabInstances.current.get(activeTab);
+    if (!inst || inst.disposed) return;
+    const currentTab = tabs.find(t => t.id === activeTab);
+    const connId = currentTab?.connId || activeConnectionId;
+    inst.term.writeln('\r\n\x1b[33m[Reconnecting SSH PTY session...]\x1b[0m');
+    try {
+      await terminalClose(activeTab).catch(() => {});
+      const cols = inst.term.cols && inst.term.cols > 10 ? inst.term.cols : 80;
+      const rows = inst.term.rows && inst.term.rows > 5 ? inst.term.rows : 24;
+      await terminalCreate(connId, rows, cols, activeTab);
+      inst.fitAddon.fit();
+      inst.term.writeln('\x1b[32m[SSH PTY session reconnected cleanly]\x1b[0m\r\n');
+      inst.term.focus();
+    } catch (err: any) {
+      inst.term.writeln(`\x1b[31m[Reconnect failed: ${err?.message || err}]\x1b[0m\r\n`);
+    }
+  };
+
   const handleLaunchPutty = async () => {
     const currentTab = tabs.find(t => t.id === activeTab);
     const connId = currentTab?.connId || activeConnectionId;
     try {
+      if (!isTauri()) { alert('Native PuTTY launch requires the SSH Desktop Windows application; use the built-in browser SSH terminal here.'); return; }
       await sshLaunchPutty(connId);
     } catch (err: any) {
       alert(`Could not launch PuTTY: ${err?.message || err}`);
@@ -1045,6 +1110,27 @@ export default function TerminalApp() {
 
         {/* Quick Commands & PuTTY Launcher */}
         <div className="flex items-center space-x-1.5 pb-1 shrink-0">
+          <button
+            onClick={() => void handleToggleRecording()}
+            className={`px-2.5 py-1 border rounded-lg text-xs font-mono flex items-center space-x-1 transition-colors cursor-pointer ${
+              recordingActive
+                ? 'bg-rose-600/30 hover:bg-rose-600/40 text-rose-200 border-rose-500/40 animate-pulse'
+                : 'bg-white/5 hover:bg-white/10 text-gray-300 border-white/10'
+            }`}
+            title="Record terminal session as audit-ready asciicast v2 (.cast)"
+          >
+            <Activity className="w-3.5 h-3.5" />
+            <span>{recordingActive ? 'Stop Rec' : 'Record'}</span>
+          </button>
+
+          <button
+            onClick={() => void handleReconnectTab()}
+            className="px-2.5 py-1 bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/20 rounded-lg text-xs font-mono flex items-center space-x-1 transition-colors cursor-pointer"
+            title="Reconnect active PTY session cleanly"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Reconnect</span>
+          </button>
           <button
             onClick={() => sendQuickCommand('sudo su -')}
             className="hidden sm:flex px-2.5 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/20 rounded-lg text-xs font-mono items-center space-x-1 transition-colors"

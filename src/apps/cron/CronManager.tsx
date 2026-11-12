@@ -5,7 +5,7 @@ import {
   AlertTriangle, Layers, Zap, X, Shield, ArrowRight, CornerDownRight, 
   RotateCcw, Sparkles, Server, ChevronRight
 } from 'lucide-react';
-import { cronList, cronAdd, cronRemove, sshExec } from '../../lib/tauri-bridge';
+import { cronList, cronAdd, cronRemove, cronRollback, sshExec } from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
 
 interface CronEntry {
@@ -208,6 +208,17 @@ export default function CronManager() {
       await loadCrons();
     } catch (err: any) {
       showNotification(`Failed to remove task: ${err?.message || err}`, 'error');
+    }
+  };
+
+  const handleRollbackCrontab = async () => {
+    if (!confirm('Restore crontab from the previous snapshot saved before the last edit?')) return;
+    try {
+      const msg = await cronRollback(activeConnId);
+      showNotification(msg || 'Crontab restored from previous snapshot');
+      await loadCrons();
+    } catch (err: any) {
+      showNotification(`Rollback failed: ${err?.message || err}`, 'error');
     }
   };
 
@@ -429,6 +440,15 @@ export default function CronManager() {
           >
             <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
             <span>New Task</span>
+          </button>
+
+          <button
+            onClick={() => void handleRollbackCrontab()}
+            className="flex items-center space-x-1 px-3 py-1.5 bg-white/10 hover:bg-amber-500/20 text-gray-300 hover:text-amber-300 rounded-xl text-xs font-medium transition-all border border-white/10 cursor-pointer"
+            title="Rollback crontab to snapshot taken before last modification"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>Rollback</span>
           </button>
 
           <button

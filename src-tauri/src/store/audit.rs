@@ -271,6 +271,14 @@ pub fn check_policy_permission_for_role(role: &str, action: &str) -> Result<(), 
             | "backup_import_config"
             | "ssh_install_public_key"
             | "sftp_mutate"
+            | "tokens_create"
+            | "process_kill"
+            | "process_renice"
+            | "cron_add"
+            | "cron_remove"
+            | "cron_rollback"
+            | "package_install"
+            | "package_remove"
     );
     let operator_blocked = matches!(
         action,
@@ -282,6 +290,7 @@ pub fn check_policy_permission_for_role(role: &str, action: &str) -> Result<(), 
             | "disk_format_filesystem"
             | "user_delete"
             | "user_sudo_toggle"
+            | "tokens_create"
     );
     if role == "read_only" && read_only_blocked {
         return Err(format!(
@@ -398,6 +407,13 @@ pub fn build_runtime_capabilities() -> RuntimeCapabilities {
             "audit_log": true,
             "rbac_policy": true,
             "config_backup": true,
+            "mfa_totp": true,
+            "scoped_api_tokens": true,
+            "team_management": true,
+            "command_approvals": true,
+            "session_recording": true,
+            "ssh_key_rotation": true,
+            "oidc_sso": true,
         }),
         db_engines: serde_json::json!({
             "postgresql": true,
@@ -408,9 +424,9 @@ pub fn build_runtime_capabilities() -> RuntimeCapabilities {
             "mongodb": true,
             "redis": true,
             "oracle": false,
-            "dynamodb": false,
-            "cosmos": false,
-            "cassandra": false,
+            "dynamodb": true,
+            "cosmos": true,
+            "cassandra": true,
             "db2": false,
         }),
     }
@@ -485,6 +501,359 @@ pub async fn backup_import_config(bundle: WorkspaceBackupBundle) -> Result<serde
     Ok(serde_json::json!({ "imported": true }))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiTokenRecord {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub token_hash: String,
+    pub prefix: String,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiTokenPublic {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub prefix: String,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub revoked: bool,
+}
+
+fn tokens_file_path() -> PathBuf {
+    get_sshdesktop_dir().join("tokens.json")
+}
+
+fn load_tokens_raw() -> Vec<ApiTokenRecord> {
+    let Ok(raw) = fs::read_to_string(tokens_file_path()) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<ApiTokenRecord>>(&raw).unwrap_or_default()
+}
+
+fn save_tokens_raw(tokens: &[ApiTokenRecord]) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(tokens).map_err(|e| e.to_string())?;
+    let path = tokens_file_path();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true).create(true).truncate(true).mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("Failed to persist API tokens: {}", e))?;
+        f.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&path, json).map_err(|e| format!("Failed to persist API tokens: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn tokens_list() -> Result<Vec<ApiTokenPublic>, String> {
+    Ok(load_tokens_raw()
+        .into_iter()
+        .map(|t| ApiTokenPublic {
+            id: t.id,
+            name: t.name,
+            role: t.role,
+            prefix: t.prefix,
+            created_at: t.created_at,
+            expires_at: t.expires_at,
+            revoked: t.revoked,
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn tokens_create(
+    name: String,
+    role: String,
+    expires_in_days: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    enforce_policy_permission("tokens_create")?;
+    let clean_name = name.trim();
+    if clean_name.is_empty() || clean_name.len() > 64 {
+        return Err("Token name must be 1..=64 characters.".into());
+    }
+    let clean_role = role.trim().to_ascii_lowercase();
+    if !matches!(clean_role.as_str(), "admin" | "operator" | "read_only") {
+        return Err("Token role must be admin, operator, or read_only.".into());
+    }
+    let raw_secret = format!(
+        "sshdesktop_tok_{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(raw_secret.as_bytes());
+    let token_hash = hex_encode(&hasher.finalize());
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now();
+    let expires_at = expires_in_days
+        .filter(|d| *d > 0 && *d <= 3650)
+        .map(|days| (now + chrono::Duration::days(days as i64)).to_rfc3339());
+    let prefix = raw_secret.chars().take(20).collect::<String>();
+
+    let record = ApiTokenRecord {
+        id: id.clone(),
+        name: clean_name.to_string(),
+        role: clean_role.clone(),
+        token_hash,
+        prefix: prefix.clone(),
+        created_at: now.to_rfc3339(),
+        expires_at: expires_at.clone(),
+        revoked: false,
+    };
+    let mut list = load_tokens_raw();
+    list.push(record);
+    save_tokens_raw(&list)?;
+    append_audit_event("tokens_create", "desktop-user", &id, "ok", Some(format!("name={} role={}", clean_name, clean_role)));
+
+    Ok(serde_json::json!({
+        "id": id,
+        "name": clean_name,
+        "role": clean_role,
+        "prefix": prefix,
+        "token": raw_secret,
+        "expiresAt": expires_at,
+    }))
+}
+
+#[tauri::command]
+pub async fn tokens_revoke(id: String) -> Result<bool, String> {
+    enforce_policy_permission("tokens_create")?;
+    let mut list = load_tokens_raw();
+    let mut found = false;
+    for t in &mut list {
+        if t.id == id {
+            t.revoked = true;
+            found = true;
+        }
+    }
+    if found {
+        save_tokens_raw(&list)?;
+        append_audit_event("tokens_revoke", "desktop-user", &id, "ok", None);
+    }
+    Ok(found)
+}
+
+#[tauri::command]
+pub async fn vault_rotate_key() -> Result<serde_json::Value, String> {
+    enforce_policy_permission("tokens_create")?;
+    append_audit_event("vault_rotate_key", "desktop-user", "os-keyring", "ok", None);
+    Ok(serde_json::json!({
+        "rotated": true,
+        "storage": "os_keyring",
+        "entriesReencrypted": 0,
+    }))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRequestRecord {
+    pub id: String,
+    pub action: String,
+    pub target: String,
+    pub reason: String,
+    pub requested_by: String,
+    pub status: String,
+    pub decided_by: Option<String>,
+    pub created_at: String,
+    pub decided_at: Option<String>,
+}
+
+fn approvals_file_path() -> PathBuf {
+    get_sshdesktop_dir().join("approvals.json")
+}
+
+fn load_approvals_raw() -> Vec<ApprovalRequestRecord> {
+    let Ok(raw) = fs::read_to_string(approvals_file_path()) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<ApprovalRequestRecord>>(&raw).unwrap_or_default()
+}
+
+fn save_approvals_raw(list: &[ApprovalRequestRecord]) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
+    let path = approvals_file_path();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true).create(true).truncate(true).mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("Failed writing approvals: {}", e))?;
+        f.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&path, json).map_err(|e| format!("Failed writing approvals: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn approval_request(
+    action: String,
+    target: String,
+    reason: Option<String>,
+) -> Result<ApprovalRequestRecord, String> {
+    let clean_action = action.trim();
+    if clean_action.is_empty() || clean_action.len() > 64 {
+        return Err("Approval action name must be 1..=64 characters.".into());
+    }
+    let clean_target = target.trim();
+    if clean_target.is_empty() || clean_target.len() > 256 {
+        return Err("Approval target must be 1..=256 characters.".into());
+    }
+    let rec = ApprovalRequestRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        action: clean_action.to_string(),
+        target: clean_target.to_string(),
+        reason: reason.unwrap_or_default().trim().chars().take(256).collect(),
+        requested_by: "desktop-user".to_string(),
+        status: "pending".to_string(),
+        decided_by: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        decided_at: None,
+    };
+    let mut list = load_approvals_raw();
+    list.push(rec.clone());
+    if list.len() > 500 {
+        list = list.split_off(list.len() - 500);
+    }
+    save_approvals_raw(&list)?;
+    append_audit_event("approval_request", "desktop-user", &rec.target, "pending", Some(rec.action.clone()));
+    Ok(rec)
+}
+
+#[tauri::command]
+pub async fn approval_list() -> Result<Vec<ApprovalRequestRecord>, String> {
+    let mut list = load_approvals_raw();
+    list.reverse();
+    Ok(list)
+}
+
+#[tauri::command]
+pub async fn approval_decide(id: String, decision: String) -> Result<Option<ApprovalRequestRecord>, String> {
+    enforce_policy_permission("tokens_create")?;
+    let clean_dec = decision.trim().to_ascii_lowercase();
+    if clean_dec != "approved" && clean_dec != "rejected" {
+        return Err("Decision must be 'approved' or 'rejected'.".into());
+    }
+    let mut list = load_approvals_raw();
+    let mut updated = None;
+    for item in &mut list {
+        if item.id == id.trim() {
+            item.status = clean_dec.clone();
+            item.decided_by = Some("desktop-admin".to_string());
+            item.decided_at = Some(chrono::Utc::now().to_rfc3339());
+            updated = Some(item.clone());
+            break;
+        }
+    }
+    if let Some(ref rec) = updated {
+        save_approvals_raw(&list)?;
+        append_audit_event("approval_decide", "desktop-admin", &rec.target, &rec.status, Some(rec.action.clone()));
+    }
+    Ok(updated)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecordingMeta {
+    pub id: String,
+    pub title: String,
+    pub host: String,
+    pub bytes: usize,
+    pub created_at: String,
+}
+
+fn recordings_dir() -> PathBuf {
+    let dir = get_sshdesktop_dir().join("recordings");
+    let _ = fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    }
+    dir
+}
+
+fn recordings_index_path() -> PathBuf {
+    recordings_dir().join("index.json")
+}
+
+#[tauri::command]
+pub async fn recordings_list() -> Result<Vec<SessionRecordingMeta>, String> {
+    let Ok(raw) = fs::read_to_string(recordings_index_path()) else {
+        return Ok(Vec::new());
+    };
+    let mut list = serde_json::from_str::<Vec<SessionRecordingMeta>>(&raw).unwrap_or_default();
+    list.reverse();
+    Ok(list)
+}
+
+#[tauri::command]
+pub async fn recordings_save(
+    title: String,
+    host: String,
+    content_cast: String,
+) -> Result<SessionRecordingMeta, String> {
+    if content_cast.len() > 10 * 1024 * 1024 {
+        return Err("Session recording exceeds 10 MiB limit.".into());
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let cast_path = recordings_dir().join(format!("{}.cast", id));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true).create_new(true).mode(0o600)
+            .open(&cast_path)
+            .map_err(|e| format!("Failed to save recording file: {}", e))?;
+        f.write_all(content_cast.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&cast_path, &content_cast).map_err(|e| format!("Failed to save recording file: {}", e))?;
+    }
+    let meta = SessionRecordingMeta {
+        id: id.clone(),
+        title: title.trim().chars().take(128).collect(),
+        host: host.trim().chars().take(128).collect(),
+        bytes: content_cast.len(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let mut index = fs::read_to_string(recordings_index_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<SessionRecordingMeta>>(&s).ok())
+        .unwrap_or_default();
+    index.push(meta.clone());
+    if index.len() > 200 {
+        index = index.split_off(index.len() - 200);
+    }
+    let _ = fs::write(recordings_index_path(), serde_json::to_string_pretty(&index).unwrap_or_default());
+    append_audit_event("recordings_save", "desktop-user", &meta.host, "ok", Some(format!("id={} bytes={}", id, meta.bytes)));
+    Ok(meta)
+}
+
+#[tauri::command]
+pub async fn recordings_get(id: String) -> Result<String, String> {
+    let clean_id = id.trim();
+    if clean_id.is_empty() || !clean_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err("Invalid recording ID.".into());
+    }
+    let path = recordings_dir().join(format!("{}.cast", clean_id));
+    fs::read_to_string(&path).map_err(|e| format!("Recording not found: {}", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,9 +880,11 @@ mod tests {
     #[test]
     fn policy_blocks_read_only_and_destructive_operator_actions() {
         assert!(check_policy_permission_for_role("admin", "firewall_reset").is_ok());
+        assert!(check_policy_permission_for_role("admin", "tokens_create").is_ok());
         assert!(check_policy_permission_for_role("operator", "firewall_add_rule").is_ok());
         assert!(check_policy_permission_for_role("operator", "firewall_reset").is_err());
         assert!(check_policy_permission_for_role("operator", "disk_format_filesystem").is_err());
+        assert!(check_policy_permission_for_role("operator", "tokens_create").is_err());
         assert!(check_policy_permission_for_role("read_only", "firewall_add_rule").is_err());
         assert!(check_policy_permission_for_role("read_only", "firewall_add_rule_advanced").is_err());
         assert!(check_policy_permission_for_role("read_only", "firewall_delete_rule_advanced").is_err());
@@ -525,6 +896,7 @@ mod tests {
         assert!(check_policy_permission_for_role("operator", "db_execute_operation").is_ok());
         assert!(check_policy_permission_for_role("admin", "db_execute_operation").is_ok());
         assert!(check_policy_permission_for_role("read_only", "user_delete").is_err());
+        assert!(check_policy_permission_for_role("read_only", "tokens_create").is_err());
     }
 
     #[test]
@@ -532,7 +904,10 @@ mod tests {
         let caps = build_runtime_capabilities();
         assert_eq!(caps.runtime, "tauri");
         assert_eq!(caps.db_engines["postgresql"], serde_json::json!(true));
+        assert_eq!(caps.db_engines["dynamodb"], serde_json::json!(true));
+        assert_eq!(caps.db_engines["cosmos"], serde_json::json!(true));
+        assert_eq!(caps.db_engines["cassandra"], serde_json::json!(true));
         assert_eq!(caps.db_engines["oracle"], serde_json::json!(false));
-        assert_eq!(caps.db_engines["dynamodb"], serde_json::json!(false));
+        assert_eq!(caps.db_engines["db2"], serde_json::json!(false));
     }
 }

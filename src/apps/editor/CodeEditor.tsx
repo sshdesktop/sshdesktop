@@ -76,6 +76,22 @@ interface FileTab {
   mediaType?: 'image' | 'video' | 'audio' | 'pdf';
   mediaUrl?: string;
   fileSize?: number;
+  initialHash?: string;
+}
+
+const MAX_EDITOR_WARN_BYTES = 5 * 1024 * 1024;
+
+async function computeContentSha256Hex(text: string): Promise<string | undefined> {
+  try {
+    if (typeof crypto === 'undefined' || !crypto.subtle) return undefined;
+    const data = new TextEncoder().encode(text);
+    const hashBuf = await crypto.subtle.digest('SHA-256', data);
+    return Array.from(new Uint8Array(hashBuf))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+  } catch {
+    return undefined;
+  }
 }
 
 interface TreeItem {
@@ -968,8 +984,21 @@ export default function CodeEditor() {
         setActiveFileId(newTab.id);
         addRecentFile(clean);
       } else {
+        // Large-file guard before reading content into Monaco
+        const escapedClean = clean.replace(/'/g, "'\\''");
+        const sizeRes = await sshExec(activeConnId, `(stat -c '%s' '${escapedClean}' 2>/dev/null || wc -c < '${escapedClean}' 2>/dev/null || echo 0)`).catch(() => null);
+        const remoteSize = parseInt((sizeRes?.stdout || '0').trim(), 10);
+        if (Number.isFinite(remoteSize) && remoteSize > MAX_EDITOR_WARN_BYTES) {
+          const mb = (remoteSize / (1024 * 1024)).toFixed(1);
+          if (!window.confirm(`'${fileName}' is ${mb} MB. Opening files larger than 5 MB in the editor can cause sluggishness. Continue anyway?`)) {
+            setLoading(false);
+            setLoadingAction(null);
+            return;
+          }
+        }
         // Plaintext / Code File
         const content = await sftpReadTextFile(activeConnId, clean);
+        const initialHash = await computeContentSha256Hex(content);
         const newTab: FileTab = {
           id: String(Date.now()),
           name: fileName,
@@ -978,6 +1007,8 @@ export default function CodeEditor() {
           content,
           isModified: false,
           isMedia: false,
+          fileSize: Number.isFinite(remoteSize) && remoteSize > 0 ? remoteSize : content.length,
+          initialHash,
         };
         setFiles(prev => [...prev, newTab]);
         setActiveFileId(newTab.id);
@@ -1037,6 +1068,26 @@ export default function CodeEditor() {
     setPermissionAlert(null);
 
     try {
+      // Conflict detection: verify remote SHA-256 hasn't diverged externally since file was opened
+      if (activeFile.initialHash) {
+        const escapedPath = activeFile.remotePath.replace(/'/g, "'\\''");
+        const hashRes = await sshExec(
+          activeConnId,
+          `(sha256sum '${escapedPath}' 2>/dev/null || shasum -a 256 '${escapedPath}' 2>/dev/null) | awk '{print $1}'`
+        ).catch(() => null);
+        const remoteHash = (hashRes?.stdout || '').trim().toLowerCase();
+        if (/^[a-f0-9]{64}$/.test(remoteHash) && remoteHash !== activeFile.initialHash) {
+          const forceOverwrite = window.confirm(
+            `External Conflict Detected:\n'${activeFile.name}' has changed on the server since you opened it.\n\nClick OK to overwrite with your changes, or Cancel to keep the remote version intact.`
+          );
+          if (!forceOverwrite) {
+            setLoading(false);
+            setLoadingAction(null);
+            return;
+          }
+        }
+      }
+
       // Guard with 15s timeout to prevent infinite loading spinners
       await Promise.race([
         saveFileWithElevatedFallback(activeConnId, activeFile.remotePath, activeFile.content),
@@ -1045,8 +1096,9 @@ export default function CodeEditor() {
         ),
       ]);
 
+      const nextHash = await computeContentSha256Hex(activeFile.content);
       setFiles(prev =>
-        prev.map(f => (f.id === activeFile.id ? { ...f, isModified: false } : f))
+        prev.map(f => (f.id === activeFile.id ? { ...f, isModified: false, initialHash: nextHash ?? f.initialHash } : f))
       );
       setSavedSuccess(true);
       showEditorToast(`Saved ${activeFile.name} successfully`);

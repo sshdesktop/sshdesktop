@@ -6,6 +6,7 @@ import {
 import { useApiStore } from './apiStore';
 import { useConnectionStore } from '../../lib/store';
 import { apiSendRequest, ApiRequestPayload, ApiHeader, ApiQueryParam } from '../../lib/tauri-bridge';
+import { clampRequestTimeoutSeconds } from '../../lib/security-utils';
 import RequestUrlBar from './components/RequestUrlBar';
 import RequestConfigTabs from './components/RequestConfigTabs';
 import ResponseViewer from './components/ResponseViewer';
@@ -43,6 +44,7 @@ export default function ApiApp() {
     resolveVariables,
     hydrateFromServer,
     syncToServer,
+    exportSanitizedBundle,
     isSyncingServer,
     lastServerSync
   } = useApiStore();
@@ -195,7 +197,7 @@ export default function ApiApp() {
         body_type: activeTab.bodyType,
         raw_body: activeTab.bodyType !== 'none' ? resolvedRawBody : undefined,
         form_data: activeTab.bodyType === 'form-data' ? activeTab.formData : undefined,
-        timeout_seconds: activeTab.timeoutSeconds || 30,
+        timeout_seconds: clampRequestTimeoutSeconds(activeTab.timeoutSeconds, 30),
         follow_redirects: activeTab.followRedirects ?? true,
         verify_ssl: activeTab.verifySsl ?? false,
       };
@@ -346,6 +348,24 @@ export default function ApiApp() {
 
         {/* Right: Remote Storage Sync & SSH Server Indicator */}
         <div className="flex items-center space-x-2 text-xs font-mono text-gray-400 shrink-0 pl-2">
+          <button
+            type="button"
+            onClick={() => {
+              const json = exportSanitizedBundle();
+              const blob = new Blob([json], { type: 'application/json' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `sshdesktop-api-sanitized-${new Date().toISOString().slice(0, 10)}.json`;
+              a.click();
+              URL.revokeObjectURL(url);
+            }}
+            className="flex items-center space-x-1 bg-white/5 hover:bg-white/10 border border-white/10 px-2.5 py-1 rounded-xl text-gray-300 hover:text-white transition-colors cursor-pointer"
+            title="Export API collections and environments with Authorization headers, bearer tokens, and secrets stripped"
+          >
+            <Shield className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Safe Export</span>
+          </button>
           {activeServer && activeConnectionId ? (
             <button
               type="button"

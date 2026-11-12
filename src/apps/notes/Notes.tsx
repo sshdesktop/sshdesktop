@@ -24,7 +24,9 @@ import {
   Italic,
   Share2,
   Lock,
-  Tag
+  Tag,
+  Download,
+  Upload
 } from 'lucide-react';
 
 interface NoteItem {
@@ -139,6 +141,79 @@ export default function Notes() {
   const insertFormatting = (prefix: string, suffix: string = '') => {
     if (!activeNote) return;
     updateBody(activeNote.body + `\n${prefix}text${suffix}`);
+  };
+
+  const deriveNotesAesKey = async (passphrase: string, salt: Uint8Array, usage: KeyUsage[]) => {
+    const enc = new TextEncoder();
+    const keyMat = await window.crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+    return window.crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: salt.buffer as ArrayBuffer, iterations: 200000, hash: 'SHA-256' },
+      keyMat,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      usage
+    );
+  };
+
+  const exportEncryptedNotes = async () => {
+    const pass = window.prompt('Enter an encryption passphrase to protect your Notes backup (.sshnotes.enc):');
+    if (!pass || pass.length < 8) {
+      if (pass !== null) window.alert('Passphrase must be at least 8 characters.');
+      return;
+    }
+    const salt = window.crypto.getRandomValues(new Uint8Array(16));
+    const iv = window.crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveNotesAesKey(pass, salt, ['encrypt']);
+    const pt = new TextEncoder().encode(JSON.stringify({ schema: 'sshdesktop-notes-v1', notes }));
+    const ct = new Uint8Array(await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, pt));
+    const toB64 = (arr: Uint8Array) => btoa(String.fromCharCode(...arr));
+    const bundle = {
+      schema: 'sshdesktop-notes-aes256gcm-v1',
+      salt: toB64(salt),
+      iv: toB64(iv),
+      data: toB64(ct),
+    };
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sshdesktop-notes-${new Date().toISOString().slice(0, 10)}.sshnotes.enc`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importEncryptedNotes = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      if (parsed?.schema !== 'sshdesktop-notes-aes256gcm-v1') {
+        throw new Error('Invalid encrypted notes backup file.');
+      }
+      const pass = window.prompt('Enter the passphrase for this Notes backup:');
+      if (!pass) return;
+      const fromB64 = (s: string) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+      const salt = fromB64(parsed.salt);
+      const iv = fromB64(parsed.iv);
+      const ct = fromB64(parsed.data);
+      const key = await deriveNotesAesKey(pass, salt, ['decrypt']);
+      const pt = await window.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+      const decoded = JSON.parse(new TextDecoder().decode(pt));
+      if (Array.isArray(decoded?.notes)) {
+        setNotes(prev => {
+          const existingIds = new Set(prev.map(n => n.id));
+          const merged = [...prev];
+          for (const item of decoded.notes) {
+            if (item && item.id && !existingIds.has(item.id)) merged.push(item);
+          }
+          return merged;
+        });
+      }
+    } catch (err: any) {
+      window.alert(err?.message || 'Failed to decrypt notes backup (wrong passphrase or corrupted file).');
+    } finally {
+      e.target.value = '';
+    }
   };
 
   // Filter notes by folder and search term
@@ -396,6 +471,24 @@ export default function Notes() {
                 Preview
               </button>
             </div>
+
+            <button
+              onClick={() => void exportEncryptedNotes()}
+              className="flex items-center space-x-1 text-xs px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 transition-colors border border-emerald-500/25 cursor-pointer"
+              title="Export AES-256-GCM encrypted notes backup"
+            >
+              <Lock className="w-3 h-3" />
+              <span>Export Encrypted</span>
+            </button>
+
+            <label
+              className="flex items-center space-x-1 text-xs px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white transition-colors border border-white/5 cursor-pointer"
+              title="Import AES-256-GCM encrypted notes backup"
+            >
+              <Upload className="w-3 h-3" />
+              <span>Restore</span>
+              <input type="file" accept=".enc,.json" onChange={importEncryptedNotes} className="hidden" />
+            </label>
 
             <button
               onClick={copyToClipboard}

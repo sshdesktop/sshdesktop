@@ -8,6 +8,9 @@ pub mod sqlite;
 pub mod mssql;
 pub mod mongo;
 pub mod redis;
+pub mod dynamodb;
+pub mod cosmos;
+pub mod cassandra;
 pub mod others;
 pub mod commands;
 
@@ -21,5 +24,8 @@ pub use sqlite::*;
 pub use mssql::*;
 pub use mongo::*;
 pub use redis::*;
+pub use dynamodb::*;
+pub use cosmos::*;
+pub use cassandra::*;
 pub use others::*;
 pub use commands::*;

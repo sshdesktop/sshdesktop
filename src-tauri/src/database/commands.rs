@@ -36,13 +36,19 @@ use super::redis::{
     connect_redis, execute_operation_redis, execute_query_redis,
     get_object_definition_redis, get_table_columns_redis, list_tables_redis,
 };
+use super::dynamodb::{
+    connect_dynamodb, execute_query_dynamodb, get_table_columns_dynamodb, list_tables_dynamodb,
+};
+use super::cosmos::{
+    connect_cosmos, execute_query_cosmos, get_table_columns_cosmos, list_tables_cosmos,
+};
+use super::cassandra::{
+    connect_cassandra, execute_query_cassandra, get_table_columns_cassandra, list_tables_cassandra,
+};
 use super::others::{
-    connect_cassandra, connect_cosmos, connect_db2, connect_dynamodb, connect_oracle,
-    execute_query_cassandra, execute_query_cosmos, execute_query_db2, execute_query_dynamodb,
-    execute_query_oracle, get_object_definition_others, get_table_columns_cassandra,
-    get_table_columns_cosmos, get_table_columns_db2, get_table_columns_dynamodb,
-    get_table_columns_oracle, list_tables_cassandra, list_tables_cosmos, list_tables_db2,
-    list_tables_dynamodb, list_tables_oracle,
+    connect_db2, connect_oracle, execute_query_db2, execute_query_oracle,
+    get_object_definition_others, get_table_columns_db2, get_table_columns_oracle,
+    list_tables_db2, list_tables_oracle,
 };
 
 pub use super::mongo::{mongodb_find_documents, mongodb_insert_document, mongodb_list_collections};
@@ -102,9 +108,9 @@ async fn dispatch_db_query(
         DriverInstance::Mssql { config, tcp_addr } => execute_query_mssql(config, tcp_addr, query, limit, session, start).await,
         DriverInstance::Mongo(client) => execute_mongodb_query(client, &session.config.database, query, limit, Some(session.capabilities.server_version.clone())).await,
         DriverInstance::Redis(client) => execute_query_redis(client, query, session, start).await,
-        DriverInstance::DynamoDb { .. } => execute_query_dynamodb(query, session, start),
-        DriverInstance::CosmosDb { .. } => execute_query_cosmos(query, session, start),
-        DriverInstance::Cassandra { .. } => execute_query_cassandra(query, session, start),
+        DriverInstance::DynamoDb { .. } => execute_query_dynamodb(query, session, start).await,
+        DriverInstance::CosmosDb { .. } => execute_query_cosmos(query, session, start).await,
+        DriverInstance::Cassandra { .. } => execute_query_cassandra(query, session).await,
         DriverInstance::Oracle { .. } => execute_query_oracle(query, session, start),
         DriverInstance::Db2 { .. } => execute_query_db2(query, session, start),
     }
@@ -280,57 +286,7 @@ pub async fn db_execute_query(
         if matches!(&session.driver, DriverInstance::Mongo(_)) {
             return Err("Read-only mode for MongoDB query consoles is not supported safely; use a read-only database account".to_string());
         }
-        let normalized = query.trim();
-        // Comments and control characters make prefix-based SQL inspection
-        // ambiguous (for example executable MySQL comments). Reject them in
-        // read-only mode rather than attempting to strip SQL syntax manually.
-        if normalized.contains("--")
-            || normalized.contains("/*")
-            || normalized.contains("*/")
-            || normalized.contains('#')
-            || normalized.chars().any(|c| c == '\0' || (c.is_control() && c != '\n' && c != '\r' && c != '\t'))
-        {
-            return Err("Read-only mode rejects SQL comments and control characters; use a database account with server-enforced read-only privileges for stronger guarantees.".into());
-        }
-        let upper = normalized.to_ascii_uppercase();
-        let allowed = ["SELECT", "SHOW", "DESCRIBE", "DESC"];
-        let is_read = allowed.iter().any(|prefix| {
-            upper.strip_prefix(prefix)
-                .map(|rest| rest.is_empty() || rest.chars().next().map(|c| c.is_whitespace()).unwrap_or(false))
-                .unwrap_or(false)
-        });
-        let upper_compact = upper.split_whitespace().collect::<Vec<_>>().join(" ");
-        let upper_no_ws: String = upper.chars().filter(|c| !c.is_whitespace()).collect();
-        // This is a conservative application-level guard, not a substitute
-        // for a database account that has server-enforced read-only privileges.
-        // Block known side-effecting, file, process, lock, and administrative
-        // functions across the supported SQL dialects.
-        let potentially_mutating = [
-            "INTO", "FORUPDATE", "FORSHARE", "LOCKINSHAREMODE",
-            "NEXTVAL(", "SETVAL(", "PG_ADVISORY", "PG_NOTIFY(",
-            "PG_RELOAD_CONF(", "PG_ROTATE_LOGFILE(", "PG_LOG_BACKEND_MEMORY_CONTEXTS(",
-            "LOAD_FILE(", "SLEEP(", "BENCHMARK(", "DBLINK_EXEC(",
-            "PG_READ_FILE(", "PG_READ_BINARY_FILE(", "PG_STAT_FILE(",
-            "LO_IMPORT(", "LO_EXPORT(", "LO_CREATE(", "LO_UNLINK(", "LO_PUT(",
-            "PG_EXPORT_SNAPSHOT(", "PG_SWITCH_WAL(", "DBLINK_CONNECT(", "DBLINK_SEND_QUERY(",
-            "OPENQUERY(", "PG_TERMINATE_BACKEND(", "PG_CANCEL_BACKEND(", "PG_LS_DIR(",
-            "XP_CMDSHELL", "SP_OACREATE", "OPENROWSET(", "OPENDATASOURCE(",
-            "GET_LOCK(", "RELEASE_LOCK(", "PG_SLEEP(", "SET_CONFIG(",
-            "DBMS_LOCK.", "DBMS_SCHEDULER.", "DBMS_PIPE.", "DBMS_SQL.",
-            "UTL_FILE.", "UTL_HTTP.", "UTL_SMTP.", "UTL_TCP.", "UTL_INADDR.",
-            "WAITFOR", "DBCC", "SHUTDOWN", "KILL ", "LOAD_EXTENSION(",
-            "WRITEFILE(", "READFILE(", "INTOOUTFILE", "INTODUMPFILE",
-        ].iter().any(|needle| upper_no_ws.contains(&needle.replace(' ', "")))
-            || upper_compact.contains("LOCK IN SHARE MODE")
-            || upper_no_ws.contains("PRAGMA")
-            || upper_no_ws.contains("ATTACHDATABASE")
-            || upper_no_ws.contains("DETACHDATABASE");
-        let semicolon_count = normalized.chars().filter(|c| *c == ';').count();
-        let has_multiple_statements = semicolon_count > 1
-            || (semicolon_count == 1 && !normalized.trim_end().ends_with(';'));
-        if !is_read || potentially_mutating || has_multiple_statements {
-            return Err("Read-only session: only one conservative read/query statement is allowed".to_string());
-        }
+        validate_readonly_sql_query(&query)?;
     }
 
     let limit = max_rows.unwrap_or(500).min(10000);
@@ -438,9 +394,9 @@ pub async fn db_list_tables(
         DriverInstance::Mssql { config, tcp_addr } => list_tables_mssql(config, tcp_addr).await,
         DriverInstance::Mongo(client) => list_collections_mongo(client, &session).await,
         DriverInstance::Redis(client) => list_tables_redis(client).await,
-        DriverInstance::DynamoDb { .. } => list_tables_dynamodb(),
-        DriverInstance::CosmosDb { database, .. } => list_tables_cosmos(database),
-        DriverInstance::Cassandra { keyspace, .. } => list_tables_cassandra(keyspace),
+        DriverInstance::DynamoDb { .. } => list_tables_dynamodb(&session).await,
+        DriverInstance::CosmosDb { .. } => list_tables_cosmos(&session).await,
+        DriverInstance::Cassandra { .. } => list_tables_cassandra(&session).await,
         DriverInstance::Oracle { sid, .. } => list_tables_oracle(sid),
         DriverInstance::Db2 { database, .. } => list_tables_db2(database),
     }
@@ -467,9 +423,9 @@ pub async fn db_get_table_columns(
         DriverInstance::Mssql { config, tcp_addr } => get_table_columns_mssql(config, tcp_addr, &table_name).await,
         DriverInstance::Mongo(client) => get_collection_columns_mongo(client, &session, &table_name).await,
         DriverInstance::Redis(_) => Ok(get_table_columns_redis()),
-        DriverInstance::DynamoDb { .. } => get_table_columns_dynamodb(),
-        DriverInstance::CosmosDb { .. } => get_table_columns_cosmos(),
-        DriverInstance::Cassandra { .. } => get_table_columns_cassandra(),
+        DriverInstance::DynamoDb { .. } => get_table_columns_dynamodb(&session, &table_name).await,
+        DriverInstance::CosmosDb { .. } => get_table_columns_cosmos(&session).await,
+        DriverInstance::Cassandra { .. } => get_table_columns_cassandra(&session, &table_name).await,
         DriverInstance::Oracle { .. } => get_table_columns_oracle(),
         DriverInstance::Db2 { .. } => get_table_columns_db2(),
     }
@@ -607,4 +563,84 @@ pub async fn db_get_capabilities(
     };
 
     Ok(session.capabilities.clone())
+}
+
+/// Conservative application-level guard for read-only database sessions.
+/// Not a substitute for server-enforced read-only roles/permissions.
+pub(crate) fn validate_readonly_sql_query(query: &str) -> Result<(), String> {
+    let normalized = query.trim();
+    // Comments and control characters make prefix-based SQL inspection
+    // ambiguous (for example executable MySQL comments). Reject them in
+    // read-only mode rather than attempting to strip SQL syntax manually.
+    if normalized.contains("--")
+        || normalized.contains("/*")
+        || normalized.contains("*/")
+        || normalized.contains('#')
+        || normalized
+            .chars()
+            .any(|c| c == '\0' || (c.is_control() && c != '\n' && c != '\r' && c != '\t'))
+    {
+        return Err("Read-only mode rejects SQL comments and control characters; use a database account with server-enforced read-only privileges for stronger guarantees.".into());
+    }
+    let upper = normalized.to_ascii_uppercase();
+    let allowed = ["SELECT", "SHOW", "DESCRIBE", "DESC"];
+    let is_read = allowed.iter().any(|prefix| {
+        upper
+            .strip_prefix(prefix)
+            .map(|rest| rest.is_empty() || rest.chars().next().map(|c| c.is_whitespace()).unwrap_or(false))
+            .unwrap_or(false)
+    });
+    let upper_compact = upper.split_whitespace().collect::<Vec<_>>().join(" ");
+    let upper_no_ws: String = upper.chars().filter(|c| !c.is_whitespace()).collect();
+    // Block known side-effecting, file, process, lock, and administrative
+    // functions across the supported SQL dialects.
+    let potentially_mutating = [
+        "INTO", "FORUPDATE", "FORSHARE", "LOCKINSHAREMODE",
+        "NEXTVAL(", "SETVAL(", "PG_ADVISORY", "PG_NOTIFY(",
+        "PG_RELOAD_CONF(", "PG_ROTATE_LOGFILE(", "PG_LOG_BACKEND_MEMORY_CONTEXTS(",
+        "LOAD_FILE(", "SLEEP(", "BENCHMARK(", "DBLINK_EXEC(",
+        "PG_READ_FILE(", "PG_READ_BINARY_FILE(", "PG_STAT_FILE(",
+        "LO_IMPORT(", "LO_EXPORT(", "LO_CREATE(", "LO_UNLINK(", "LO_PUT(",
+        "PG_EXPORT_SNAPSHOT(", "PG_SWITCH_WAL(", "DBLINK_CONNECT(", "DBLINK_SEND_QUERY(",
+        "OPENQUERY(", "PG_TERMINATE_BACKEND(", "PG_CANCEL_BACKEND(", "PG_LS_DIR(",
+        "XP_CMDSHELL", "SP_OACREATE", "OPENROWSET(", "OPENDATASOURCE(",
+        "GET_LOCK(", "RELEASE_LOCK(", "PG_SLEEP(", "SET_CONFIG(",
+        "DBMS_LOCK.", "DBMS_SCHEDULER.", "DBMS_PIPE.", "DBMS_SQL.",
+        "UTL_FILE.", "UTL_HTTP.", "UTL_SMTP.", "UTL_TCP.", "UTL_INADDR.",
+        "WAITFOR", "DBCC", "SHUTDOWN", "KILL ", "LOAD_EXTENSION(",
+        "WRITEFILE(", "READFILE(", "INTOOUTFILE", "INTODUMPFILE",
+    ]
+    .iter()
+    .any(|needle| upper_no_ws.contains(&needle.replace(' ', "")))
+        || upper_compact.contains("LOCK IN SHARE MODE")
+        || upper_no_ws.contains("PRAGMA")
+        || upper_no_ws.contains("ATTACHDATABASE")
+        || upper_no_ws.contains("DETACHDATABASE");
+    let semicolon_count = normalized.chars().filter(|c| *c == ';').count();
+    let has_multiple_statements = semicolon_count > 1
+        || (semicolon_count == 1 && !normalized.trim_end().ends_with(';'));
+    if !is_read || potentially_mutating || has_multiple_statements {
+        return Err("Read-only session: only one conservative read/query statement is allowed".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readonly_sql_guard_allows_single_reads_and_blocks_bypasses() {
+        assert!(validate_readonly_sql_query("SELECT id, email FROM users WHERE active = 1;").is_ok());
+        assert!(validate_readonly_sql_query("SHOW TABLES").is_ok());
+        assert!(validate_readonly_sql_query("DESCRIBE audit_logs").is_ok());
+
+        assert!(validate_readonly_sql_query("DELETE FROM users").is_err());
+        assert!(validate_readonly_sql_query("SELECT 1; DROP TABLE users").is_err());
+        assert!(validate_readonly_sql_query("SELECT /* bypass */ 1").is_err());
+        assert!(validate_readonly_sql_query("SELECT PG_SLEEP(5)").is_err());
+        assert!(validate_readonly_sql_query("SELECT LOAD_FILE('/etc/passwd')").is_err());
+        assert!(validate_readonly_sql_query("SELECT * FROM users INTO OUTFILE '/tmp/dump'").is_err());
+        assert!(validate_readonly_sql_query("SELECT * FROM pragma_table_info('users')").is_err());
+    }
 }

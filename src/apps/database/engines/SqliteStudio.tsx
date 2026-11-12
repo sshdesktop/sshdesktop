@@ -442,15 +442,10 @@ export const SqliteStudio: React.FC<SqliteStudioProps> = ({ profile, onDisconnec
 
   const handleOpenDefinition = async (name: string, type: 'table' | 'view' | 'procedure' | 'function' | 'trigger') => {
     try {
-      let ddl = await dbGetObjectDefinition(profile.id, type, name, currentDb);
+      const ddl = await dbGetObjectDefinition(profile.id, type, name, currentDb);
       if (!ddl || ddl.trim().length === 0) {
-        if (type === 'view') {
-          ddl = `CREATE VIEW "${name}" AS\nSELECT * FROM "${selectedTable || 'table_name'}";`;
-        } else if (type === 'trigger') {
-          ddl = `CREATE TRIGGER "${name}"\nAFTER INSERT ON "${selectedTable || 'table_name'}"\nBEGIN\n  -- Trigger logic\nEND;`;
-        } else {
-          ddl = `SELECT sql FROM sqlite_master WHERE name = '${name}';`;
-        }
+        alert(`Server did not return live DDL for ${type} "${name}" from sqlite_master.`);
+        return;
       }
 
       const newId = `tab-${Date.now()}`;

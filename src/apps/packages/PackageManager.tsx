@@ -8,11 +8,13 @@ import {
   Box, Key, Zap, CheckCheck, Loader2
 } from 'lucide-react';
 import { 
-  packageList, packageUpgradable, packageInstall, packageRemove, 
+  packageList, packageUpgradable, packageInstall, packageRemove, packagePreview,
   packageUpdate, packageSearch, packageDetectManager, sshExec 
 } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
+import { useCancellableSshRequest } from '../../lib/hooks/useCancellableSshRequest';
+import { useWindowedList } from '../../lib/hooks/useWindowedList';
 import { useUserPrivilege } from '../../lib/permissions';
 import PermissionAlertBanner from '../../components/PermissionAlertBanner';
 import PermissionAlertModal from '../../components/PermissionAlertModal';
@@ -180,6 +182,19 @@ export default function PackageManager() {
   const [manualPkgInput, setManualPkgInput] = useState('');
   const [inspectPkg, setInspectPkg] = useState<PackageItem | null>(null);
   const [restrictedAction, setRestrictedAction] = useState<string | null>(null);
+  const [depPreview, setDepPreview] = useState<{ pkg: string; action: 'install' | 'remove'; output: string; loading: boolean } | null>(null);
+
+  const handlePreviewDependencies = async (pkgName: string, action: 'install' | 'remove') => {
+    const clean = pkgName.trim();
+    if (!clean) return;
+    setDepPreview({ pkg: clean, action, output: '', loading: true });
+    try {
+      const out = await packagePreview(activeConnId, clean, action);
+      setDepPreview({ pkg: clean, action, output: out, loading: false });
+    } catch (err: any) {
+      setDepPreview({ pkg: clean, action, output: `Preview failed: ${err?.message || err}`, loading: false });
+    }
+  };
 
   // Row Right-Click Context Menu State
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; pkg: PackageItem } | null>(null);
@@ -190,6 +205,7 @@ export default function PackageManager() {
   const { hasSudo, isRoot, username } = useUserPrivilege();
   const { openApp } = useWindowManager();
   const { runTerminalCommand } = useEditorStore();
+  const { runCancellable } = useCancellableSshRequest(activeConnId);
 
   // Detect Linux package manager on connection change
   useEffect(() => {
@@ -230,10 +246,15 @@ export default function PackageManager() {
   const loadPackages = useCallback(async () => {
     setLoading(true);
     try {
-      const [allPkgs, upPkgs] = await Promise.all([
-        packageList(activeConnId),
-        packageUpgradable(activeConnId)
-      ]);
+      const batch = await runCancellable(async () => {
+        const [allPkgs, upPkgs] = await Promise.all([
+          packageList(activeConnId),
+          packageUpgradable(activeConnId)
+        ]);
+        return { allPkgs, upPkgs };
+      });
+      if (!batch) return;
+      const { allPkgs, upPkgs } = batch;
 
       const upMap = new Map<string, string>();
       if (upPkgs && Array.isArray(upPkgs)) {
@@ -258,7 +279,7 @@ export default function PackageManager() {
     } finally {
       setLoading(false);
     }
-  }, [activeConnId]);
+  }, [activeConnId, runCancellable]);
 
   useEffect(() => {
     loadPackages();
@@ -657,6 +678,15 @@ export default function PackageManager() {
     });
   }, [packages, tab, search]);
 
+  const {
+    visibleItems: windowedInstalled,
+    hasMore: hasMorePackages,
+    visibleCount: visiblePkgCount,
+    totalCount: totalPkgCount,
+    loadMore: loadMorePackages,
+    showAll: showAllPackages,
+  } = useWindowedList(filteredInstalled, 200, 200, `${activeConnId}:${tab}:${search}`);
+
   // Filtered Curated App Store
   const filteredCuratedApps = useMemo(() => {
     return CURATED_APPS.filter(app => {
@@ -984,7 +1014,7 @@ export default function PackageManager() {
                     </td>
                   </tr>
                 ) : (
-                  filteredInstalled.map((pkg, idx) => {
+                  windowedInstalled.map((pkg, idx) => {
                     const isSelected = selectedPkgName === pkg.name;
                     const isUpgradable = pkg.upgradable;
                     const isBusy = actionInProgress === pkg.name;
@@ -1061,6 +1091,25 @@ export default function PackageManager() {
                 )}
               </tbody>
             </table>
+            {hasMorePackages && (
+              <div className="px-4 py-2.5 bg-[#14141f] border-t border-white/10 flex items-center justify-between text-xs text-gray-300">
+                <span>Showing {visiblePkgCount} of {totalPkgCount} packages</span>
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={loadMorePackages}
+                    className="px-3 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 font-semibold cursor-pointer"
+                  >
+                    Load +200
+                  </button>
+                  <button
+                    onClick={showAllPackages}
+                    className="px-3 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-gray-200 cursor-pointer"
+                  >
+                    Show All
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -1318,6 +1367,13 @@ export default function PackageManager() {
 
               <div className="flex items-center space-x-2">
                 <button
+                  onClick={() => void handlePreviewDependencies(inspectPkg.name, 'remove')}
+                  className="px-3 py-2 rounded-xl text-xs bg-white/10 hover:bg-white/15 text-amber-300 border border-amber-500/30 font-semibold cursor-pointer"
+                  title="Simulate dependency removal without modifying packages"
+                >
+                  Preview Removal
+                </button>
+                <button
                   onClick={() => handleRemovePackage(inspectPkg.name)}
                   className="px-3.5 py-2 rounded-xl text-xs bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 font-semibold"
                 >
@@ -1376,10 +1432,24 @@ export default function PackageManager() {
               </span>
             </div>
 
+            {depPreview && (
+              <div className="bg-black/50 border border-amber-500/30 rounded-xl p-3 max-h-44 overflow-y-auto font-mono text-[11px] text-amber-100 whitespace-pre-wrap">
+                {depPreview.loading ? 'Simulating dependency resolution...' : depPreview.output}
+              </div>
+            )}
+
             <div className="flex justify-end space-x-2 pt-2 border-t border-white/10">
               <button
                 type="button"
-                onClick={() => setShowInstallModal(false)}
+                onClick={() => void handlePreviewDependencies(manualPkgInput, 'install')}
+                disabled={!manualPkgInput.trim()}
+                className="px-3.5 py-2 rounded-xl text-xs bg-white/10 hover:bg-white/15 disabled:opacity-40 text-amber-300 font-semibold cursor-pointer"
+              >
+                Preview Deps
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowInstallModal(false); setDepPreview(null); }}
                 className="px-3.5 py-2 rounded-xl text-xs text-gray-300 hover:text-white hover:bg-white/5 transition-colors cursor-pointer"
               >
                 Cancel

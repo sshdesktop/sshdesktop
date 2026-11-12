@@ -6,7 +6,7 @@ import {
 import SshDesktopLogo from '../components/SshDesktopLogo';
 import { 
   authGetStatus, authLogin, authChangeCredentials, AuthStatusResponse,
-  AUTH_STORAGE_KEY, LEGACY_AUTH_STORAGE_KEY
+  isTauri, AUTH_STORAGE_KEY, LEGACY_AUTH_STORAGE_KEY
 } from '../lib/tauri-bridge';
 
 interface WebAuthGateProps {
@@ -19,6 +19,8 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
   const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [totpCode, setTotpCode] = useState('');
+  const [mfaRequired, setMfaRequired] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -36,9 +38,18 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
   const [isChanging, setIsChanging] = useState(false);
 
   const [sessionExpiredNotice, setSessionExpiredNotice] = useState(false);
+  const [ssoStatus, setSsoStatus] = useState<{ enabled: boolean; provider_name: string } | null>(null);
 
   useEffect(() => {
     let mounted = true;
+    if (!isTauri()) {
+      fetch('/api/sso/status')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (mounted && data?.enabled) setSsoStatus(data);
+        })
+        .catch(() => {});
+    }
     authGetStatus()
       .then((status) => {
         if (!mounted) return;
@@ -49,6 +60,9 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
           setShowChangeModal(true);
         } else if (status.session_expired) {
           setSessionExpiredNotice(true);
+        }
+        if (status.totp_enabled) {
+          setMfaRequired(true);
         }
         if (status.is_first_login) {
           setUsername((prev) => prev || 'admin');
@@ -76,7 +90,7 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
     setIsLoading(true);
 
     try {
-      const res = await authLogin(username.trim(), password);
+      const res = await authLogin(username.trim(), password, totpCode.trim() || undefined);
       if (res.success) {
         const expiresAt = res.expires_at || (Date.now() + 60 * 60 * 1000);
         // Never persist bearer/session tokens in browser storage; web sessions use HttpOnly SameSite=Strict cookies
@@ -101,6 +115,9 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
           onAuthenticated();
         }
       } else {
+        if (res.mfa_required) {
+          setMfaRequired(true);
+        }
         setError(res.message || 'Invalid username or password.');
       }
     } catch (err: any) {
@@ -316,6 +333,28 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
             </div>
           </div>
 
+          {mfaRequired && (
+            <div className="space-y-1.5 animate-in fade-in">
+              <label className="text-xs font-semibold text-gray-300 flex items-center justify-between">
+                <span>Authenticator Code (2FA TOTP)</span>
+                <span className="text-[10px] text-blue-400 font-normal">6-digit code</span>
+              </label>
+              <div className="relative">
+                <ShieldCheck className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-blue-400" />
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={8}
+                  placeholder="000000"
+                  value={totpCode}
+                  onChange={(e) => setTotpCode(e.target.value.replace(/[^0-9\s]/g, ''))}
+                  className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-black/40 border border-blue-500/40 text-white placeholder-gray-500 text-sm tracking-[0.25em] focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all font-mono"
+                />
+              </div>
+            </div>
+          )}
+
           {/* Options Row */}
           <div className="flex items-center justify-between pt-1">
             <label className="flex items-center space-x-2 cursor-pointer text-xs text-gray-300">
@@ -345,6 +384,16 @@ export default function WebAuthGate({ onAuthenticated }: WebAuthGateProps) {
               </>
             )}
           </button>
+
+          {ssoStatus?.enabled && (
+            <a
+              href="/api/sso/start"
+              className="w-full py-2.5 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-white font-semibold text-xs flex items-center justify-center space-x-2 transition-colors"
+            >
+              <ShieldCheck className="w-4 h-4 text-sky-400" />
+              <span>Sign in with {ssoStatus.provider_name || 'OIDC SSO'}</span>
+            </a>
+          )}
         </form>
 
         {/* Footer Info */}

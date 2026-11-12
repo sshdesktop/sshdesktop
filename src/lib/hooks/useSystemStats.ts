@@ -1,26 +1,28 @@
 import { useState, useEffect, useRef } from 'react';
 import { systemGetStats } from '../tauri-api';
 import { SystemStats } from '../types';
-import { useSettingsStore, useTelemetryStore } from '../store';
+import { useSettingsStore, useTelemetryStore, useConnectionStore } from '../store';
 
 export function useSystemStats() {
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [history, setHistory] = useState<SystemStats[]>([]);
   const intervalSeconds = useSettingsStore((s) => s.pollingInterval) || 15;
+  const activeConnectionId = useConnectionStore((s) => s.activeConnectionId);
   const isFetchingRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
+    const controller = new AbortController();
 
     const fetchStats = async () => {
       // Guard: do not poll if document is hidden/minimized or another request is currently in-flight
       if (typeof document !== 'undefined' && document.hidden) return;
-      if (isFetchingRef.current) return;
+      if (isFetchingRef.current || controller.signal.aborted) return;
 
       isFetchingRef.current = true;
       try {
         const current = await systemGetStats();
-        if (mounted && current) {
+        if (mounted && !controller.signal.aborted && current) {
           setStats(current);
           setHistory(prev => [...prev.slice(-30), current]);
 
@@ -37,12 +39,12 @@ export function useSystemStats() {
             ramPct,
             ramUsed: `${(ramUsed / 1024 / 1024 / 1024).toFixed(1)} GB`,
             ramTotal: `${(ramTotal / 1024 / 1024 / 1024).toFixed(1)} GB`,
-            loadAvg: typeof current.load_avg === 'object'
-              ? `${(current.load_avg as any)[0] ?? 0.1}, ${(current.load_avg as any)[1] ?? 0.2}, ${(current.load_avg as any)[2] ?? 0.3}`
-              : '0.1, 0.2, 0.3',
-            uptime: current.uptime_seconds
+            loadAvg: Array.isArray(current.load_avg) && current.load_avg.length >= 3
+              ? `${Number(current.load_avg[0]).toFixed(2)}, ${Number(current.load_avg[1]).toFixed(2)}, ${Number(current.load_avg[2]).toFixed(2)}`
+              : '—',
+            uptime: typeof current.uptime_seconds === 'number' && current.uptime_seconds > 0
               ? `${Math.floor(current.uptime_seconds / 86400)}d ${Math.floor((current.uptime_seconds % 86400) / 3600)}h`
-              : '1d',
+              : '—',
             kernel: current.kernel ? current.kernel.split('-')[0] : 'Linux'
           });
         }
@@ -60,9 +62,10 @@ export function useSystemStats() {
 
     return () => {
       mounted = false;
+      controller.abort();
       clearInterval(id);
     };
-  }, [intervalSeconds]);
+  }, [intervalSeconds, activeConnectionId]);
 
   return { stats, history };
 }

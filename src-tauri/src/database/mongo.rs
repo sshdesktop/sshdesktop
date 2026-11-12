@@ -511,7 +511,7 @@ pub fn relax_to_strict_json(input: &str) -> String {
                 if i < n && chars[i] == quote { i += 1; }
                 while i < n && chars[i] != ')' { i += 1; }
                 if i < n && chars[i] == ')' { i += 1; }
-                out.push_str(&format!("{{\"$oid\":{}}}", serde_json::to_string(oid_str.trim()).map_err(|e| e.to_string())?));
+                out.push_str(&format!("{{\"$oid\":{}}}", serde_json::to_string(oid_str.trim()).unwrap_or_else(|_| format!("\"{}\"", oid_str.trim()))));
                 continue;
             }
         }
@@ -534,7 +534,7 @@ pub fn relax_to_strict_json(input: &str) -> String {
                 if i < n && chars[i] == quote { i += 1; }
                 while i < n && chars[i] != ')' { i += 1; }
                 if i < n && chars[i] == ')' { i += 1; }
-                out.push_str(&format!("{{\"$date\":{}}}", serde_json::to_string(date_str.trim()).map_err(|e| e.to_string())?));
+                out.push_str(&format!("{{\"$date\":{}}}", serde_json::to_string(date_str.trim()).unwrap_or_else(|_| format!("\"{}\"", date_str.trim()))));
                 continue;
             }
         }
@@ -560,9 +560,9 @@ pub fn relax_to_strict_json(input: &str) -> String {
                     i = j;
                     if d_str.trim().is_empty() {
                         let now = chrono::Utc::now().to_rfc3339();
-                        out.push_str(&format!("{{\"$date\":{}}}", serde_json::to_string(&now).map_err(|e| e.to_string())?));
+                        out.push_str(&format!("{{\"$date\":{}}}", serde_json::to_string(&now).unwrap_or_else(|_| format!("\"{}\"", now))));
                     } else {
-                        out.push_str(&format!("{{\"$date\":{}}}", serde_json::to_string(d_str.trim()).map_err(|e| e.to_string())?));
+                        out.push_str(&format!("{{\"$date\":{}}}", serde_json::to_string(d_str.trim()).unwrap_or_else(|_| format!("\"{}\"", d_str.trim()))));
                     }
                     continue;
                 }
@@ -3224,7 +3224,7 @@ mod mongo_input_validation_tests {
     fn rejects_empty_oversized_and_control_character_names() {
         assert!(validate_mongo_name("", "collection name").is_err());
         assert!(validate_mongo_name(&"x".repeat(256), "collection name").is_err());
-        assert!(validate_mongo_name("users\\nadmin", "collection name").is_err());
+        assert!(validate_mongo_name("users\nadmin", "collection name").is_err());
         assert!(validate_mongo_name("users\0admin", "collection name").is_err());
         assert!(validate_mongo_name(" users", "collection name").is_err());
         assert!(validate_mongo_name("users ", "collection name").is_err());

@@ -560,7 +560,7 @@ mod tests {
     #[test]
     fn wildcard_host_options_do_not_leak_into_concrete_hosts() {
         let hosts = parse_ssh_config_content(
-            "Host *.internal\\n    User wildcard-user\\nHost app-prod\\n    HostName 10.0.0.8\\n"
+            "Host *.internal\n    User wildcard-user\nHost app-prod\n    HostName 10.0.0.8\n"
         );
         let app = hosts.iter().find(|host| host.name == "app-prod").unwrap();
         assert_eq!(app.user, None);
@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn first_scalar_host_option_wins_like_openssh() {
         let hosts = parse_ssh_config_content(
-            "Host app-prod\\n    User first-user\\n    User second-user\\n    HostName first.example.com\\n    HostName second.example.com\\n"
+            "Host app-prod\n    User first-user\n    User second-user\n    HostName first.example.com\n    HostName second.example.com\n"
         );
         let app = hosts.iter().find(|host| host.name == "app-prod").unwrap();
         assert_eq!(app.user.as_deref(), Some("first-user"));
@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn first_global_scalar_default_wins() {
         let hosts = parse_ssh_config_content(
-            "User global-first\\nUser global-second\\nHost app-prod\\n    HostName app.example.com\\n"
+            "User global-first\nUser global-second\nHost app-prod\n    HostName app.example.com\n"
         );
         let app = hosts.iter().find(|host| host.name == "app-prod").unwrap();
         assert_eq!(app.user.as_deref(), Some("global-first"));
@@ -609,7 +609,7 @@ mod host_header_tests {
 
     #[test]
     fn host_block_replacement_recognizes_case_and_whitespace() {
-        assert!(is_exact_host_block_header("host\\tprod # managed", "prod"));
+        assert!(is_exact_host_block_header("host\tprod # managed", "prod"));
         assert!(is_exact_host_block_header(" HOST prod ", "prod"));
         assert!(!is_exact_host_block_header("Host prod other", "prod"));
         assert!(!is_exact_host_block_header("HostName prod", "prod"));

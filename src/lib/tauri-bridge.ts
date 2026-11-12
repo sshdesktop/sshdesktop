@@ -1,6 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { UserPrivilegeInfo } from './types';
 export type { UserPrivilegeInfo } from './types';
+import {
+  parseAppError,
+  SshDesktopError,
+  UNIFIED_COMMAND_CONTRACT,
+  type AppErrorCode,
+} from './ipc-contract';
+export { SshDesktopError, parseAppError, UNIFIED_COMMAND_CONTRACT, type AppErrorCode };
 
 export function isTauri(): boolean {
   return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
@@ -80,13 +87,28 @@ export function isConnectionClosed(connId?: string | null): boolean {
   return true;
 }
 
-export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {}, fallback: T): Promise<T> {
+export interface SafeInvokeOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export async function safeInvoke<T>(
+  cmd: string,
+  args: Record<string, any> = {},
+  fallback: T,
+  options?: SafeInvokeOptions,
+): Promise<T> {
+  const effectiveTimeoutMs = options?.timeoutMs ?? UNIFIED_COMMAND_CONTRACT[cmd]?.defaultTimeoutMs ?? 30_000;
+  if (options?.signal?.aborted) {
+    throw new SshDesktopError('CANCELLED', `Command '${cmd}' was cancelled before execution.`, cmd);
+  }
   if (isTauri()) {
     try {
       return await invoke<T>(cmd, args);
     } catch (err: any) {
-      console.error(`[SSH Desktop Tauri] Command '${cmd}' failed:`, err);
-      const errMsg = String(err?.message || err);
+      const typedErr = parseAppError(err, cmd);
+      console.error(`[SSH Desktop Tauri] Command '${cmd}' failed (${typedErr.code}):`, typedErr.message);
+      const errMsg = typedErr.message;
       const isConnectionLoss = 
         errMsg.includes('No active SSH connection') || 
         errMsg.includes('Connection closed') || 
@@ -131,11 +153,15 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
           window.dispatchEvent(new CustomEvent('clouddesk-ssh-disconnected', { detail }));
         }
       }
-      throw err;
+      throw parseAppError(err, cmd);
     }
   }
 
   // Web / Node.js Backend Mode (e.g. running via node server.js on port 2222 or web preview)
+  const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  options?.signal?.addEventListener('abort', onExternalAbort, { once: true });
+  const timeoutHandle = effectiveTimeoutMs > 0 ? setTimeout(() => controller.abort(), effectiveTimeoutMs) : null;
   try {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -146,6 +172,7 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
       method: 'POST',
       credentials: 'same-origin',
       headers,
+      signal: controller.signal,
       body: JSON.stringify({ cmd, args }),
     });
 
@@ -156,13 +183,13 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
           detail: { reason: 'Your session has expired (1 hour limit). Please sign in again.' }
         }));
       }
-      throw new Error('Session expired (1 hour limit). Please sign in again.');
+      throw parseAppError('SESSION_EXPIRED: Your session has expired (1 hour limit). Please sign in again.', cmd, 401);
     }
 
     if (res.ok) {
       const data = await res.json();
       if (data && data.error) {
-        throw new Error(data.error);
+        throw parseAppError(data.error, cmd, res.status);
       }
       return (data ? data.result : fallback) as T;
     } else {
@@ -172,10 +199,17 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
         const jsonErr = JSON.parse(errText);
         parsedMsg = jsonErr.error || errText;
       } catch {}
-      throw new Error(parsedMsg || `HTTP ${res.status}: Failed to invoke '${cmd}'`);
+      throw parseAppError(parsedMsg || `HTTP ${res.status}: Failed to invoke '${cmd}'`, cmd, res.status);
     }
   } catch (err: any) {
-    console.error(`[SSH Desktop Web IPC] Command '${cmd}' failed:`, err);
+    const timedOut = controller.signal.aborted && !options?.signal?.aborted;
+    const typedErr = timedOut
+      ? new SshDesktopError('TIMEOUT', `Command '${cmd}' timed out after ${effectiveTimeoutMs}ms.`, cmd)
+      : parseAppError(err, cmd);
+    console.error(`[SSH Desktop Web IPC] Command '${cmd}' failed:`, typedErr);
+    if (typedErr.code === 'CANCELLED') {
+      throw typedErr;
+    }
     const isReadOnlyFallback =
       cmd.endsWith('_list') ||
       cmd.endsWith('_get') ||
@@ -189,9 +223,12 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {},
       cmd === 'ssh_get_socks5' ||
       cmd === 'store_list_connections';
     if (!isReadOnlyFallback) {
-      throw err;
+      throw typedErr;
     }
     return fallback;
+  } finally {
+    if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+    options?.signal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
@@ -372,8 +409,19 @@ export async function sftpReadFileBase64(connId: string, path: string): Promise<
   return safeInvoke<string>('sftp_read_file_base64', { connId, path }, '');
 }
 
-export async function sftpWriteTextFile(connId: string, path: string, content: string): Promise<void> {
-  return safeInvoke<void>('sftp_write_text_file', { connId, path, content }, undefined);
+export async function sftpWriteTextFile(
+  connId: string,
+  path: string,
+  content: string,
+  expectedHash?: string,
+): Promise<void> {
+  return safeInvoke<void>('sftp_write_text_file', {
+    connId,
+    path,
+    content,
+    expectedHash,
+    expected_hash: expectedHash,
+  }, undefined);
 }
 
 export async function sftpWriteFile(connId: string, path: string, content: number[]): Promise<void> {
@@ -468,8 +516,19 @@ export async function processList(connId: string = 'default'): Promise<any[]> {
   }
 }
 
-export async function processKill(connId: string, pid: number, signal: string): Promise<void> {
-  return safeInvoke<void>('process_kill', { connId, pid, signal }, undefined);
+export async function processKill(
+  connId: string,
+  pid: number,
+  signal: string,
+  expectedName?: string,
+): Promise<void> {
+  return safeInvoke<void>('process_kill', {
+    connId,
+    pid,
+    signal,
+    expectedName,
+    expected_name: expectedName,
+  }, undefined);
 }
 
 export async function processRenice(connId: string, pid: number, value: number): Promise<void> {
@@ -617,6 +676,10 @@ export async function packageRemove(connId: string, name: string): Promise<strin
   return safeInvoke<string>('package_remove', { connId, name }, 'Removed');
 }
 
+export async function packagePreview(connId: string, name: string, action: 'install' | 'remove'): Promise<string> {
+  return safeInvoke<string>('package_preview', { connId, name, action }, '');
+}
+
 export async function packageUpdate(connId: string): Promise<string> {
   return safeInvoke<string>('package_update', { connId }, 'Updated');
 }
@@ -715,6 +778,10 @@ export async function cronAdd(connId: string, schedule: string, command: string)
 
 export async function cronRemove(connId: string, lineNumber: number): Promise<void> {
   return safeInvoke<void>('cron_remove', { connId, lineNumber }, undefined);
+}
+
+export async function cronRollback(connId: string): Promise<string> {
+  return safeInvoke<string>('cron_rollback', { connId }, 'Crontab restored from previous snapshot.');
 }
 
 export async function logsJournal(connId: string, unit?: string, lines: number = 100): Promise<string> {
@@ -1738,6 +1805,7 @@ export interface AuthStatusResponse {
   is_configured: boolean;
   is_authenticated: boolean;
   must_change_password: boolean;
+  totp_enabled?: boolean;
   is_first_login?: boolean;
   initial_credentials_cmd?: string;
   username: string;
@@ -1750,11 +1818,30 @@ export interface AuthStatusResponse {
 export interface AuthActionResult {
   success: boolean;
   must_change_password: boolean;
+  mfa_required?: boolean;
   username: string;
   token?: string;
   expires_at?: number;
   expires_in_seconds?: number;
   message?: string;
+}
+
+export interface TotpSetupResponse {
+  secret: string;
+  otpauth_url: string;
+  totp_enabled: boolean;
+}
+
+export interface ScopedApiToken {
+  id: string;
+  name: string;
+  role: 'admin' | 'operator' | 'read_only';
+  prefix: string;
+  createdAt?: string;
+  created_at?: string;
+  expiresAt?: string | null;
+  expires_at?: string | null;
+  revoked: boolean;
 }
 
 export async function authGetStatus(): Promise<AuthStatusResponse> {
@@ -1771,13 +1858,34 @@ export async function authGetStatus(): Promise<AuthStatusResponse> {
   });
 }
 
-export async function authLogin(username: string, password: string): Promise<AuthActionResult> {
-  return safeInvoke<AuthActionResult>('auth_login', { username, password }, {
+export async function authLogin(username: string, password: string, totpCode?: string): Promise<AuthActionResult> {
+  return safeInvoke<AuthActionResult>('auth_login', {
+    username,
+    password,
+    totpCode: totpCode || undefined,
+    totp_code: totpCode || undefined,
+  }, {
     success: false,
     must_change_password: false,
     username,
     message: 'Authentication unavailable',
   });
+}
+
+export async function authTotpSetup(): Promise<TotpSetupResponse> {
+  return safeInvoke<TotpSetupResponse>('auth_totp_setup', {}, {
+    secret: '',
+    otpauth_url: '',
+    totp_enabled: false,
+  });
+}
+
+export async function authTotpEnable(secret: string, code: string): Promise<boolean> {
+  return safeInvoke<boolean>('auth_totp_enable', { secret, code }, false);
+}
+
+export async function authTotpDisable(password: string, code: string): Promise<boolean> {
+  return safeInvoke<boolean>('auth_totp_disable', { password, code }, false);
 }
 
 export async function authChangeCredentials(currentPassword: string, newUsername: string, newPassword: string): Promise<AuthActionResult> {
@@ -2003,6 +2111,191 @@ export async function backupExportConfig(): Promise<any> {
 
 export async function backupImportConfig(bundle: any): Promise<any> {
   return safeInvoke<any>('backup_import_config', { bundle }, { imported: false });
+}
+
+export async function tokensList(): Promise<ScopedApiToken[]> {
+  return safeInvoke<ScopedApiToken[]>('tokens_list', {}, []);
+}
+
+export async function tokensCreate(
+  name: string,
+  role: 'admin' | 'operator' | 'read_only',
+  expiresInDays?: number,
+): Promise<ScopedApiToken & { token: string }> {
+  return safeInvoke<ScopedApiToken & { token: string }>('tokens_create', {
+    name,
+    role,
+    expiresInDays,
+    expires_in_days: expiresInDays,
+  }, {
+    id: '',
+    name,
+    role,
+    prefix: '',
+    token: '',
+    revoked: false,
+  });
+}
+
+export async function tokensRevoke(id: string): Promise<boolean> {
+  return safeInvoke<boolean>('tokens_revoke', { id }, false);
+}
+
+export async function vaultRotateKey(): Promise<{ rotated: boolean; entriesReencrypted?: number }> {
+  return safeInvoke<{ rotated: boolean; entriesReencrypted?: number }>('vault_rotate_key', {}, { rotated: false });
+}
+
+export interface TeamMember {
+  username: string;
+  role: 'admin' | 'operator' | 'read_only';
+  disabled: boolean;
+  created_at: number;
+  last_login_at?: number | null;
+}
+
+export interface SsoOidcConfig {
+  enabled: boolean;
+  provider_name: string;
+  issuer_url: string;
+  client_id: string;
+  redirect_uri: string;
+  default_role: 'admin' | 'operator' | 'read_only';
+}
+
+export interface CommandApprovalRecord {
+  id: string;
+  action: string;
+  target: string;
+  reason: string;
+  requested_by: string;
+  status: 'pending' | 'approved' | 'rejected';
+  decided_by?: string | null;
+  created_at: string;
+  decided_at?: string | null;
+}
+
+export interface SessionRecordingMeta {
+  id: string;
+  title: string;
+  host: string;
+  bytes: number;
+  created_at: string;
+}
+
+export async function teamList(): Promise<TeamMember[]> {
+  return safeInvoke<TeamMember[]>('team_list', {}, []);
+}
+
+export async function teamAdd(
+  username: string,
+  password: string,
+  role: 'admin' | 'operator' | 'read_only',
+): Promise<TeamMember> {
+  return safeInvoke<TeamMember>('team_add', { username, password, role }, {
+    username,
+    role,
+    disabled: false,
+    created_at: 0,
+  });
+}
+
+export async function teamSetRole(
+  username: string,
+  role: 'admin' | 'operator' | 'read_only',
+  disabled?: boolean,
+): Promise<boolean> {
+  return safeInvoke<boolean>('team_set_role', { username, role, disabled }, false);
+}
+
+export async function teamRemove(username: string): Promise<boolean> {
+  return safeInvoke<boolean>('team_remove', { username }, false);
+}
+
+export async function ssoGetConfig(): Promise<SsoOidcConfig> {
+  return safeInvoke<SsoOidcConfig>('sso_get_config', {}, {
+    enabled: false,
+    provider_name: 'OIDC Identity Provider',
+    issuer_url: '',
+    client_id: '',
+    redirect_uri: '',
+    default_role: 'read_only',
+  });
+}
+
+export async function ssoSetConfig(config: SsoOidcConfig): Promise<SsoOidcConfig> {
+  return safeInvoke<SsoOidcConfig>('sso_set_config', { config, ...config }, config);
+}
+
+export async function approvalRequest(action: string, target: string, reason = ''): Promise<CommandApprovalRecord> {
+  return safeInvoke<CommandApprovalRecord>('approval_request', { action, target, reason }, {
+    id: '',
+    action,
+    target,
+    reason,
+    requested_by: '',
+    status: 'pending',
+    created_at: new Date().toISOString(),
+  });
+}
+
+export async function approvalList(): Promise<CommandApprovalRecord[]> {
+  return safeInvoke<CommandApprovalRecord[]>('approval_list', {}, []);
+}
+
+export async function approvalDecide(
+  id: string,
+  decision: 'approved' | 'rejected',
+): Promise<CommandApprovalRecord | null> {
+  return safeInvoke<CommandApprovalRecord | null>('approval_decide', { id, decision }, null);
+}
+
+export async function recordingsList(): Promise<SessionRecordingMeta[]> {
+  return safeInvoke<SessionRecordingMeta[]>('recordings_list', {}, []);
+}
+
+export async function recordingsSave(
+  title: string,
+  host: string,
+  contentCast: string,
+): Promise<SessionRecordingMeta> {
+  return safeInvoke<SessionRecordingMeta>('recordings_save', {
+    title,
+    host,
+    contentCast,
+    content_cast: contentCast,
+  }, {
+    id: '',
+    title,
+    host,
+    bytes: contentCast.length,
+    created_at: new Date().toISOString(),
+  });
+}
+
+export async function recordingsGet(id: string): Promise<string> {
+  return safeInvoke<string>('recordings_get', { id }, '');
+}
+
+export async function sshRotateServerKey(
+  connId: string,
+  oldPublicKey?: string,
+  filename?: string,
+  comment?: string,
+  passphrase?: string,
+): Promise<GeneratedKeyPair> {
+  return safeInvoke<GeneratedKeyPair>('ssh_rotate_server_key', {
+    connId,
+    oldPublicKey,
+    old_public_key: oldPublicKey,
+    filename,
+    comment,
+    passphrase,
+  }, {
+    private_key_path: '',
+    public_key_path: '',
+    public_key_content: '',
+    fingerprint_sha256: '',
+  });
 }
 
 // ----------------- Centralized Application Lifecycle & Shutdown -----------------

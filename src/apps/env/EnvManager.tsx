@@ -2,10 +2,12 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Variable, Plus, Trash2, Edit3, Search, RefreshCw, Save, ArrowUp, ArrowDown,
   CheckCircle2, AlertTriangle, XCircle, Shield, Folder, Copy, Check, Terminal,
-  Sliders, Info, FileText, Undo2, ExternalLink, HelpCircle, HardDrive, Sparkles
+  Sliders, Info, FileText, Undo2, ExternalLink, HelpCircle, HardDrive, Sparkles,
+  Eye, EyeOff, Download
 } from 'lucide-react';
 import { useConnectionStore } from '../../lib/store';
 import { sshExec, sftpReadTextFile, sftpWriteTextFile, sftpMkdir, sendDesktopNotification } from '../../lib/tauri-bridge';
+import { isSensitiveEnvKey } from '../../lib/security-utils';
 
 const sq = (value: string): string => `'${String(value).replace(/'/g, "'\\''")}'`;
 const escapeEnvDoubleQuoted = (value: string): string =>
@@ -74,6 +76,37 @@ export default function EnvManager() {
   const [scopeFilter, setScopeFilter] = useState<EnvScope>('all');
   const [typeFilter, setTypeFilter] = useState<'all' | 'multipath' | 'single'>('all');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [revealedKeys, setRevealedKeys] = useState<Set<string>>(() => new Set());
+  const toggleRevealKey = (key: string) => {
+    setRevealedKeys(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const handleExportEnvBackup = () => {
+    const payload = {
+      schema: 'sshdesktop-env-backup-v1',
+      exportedAt: new Date().toISOString(),
+      variables: variables.map(v => ({
+        key: v.key,
+        scope: v.scope,
+        sourceFile: v.sourceFile,
+        isSensitive: isSensitiveEnvKey(v.key),
+        value: isSensitiveEnvKey(v.key) ? '[REDACTED_SECRET]' : v.value,
+      })),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `env-backup-sanitized-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Exported sanitized environment backup (secrets redacted)');
+  };
 
   // Path Validations cache { [path: string]: 'exists' | 'missing' | 'file' }
   const [pathStatusMap, setPathStatusMap] = useState<Record<string, 'exists' | 'missing' | 'file'>>({});
@@ -582,6 +615,15 @@ export default function EnvManager() {
           </button>
 
           <button
+            onClick={handleExportEnvBackup}
+            className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-200 border border-white/10 text-xs font-medium flex items-center space-x-1.5 transition-all cursor-pointer"
+            title="Download JSON backup with detected secret values safely redacted"
+          >
+            <Download className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Safe Backup</span>
+          </button>
+
+          <button
             onClick={loadEnvironment}
             disabled={isLoading}
             className={`p-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white transition-colors border border-white/10 ${isLoading ? 'animate-spin text-blue-400' : ''}`}
@@ -736,6 +778,15 @@ export default function EnvManager() {
 
                   {/* Row Actions */}
                   <div className="flex items-center space-x-1.5 shrink-0">
+                    {isSensitiveEnvKey(item.key) && (
+                      <button
+                        onClick={() => toggleRevealKey(item.key)}
+                        className="p-1.5 rounded-xl hover:bg-white/10 text-amber-300 hover:text-amber-200 transition-colors cursor-pointer"
+                        title={revealedKeys.has(item.key) ? 'Mask secret value' : 'Reveal secret value'}
+                      >
+                        {revealedKeys.has(item.key) ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    )}
                     <button
                       onClick={() => {
                         navigator.clipboard.writeText(item.value);
@@ -833,7 +884,9 @@ export default function EnvManager() {
                     </div>
                   ) : (
                     <div className="bg-[#0d0d15] rounded-xl px-3.5 py-2 font-mono text-xs text-gray-300 break-all border border-white/[0.05] select-text">
-                      {item.value || <span className="text-gray-600 italic">(Empty value)</span>}
+                      {isSensitiveEnvKey(item.key) && !revealedKeys.has(item.key) && item.value
+                        ? <span className="text-amber-300/80 tracking-widest">•••••••••••• (masked — click eye to reveal)</span>
+                        : (item.value || <span className="text-gray-600 italic">(Empty value)</span>)}
                     </div>
                   )}
                 </div>

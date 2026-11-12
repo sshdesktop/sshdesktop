@@ -139,6 +139,22 @@ pub async fn cron_list_all(
     Ok(list)
 }
 
+fn build_safe_crontab_update_script(action_cmd: &str) -> String {
+    format!(
+        "LOCK_FILE=\"/tmp/.sshdesktop_cron_$(id -u).lock\"; \
+         BAK_FILE=\"$HOME/.sshdesktop_crontab.bak\"; \
+         run_update() {{ \
+           (crontab -l 2>/dev/null > \"$BAK_FILE\" || true); \
+           {action_cmd}; \
+         }}; \
+         if command -v flock >/dev/null 2>&1; then \
+           (flock -w 5 9 || {{ echo 'CRON_LOCK_TIMEOUT: Concurrent crontab update in progress.' >&2; exit 4; }}; run_update) 9>\"$LOCK_FILE\"; \
+         else \
+           run_update; \
+         fi"
+    )
+}
+
 #[tauri::command]
 pub async fn cron_add(
     state: tauri::State<'_, AppState>,
@@ -146,6 +162,7 @@ pub async fn cron_add(
     schedule: String,
     command: String,
 ) -> Result<(), String> {
+    crate::store::audit::enforce_policy_permission("cron_add")?;
     // Validate schedule fields
     let fields: Vec<&str> = schedule.split_whitespace().collect();
     if fields.len() != 5 {
@@ -163,17 +180,19 @@ pub async fn cron_add(
 
     let new_entry = format!("{} {}", schedule, command);
     let escaped = new_entry.replace('\'', r"'\''");
-    let cmd = format!("(crontab -l 2>/dev/null; printf '%s\\n' '{}') | crontab -", escaped);
+    let update_action = format!("(crontab -l 2>/dev/null; printf '%s\\n' '{}') | crontab -", escaped);
+    let cmd = build_safe_crontab_update_script(&update_action);
 
-    let (_out, code) = run_cmd(&state, &conn_id, &cmd).await;
+    let (out, code) = run_cmd(&state, &conn_id, &cmd).await;
     if code == -1 {
         return Err("No active SSH connection.".into());
     }
     if code != 0 {
-        return Err("Failed to add cron entry.".into());
+        return Err(if out.trim().is_empty() { "Failed to add cron entry.".into() } else { out.trim().to_string() });
     }
 
-    log::info!("SSH Desktop: Added cron: {} {}", schedule, command);
+    crate::store::audit::append_audit_event("cron_add", "desktop-user", &conn_id, "ok", Some(schedule));
+    log::info!("SSH Desktop: Added cron: {}", new_entry);
     Ok(())
 }
 
@@ -183,6 +202,7 @@ pub async fn cron_remove(
     conn_id: String,
     line_number: u32,
 ) -> Result<(), String> {
+    crate::store::audit::enforce_policy_permission("cron_remove")?;
     if line_number == 0 {
         return Err("Invalid line number.".into());
     }
@@ -200,17 +220,59 @@ pub async fn cron_remove(
     if selected.trim().is_empty() || selected.trim().starts_with('#') {
         return Err(format!("Cron line {} is not an active job.", line_number));
     }
+    let expected_escaped = selected.replace('\'', r"'\''");
     let actual_line_num = line_number;
 
-    let cmd = format!("crontab -l 2>/dev/null | sed '{}d' | crontab -", actual_line_num);
-    let (_out, del_code) = run_cmd(&state, &conn_id, &cmd).await;
+    // Compare-and-swap check inside the lock ensures line_number still refers to the same job.
+    let update_action = format!(
+        "CUR=$(crontab -l 2>/dev/null | sed -n '{line}p'); \
+         if [ \"$CUR\" != '{expected}' ]; then \
+           echo 'CRON_CONFLICT: Crontab changed concurrently; refresh before removing.' >&2; exit 5; \
+         fi; \
+         crontab -l 2>/dev/null | sed '{line}d' | crontab -",
+        line = actual_line_num,
+        expected = expected_escaped,
+    );
+    let cmd = build_safe_crontab_update_script(&update_action);
+    let (out, del_code) = run_cmd(&state, &conn_id, &cmd).await;
     if del_code == -1 {
         return Err("No active SSH connection.".into());
     }
     if del_code != 0 {
-        return Err(format!("Failed to remove cron entry #{}", line_number));
+        return Err(if out.trim().is_empty() { format!("Failed to remove cron entry #{}", line_number) } else { out.trim().to_string() });
     }
 
+    crate::store::audit::append_audit_event("cron_remove", "desktop-user", &conn_id, "ok", Some(format!("line={}", actual_line_num)));
     log::info!("SSH Desktop: Removed cron entry at line {}", actual_line_num);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn cron_rollback(
+    state: tauri::State<'_, AppState>,
+    conn_id: String,
+) -> Result<String, String> {
+    crate::store::audit::enforce_policy_permission("cron_rollback")?;
+    let cmd = "BAK=\"$HOME/.sshdesktop_crontab.bak\"; if [ ! -f \"$BAK\" ]; then echo 'No crontab backup snapshot found.' >&2; exit 2; fi; crontab \"$BAK\" && echo 'Crontab restored from previous snapshot.'";
+    let (out, code) = run_cmd(&state, &conn_id, cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+    if code != 0 {
+        return Err(if out.trim().is_empty() { "Failed to restore crontab backup.".into() } else { out.trim().to_string() });
+    }
+    crate::store::audit::append_audit_event("cron_rollback", "desktop-user", &conn_id, "ok", None);
+    Ok(out.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cron_update_script_includes_backup_and_lock() {
+        let script = build_safe_crontab_update_script("crontab -l | crontab -");
+        assert!(script.contains(".sshdesktop_crontab.bak"));
+        assert!(script.contains("flock -w 5"));
+    }
 }

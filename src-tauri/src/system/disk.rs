@@ -1512,3 +1512,23 @@ echo "Successfully updated /tmp space to $SIZE (tmpfs active)."
 
     Ok(stdout.trim().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disk_validation_rejects_traversal_and_host_paths() {
+        assert!(valid_device_path("/dev/sda1"));
+        assert!(valid_device_path("nvme0n1p1"));
+        assert!(!valid_device_path("/etc/passwd"));
+        assert!(!valid_device_path("/dev/../etc/shadow"));
+        assert!(!valid_device_path("/dev/sda1;rm -rf /"));
+        assert!(!valid_device_path(" /dev/sda1 "));
+
+        assert!(valid_absolute_path("/mnt/data"));
+        assert!(!valid_absolute_path("relative/path"));
+        assert!(!valid_absolute_path("/mnt/bad\nline"));
+        assert_eq!(fstab_escape("/mnt/my data#1"), "/mnt/my\\040data\\0431");
+    }
+}

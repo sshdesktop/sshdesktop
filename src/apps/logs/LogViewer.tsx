@@ -9,6 +9,7 @@ import { logsJournal, logsFile, logsDmesg, sshExec } from '../../lib/tauri-bridg
 import { useConnectionStore } from '../../lib/store';
 import { useUserPrivilege } from '../../lib/permissions';
 import PermissionAlertBanner from '../../components/PermissionAlertBanner';
+import { redactSensitiveLogText } from '../../lib/security-utils';
 
 interface LogEntry {
   id: string;
@@ -41,6 +42,8 @@ const PRESET_SOURCES: LogSourceItem[] = [
   { id: 'docker', name: 'Docker Daemon Service', category: 'services', icon: Layers, unit: 'docker', desc: 'Container engine startup and execution logs' },
   { id: 'cron', name: 'Cron Scheduled Jobs', category: 'services', icon: ScrollText, unit: 'cron', desc: 'Automated crontab execution history' },
 ];
+
+const MAX_LOG_LINES = 5000;
 
 function parseLogLine(line: string, idx: number): LogEntry {
   const trimmed = line.trim();
@@ -105,6 +108,7 @@ export default function LogViewer() {
   const [search, setSearch] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
   const [tailLines, setTailLines] = useState<number>(200);
+  const [redactSecrets, setRedactSecrets] = useState<boolean>(true);
   const [loading, setLoading] = useState(false);
   const [copiedNotification, setCopiedNotification] = useState(false);
 
@@ -141,7 +145,8 @@ export default function LogViewer() {
 
       if (raw && raw.trim().length > 0) {
         const lines = raw.trim().split('\n').filter(Boolean);
-        const parsed = lines.slice(-tailLines).map((l, i) => parseLogLine(l, i));
+        const cap = Math.min(tailLines, MAX_LOG_LINES);
+        const parsed = lines.slice(-cap).map((l, i) => parseLogLine(l, i));
         setLogs(parsed);
       } else if (!raw) {
         setLogs([]);
@@ -205,7 +210,8 @@ export default function LogViewer() {
 
   // Export Log File
   const handleExportLogs = () => {
-    const textContent = filtered.map(l => `[${l.timestamp}] [${l.level.toUpperCase()}] ${l.subsystem}${l.pid ? `[${l.pid}]` : ''}: ${l.message}`).join('\n');
+    const fmt = (s: string) => (redactSecrets ? redactSensitiveLogText(s) : s);
+    const textContent = filtered.map(l => `[${l.timestamp}] [${l.level.toUpperCase()}] ${l.subsystem}${l.pid ? `[${l.pid}]` : ''}: ${fmt(l.message)}`).join('\n');
     const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -219,7 +225,7 @@ export default function LogViewer() {
 
   // Copy Selected Log
   const handleCopyLog = (text: string) => {
-    navigator.clipboard.writeText(text);
+    navigator.clipboard.writeText(redactSecrets ? redactSensitiveLogText(text) : text);
     setCopiedNotification(true);
     setTimeout(() => setCopiedNotification(false), 2000);
   };
@@ -345,7 +351,21 @@ export default function LogViewer() {
             <option value={200}>200 lines</option>
             <option value={500}>500 lines</option>
             <option value={1000}>1000 lines</option>
+            <option value={2000}>2000 lines</option>
           </select>
+
+          <button
+            onClick={() => setRedactSecrets(prev => !prev)}
+            className={`flex items-center space-x-1 px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-all cursor-pointer ${
+              redactSecrets
+                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                : 'bg-white/5 text-gray-400 border-white/10'
+            }`}
+            title="Mask bearer tokens, passwords, AWS keys, and private keys in log display and exports"
+          >
+            <Shield className="w-3.5 h-3.5" />
+            <span>{redactSecrets ? 'Secrets Redacted' : 'Raw Unredacted'}</span>
+          </button>
 
           {/* Export / Download */}
           <button
@@ -563,7 +583,7 @@ export default function LogViewer() {
                             ? 'text-amber-200' 
                             : 'text-gray-300'
                         }`}>
-                          {log.message}
+                          {redactSecrets ? redactSensitiveLogText(log.message) : log.message}
                         </td>
                       </tr>
                     );
@@ -611,7 +631,7 @@ export default function LogViewer() {
 
               {/* Raw Log Detail Payload */}
               <div className="flex-1 bg-[#0a0a0f] p-3 rounded-xl border border-white/5 font-mono text-xs text-gray-300 overflow-y-auto whitespace-pre-wrap select-text leading-relaxed">
-                {selectedLog.raw}
+                {redactSecrets ? redactSensitiveLogText(selectedLog.raw) : selectedLog.raw}
               </div>
             </div>
           )}

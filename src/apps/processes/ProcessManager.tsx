@@ -10,6 +10,8 @@ import {
 import { processList, processKill, processRenice, sshExec, systemGetStats } from '../../lib/tauri-bridge';
 import { useConnectionStore, useEditorStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
+import { useCancellableSshRequest } from '../../lib/hooks/useCancellableSshRequest';
+import { useWindowedList } from '../../lib/hooks/useWindowedList';
 import { PortalContextMenu } from '../../components/PortalContextMenu';
 
 interface ProcessRow {
@@ -84,17 +86,22 @@ export default function ProcessManager() {
   const currentUsername = activeServer?.username || 'root';
   const { openApp } = useWindowManager();
   const { runTerminalCommand } = useEditorStore();
+  const { runCancellable } = useCancellableSshRequest(activeConnId);
 
   const loadProcesses = useCallback(async () => {
     if (isFetchingRef.current || (typeof document !== 'undefined' && document.hidden)) return;
     isFetchingRef.current = true;
     setIsLoading(true);
     try {
-      // Run ps -eo pid,ppid,user,%cpu,%mem,vsz,rss,stat,start,comm,args alongside system stats
-      const [list, stats] = await Promise.all([
-        processList(activeConnId).catch(() => []),
-        systemGetStats(activeConnId).catch(() => null)
-      ]);
+      const batch = await runCancellable(async () => {
+        const [list, stats] = await Promise.all([
+          processList(activeConnId).catch(() => []),
+          systemGetStats(activeConnId).catch(() => null),
+        ]);
+        return { list, stats };
+      });
+      if (!batch) return;
+      const { list, stats } = batch;
       if (stats) {
         setSystemStats(stats);
       }
@@ -128,7 +135,7 @@ export default function ProcessManager() {
       setIsLoading(false);
       isFetchingRef.current = false;
     }
-  }, [activeConnId]);
+  }, [activeConnId, runCancellable]);
 
   useEffect(() => {
     loadProcesses();
@@ -200,9 +207,10 @@ export default function ProcessManager() {
   const handleSignal = async (pid: number, signal: string, label: string) => {
     setContextMenu(null);
     setShowQuitModal(null);
+    const targetProc = processes.find(p => p.pid === pid);
     try {
       if (signal === 'TERM' || signal === 'KILL') {
-        await processKill(activeConnId, pid, signal);
+        await processKill(activeConnId, pid, signal, targetProc?.name);
       } else {
         await sshExec(activeConnId, `kill -${signal} ${pid}`);
       }
@@ -292,6 +300,15 @@ export default function ProcessManager() {
     roots.forEach(r => traverse(r, 0));
     return flattened;
   }, [filtered, viewLayout, sortBy, sortAsc]);
+
+  const {
+    visibleItems: windowedProcesses,
+    hasMore: hasMoreProcesses,
+    visibleCount: visibleProcessCount,
+    totalCount: totalProcessCount,
+    loadMore: loadMoreProcesses,
+    showAll: showAllProcesses,
+  } = useWindowedList(treeSorted, 200, 200, `${activeConnId}:${viewLayout}:${search}`);
 
   // Aggregate Metrics for macOS Gauges
   const totalCpuUsage = useMemo(() => {
@@ -537,7 +554,7 @@ export default function ProcessManager() {
                   </td>
                 </tr>
               ) : (
-                treeSorted.map((proc, index) => {
+                windowedProcesses.map((proc, index) => {
                   const isSelected = selectedPid === proc.pid;
                   const isZebra = index % 2 === 1;
                   const isHighCpu = proc.cpu > 15;
@@ -621,6 +638,25 @@ export default function ProcessManager() {
               )}
             </tbody>
           </table>
+          {hasMoreProcesses && (
+            <div className="px-4 py-2 bg-[#14141f] border-t border-white/10 flex items-center justify-between text-xs text-gray-300">
+              <span>Showing {visibleProcessCount} of {totalProcessCount} processes</span>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={loadMoreProcesses}
+                  className="px-3 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 font-semibold cursor-pointer"
+                >
+                  Load +200
+                </button>
+                <button
+                  onClick={showAllProcesses}
+                  className="px-3 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-gray-200 cursor-pointer"
+                >
+                  Show All
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* macOS Activity Monitor Live Bottom Dashboard with Animated Visual Gauges */}

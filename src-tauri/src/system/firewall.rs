@@ -536,11 +536,29 @@ pub async fn firewall_add_rule_advanced(
     };
 
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
     if code != 0 {
         return Err(format!("Failed to add rule (code {}): {}", code, stdout.trim()));
     }
 
-    Ok(format!("Rule successfully added: {} {} {}", action.to_uppercase(), port, proto))
+    // Read back active firewall state after mutation to confirm enforcement
+    let verify_cmd = match fw {
+        "firewalld" => "firewall-cmd --list-ports --list-services 2>&1",
+        "ufw" => "ufw status | head -n 15 2>&1",
+        _ => "iptables -L INPUT -n --line-numbers | head -n 15 2>&1",
+    };
+    let (verify_out, _) = run_cmd_priv(&state, &conn_id, verify_cmd).await;
+    crate::store::audit::append_audit_event(
+        "firewall_add_rule",
+        "desktop-user",
+        &conn_id,
+        "ok",
+        Some(format!("backend={} action={} port={}/{}", fw, action, port, proto)),
+    );
+
+    Ok(format!("Rule added ({} {} {}); verified state:\n{}", action.to_uppercase(), port, proto, verify_out.trim()))
 }
 
 #[tauri::command]
@@ -634,11 +652,27 @@ pub async fn firewall_delete_rule_advanced(
     };
 
     let (stdout, code) = run_cmd_priv(&state, &conn_id, &cmd).await;
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
     if code != 0 {
         return Err(format!("Rule delete failed: {}", stdout.trim()));
     }
+    let verify_cmd = match fw {
+        "firewalld" => "firewall-cmd --list-ports --list-services 2>&1",
+        "ufw" => "ufw status | head -n 15 2>&1",
+        _ => "iptables -L INPUT -n --line-numbers | head -n 15 2>&1",
+    };
+    let (verify_out, _) = run_cmd_priv(&state, &conn_id, verify_cmd).await;
+    crate::store::audit::append_audit_event(
+        "firewall_delete_rule",
+        "desktop-user",
+        &conn_id,
+        "ok",
+        Some(format!("backend={} rule={}", fw, rule_number)),
+    );
 
-    Ok("Firewall rule successfully deleted.".to_string())
+    Ok(format!("Firewall rule deleted; verified state:\n{}", verify_out.trim()))
 }
 
 #[tauri::command]
@@ -663,13 +697,13 @@ pub async fn firewall_toggle(
         ("ufw", false) => "ufw disable 2>&1 && ufw status | head -n 1",
         ("firewalld", true) => "systemctl enable --now firewalld 2>&1 && firewall-cmd --state 2>&1",
         ("firewalld", false) => "systemctl stop firewalld 2>&1 && (firewall-cmd --state 2>&1 || echo 'not running')",
-        ("nftables", true) => "systemctl enable --now nftables 2>&1 && nft list tables 2>&1",
-        ("nftables", false) => "systemctl stop nftables 2>&1",
+        ("nftables", true) => "systemctl enable --now nftables 2>&1 && systemctl is-active nftables 2>&1 && nft list tables 2>&1",
+        ("nftables", false) => "systemctl stop nftables 2>&1 && (systemctl is-active nftables 2>&1 || true)",
         ("iptables", true) => {
-            "if systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl enable --now iptables 2>&1; elif systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then systemctl enable --now netfilter-persistent 2>&1; else echo 'Raw iptables has no unified service daemon on this host; install ufw/firewalld or manage rules directly.' >&2; exit 1; fi"
+            "if systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl enable --now iptables 2>&1 && systemctl is-active iptables 2>&1; elif systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then systemctl enable --now netfilter-persistent 2>&1 && systemctl is-active netfilter-persistent 2>&1; else echo 'Raw iptables has no unified service daemon on this host; install ufw/firewalld or manage rules directly.' >&2; exit 1; fi"
         }
         ("iptables", false) => {
-            "if systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl stop iptables 2>&1; elif systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then systemctl stop netfilter-persistent 2>&1; else echo 'Raw iptables cannot be safely disabled via service stop; manage chains explicitly.' >&2; exit 1; fi"
+            "if systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl stop iptables 2>&1 && (systemctl is-active iptables 2>&1 || true); elif systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then systemctl stop netfilter-persistent 2>&1 && (systemctl is-active netfilter-persistent 2>&1 || true); else echo 'Raw iptables cannot be safely disabled via service stop; manage chains explicitly.' >&2; exit 1; fi"
         }
         _ => return Err("No supported firewall backend (ufw, firewalld, nftables, iptables) is installed.".into()),
     };
@@ -684,6 +718,25 @@ pub async fn firewall_toggle(
             "Failed to {} {} firewall: {}",
             if enable { "enable" } else { "disable" },
             fw,
+            stdout.trim()
+        ));
+    }
+    // Verify active state rather than trusting command exit alone
+    let lower_out = stdout.to_lowercase();
+    let verified = match (fw, enable) {
+        ("ufw", true) => lower_out.contains("status: active"),
+        ("ufw", false) => lower_out.contains("inactive"),
+        ("firewalld", true) => lower_out.contains("running") && !lower_out.contains("not running"),
+        ("firewalld", false) => lower_out.contains("not running"),
+        ("nftables", true) | ("iptables", true) => lower_out.lines().any(|l| l.trim() == "active"),
+        ("nftables", false) | ("iptables", false) => !lower_out.lines().any(|l| l.trim() == "active"),
+        _ => false,
+    };
+    if !verified {
+        return Err(format!(
+            "Firewall {} toggle did not reach expected '{}' state; observed: {}",
+            fw,
+            if enable { "active" } else { "inactive" },
             stdout.trim()
         ));
     }
@@ -845,4 +898,27 @@ pub async fn firewall_reload(
         return Err(format!("Failed to reload {} firewall: {}", fw, stdout.trim()));
     }
     Ok(format!("{} firewall rules reloaded successfully.", fw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn firewall_validation_accepts_ports_services_and_cidrs_and_rejects_injection() {
+        assert!(valid_firewall_port_or_service("22"));
+        assert!(valid_firewall_port_or_service("443"));
+        assert!(valid_firewall_port_or_service("https"));
+        assert!(!valid_firewall_port_or_service("0"));
+        assert!(!valid_firewall_port_or_service("22;id"));
+        assert!(!valid_firewall_port_or_service(""));
+
+        assert!(valid_zone("public"));
+        assert!(!valid_zone("public && id"));
+
+        assert!(valid_ip_or_cidr("10.0.0.0/8"));
+        assert!(valid_ip_or_cidr("2001:db8::/32"));
+        assert!(!valid_ip_or_cidr("10.0.0.1/99"));
+        assert!(!valid_ip_or_cidr("1.2.3.4;whoami"));
+    }
 }

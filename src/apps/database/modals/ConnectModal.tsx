@@ -26,7 +26,7 @@ interface ConnectModalProps {
   initialProfile?: DbConnectionProfile | null;
 }
 
-const UNIMPLEMENTED_ENGINES = new Set<DbEngine>(['oracle', 'dynamodb', 'cosmos', 'cassandra', 'db2']);
+const UNIMPLEMENTED_ENGINES = new Set<DbEngine>(['oracle', 'db2']);
 
 const ENGINE_DEFAULTS: Record<DbEngine, { port: number; user: string; db: string; label: string; icon: string }> = {
   postgresql: { port: 5432, user: 'postgres', db: 'postgres', label: 'PostgreSQL', icon: '🐘' },
@@ -36,11 +36,11 @@ const ENGINE_DEFAULTS: Record<DbEngine, { port: number; user: string; db: string
   mssql: { port: 1433, user: 'sa', db: 'master', label: 'SQL Server (MSSQL)', icon: '🏢' },
   mongodb: { port: 27017, user: 'admin', db: 'admin', label: 'MongoDB', icon: '🍃' },
   redis: { port: 6379, user: 'default', db: '0', label: 'Redis', icon: '⚡' },
-  oracle: { port: 1521, user: 'SYSTEM', db: 'ORCL', label: 'Oracle (Planned)', icon: '🏛️' },
-  dynamodb: { port: 8000, user: '', db: 'default', label: 'DynamoDB (Planned)', icon: '📦' },
-  cosmos: { port: 443, user: '', db: 'cosmos-db', label: 'Cosmos DB (Planned)', icon: '🪐' },
-  cassandra: { port: 9042, user: 'cassandra', db: 'system', label: 'Cassandra (Planned)', icon: '👁️' },
-  db2: { port: 50000, user: 'db2inst1', db: 'SAMPLE', label: 'IBM DB2 (Planned)', icon: '🔷' },
+  oracle: { port: 1521, user: 'SYSTEM', db: 'ORCL', label: 'Oracle (SDK Req.)', icon: '🏛️' },
+  dynamodb: { port: 8000, user: '', db: 'default', label: 'DynamoDB', icon: '📦' },
+  cosmos: { port: 443, user: '', db: 'cosmos-db', label: 'Cosmos DB', icon: '🪐' },
+  cassandra: { port: 9042, user: 'cassandra', db: 'system', label: 'Cassandra', icon: '👁️' },
+  db2: { port: 50000, user: 'db2inst1', db: 'SAMPLE', label: 'IBM DB2 (CLI Req.)', icon: '🔷' },
 };
 
 export const ConnectModal: React.FC<ConnectModalProps> = ({

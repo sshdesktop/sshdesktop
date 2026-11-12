@@ -319,7 +319,12 @@ fn parse_ls_output(clean_path: &str, stdout: &str) -> Vec<FileEntry> {
             }
 
             // For symlinks "name -> target", keep just the name and strip any surrounding quotes added by ls
-            let raw_target = raw_name.split(" -> ").next().unwrap_or(&raw_name).trim();
+            let is_symlink_line = parts[0].starts_with('l');
+            let raw_target = if is_symlink_line {
+                raw_name.split(" -> ").next().unwrap_or(&raw_name).trim()
+            } else {
+                raw_name.trim_end_matches('\r')
+            };
             let display_name = if (raw_target.starts_with('\'') && raw_target.ends_with('\'') && raw_target.len() >= 2)
                 || (raw_target.starts_with('"') && raw_target.ends_with('"') && raw_target.len() >= 2)
             {
@@ -1110,6 +1115,18 @@ mod tests {
         assert_eq!(entries[0].modified, 1700000100);
         assert!(entries[1].is_symlink);
         assert_eq!(entries[1].name, "my link");
+    }
+
+    #[test]
+    fn ls_fallback_preserves_quotes_unicode_and_trailing_spaces() {
+        let ls_out = "-rw-r--r-- 1 user group 42 1700000300 résumé (2026) $report .txt \n\
+                      drwxr-xr-x 1 user group 4096 1700000400 \"quoted \\\"dir\\\"\" \n";
+        let entries = parse_ls_output("/srv/data", ls_out);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "résumé (2026) $report .txt ");
+        assert_eq!(entries[0].path, "/srv/data/résumé (2026) $report .txt ");
+        assert!(entries[1].is_dir);
+        assert!(entries[1].name.contains("quoted"));
     }
 }
 

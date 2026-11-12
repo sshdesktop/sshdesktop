@@ -10,7 +10,7 @@ import {
   ShieldAlert, Sparkles, Cpu, FolderKey
 } from 'lucide-react';
 import { 
-  sshTestConnection, sshLaunchPutty, pickKeyFile, storeListConnections,
+  isTauri, sshTestConnection, sshLaunchPutty, pickKeyFile, storeListConnections,
   sshConfigReadHosts, sshConfigSaveHost, sshConfigGetPath,
   sshVerifyHostKey, sshTrustHostKey,
   sshGenerateKeyPair, sshListLocalKeys, sshInstallPublicKey,
@@ -1053,6 +1053,10 @@ export default function ConnectionScreen() {
                 <div className="my-1 border-t border-white/10 mx-2" />
                 <div 
                   onClick={() => {
+                    if (!isTauri()) {
+                      window.alert('Native PuTTY launch requires the SSH Desktop Windows application; use the built-in browser SSH terminal here.');
+                      return;
+                    }
                     const hostToLaunch = host || selectedConn?.host;
                     if (hostToLaunch) sshLaunchPutty(selectedConn?.id || 'default');
                   }}
@@ -1948,12 +1952,16 @@ export default function ConnectionScreen() {
         <div className="flex items-center space-x-5">
           <button
             onClick={() => {
+              if (!isTauri()) {
+                window.alert('Native PuTTY launch requires the SSH Desktop Windows application; use the built-in browser SSH terminal here.');
+                return;
+              }
               if (selectedConn?.host) {
                 sshLaunchPutty(selectedConn.id);
               }
             }}
             className="flex items-center space-x-1 hover:text-white transition-colors"
-            title="Open native PuTTY terminal"
+            title={isTauri() ? 'Open native PuTTY terminal' : 'Native PuTTY terminal (Desktop app only)'}
           >
             <Terminal className="w-3 h-3 text-emerald-400" />
             <span>PuTTY Terminal</span>

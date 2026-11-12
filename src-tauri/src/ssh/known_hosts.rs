@@ -549,4 +549,28 @@ mod tests {
         assert_eq!(status, "unsupported_cert_authority");
         assert!(msg.contains("@cert-authority"));
     }
+
+    #[test]
+    fn revoked_marker_and_custom_port_are_enforced() {
+        let content = "@revoked [bastion.internal]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRevokedKey\n\
+                       [bastion.internal]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITrustedKey\n";
+        let (revoked_status, revoked_msg, _) = evaluate_known_hosts_content(
+            content,
+            "bastion.internal",
+            2222,
+            "ssh-ed25519",
+            "AAAAC3NzaC1lZDI1NTE5AAAAIRevokedKey",
+        );
+        assert_eq!(revoked_status, "changed");
+        assert!(revoked_msg.to_ascii_lowercase().contains("revoked"));
+
+        let (ok_status, _, _) = evaluate_known_hosts_content(
+            content,
+            "bastion.internal",
+            2222,
+            "ssh-ed25519",
+            "AAAAC3NzaC1lZDI1NTE5AAAAITrustedKey",
+        );
+        assert_eq!(ok_status, "trusted");
+    }
 }
