@@ -1280,6 +1280,7 @@ pub async fn execute_mongodb_single_command(
                 return Err("createCollection requires collection name, e.g. db.createCollection(\"name\")".to_string());
             }
             let coll_name = args[0].trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
+            validate_mongo_name(coll_name, "collection name")?;
             let mut cmd = mongodb::bson::Document::new();
             cmd.insert("create", coll_name);
             if args.len() >= 2 && !args[1].trim().is_empty() {
@@ -1305,6 +1306,8 @@ pub async fn execute_mongodb_single_command(
             }
             let view_name = args[0].trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
             let view_on = args[1].trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
+            validate_mongo_name(view_name, "view name")?;
+            validate_mongo_name(view_on, "collection name")?;
             let pipeline_json = relax_to_strict_json(&args[2]);
             let pipeline_val: serde_json::Value = serde_json::from_str(&pipeline_json)
                 .map_err(|e| format!("Invalid createView pipeline: {}", e))?;
@@ -1338,6 +1341,7 @@ pub async fn execute_mongodb_single_command(
                 return Err("validateCollection requires collection name, e.g. db.validateCollection(\"name\")".to_string());
             }
             let target_coll = args[0].trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
+            validate_mongo_name(target_coll, "collection name")?;
             let mut cmd = mongodb::bson::Document::new();
             cmd.insert("validate", target_coll);
             if args.len() >= 2 && !args[1].trim().is_empty() {
@@ -1636,11 +1640,13 @@ pub async fn execute_mongodb_single_command(
         if coll_name.is_empty() {
             return Err("MongoDB collection name could not be determined".to_string());
         }
+        validate_mongo_name(&coll_name, "collection name")?;
 
         let methods = parse_method_calls(rest);
         if methods.is_empty() {
             let coll = client.database(database_name).collection::<mongodb::bson::Document>(&coll_name);
-            let find_opts = mongodb::options::FindOptions::builder().limit(Some(limit_override as i64)).build();
+            let find_opts = mongodb::options::FindOptions::builder()
+                .limit(Some(limit_override.clamp(1, 10_000) as i64)).build();
             let mut cursor = coll.find(None, find_opts).await.map_err(|e| format!("MongoDB error: {}", e))?;
             return collect_mongo_cursor_results(&mut cursor, "MongoDB Find", start, server_version, limit_override).await;
         }
@@ -1661,14 +1667,20 @@ pub async fn execute_mongodb_single_command(
                 for (m_name, m_args) in &methods[1..] {
                     match m_name.as_str() {
                         "limit" => {
-                            if let Ok(l) = m_args.trim().parse::<i64>() {
-                                limit = l.clamp(1, 10_000);
+                            let parsed = m_args.trim().parse::<i64>()
+                                .map_err(|_| "MongoDB limit() requires an integer.".to_string())?;
+                            if parsed <= 0 {
+                                return Err("MongoDB limit() must be greater than zero.".into());
                             }
+                            limit = parsed.clamp(1, 10_000);
                         }
                         "skip" => {
-                            if let Ok(s) = m_args.trim().parse::<u64>() {
-                                skip = Some(s);
+                            let parsed = m_args.trim().parse::<u64>()
+                                .map_err(|_| "MongoDB skip() requires a non-negative integer.".to_string())?;
+                            if parsed > 1_000_000_000 {
+                                return Err("MongoDB skip value exceeds the supported limit.".into());
                             }
+                            skip = Some(parsed);
                         }
                         "sort" => {
                             if let Ok(s_doc) = parse_relaxed_document(m_args) {
@@ -1806,6 +1818,9 @@ pub async fn execute_mongodb_single_command(
                     return Err("distinct requires field name argument, e.g. distinct(\"field\")".to_string());
                 }
                 let field = args[0].trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
+                if field.is_empty() || field.len() > 1024 || field.chars().any(|c| c.is_control()) {
+                    return Err("MongoDB distinct field must be 1–1024 bytes and contain no control characters.".into());
+                }
                 let filter_doc = if args.len() > 1 && !args[1].trim().is_empty() {
                     Some(parse_relaxed_document(&args[1])?)
                 } else {
@@ -1869,7 +1884,10 @@ pub async fn execute_mongodb_single_command(
                 let val: serde_json::Value = serde_json::from_str(&strict)
                     .map_err(|e| format!("Invalid MongoDB insertMany array: {}", e))?;
                 let docs = if let serde_json::Value::Array(items) = val {
-                    let mut docs = Vec::new();
+                    if items.is_empty() || items.len() > 1_000 {
+                        return Err("MongoDB insertMany requires between 1 and 1000 documents.".into());
+                    }
+                    let mut docs = Vec::with_capacity(items.len());
                     for item in items {
                         docs.push(json_to_bson_document(item)?);
                     }
@@ -1925,6 +1943,9 @@ pub async fn execute_mongodb_single_command(
                     return Err("updateOne requires (filter, update) arguments".to_string());
                 }
                 let filter_doc = parse_relaxed_document(&args[0])?;
+                if filter_doc.is_empty() {
+                    return Err("MongoDB updateOne requires a non-empty filter.".into());
+                }
                 let update_doc = parse_relaxed_document(&args[1])?;
                 let res = coll.update_one(filter_doc, update_doc, None).await.map_err(|e| format!("MongoDB updateOne error: {}", e))?;
                 return Ok(QueryResult {
@@ -1969,6 +1990,9 @@ pub async fn execute_mongodb_single_command(
                     return Err("updateMany requires (filter, update) arguments".to_string());
                 }
                 let filter_doc = parse_relaxed_document(&args[0])?;
+                if filter_doc.is_empty() {
+                    return Err("MongoDB updateMany requires a non-empty filter to prevent accidental full-collection updates.".into());
+                }
                 let update_doc = parse_relaxed_document(&args[1])?;
                 let res = coll.update_many(filter_doc, update_doc, None).await.map_err(|e| format!("MongoDB updateMany error: {}", e))?;
                 return Ok(QueryResult {
@@ -2053,6 +2077,9 @@ pub async fn execute_mongodb_single_command(
 
             "deleteOne" => {
                 let filter_doc = parse_relaxed_document(primary_args)?;
+                if filter_doc.is_empty() {
+                    return Err("MongoDB deleteOne requires a non-empty filter.".into());
+                }
                 let res = coll.delete_one(filter_doc, None).await.map_err(|e| format!("MongoDB deleteOne error: {}", e))?;
                 return Ok(QueryResult {
                     columns: vec![ColumnMeta {
@@ -2079,6 +2106,9 @@ pub async fn execute_mongodb_single_command(
 
             "deleteMany" => {
                 let filter_doc = parse_relaxed_document(primary_args)?;
+                if filter_doc.is_empty() {
+                    return Err("MongoDB deleteMany requires a non-empty filter to prevent accidental full-collection deletion.".into());
+                }
                 let res = coll.delete_many(filter_doc, None).await.map_err(|e| format!("MongoDB deleteMany error: {}", e))?;
                 return Ok(QueryResult {
                     columns: vec![ColumnMeta {
@@ -2204,6 +2234,15 @@ pub async fn execute_mongodb_single_command(
                     serde_json::Value::Array(arr) => arr,
                     _ => return Err("bulkWrite operations must be an array".to_string()),
                 };
+                if ops.is_empty() || ops.len() > 1_000 {
+                    return Err("MongoDB bulkWrite requires between 1 and 1000 operations.".into());
+                }
+                for (idx, op) in ops.iter().enumerate() {
+                    let map = op.as_object().ok_or_else(|| format!("Bulk operation {} must be an object.", idx))?;
+                    if map.len() != 1 {
+                        return Err(format!("Bulk operation {} must contain exactly one operation.", idx));
+                    }
+                }
 
                 let mut inserted_count = 0u64;
                 let mut matched_count = 0u64;
@@ -2248,6 +2287,10 @@ pub async fn execute_mongodb_single_command(
                                 }
                                 "updateMany" => {
                                     let filter = op_body.get("filter").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                                    if filter.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+                                        errors.push(format!("Op {}: updateMany requires a non-empty filter.", idx));
+                                        continue;
+                                    }
                                     let update = op_body.get("update").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                                     let upsert = op_body.get("upsert").and_then(|v| v.as_bool()).unwrap_or(false);
                                     let opts = mongodb::options::UpdateOptions::builder().upsert(Some(upsert)).build();
@@ -2277,6 +2320,10 @@ pub async fn execute_mongodb_single_command(
                                 }
                                 "deleteMany" => {
                                     let filter = op_body.get("filter").cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                                    if filter.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+                                        errors.push(format!("Op {}: deleteMany requires a non-empty filter.", idx));
+                                        continue;
+                                    }
                                     match json_to_bson_document(filter) {
                                         Ok(f) => match coll.delete_many(f, None).await {
                                             Ok(res) => deleted_count += res.deleted_count,
@@ -2528,9 +2575,9 @@ pub async fn execute_mongodb_single_command(
     // 7. Try parsing as relaxed JSON document command as final fallback
     if let Ok(doc_cmd) = parse_relaxed_document(&clean) {
         let db = client.database(database_name);
-        if let Ok(res) = db.run_command(doc_cmd, None).await {
-            return unpack_mongo_command_result(res, "MongoDB Command", start, server_version);
-        }
+        let res = db.run_command(doc_cmd, None).await
+            .map_err(|e| format!("MongoDB command failed: {}", e))?;
+        return unpack_mongo_command_result(res, "MongoDB Command", start, server_version);
     }
 
     Err(format!(
