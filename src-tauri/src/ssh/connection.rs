@@ -1141,7 +1141,7 @@ pub async fn ssh_get_user_privilege(
     // 3. Probe the actual remote identity. Never infer UID/GID or privileges
     // from the configured SSH username when the remote command fails.
     // set -e ensures a failed id command cannot be hidden by a later printf.
-    let probe_script = r#"set -e; id -u; id -g; id -un; id -Gn; printf '%s\\n' "$HOME""#;
+    let probe_script = r#"set -e; id -u; id -g; id -un; id -Gn; printf '%s\n' "$HOME""#;
     let (stdout, probe_code) = crate::ssh::exec::run_cmd(&state, &conn_id, probe_script).await;
     if probe_code != 0 {
         return Err("Could not verify the remote user identity; privilege detection was stopped.".into());
