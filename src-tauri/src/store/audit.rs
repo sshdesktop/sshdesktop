@@ -270,6 +270,7 @@ pub fn check_policy_permission_for_role(role: &str, action: &str) -> Result<(), 
             | "db_execute_operation"
             | "backup_import_config"
             | "ssh_install_public_key"
+            | "sftp_mutate"
     );
     let operator_blocked = matches!(
         action,
@@ -519,6 +520,7 @@ mod tests {
         assert!(check_policy_permission_for_role("read_only", "firewall_install").is_err());
         assert!(check_policy_permission_for_role("read_only", "firewall_reload").is_err());
         assert!(check_policy_permission_for_role("read_only", "ssh_install_public_key").is_err());
+        assert!(check_policy_permission_for_role("read_only", "sftp_mutate").is_err());
         assert!(check_policy_permission_for_role("read_only", "user_delete").is_err());
     }
 
