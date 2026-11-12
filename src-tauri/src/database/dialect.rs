@@ -71,7 +71,7 @@ fn default_clause(value: Option<&String>) -> Result<String, String> {
 
 fn validate_identifier(value: &str, kind: &str) -> Result<(), String> {
     let ident = value.trim();
-    if ident.is_empty() || ident.len() > 128 || ident.chars().any(|c| c.is_control() || c == '\\0') {
+    if ident.is_empty() || ident.len() > 128 || ident.chars().any(|c| c.is_control() || c == '\0') {
         return Err(format!("{} must be 1–128 bytes and contain no control characters.", kind));
     }
     Ok(())
