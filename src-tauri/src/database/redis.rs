@@ -350,6 +350,55 @@ pub async fn execute_operation_redis(
     }
 }
 
+async fn redis_hscan_bounded(
+    con: &mut redis::aio::MultiplexedConnection,
+    key: &str,
+) -> Result<HashMap<String, String>, String> {
+    const MAX_FIELDS: usize = 10_000;
+    let mut cursor = 0u64;
+    let mut fields = HashMap::new();
+    loop {
+        let (next, batch): (u64, Vec<(String, String)>) = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            redis::cmd("HSCAN").arg(key).arg(cursor).arg("COUNT").arg(1000).query_async(con),
+        ).await.map_err(|_| "Redis HSCAN timed out.".to_string())?
+            .map_err(|e| format!("Redis HSCAN failed: {}", e))?;
+        for (field, value) in batch {
+            fields.entry(field).or_insert(value);
+            if fields.len() >= MAX_FIELDS { break; }
+        }
+        if fields.len() >= MAX_FIELDS || next == 0 { break; }
+        cursor = next;
+    }
+    Ok(fields)
+}
+
+async fn redis_sscan_bounded(
+    con: &mut redis::aio::MultiplexedConnection,
+    key: &str,
+) -> Result<Vec<String>, String> {
+    const MAX_MEMBERS: usize = 10_000;
+    let mut cursor = 0u64;
+    let mut seen = std::collections::HashSet::new();
+    let mut members = Vec::new();
+    loop {
+        let (next, batch): (u64, Vec<String>) = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            redis::cmd("SSCAN").arg(key).arg(cursor).arg("COUNT").arg(1000).query_async(con),
+        ).await.map_err(|_| "Redis SSCAN timed out.".to_string())?
+            .map_err(|e| format!("Redis SSCAN failed: {}", e))?;
+        for member in batch {
+            if seen.insert(member.clone()) {
+                members.push(member);
+                if members.len() >= MAX_MEMBERS { break; }
+            }
+        }
+        if members.len() >= MAX_MEMBERS || next == 0 { break; }
+        cursor = next;
+    }
+    Ok(members)
+}
+
 pub async fn get_object_definition_redis(
     client: &redis::Client,
     name: &str,
@@ -461,8 +510,7 @@ pub async fn redis_get_value(
             let size: usize = redis::cmd("HLEN").arg(&key).query_async(&mut con).await
                 .map_err(|e| format!("Redis HLEN failed: {}", e))?;
             if size > MAX_ITEMS { return Err("Redis hash exceeds the 10,000-field display limit.".into()); }
-            let map: HashMap<String, String> = redis::cmd("HGETALL").arg(&key).query_async(&mut con).await
-                .map_err(|e| format!("Redis HGETALL failed: {}", e))?;
+            let map = redis_hscan_bounded(&mut con, &key).await?;
             serde_json::to_value(map).map_err(|e| format!("Could not serialize Redis hash: {}", e))?
         }
         "list" => {
@@ -477,8 +525,7 @@ pub async fn redis_get_value(
             let size: usize = redis::cmd("SCARD").arg(&key).query_async(&mut con).await
                 .map_err(|e| format!("Redis SCARD failed: {}", e))?;
             if size > MAX_ITEMS { return Err("Redis set exceeds the 10,000-member display limit.".into()); }
-            let items: Vec<String> = redis::cmd("SMEMBERS").arg(&key).query_async(&mut con).await
-                .map_err(|e| format!("Redis SMEMBERS failed: {}", e))?;
+            let items = redis_sscan_bounded(&mut con, &key).await?;
             serde_json::to_value(items).map_err(|e| format!("Could not serialize Redis set: {}", e))?
         }
         "zset" => {
@@ -494,6 +541,11 @@ pub async fn redis_get_value(
         other => return Err(format!("Unsupported Redis key type '{}'.", other)),
     };
 
+    let encoded_size = serde_json::to_vec(&val)
+        .map_err(|e| format!("Could not serialize Redis value: {}", e))?.len();
+    if encoded_size > 16 * 1024 * 1024 {
+        return Err("Redis key value exceeds the 16 MiB display limit.".into());
+    }
     Ok(RedisValueItem { key, key_type: ty, ttl, value: val })
 }
 
