@@ -499,6 +499,10 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
     }
     let is_ppk = selected_key_path.map(is_ppk_key).unwrap_or(false);
 
+    // Keep the new transport private until authentication and connection metadata
+    // are committed. This prevents a failed reconnect from replacing a live session.
+    let mut native_handle = None;
+
     // 0. Primary Fast Path: Try establishing persistent in-memory SSH transport
     if !is_ppk {
         if let Ok(handle) = crate::ssh::session::connect_session_with_passphrase_auth(
@@ -511,10 +515,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
             config.auth_method.as_deref() != Some("password"),
         ).await {
             verified = true;
-            let mut sessions = state.sessions.lock().await;
-            let arc_handle = std::sync::Arc::new(handle);
-            sessions.insert(id.clone(), arc_handle.clone());
-            sessions.insert("default".to_string(), arc_handle);
+            native_handle = Some(std::sync::Arc::new(handle));
             log::info!("SSH Desktop: Native persistent SSH session established for {}", host);
         }
     }
@@ -702,6 +703,38 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
         };
         log::error!("SSH Desktop: Connection failed for {}: {}", host, clean_error);
         return Err(clean_error);
+    }
+
+    // Replace any previous transport only after the new connection is verified.
+    // Also clear a stale native transport when the new connection used an external
+    // SSH client (OpenSSH/Plink), which does not create a persistent in-memory handle.
+    let previous_handle = {
+        let mut sessions = state.sessions.lock().await;
+        let previous = sessions.remove(&id);
+        if let Some(old) = previous.as_ref() {
+            if sessions.get("default")
+                .map(|default_handle| std::sync::Arc::ptr_eq(default_handle, old))
+                .unwrap_or(false)
+            {
+                sessions.remove("default");
+            }
+        }
+        if let Some(new_handle) = native_handle {
+            sessions.insert(id.clone(), new_handle.clone());
+            sessions.insert("default".to_string(), new_handle);
+        }
+        previous
+    };
+
+    if let Some(old_handle) = previous_handle {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            old_handle.disconnect(
+                russh::Disconnect::ByApplication,
+                "SSH connection replaced",
+                "en",
+            ),
+        ).await;
     }
 
     let conn = SshConnection {
