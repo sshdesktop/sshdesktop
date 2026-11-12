@@ -33,6 +33,8 @@ pub async fn connect_mongo(
     config: &DatabaseConnectionConfig,
 ) -> Result<(DriverInstance, ServerCapabilities), String> {
     let db_name = get_effective_mongo_db(&config.database).to_string();
+    validate_mongo_name(&db_name, "database name")?;
+    let timeout_secs = config.timeout_seconds.unwrap_or(8).clamp(3, 120);
 
     let has_auth = !config.username.trim().is_empty() && config.password.as_ref().map(|p| !p.is_empty()).unwrap_or(false);
     let auth = if has_auth {
@@ -71,8 +73,8 @@ pub async fn connect_mongo(
         .await
         .map_err(|e| format!("MongoDB connection string error: {}", e))?;
 
-    client_options.server_selection_timeout = Some(std::time::Duration::from_secs(config.timeout_seconds.unwrap_or(8)));
-    client_options.connect_timeout = Some(std::time::Duration::from_secs(config.timeout_seconds.unwrap_or(8)));
+    client_options.server_selection_timeout = Some(std::time::Duration::from_secs(timeout_secs));
+    client_options.connect_timeout = Some(std::time::Duration::from_secs(timeout_secs));
 
     let client = mongodb::Client::with_options(client_options)
         .map_err(|e| format!("MongoDB client init error: {}", e))?;
@@ -1209,18 +1211,19 @@ pub async fn execute_mongodb_single_command(
             let tokens: Vec<&str> = after_from.split_whitespace().collect();
             if !tokens.is_empty() {
                 let coll_name = tokens[0].trim_matches(|c| c == '`' || c == '\'' || c == '"' || c == ';');
-                let mut limit = limit_override as i64;
+                validate_mongo_name(coll_name, "collection name")?;
+                let mut limit = limit_override.clamp(1, 10_000) as i64;
                 for (idx, tok) in tokens.iter().enumerate() {
                     if tok.eq_ignore_ascii_case("LIMIT") && idx + 1 < tokens.len() {
                         if let Ok(l) = tokens[idx + 1].trim_matches(';').parse::<i64>() {
-                            limit = l;
+                            limit = l.clamp(1, 10_000);
                         }
                     }
                 }
                 let coll = client.database(database_name).collection::<mongodb::bson::Document>(coll_name);
                 let find_opts = mongodb::options::FindOptions::builder().limit(Some(limit)).build();
                 let mut cursor = coll.find(None, find_opts).await.map_err(|e| format!("MongoDB error: {}", e))?;
-                return collect_mongo_cursor_results(&mut cursor, "MongoDB SQL Query", start, server_version, limit_override).await;
+                return collect_mongo_cursor_results(&mut cursor, "MongoDB SQL Query", start, server_version, limit as usize).await;
             }
         }
     }
@@ -1644,7 +1647,7 @@ pub async fn execute_mongodb_single_command(
             "find" => {
                 let filter_doc = parse_relaxed_document(primary_args)?;
                 let mut find_opts = mongodb::options::FindOptions::default();
-                let mut limit = limit_override as i64;
+                let mut limit = limit_override.clamp(1, 10_000) as i64;
                 let mut skip = None;
                 let mut sort = None;
                 let mut projection = None;
@@ -1653,7 +1656,7 @@ pub async fn execute_mongodb_single_command(
                     match m_name.as_str() {
                         "limit" => {
                             if let Ok(l) = m_args.trim().parse::<i64>() {
-                                limit = l;
+                                limit = l.clamp(1, 10_000);
                             }
                         }
                         "skip" => {
@@ -1675,7 +1678,11 @@ pub async fn execute_mongodb_single_command(
                     }
                 }
 
-                find_opts.limit = Some(limit);
+                validate_mongo_name(&coll_name, "collection name")?;
+                find_opts.limit = Some(limit.clamp(1, 10_000));
+                if skip.unwrap_or(0) > 1_000_000_000 {
+                    return Err("MongoDB skip value exceeds the supported limit.".into());
+                }
                 find_opts.skip = skip;
                 find_opts.sort = sort;
                 find_opts.projection = projection;
@@ -2661,6 +2668,7 @@ pub async fn get_collection_columns_mongo(
     table_name: &str,
 ) -> Result<Vec<ColumnMeta>, String> {
     let db_name = get_effective_mongo_db(&session.config.database);
+    validate_mongo_name(table_name, "collection name")?;
     let db = client.database(db_name);
     let coll = db.collection::<mongodb::bson::Document>(table_name);
     use futures::StreamExt;
@@ -2742,6 +2750,7 @@ pub async fn execute_operation_mongo(
     let db = client.database(get_effective_mongo_db(&session.config.database));
     match operation {
         DatabaseOperation::CreateTable { table, .. } => {
+            validate_mongo_name(table, "collection name")?;
             db.create_collection(table, None).await.map_err(|e| e.to_string())?;
             Ok(OperationResult {
                 success: true,
@@ -2753,6 +2762,7 @@ pub async fn execute_operation_mongo(
             })
         }
         DatabaseOperation::DropObject { name, .. } => {
+            validate_mongo_name(name, "collection name")?;
             db.collection::<mongodb::bson::Document>(name).drop(None).await.map_err(|e| e.to_string())?;
             Ok(OperationResult {
                 success: true,
@@ -2764,6 +2774,7 @@ pub async fn execute_operation_mongo(
             })
         }
         DatabaseOperation::TruncateTable { table, .. } => {
+            validate_mongo_name(table, "collection name")?;
             let coll = db.collection::<mongodb::bson::Document>(table);
             let res = coll.delete_many(mongodb::bson::doc! {}, None).await.map_err(|e| e.to_string())?;
             Ok(OperationResult {
@@ -2776,6 +2787,14 @@ pub async fn execute_operation_mongo(
             })
         }
         DatabaseOperation::CreateIndex { table, index_name, columns, is_unique, .. } => {
+            validate_mongo_name(table, "collection name")?;
+            validate_mongo_name(index_name, "index name")?;
+            if columns.is_empty() || columns.len() > 64 {
+                return Err("MongoDB indexes require 1–64 fields.".into());
+            }
+            for column in columns {
+                validate_mongo_name(column, "index field name")?;
+            }
             let coll = db.collection::<mongodb::bson::Document>(table);
             let mut keys_doc = mongodb::bson::Document::new();
             for col in columns {
@@ -2801,6 +2820,8 @@ pub async fn execute_operation_mongo(
             })
         }
         DatabaseOperation::DropIndex { table, index_name, .. } => {
+            validate_mongo_name(table, "collection name")?;
+            validate_mongo_name(index_name, "index name")?;
             let coll = db.collection::<mongodb::bson::Document>(table);
             coll.drop_index(index_name.clone(), None).await.map_err(|e| e.to_string())?;
             Ok(OperationResult {
@@ -2821,6 +2842,7 @@ pub async fn get_object_definition_mongo(
     session: &ActiveDatabaseSession,
     name: &str,
 ) -> Result<String, String> {
+    validate_mongo_name(name, "collection name")?;
     let db = client.database(get_effective_mongo_db(&session.config.database));
     let coll = db.collection::<mongodb::bson::Document>(name);
     let count = coll.count_documents(mongodb::bson::doc! {}, None).await
@@ -2845,8 +2867,13 @@ pub async fn mongodb_list_collections(
 
     if let DriverInstance::Mongo(client) = &session.driver {
         let db_target = database.as_deref().unwrap_or(&session.config.database);
+        validate_mongo_name(get_effective_mongo_db(db_target), "database name")?;
         let db = client.database(get_effective_mongo_db(db_target));
-        db.list_collection_names(None).await.map_err(|e| e.to_string())
+        let names = db.list_collection_names(None).await.map_err(|e| e.to_string())?;
+        if names.len() > 10_000 {
+            return Err("MongoDB database contains more than 10,000 collections; narrow the database scope.".into());
+        }
+        Ok(names)
     } else {
         Err("Active connection is not MongoDB".to_string())
     }
@@ -2929,6 +2956,11 @@ pub async fn mongodb_insert_document(
             return Err("MongoDB document input exceeds the 15 MiB desktop limit.".into());
         }
         let doc: mongodb::bson::Document = serde_json::from_str(&doc_json).map_err(|e| e.to_string())?;
+        let bson_size = mongodb::bson::to_vec(&doc)
+            .map_err(|e| format!("Could not validate MongoDB document size: {}", e))?.len();
+        if bson_size > 15 * 1024 * 1024 {
+            return Err("MongoDB BSON document exceeds the 15 MiB desktop limit.".into());
+        }
         let res = coll.insert_one(doc, None).await.map_err(|e| e.to_string())?;
 
         Ok(format!("{:?}", res.inserted_id))
