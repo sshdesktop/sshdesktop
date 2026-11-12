@@ -521,6 +521,9 @@ mod tests {
         assert!(check_policy_permission_for_role("read_only", "firewall_reload").is_err());
         assert!(check_policy_permission_for_role("read_only", "ssh_install_public_key").is_err());
         assert!(check_policy_permission_for_role("read_only", "sftp_mutate").is_err());
+        assert!(check_policy_permission_for_role("read_only", "db_execute_operation").is_err());
+        assert!(check_policy_permission_for_role("operator", "db_execute_operation").is_ok());
+        assert!(check_policy_permission_for_role("admin", "db_execute_operation").is_ok());
         assert!(check_policy_permission_for_role("read_only", "user_delete").is_err());
     }
 
