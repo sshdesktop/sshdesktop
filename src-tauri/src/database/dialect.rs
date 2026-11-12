@@ -69,6 +69,14 @@ fn default_clause(value: Option<&String>) -> Result<String, String> {
     Ok(format!(" DEFAULT '{}'", value.replace('\'', "''")))
 }
 
+fn validate_identifier(value: &str, kind: &str) -> Result<(), String> {
+    let ident = value.trim();
+    if ident.is_empty() || ident.len() > 128 || ident.chars().any(|c| c.is_control() || c == '\\0') {
+        return Err(format!("{} must be 1–128 bytes and contain no control characters.", kind));
+    }
+    Ok(())
+}
+
 use super::types::ColumnSpec;
 
 // ─── SQL Dialect Helpers ──────────────────────────────────────────
@@ -88,6 +96,18 @@ pub fn generate_create_table_sql(
     table: &str,
     columns: &[ColumnSpec],
 ) -> Result<String, String> {
+    validate_identifier(table, "Table name")?;
+    if columns.len() > 256 {
+        return Err("A table cannot contain more than 256 columns in one operation.".into());
+    }
+    let mut seen_columns = std::collections::HashSet::with_capacity(columns.len());
+    for col in columns {
+        validate_identifier(&col.name, "Column name")?;
+        if !seen_columns.insert(col.name.to_ascii_lowercase()) {
+            return Err(format!("Duplicate column name '{}'.", col.name));
+        }
+    }
+
     if columns.is_empty() {
         return Err("Cannot create table with 0 columns".to_string());
     }
@@ -186,6 +206,9 @@ pub fn generate_rename_sql(
     old_name: &str,
     new_name: &str,
 ) -> Result<String, String> {
+    validate_identifier(old_name, "Old object name")?;
+    validate_identifier(new_name, "New object name")?;
+
     match engine {
         "mysql" | "mariadb" => match object_type {
             "table" | "view" => Ok(format!(
@@ -249,6 +272,8 @@ pub fn generate_drop_sql(
     object_type: &str,
     name: &str,
 ) -> Result<String, String> {
+    validate_identifier(name, "Object name")?;
+
     let q_name = quote_ident(engine, name);
     match engine {
         "mysql" | "mariadb" => match object_type {
@@ -286,6 +311,8 @@ pub fn generate_drop_sql(
 }
 
 pub fn generate_truncate_table_sql(engine: &str, table: &str) -> String {
+    validate_identifier(table, "Table name").expect("table identifier validated by caller");
+
     let q = quote_ident(engine, table);
     match engine {
         "sqlite" => format!("DELETE FROM {};", q),
@@ -294,6 +321,9 @@ pub fn generate_truncate_table_sql(engine: &str, table: &str) -> String {
 }
 
 pub fn generate_add_column_sql(engine: &str, table: &str, col: &ColumnSpec) -> Result<String, String> {
+    validate_identifier(table, "Table name")?;
+    validate_identifier(&col.name, "Column name")?;
+
     let q_table = quote_ident(engine, table);
     let q_col = quote_ident(engine, &col.name);
     let data_type = validate_sql_type(&col.data_type)?;
@@ -306,6 +336,9 @@ pub fn generate_add_column_sql(engine: &str, table: &str, col: &ColumnSpec) -> R
 }
 
 pub fn generate_drop_column_sql(engine: &str, table: &str, col_name: &str) -> String {
+    validate_identifier(table, "Table name").expect("table identifier validated by caller");
+    validate_identifier(col_name, "Column name").expect("column identifier validated by caller");
+
     let q_table = quote_ident(engine, table);
     let q_col = quote_ident(engine, col_name);
     format!("ALTER TABLE {} DROP COLUMN {};", q_table, q_col)
@@ -318,6 +351,15 @@ pub fn generate_create_index_sql(
     columns: &[String],
     is_unique: bool,
 ) -> Result<String, String> {
+    validate_identifier(table, "Table name")?;
+    validate_identifier(index_name, "Index name")?;
+    if columns.len() > 64 {
+        return Err("An index cannot contain more than 64 columns.".into());
+    }
+    for column in columns {
+        validate_identifier(column, "Index column name")?;
+    }
+
     if columns.is_empty() {
         return Err("Columns list cannot be empty for index".to_string());
     }
@@ -333,6 +375,9 @@ pub fn generate_create_index_sql(
 }
 
 pub fn generate_drop_index_sql(engine: &str, table: &str, index_name: &str) -> String {
+    validate_identifier(table, "Table name").expect("table identifier validated by caller");
+    validate_identifier(index_name, "Index name").expect("index identifier validated by caller");
+
     let q_idx = quote_ident(engine, index_name);
     let q_tbl = quote_ident(engine, table);
     match engine {
