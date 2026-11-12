@@ -213,6 +213,8 @@ pub async fn db_test_connection(
     config: DatabaseConnectionConfig,
 ) -> Result<ServerCapabilities, String> {
     let mut config = config;
+    validate_database_config(&config)?;
+    config.timeout_seconds = Some(config.timeout_seconds.unwrap_or(8).clamp(3, 120));
     let engine_lower = config.engine.trim().to_lowercase();
     if config.database.trim().is_empty() {
         match engine_lower.as_str() {
