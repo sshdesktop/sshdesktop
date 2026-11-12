@@ -5,6 +5,13 @@ fn validate_sqlite_identifier(value: &str, kind: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_sqlite_metadata_text(value: &str, kind: &str, max_bytes: usize) -> Result<(), String> {
+    if value.len() > max_bytes || value.chars().any(|c| c == '\0') {
+        return Err(format!("SQLite {} metadata exceeds its {} byte limit or contains NUL.", kind, max_bytes));
+    }
+    Ok(())
+}
+
 fn secure_sqlite_cache_file(path: &std::path::Path) -> Result<(), String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|e| format!("Could not inspect SQLite cache file: {}", e))?;
@@ -590,6 +597,9 @@ pub async fn list_tables_sqlite(pool: &sqlx::SqlitePool) -> Result<Vec<DatabaseO
             return Err("SQLite returned an invalid or oversized schema object name.".to_string());
         }
         let obj_type: String = r.try_get(1).map_err(|e| format!("Invalid SQLite object type: {}", e))?;
+        if obj_type != "table" && obj_type != "view" {
+            return Err("SQLite returned an unsupported schema object type.".into());
+        }
         Ok(DatabaseObject { name, object_type: obj_type, schema: None, row_count: None, size_bytes: None, definition: None })
     }).collect()
 }
@@ -611,6 +621,9 @@ pub async fn get_table_columns_sqlite(
         let from_col: String = fkr.try_get("from").map_err(|e| format!("Invalid SQLite foreign-key column metadata: {}", e))?;
         let to_table: String = fkr.try_get("table").map_err(|e| format!("Invalid SQLite foreign-key table metadata: {}", e))?;
         let to_col: String = fkr.try_get("to").map_err(|e| format!("Invalid SQLite foreign-key target metadata: {}", e))?;
+        validate_sqlite_metadata_text(&from_col, "foreign-key column", 255)?;
+        validate_sqlite_metadata_text(&to_table, "foreign-key table", 255)?;
+        validate_sqlite_metadata_text(&to_col, "foreign-key target column", 255)?;
         if !from_col.is_empty() {
             fk_map.insert(from_col, (to_table, to_col));
         }
@@ -629,6 +642,11 @@ pub async fn get_table_columns_sqlite(
         let notnull: i64 = r.try_get("notnull").map_err(|e| format!("Invalid SQLite nullability metadata: {}", e))?;
         let pk: i64 = r.try_get("pk").map_err(|e| format!("Invalid SQLite primary-key metadata: {}", e))?;
         let dflt: Option<String> = r.try_get("dflt_value").map_err(|e| format!("Invalid SQLite default metadata: {}", e))?;
+        validate_sqlite_metadata_text(&name, "column name", 255)?;
+        validate_sqlite_metadata_text(&ty, "column type", 1024)?;
+        if let Some(default_value) = dflt.as_deref() {
+            validate_sqlite_metadata_text(default_value, "column default", 16 * 1024)?;
+        }
 
         let fk_info = fk_map.get(&name);
 
@@ -698,6 +716,7 @@ pub async fn get_object_definition_sqlite(
     let row = sqlx::query(q).bind(name).fetch_one(pool).await.map_err(|e| e.to_string())?;
     let def: Option<String> = row.try_get(0).map_err(|e| format!("Invalid SQLite object definition: {}", e))?;
     let definition = def.ok_or_else(|| format!("SQLite object '{}' has no stored SQL definition.", name))?;
+    validate_sqlite_metadata_text(&definition, "object definition", 5 * 1024 * 1024)?;
     if definition.len() > 5 * 1024 * 1024 {
         return Err("SQLite object definition exceeds the 5 MiB metadata limit.".into());
     }
@@ -818,7 +837,8 @@ mod sqlite_sync_validation_tests {
         bad_fraction[21] = 63;
         assert!(validate_sqlite_file_header(&bad_fraction).is_err());
         let mut bad_reserved = valid_test_sqlite_header();
-        bad_reserved[20] = 4096u8.saturating_sub(480) as u8;
+        bad_reserved[16..18].copy_from_slice(&512u16.to_be_bytes());
+        bad_reserved[20] = 33;
         assert!(validate_sqlite_file_header(&bad_reserved).is_err());
     }
 
