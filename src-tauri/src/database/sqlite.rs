@@ -61,6 +61,7 @@ static SQLITE_CACHE_LOCKS: OnceLock<StdMutex<HashMap<std::path::PathBuf, Weak<to
 fn sqlite_cache_lock(path: &std::path::Path) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
     let registry = SQLITE_CACHE_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut locks = registry.lock().map_err(|_| "SQLite cache lock registry is poisoned.".to_string())?;
+    // Remove dead entries so one-off database paths do not grow this registry forever.
     locks.retain(|_, lock| lock.strong_count() > 0);
     if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
         return Ok(lock);
@@ -75,6 +76,42 @@ use super::types::{
 };
 use super::serialization::{serialize_sqlite_row, split_sql_statements_for_engine};
 use super::tunnel::from_base64;
+
+fn validate_remote_sqlite_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || path.len() > 4096 || !path.starts_with('/')
+        || path.chars().any(|c| c.is_control() || c == '\0')
+        || path.split('/').any(|part| part == "." || part == "..")
+    {
+        return Err("Remote SQLite path must be a normalized absolute POSIX path of at most 4096 bytes.".into());
+    }
+    Ok(())
+}
+
+async fn prepare_remote_sqlite_sync(pool: &sqlx::SqlitePool) -> Result<(), String> {
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").fetch_one(pool).await
+        .map_err(|e| format!("Could not checkpoint the local SQLite WAL before remote sync: {}", e))?;
+    let mode: (String,) = sqlx::query_as("PRAGMA journal_mode=DELETE").fetch_one(pool).await
+        .map_err(|e| format!("Could not switch local SQLite journal mode to DELETE: {}", e))?;
+    if !mode.0.eq_ignore_ascii_case("delete") {
+        return Err(format!("Remote SQLite sync requires DELETE journal mode; SQLite returned '{}'.", mode.0));
+    }
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").fetch_one(pool).await
+        .map_err(|e| format!("Could not finalize SQLite WAL checkpoint: {}", e))?;
+    Ok(())
+}
+
+fn ensure_no_pending_local_wal(cache_path: &std::path::Path) -> Result<(), String> {
+    let wal_path = std::path::PathBuf::from(format!("{}-wal", cache_path.display()));
+    match std::fs::symlink_metadata(&wal_path) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() =>
+            Err("Refusing remote sync because the local SQLite WAL sidecar is not a regular file.".into()),
+        Ok(meta) if meta.len() > 0 =>
+            Err("Refusing remote sync because the local SQLite WAL still contains data.".into()),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Could not inspect local SQLite WAL sidecar: {}", e)),
+    }
+}
 
 pub async fn connect_sqlite(
     config: &DatabaseConnectionConfig,
@@ -254,10 +291,13 @@ pub async fn execute_query_sqlite(
         Some(session.config.ssh_connection_id.as_deref().filter(|id| !id.trim().is_empty())
             .ok_or_else(|| "Remote SQLite query requires an explicit SSH connection ID.".to_string())?)
     } else { None };
-    let _cache_guard = if session.config.use_ssh {
+    let remote_cache_path = if session.config.use_ssh {
         let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
-        let cache_path = sqlite_cache_path(&session.config, raw_path)?;
-        Some(sqlite_cache_lock(&cache_path)?.lock_owned().await)
+        validate_remote_sqlite_path(raw_path)?;
+        Some(sqlite_cache_path(&session.config, raw_path)?)
+    } else { None };
+    let _cache_guard = if let Some(cache_path) = remote_cache_path.as_ref() {
+        Some(sqlite_cache_lock(cache_path)?.lock_owned().await)
     } else { None };
     // For remote SQLite, conservatively sync after every query. SQL lexical
     // classification cannot reliably recognize every write form (comments,
@@ -384,12 +424,11 @@ pub async fn execute_query_sqlite(
     if had_mutation && session.config.use_ssh {
         if let Some(conn_id) = remote_sync_id {
             let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
-            if raw_path.is_empty() || raw_path.len() > 4096 || raw_path.chars().any(|c| c.is_control() || c == '\0')
-                || !raw_path.starts_with('/') || raw_path.split('/').any(|part| part == "." || part == "..") {
-                return Err("Remote SQLite sync path is invalid.".into());
-            }
-            let local_cache = sqlite_cache_path(&session.config, raw_path)?;
-            let bytes = std::fs::read(&local_cache)
+            validate_remote_sqlite_path(raw_path)?;
+            let local_cache = remote_cache_path.as_ref().ok_or_else(|| "Remote SQLite cache path was not initialized.".to_string())?;
+            prepare_remote_sqlite_sync(pool).await?;
+            ensure_no_pending_local_wal(local_cache)?;
+            let bytes = std::fs::read(local_cache)
                 .map_err(|e| format!("Failed to read updated local SQLite cache: {}", e))?;
             crate::ssh::sftp::sftp_write_bytes(state, conn_id, raw_path, &bytes).await
                 .map_err(|e| format!("SQLite changes were applied locally but remote sync failed: {}", e))?;
