@@ -53,6 +53,22 @@ fn sqlite_cache_path(config: &DatabaseConnectionConfig, remote_path: &str) -> Re
 
 use futures::TryStreamExt;
 use std::time::Instant;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+
+static SQLITE_CACHE_LOCKS: OnceLock<StdMutex<HashMap<std::path::PathBuf, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+
+fn sqlite_cache_lock(path: &std::path::Path) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
+    let registry = SQLITE_CACHE_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut locks = registry.lock().map_err(|_| "SQLite cache lock registry is poisoned.".to_string())?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    Ok(lock)
+}
 use super::types::{
     ActiveDatabaseSession, BatchStatementResult, ColumnMeta, DatabaseConnectionConfig,
     DatabaseObject, DriverInstance, QueryResult, ServerCapabilities,
@@ -99,6 +115,10 @@ pub async fn connect_sqlite(
             }
 
             let local_cache = sqlite_cache_path(config, raw_path)?;
+            // Serialize cache refresh against queries and uploads from other sessions
+            // in this process that target the same remote SQLite file.
+            let cache_lock = sqlite_cache_lock(&local_cache)?;
+            let _cache_guard = cache_lock.lock().await;
             // A non-empty SQLite WAL may contain committed changes absent from the main file.
             let wal_path = format!("{}-wal", escaped);
             let wal_cmd = format!("if [ -s '{}' ]; then echo WAL_ACTIVE; else echo WAL_CLEAR; fi", wal_path);
@@ -234,6 +254,15 @@ pub async fn execute_query_sqlite(
         Some(session.config.ssh_connection_id.as_deref().filter(|id| !id.trim().is_empty())
             .ok_or_else(|| "Remote SQLite query requires an explicit SSH connection ID.".to_string())?)
     } else { None };
+    let _cache_guard = if session.config.use_ssh {
+        let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
+        let cache_path = sqlite_cache_path(&session.config, raw_path)?;
+        Some(sqlite_cache_lock(&cache_path)?.lock_owned().await)
+    } else { None };
+    // For remote SQLite, conservatively sync after every query. SQL lexical
+    // classification cannot reliably recognize every write form (comments,
+    // CTEs, extensions, or dialect-specific syntax).
+    if session.config.use_ssh { had_mutation = true; }
     let mut remaining_rows = limit;
     for (stmt_idx, stmt) in statements.iter().enumerate() {
         let stmt_start = Instant::now();
@@ -451,6 +480,11 @@ pub async fn execute_operation_sqlite(
     let remote_conn_id = if session.config.use_ssh {
         Some(session.config.ssh_connection_id.as_deref().filter(|id| !id.trim().is_empty())
             .ok_or_else(|| "Remote SQLite operation has no explicit SSH connection ID.".to_string())?)
+    } else { None };
+    let _cache_guard = if session.config.use_ssh {
+        let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
+        let cache_path = sqlite_cache_path(&session.config, raw_path)?;
+        Some(sqlite_cache_lock(&cache_path)?.lock_owned().await)
     } else { None };
     let res = sqlx::raw_sql(sql).execute(pool).await.map_err(|e| e.to_string())?;
     if let Some(conn_id) = remote_conn_id {
