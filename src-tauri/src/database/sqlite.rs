@@ -46,6 +46,12 @@ fn sqlite_cache_path(config: &DatabaseConnectionConfig, remote_path: &str) -> Re
     hasher.update([0]);
     if let Some(id) = config.ssh_connection_id.as_deref() { hasher.update(id.as_bytes()); }
     hasher.update([0]);
+    if let Some(host) = config.ssh_host.as_deref() { hasher.update(host.as_bytes()); }
+    hasher.update([0]);
+    if let Some(port) = config.ssh_port { hasher.update(port.to_be_bytes()); }
+    hasher.update([0]);
+    if let Some(user) = config.ssh_user.as_deref() { hasher.update(user.as_bytes()); }
+    hasher.update([0]);
     hasher.update(remote_path.as_bytes());
     let digest = format!("{:x}", hasher.finalize());
     Ok(cache_dir.join(format!("{}.db", digest)))
@@ -179,9 +185,16 @@ pub async fn connect_sqlite(
                         return Err("Refusing to replace a non-regular SQLite cache path.".into());
                     }
                 }
-                std::fs::File::create(&local_cache)
-                    .map_err(|e| format!("Failed to create local SQLite cache: {}", e))?;
-                secure_sqlite_cache_file(&local_cache)?;
+                let temp_cache = local_cache.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+                let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp_cache)
+                    .map_err(|e| format!("Failed to create temporary SQLite cache: {}", e))?;
+                drop(file);
+                if let Err(e) = secure_sqlite_cache_file(&temp_cache) {
+                    let _ = std::fs::remove_file(&temp_cache);
+                    return Err(e);
+                }
+                std::fs::rename(&temp_cache, &local_cache)
+                    .map_err(|e| { let _ = std::fs::remove_file(&temp_cache); format!("Failed to publish empty SQLite cache: {}", e) })?;
             } else {
                 let download_cmd = format!(
                     "size=$(wc -c < '{}') || exit 1; [ \"$size\" -le 268435456 ] || {{ echo 'Remote SQLite database exceeds the 256 MiB cache limit' >&2; exit 1; }}; base64 '{}' | tr -d '\\n'",
@@ -197,14 +210,22 @@ pub async fn connect_sqlite(
                     return Err("Decoded remote SQLite database exceeds the 256 MiB cache limit.".into());
                 }
                 let temp_cache = local_cache.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
-                {
+                let write_result = (|| -> Result<(), String> {
                     use std::io::Write;
                     let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp_cache)
                         .map_err(|e| format!("Failed to create temporary SQLite cache: {}", e))?;
                     file.write_all(&bytes).map_err(|e| format!("Failed to write temporary SQLite cache: {}", e))?;
                     file.sync_all().map_err(|e| format!("Failed to flush temporary SQLite cache: {}", e))?;
+                    Ok(())
+                })();
+                if let Err(e) = write_result {
+                    let _ = std::fs::remove_file(&temp_cache);
+                    return Err(e);
                 }
-                secure_sqlite_cache_file(&temp_cache)?;
+                if let Err(e) = secure_sqlite_cache_file(&temp_cache) {
+                    let _ = std::fs::remove_file(&temp_cache);
+                    return Err(e);
+                }
                 std::fs::rename(&temp_cache, &local_cache)
                     .map_err(|e| { let _ = std::fs::remove_file(&temp_cache); format!("Failed to publish downloaded SQLite cache: {}", e) })?;
             }
