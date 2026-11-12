@@ -345,22 +345,41 @@ pub async fn redis_scan_keys(
         return Err("Redis key pattern must be at most 1024 bytes and contain no control characters.".into());
     }
     let cnt = count.unwrap_or(200).clamp(1, 1000);
-    let mut con = client.get_multiplexed_tokio_connection().await
+    let mut con = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.get_multiplexed_tokio_connection(),
+    ).await.map_err(|_| "Redis connection timed out after 10 seconds.".to_string())?
         .map_err(|e| format!("Redis connection error: {}", e))?;
-    let res: (u64, Vec<String>) = redis::cmd("SCAN")
-        .arg(0).arg("MATCH").arg(&pat).arg("COUNT").arg(cnt)
-        .query_async(&mut con).await
-        .map_err(|e| format!("Redis SCAN failed: {}", e))?;
-
-    let mut items = Vec::with_capacity(res.1.len());
-    for key in res.1.into_iter().take(1000) {
-        let ty: String = redis::cmd("TYPE").arg(&key).query_async(&mut con).await
-            .map_err(|e| format!("Redis TYPE failed for key '{}': {}", key, e))?;
-        let ttl: i64 = redis::cmd("TTL").arg(&key).query_async(&mut con).await
-            .map_err(|e| format!("Redis TTL failed for key '{}': {}", key, e))?;
-        items.push(RedisKeyItem { key, key_type: ty, ttl, size: None });
-    }
-    Ok(items)
+    const MAX_SCAN_KEYS: usize = 10_000;
+    let scan_result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut cursor = 0u64;
+        let mut seen = std::collections::HashSet::new();
+        let mut keys = Vec::new();
+        loop {
+            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor).arg("MATCH").arg(&pat).arg("COUNT").arg(cnt)
+                .query_async(&mut con).await
+                .map_err(|e| format!("Redis SCAN failed: {}", e))?;
+            for key in batch {
+                if seen.insert(key.clone()) {
+                    keys.push(key);
+                    if keys.len() >= MAX_SCAN_KEYS { break; }
+                }
+            }
+            if keys.len() >= MAX_SCAN_KEYS || next_cursor == 0 { break; }
+            cursor = next_cursor;
+        }
+        let mut items = Vec::with_capacity(keys.len());
+        for key in keys {
+            let ty: String = redis::cmd("TYPE").arg(&key).query_async(&mut con).await
+                .map_err(|e| format!("Redis TYPE failed for key '{}': {}", key, e))?;
+            let ttl: i64 = redis::cmd("TTL").arg(&key).query_async(&mut con).await
+                .map_err(|e| format!("Redis TTL failed for key '{}': {}", key, e))?;
+            items.push(RedisKeyItem { key, key_type: ty, ttl, size: None });
+        }
+        Ok::<Vec<RedisKeyItem>, String>(items)
+    }).await.map_err(|_| "Redis key scan exceeded the 30-second time limit.".to_string())??;
+    Ok(scan_result)
 }
 
 #[tauri::command]
