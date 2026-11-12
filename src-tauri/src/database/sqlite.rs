@@ -597,3 +597,53 @@ mod sqlite_path_and_transaction_tests {
         }
     }
 }
+
+
+#[cfg(test)]
+mod remote_sqlite_safety_tests {
+    use super::*;
+
+    #[test]
+    fn remote_path_requires_absolute_normalized_posix_path() {
+        assert!(validate_remote_sqlite_path("/var/lib/app/data.db").is_ok());
+        assert!(validate_remote_sqlite_path("/tmp/数据库.db").is_ok());
+        assert!(validate_remote_sqlite_path("").is_err());
+        assert!(validate_remote_sqlite_path("relative.db").is_err());
+        assert!(validate_remote_sqlite_path("/tmp/../etc/passwd").is_err());
+        assert!(validate_remote_sqlite_path("/tmp/./data.db").is_err());
+        assert!(validate_remote_sqlite_path("/tmp/data\n.db").is_err());
+        assert!(validate_remote_sqlite_path(&format!("/{}", "a".repeat(4096))).is_err());
+    }
+
+    #[test]
+    fn cache_lock_is_shared_for_same_path_and_distinct_for_other_paths() {
+        let a = std::path::PathBuf::from("/tmp/sshdesktop-test-a.db");
+        let b = std::path::PathBuf::from("/tmp/sshdesktop-test-b.db");
+        let first = sqlite_cache_lock(&a).expect("first cache lock");
+        let second = sqlite_cache_lock(&a).expect("second cache lock");
+        let other = sqlite_cache_lock(&b).expect("other cache lock");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other));
+    }
+
+    #[test]
+    fn missing_or_empty_wal_is_safe_but_nonempty_wal_is_rejected() {
+        let path = std::env::temp_dir().join(format!("sshdesktop-wal-test-{}.db", uuid::Uuid::new_v4()));
+        assert!(ensure_no_pending_local_wal(&path).is_ok());
+        let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
+        std::fs::write(&wal, []).expect("create empty WAL");
+        assert!(ensure_no_pending_local_wal(&path).is_ok());
+        std::fs::write(&wal, b"pending wal").expect("write WAL");
+        assert!(ensure_no_pending_local_wal(&path).is_err());
+        let _ = std::fs::remove_file(&wal);
+    }
+
+    #[test]
+    fn sqlite_cache_lock_registry_reuses_arc_without_holding_registry_lock() {
+        let path = std::path::PathBuf::from("/tmp/sshdesktop-test-registry.db");
+        let lock = sqlite_cache_lock(&path).expect("cache lock");
+        let guard = lock.try_lock().expect("new lock should be available");
+        drop(guard);
+        assert!(Arc::strong_count(&lock) >= 1);
+    }
+}
