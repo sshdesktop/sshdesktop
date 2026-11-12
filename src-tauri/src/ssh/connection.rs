@@ -934,10 +934,21 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
             config.passphrase.as_deref(),
             config.auth_method.as_deref() != Some("password"),
         ).await {
-            if let Ok((out, _err, code)) = crate::ssh::session::run_exec_channel(&handle, "echo sshdesktop-ok").await {
-                if code == 0 && (out.contains("sshdesktop-ok") || out.contains("clouddesk-ok")) {
-                    return Ok(true);
+            // A connection test is a short-lived probe, not a persistent session.
+            // Always close its authenticated transport before returning or falling
+            // through to the external-client probe.
+            let probe_succeeded = match crate::ssh::session::run_exec_channel(&handle, "echo sshdesktop-ok").await {
+                Ok((out, _err, code)) => {
+                    code == 0 && (out.contains("sshdesktop-ok") || out.contains("clouddesk-ok"))
                 }
+                Err(_) => false,
+            };
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(800),
+                handle.disconnect(russh::Disconnect::ByApplication, "Connection test completed", "en"),
+            ).await;
+            if probe_succeeded {
+                return Ok(true);
             }
         }
     }
