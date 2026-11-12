@@ -36,6 +36,18 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::AppState;
 
+/// Spawn an SSH authentication probe with bounded stdout/stderr capture.
+/// kill_on_drop ensures a timed-out probe is terminated when its future is cancelled.
+async fn run_limited_probe(
+    cmd: &mut tokio::process::Command,
+) -> Result<std::process::Output, String> {
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let child = cmd.spawn().map_err(|e| format!("Failed to start SSH probe: {}", e))?;
+    crate::ssh::exec::wait_with_limited_output(child).await
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConnectionConfig {
     #[serde(default)]
@@ -572,7 +584,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
 
                 match cmd.spawn() {
                     Ok(child) => {
-                        match tokio::time::timeout(std::time::Duration::from_secs(12), child.wait_with_output()).await {
+                        match tokio::time::timeout(std::time::Duration::from_secs(12), crate::ssh::exec::wait_with_limited_output(child)).await {
                             Ok(Ok(out)) => {
                                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                                 let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -634,7 +646,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
 
             ssh_test.arg(format!("{}@{}", user, host)).arg("echo sshdesktop-connected");
 
-            match tokio::time::timeout(std::time::Duration::from_secs(8), ssh_test.output()).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(8), run_limited_probe(&mut ssh_test)).await {
                 Ok(Ok(out)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -685,7 +697,7 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
 
                 match cmd.spawn() {
                     Ok(child) => {
-                        match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait_with_output()).await {
+                        match tokio::time::timeout(std::time::Duration::from_secs(10), crate::ssh::exec::wait_with_limited_output(child)).await {
                             Ok(Ok(out)) => {
                                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                                 let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -1059,7 +1071,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
                 .arg("-i").arg(key_path)
                 .arg(host)
                 .arg("echo sshdesktop-ok");
-            if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await {
+            if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), run_limited_probe(&mut cmd)).await {
                 if res.status.success() {
                     return Ok(true);
                 }
@@ -1084,7 +1096,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
                     .arg("-pwfile").arg(password_file.path())
                     .arg(host)
                     .arg("echo sshdesktop-ok");
-                if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await {
+                if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), run_limited_probe(&mut cmd)).await {
                     if res.status.success() {
                         return Ok(true);
                     }
@@ -1110,7 +1122,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
             }
         }
         cmd.arg(format!("{}@{}", user, host)).arg("echo sshdesktop-ok");
-        if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await {
+        if let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(8), run_limited_probe(&mut cmd)).await {
             if res.status.success() {
                 return Ok(true);
             }
