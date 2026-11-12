@@ -275,8 +275,14 @@ fn parse_ssh_config_internal(
                     if let Some(file_pattern) = inc_path.file_name().and_then(|n| n.to_str()) {
                         if (file_pattern.contains('*') || file_pattern.contains('?')) && parent.is_dir() {
                             if let Ok(entries) = std::fs::read_dir(parent) {
-                                for entry in entries.flatten() {
-                                    let p = entry.path();
+                                // OpenSSH expands Include globs in deterministic
+                                // lexical order. read_dir order is filesystem-dependent.
+                                let mut paths: Vec<PathBuf> = entries
+                                    .filter_map(Result::ok)
+                                    .map(|entry| entry.path())
+                                    .collect();
+                                paths.sort();
+                                for p in paths {
                                     if p.is_file() {
                                         if let Some(fname) = p.file_name().and_then(|n| n.to_str()) {
                                             if wildcard_match(file_pattern, fname) {
