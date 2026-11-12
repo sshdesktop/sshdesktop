@@ -243,7 +243,7 @@ pub async fn terminal_create(
                                 drop(sessions);
                                 let _ = tokio::time::timeout(
                                     std::time::Duration::from_millis(800),
-                                    new_handle.disconnect(
+                                    arc_h.disconnect(
                                         russh::Disconnect::ByApplication,
                                         "Superseded terminal SSH handshake",
                                         "en",
