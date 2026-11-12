@@ -41,6 +41,28 @@ fn validate_socks5_credentials(
         && constant_time_eq(offered_pass, expected_pass.as_bytes())
 }
 
+fn is_cloud_metadata_target(host: &str) -> bool {
+    let normalized = host.trim_matches(|ch| ch == '[' || ch == ']').trim_end_matches('.').to_ascii_lowercase();
+    if matches!(normalized.as_str(), "metadata.google.internal" | "metadata") {
+        return true;
+    }
+
+    match normalized.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            ip == std::net::Ipv4Addr::new(169, 254, 169, 254)
+                || ip == std::net::Ipv4Addr::new(169, 254, 170, 2)
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip == "fd00:ec2::254".parse::<std::net::Ipv6Addr>().unwrap()
+                || ip.to_ipv4_mapped().map(|mapped| {
+                    mapped == std::net::Ipv4Addr::new(169, 254, 169, 254)
+                        || mapped == std::net::Ipv4Addr::new(169, 254, 170, 2)
+                }).unwrap_or(false)
+        }
+        Err(_) => false,
+    }
+}
+
 async fn handle_socks5_client(
     stream: &mut tokio::net::TcpStream,
     handle: &Arc<crate::ssh::session::ClientHandle>,
@@ -165,13 +187,7 @@ async fn handle_socks5_client(
             return Err("SOCKS5 destination port must be between 1 and 65535".into());
         }
         let policy = crate::store::audit::load_security_policy();
-        let host_lower = target_host.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
-        if policy.block_metadata_egress
-            && matches!(
-                host_lower.as_str(),
-                "169.254.169.254" | "169.254.170.2" | "fd00:ec2::254" | "metadata.google.internal"
-            )
-        {
+        if policy.block_metadata_egress && is_cloud_metadata_target(&target_host) {
             let _ = stream.write_all(&[0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
             return Err("SOCKS5 connection to cloud instance metadata endpoints is blocked by workspace security policy".into());
         }
@@ -1252,5 +1268,15 @@ mod tests {
         assert!(!validate_socks5_credentials(b"alice", b"s3cr3u", "alice", "s3cr3t"));
         assert!(!validate_socks5_credentials(b"alice2", b"s3cr3t", "alice", "s3cr3t"));
         assert!(!validate_socks5_credentials(b"bob", b"s3cr3t", "alice", "s3cr3t"));
+    }
+
+    #[test]
+    fn metadata_egress_filter_handles_ipv4_mapped_ipv6() {
+        assert!(is_cloud_metadata_target("169.254.169.254"));
+        assert!(is_cloud_metadata_target("[fd00:ec2::254]"));
+        assert!(is_cloud_metadata_target("::ffff:169.254.169.254"));
+        assert!(is_cloud_metadata_target("metadata.google.internal."));
+        assert!(!is_cloud_metadata_target("10.0.0.5"));
+        assert!(!is_cloud_metadata_target("example.com"));
     }
 }
