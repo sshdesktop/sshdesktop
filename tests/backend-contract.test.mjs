@@ -64,6 +64,7 @@ test('parseAppError maps backend error signatures consistently across runtimes',
   assert.equal(contract.parseAppError('CONFLICT_DETECTED: remote hash changed', 'sftp_write_text_file').code, 'CONFLICT_DETECTED');
   assert.equal(contract.parseAppError('PROCESS_IDENTITY_MISMATCH: PID reused', 'process_kill').code, 'PROCESS_IDENTITY_MISMATCH');
   assert.equal(contract.parseAppError('Operation timed out after 5000ms', 'ssh_exec').code, 'TIMEOUT');
+  assert.equal(contract.parseAppError('SECURITY ALERT: Host key verification failed', 'ssh_connect').code, 'HOST_KEY_UNTRUSTED');
 });
 
 test('withRetryAndTimeout retries transient failures, honors AbortSignal, and enforces timeout', async () => {

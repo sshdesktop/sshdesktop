@@ -125,6 +125,8 @@ export const useConnectionStore = create<ConnectionState>()(
           color: fullConn.color,
           group: fullConn.group,
           tags: fullConn.tags || [],
+          keepalive_interval_sec: (fullConn as any).keepalive_interval_sec ?? (fullConn as any).keepaliveIntervalSec,
+          proxy_jump: (fullConn as any).proxy_jump || (fullConn as any).proxyJump,
         }).catch((err) => {
           console.error('[SSH Desktop Store] Failed to save connection:', err);
         });
@@ -153,6 +155,8 @@ export const useConnectionStore = create<ConnectionState>()(
           color: updated.color,
           group: updated.group,
           tags: updated.tags || [],
+          keepalive_interval_sec: (updated as any).keepalive_interval_sec ?? (updated as any).keepaliveIntervalSec,
+          proxy_jump: (updated as any).proxy_jump || (updated as any).proxyJump,
         }).catch((err) => {
           console.error('[SSH Desktop Store] Failed to update connection:', err);
         });
@@ -276,6 +280,8 @@ export const useConnectionStore = create<ConnectionState>()(
           color: target.color,
           group: target.group,
           tags: target.tags || [],
+          keepalive_interval_sec: target.keepalive_interval_sec ?? target.keepaliveIntervalSec,
+          proxy_jump: target.proxy_jump || target.proxyJump,
         });
 
         // Persist to disk as well
@@ -293,6 +299,8 @@ export const useConnectionStore = create<ConnectionState>()(
           color: target.color,
           group: target.group,
           tags: target.tags || [],
+          keepalive_interval_sec: target.keepalive_interval_sec ?? target.keepaliveIntervalSec,
+          proxy_jump: target.proxy_jump || target.proxyJump,
         }).catch(() => {});
 
         // Only mark connected when backend verification succeeds
@@ -489,6 +497,8 @@ export const useConnectionStore = create<ConnectionState>()(
               authMethod: s.auth_method || s.authMethod || (s.private_key_path ? 'key' : 'password'),
               privateKeyPath: s.private_key_path || s.privateKeyPath,
               created_at: s.created_at || Date.now(),
+              keepalive_interval_sec: s.keepalive_interval_sec ?? s.keepaliveIntervalSec,
+              proxy_jump: s.proxy_jump || s.proxyJump,
             }));
             const map = new Map<string, SavedConnection>();
             state.connections.forEach(c => map.set(c.id, c));

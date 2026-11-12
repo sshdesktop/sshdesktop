@@ -42,7 +42,7 @@ export function parseAppError(err: unknown, command?: string, httpStatus?: numbe
     code = 'CONFLICT_DETECTED';
   } else if (upper.includes('PROCESS_IDENTITY_MISMATCH')) {
     code = 'PROCESS_IDENTITY_MISMATCH';
-  } else if (upper.includes('HOST_KEY') || upper.includes('KNOWN_HOSTS')) {
+  } else if (upper.includes('HOST_KEY') || upper.includes('KNOWN_HOSTS') || upper.includes('SECURITY ALERT')) {
     code = 'HOST_KEY_UNTRUSTED';
   } else if (upper.includes('TIMED OUT') || upper.includes('TIMEOUT')) {
     code = 'TIMEOUT';

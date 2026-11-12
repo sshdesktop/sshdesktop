@@ -90,9 +90,13 @@ const mockLocalStorage = createStorageMock();
 const mockSessionStorage = createStorageMock();
 globalThis.localStorage = mockLocalStorage;
 globalThis.sessionStorage = mockSessionStorage;
+const dispatchedEvents = [];
 globalThis.window = {
   location: { origin: 'http://localhost:9000', protocol: 'http:' },
-  dispatchEvent: () => true,
+  dispatchEvent: (event) => {
+    dispatchedEvents.push(event);
+    return true;
+  },
   CustomEvent: class CustomEvent { constructor(name, opts) { this.type = name; this.detail = opts?.detail; } },
 };
 globalThis.CustomEvent = globalThis.window.CustomEvent;
@@ -286,4 +290,46 @@ test('certbot-service validates domain names and email addresses and rejects com
     () => certbotSvc.testSslDiagnostics('conn-1', 'example.com"; reboot; echo "'),
     /Invalid target domain/
   );
+});
+
+test('handleBridgeErrorEvents dispatches security alert on untrusted host key', () => {
+  dispatchedEvents.length = 0;
+  const err = bridge.parseAppError('SECURITY ALERT: REMOTE HOST IDENTIFICATION HAS CHANGED!', 'ssh_connect');
+  bridge.handleBridgeErrorEvents('ssh_connect', { connId: 'server-1' }, err);
+  const alertEvent = dispatchedEvents.find((e) => e.type === 'sshdesktop-security-alert');
+  assert.ok(alertEvent, 'Expected sshdesktop-security-alert event');
+  assert.equal(alertEvent.detail.connId, 'server-1');
+  assert.equal(alertEvent.detail.code, 'HOST_KEY_UNTRUSTED');
+});
+
+test('handleBridgeErrorEvents dispatches disconnect events on connection loss', () => {
+  dispatchedEvents.length = 0;
+  const err = bridge.parseAppError('Connection closed by remote host', 'ssh_exec');
+  bridge.handleBridgeErrorEvents('ssh_exec', { connId: 'server-1' }, err);
+  const dropEvent = dispatchedEvents.find((e) => e.type === 'sshdesktop-ssh-disconnected');
+  assert.ok(dropEvent, 'Expected sshdesktop-ssh-disconnected event');
+  assert.equal(dropEvent.detail.connId, 'server-1');
+});
+
+test('terminalResize debounces identical dimension updates', async () => {
+  let invokeCount = 0;
+  globalThis.fetch = async () => {
+    invokeCount++;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ result: null }),
+      text: async () => JSON.stringify({ result: null }),
+    };
+  };
+
+  await bridge.terminalResize('term-test-1', 24, 80);
+  assert.equal(invokeCount, 1);
+  // Re-invoking with identical dimensions should short-circuit and avoid redundant invoke
+  await bridge.terminalResize('term-test-1', 24, 80);
+  assert.equal(invokeCount, 1);
+  // Different dimensions trigger invoke
+  await bridge.terminalResize('term-test-1', 30, 100);
+  assert.equal(invokeCount, 2);
+  await bridge.terminalClose('term-test-1');
 });

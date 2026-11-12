@@ -87,6 +87,66 @@ export function isConnectionClosed(connId?: string | null): boolean {
   return true;
 }
 
+export function handleBridgeErrorEvents(cmd: string, args: Record<string, any>, typedErr: SshDesktopError): void {
+  if (typeof window === 'undefined') return;
+  const errMsg = typedErr.message || '';
+  const upper = errMsg.toUpperCase();
+  const targetConnId = args?.connId || args?.connectionId || args?.id;
+  const isExplicitlyClosed = Boolean(targetConnId && isConnectionClosed(targetConnId));
+
+  // 1. Host key security alerts
+  if (typedErr.code === 'HOST_KEY_UNTRUSTED' || upper.includes('SECURITY ALERT') || upper.includes('HOST KEY')) {
+    const alertDetail = {
+      connId: targetConnId,
+      command: cmd,
+      reason: errMsg,
+      code: typedErr.code,
+    };
+    window.dispatchEvent(new CustomEvent('sshdesktop-security-alert', { detail: alertDetail }));
+  }
+
+  // 2. Disconnect detection
+  const isConnectionLoss =
+    errMsg.includes('No active SSH connection') ||
+    errMsg.includes('Connection closed') ||
+    errMsg.includes('connection reset') ||
+    errMsg.includes('broken pipe') ||
+    errMsg.includes('Connection refused') ||
+    errMsg.includes('Connection timed out') ||
+    errMsg.includes('timed out') ||
+    errMsg.includes('Host is down') ||
+    errMsg.includes('No route to host') ||
+    errMsg.includes('Network is unreachable') ||
+    errMsg.includes('closed by remote host') ||
+    errMsg.includes('failed to send channel request') ||
+    errMsg.includes('channel EOF') ||
+    errMsg.includes('Socket closed') ||
+    errMsg.includes('transport error');
+
+  // Do NOT trigger global disconnect alert when:
+  // 1. It is a connection test (ssh_test_connection)
+  // 2. It is an intentional disconnect or store deletion
+  // 3. It is an initial connection attempt (ssh_connect)
+  // 4. The error is simply that no connection exists for this ID (e.g. un-connected fleet node)
+  const isNotDropEvent =
+    cmd === 'ssh_test_connection' ||
+    cmd === 'ssh_disconnect' ||
+    cmd === 'store_delete_connection' ||
+    cmd === 'ssh_connect' ||
+    errMsg.includes('No active SSH connection') ||
+    errMsg.includes('Please connect to a server first');
+
+  if (isConnectionLoss && !isNotDropEvent && !isExplicitlyClosed) {
+    const detail = {
+      connId: targetConnId,
+      command: cmd,
+      reason: errMsg,
+    };
+    window.dispatchEvent(new CustomEvent('sshdesktop-ssh-disconnected', { detail }));
+    window.dispatchEvent(new CustomEvent('clouddesk-ssh-disconnected', { detail }));
+  }
+}
+
 export interface SafeInvokeOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -108,52 +168,8 @@ export async function safeInvoke<T>(
     } catch (err: any) {
       const typedErr = parseAppError(err, cmd);
       console.error(`[SSH Desktop Tauri] Command '${cmd}' failed (${typedErr.code}):`, typedErr.message);
-      const errMsg = typedErr.message;
-      const isConnectionLoss = 
-        errMsg.includes('No active SSH connection') || 
-        errMsg.includes('Connection closed') || 
-        errMsg.includes('connection reset') || 
-        errMsg.includes('broken pipe') ||
-        errMsg.includes('Connection refused') ||
-        errMsg.includes('Connection timed out') ||
-        errMsg.includes('timed out') ||
-        errMsg.includes('Host is down') ||
-        errMsg.includes('No route to host') ||
-        errMsg.includes('Network is unreachable') ||
-        errMsg.includes('closed by remote host') ||
-        errMsg.includes('failed to send channel request') ||
-        errMsg.includes('channel EOF') ||
-        errMsg.includes('Socket closed') ||
-        errMsg.includes('transport error');
-
-      // Do NOT trigger global disconnect alert when:
-      // 1. It is a connection test (ssh_test_connection)
-      // 2. It is an intentional disconnect or store deletion
-      // 3. It is an initial connection attempt (ssh_connect)
-      // 4. The error is simply that no connection exists for this ID (e.g. un-connected fleet node)
-      const isNotDropEvent = 
-        cmd === 'ssh_test_connection' || 
-        cmd === 'ssh_disconnect' || 
-        cmd === 'store_delete_connection' ||
-        cmd === 'ssh_connect' ||
-        errMsg.includes('No active SSH connection') ||
-        errMsg.includes('Please connect to a server first');
-
-      const targetConnId = args?.connId || args?.connectionId || args?.id;
-      const isExplicitlyClosed = targetConnId && isConnectionClosed(targetConnId);
-
-      if (isConnectionLoss && !isNotDropEvent && !isExplicitlyClosed) {
-        if (typeof window !== 'undefined') {
-          const detail = { 
-            connId: targetConnId,
-            command: cmd,
-            reason: errMsg 
-          };
-          window.dispatchEvent(new CustomEvent('sshdesktop-ssh-disconnected', { detail }));
-          window.dispatchEvent(new CustomEvent('clouddesk-ssh-disconnected', { detail }));
-        }
-      }
-      throw parseAppError(err, cmd);
+      handleBridgeErrorEvents(cmd, args, typedErr);
+      throw typedErr;
     }
   }
 
@@ -207,6 +223,7 @@ export async function safeInvoke<T>(
       ? new SshDesktopError('TIMEOUT', `Command '${cmd}' timed out after ${effectiveTimeoutMs}ms.`, cmd)
       : parseAppError(err, cmd);
     console.error(`[SSH Desktop Web IPC] Command '${cmd}' failed:`, typedErr);
+    handleBridgeErrorEvents(cmd, args, typedErr);
     if (typedErr.code === 'CANCELLED') {
       throw typedErr;
     }
@@ -372,16 +389,22 @@ export async function terminalWrite(terminalId: string, data: number[]): Promise
 }
 
 export async function terminalResize(terminalId: string, rows: number, cols: number): Promise<void> {
-  lastKnownTerminalSizes.set(terminalId, { rows, cols });
+  const normalizedRows = Math.max(1, Math.floor(rows));
+  const normalizedCols = Math.max(1, Math.floor(cols));
+  const prev = lastKnownTerminalSizes.get(terminalId);
+  if (prev && prev.rows === normalizedRows && prev.cols === normalizedCols) {
+    return;
+  }
+  lastKnownTerminalSizes.set(terminalId, { rows: normalizedRows, cols: normalizedCols });
   if (!isTauri()) {
     const ws = webTerminalSockets.get(terminalId);
     if (ws && ws.readyState === WebSocket.OPEN) {
       try {
-        ws.send(JSON.stringify({ type: 'resize', rows, cols }));
+        ws.send(JSON.stringify({ type: 'resize', rows: normalizedRows, cols: normalizedCols }));
       } catch {}
     }
   }
-  return safeInvoke<void>('terminal_resize', { terminalId, rows, cols }, undefined);
+  return safeInvoke<void>('terminal_resize', { terminalId, rows: normalizedRows, cols: normalizedCols }, undefined);
 }
 
 export async function terminalClose(terminalId: string): Promise<void> {
@@ -424,8 +447,13 @@ export async function sftpWriteTextFile(
   }, undefined);
 }
 
-export async function sftpWriteFile(connId: string, path: string, content: number[]): Promise<void> {
-  return safeInvoke<void>('sftp_write_file', { connId, path, content }, undefined);
+export async function sftpWriteFile(
+  connId: string,
+  path: string,
+  content: number[] | Uint8Array,
+): Promise<void> {
+  const payload = Array.isArray(content) ? content : Array.from(content);
+  return safeInvoke<void>('sftp_write_file', { connId, path, content: payload }, undefined);
 }
 
 export async function sftpMkdir(connId: string, path: string): Promise<void> {
@@ -465,9 +493,21 @@ export async function sftpDownloadFile(connId: string, remotePath: string, local
       }
       return await sftpDownloadToDownloads(connId, remotePath);
     }
-    // Web browser fallback
-    const textContent = await sftpReadTextFile(connId, remotePath);
-    const blob = new Blob([textContent], { type: 'application/octet-stream' });
+    // Web browser fallback: read as base64 to avoid corrupting binary files (images, archives, executables)
+    let blob: Blob;
+    try {
+      const base64Content = await sftpReadFileBase64(connId, remotePath);
+      const binaryString = atob(base64Content);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      blob = new Blob([bytes], { type: 'application/octet-stream' });
+    } catch {
+      const textContent = await sftpReadTextFile(connId, remotePath);
+      blob = new Blob([textContent], { type: 'application/octet-stream' });
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1602,6 +1642,8 @@ export interface SshTunnelInfo {
   remote_host: string;
   remote_port: number;
   created_at: number;
+  tunnel_type?: 'local' | 'remote' | 'dynamic' | string;
+  bytes_transferred?: number;
 }
 
 export async function sshStartTunnel(
