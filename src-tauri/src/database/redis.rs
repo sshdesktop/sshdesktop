@@ -244,20 +244,31 @@ pub async fn execute_query_redis(
 }
 
 pub async fn list_tables_redis(client: &redis::Client) -> Result<Vec<DatabaseObject>, String> {
-    let mut con = client.get_multiplexed_tokio_connection().await.map_err(|e| e.to_string())?;
+    let mut con = tokio::time::timeout(std::time::Duration::from_secs(10), client.get_multiplexed_tokio_connection())
+        .await.map_err(|_| "Redis connection timed out after 10 seconds.".to_string())?
+        .map_err(|e| format!("Redis connection error: {}", e))?;
     let mut keys = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut cursor: u64 = 0;
     loop {
         let (next, mut batch): (u64, Vec<String>) = redis::cmd("SCAN")
             .arg(cursor).arg("MATCH").arg("*").arg("COUNT").arg(500)
             .query_async(&mut con).await.map_err(|e| format!("Redis SCAN failed: {}", e))?;
-        keys.append(&mut batch);
+        for key in batch {
+            if seen.insert(key.clone()) {
+                keys.push(key);
+                if keys.len() >= 10000 { break; }
+            }
+        }
         if keys.len() >= 10000 {
             keys.truncate(10000);
             break;
         }
         cursor = next;
         if cursor == 0 { break; }
+    }
+    if keys.len() > 10_000 {
+        keys.truncate(10_000);
     }
     Ok(keys
         .into_iter()
@@ -317,8 +328,15 @@ pub async fn execute_operation_redis(
 ) -> Result<OperationResult, String> {
     match operation {
         DatabaseOperation::DropObject { name, .. } => {
-            let mut con = client.get_multiplexed_tokio_connection().await.map_err(|e| e.to_string())?;
-            let deleted: u64 = redis::cmd("DEL").arg(name).query_async(&mut con).await.map_err(|e| e.to_string())?;
+            validate_redis_key(name)?;
+            let mut con = tokio::time::timeout(std::time::Duration::from_secs(10), client.get_multiplexed_tokio_connection())
+                .await.map_err(|_| "Redis connection timed out after 10 seconds.".to_string())?
+                .map_err(|e| format!("Redis connection error: {}", e))?;
+            let deleted: u64 = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                redis::cmd("DEL").arg(name).query_async(&mut con),
+            ).await.map_err(|_| "Redis delete timed out after 30 seconds.".to_string())?
+                .map_err(|e| format!("Redis DEL failed: {}", e))?;
             Ok(OperationResult {
                 success: true,
                 message: format!("Key '{}' deleted", name),
@@ -336,10 +354,10 @@ pub async fn get_object_definition_redis(
     client: &redis::Client,
     name: &str,
 ) -> Result<String, String> {
-    let mut con = client.get_multiplexed_tokio_connection().await.map_err(|e| e.to_string())?;
-    if name.is_empty() || name.len() > 1024 || name.chars().any(|c| c == '\0') {
-        return Err("Redis key must contain 1–1024 bytes and no NUL characters.".into());
-    }
+    validate_redis_key(name)?;
+    let mut con = tokio::time::timeout(std::time::Duration::from_secs(10), client.get_multiplexed_tokio_connection())
+        .await.map_err(|_| "Redis connection timed out after 10 seconds.".to_string())?
+        .map_err(|e| format!("Redis connection error: {}", e))?;
     let k_type: String = redis::cmd("TYPE").arg(name).query_async(&mut con).await
         .map_err(|e| format!("Redis TYPE failed: {}", e))?;
     let ttl: i64 = redis::cmd("TTL").arg(name).query_async(&mut con).await
@@ -412,9 +430,7 @@ pub async fn redis_get_value(
     connection_id: String,
     key: String,
 ) -> Result<RedisValueItem, String> {
-    if key.is_empty() || key.len() > 1024 || key.chars().any(|c| c == '\0') {
-        return Err("Redis key must contain 1–1024 bytes and no NUL characters.".into());
-    }
+    validate_redis_key(&key)?;
     let session = {
         let lock = db_mgr.sessions.lock().await;
         lock.get(&connection_id).cloned()
@@ -489,9 +505,7 @@ pub async fn redis_set_value(
     value: String,
     ttl: Option<i64>,
 ) -> Result<(), String> {
-    if key.is_empty() || key.len() > 1024 || key.chars().any(|c| c == '\0') {
-        return Err("Redis key must contain 1–1024 bytes and no NUL characters.".into());
-    }
+    validate_redis_key(&key)?;
     if value.len() > 16 * 1024 * 1024 {
         return Err("Redis value exceeds the 16 MiB input limit.".into());
     }
@@ -528,9 +542,7 @@ pub async fn redis_delete_key(
     connection_id: String,
     key: String,
 ) -> Result<bool, String> {
-    if key.is_empty() || key.len() > 1024 || key.chars().any(|c| c == '\0') {
-        return Err("Redis key must contain 1–1024 bytes and no NUL characters.".into());
-    }
+    validate_redis_key(&key)?;
     let session = {
         let lock = db_mgr.sessions.lock().await;
         lock.get(&connection_id).cloned()
