@@ -323,7 +323,7 @@ pub async fn execute_query_sqlite(
     // For remote SQLite, conservatively sync after every query. SQL lexical
     // classification cannot reliably recognize every write form (comments,
     // CTEs, extensions, or dialect-specific syntax).
-    if session.config.use_ssh { had_mutation = true; }
+    if session.config.use_ssh && !session.config.read_only { had_mutation = true; }
     let mut remaining_rows = limit;
     for (stmt_idx, stmt) in statements.iter().enumerate() {
         let stmt_start = Instant::now();
@@ -442,7 +442,7 @@ pub async fn execute_query_sqlite(
     }
 
     // If SQLite is on remote host and mutation occurred, sync cache back via SFTP
-    if had_mutation && session.config.use_ssh {
+    if had_mutation && session.config.use_ssh && !session.config.read_only {
         if let Some(conn_id) = remote_sync_id {
             let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
             validate_remote_sqlite_path(raw_path)?;
