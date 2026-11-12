@@ -193,16 +193,25 @@ pub async fn terminal_create(
         let handle = match handle_opt {
             Some(h) => Some(h),
             None => {
-                // Deduplicate concurrent on-demand session handshakes per connection
-                static HANDSHAKE_LOCKS: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
-                    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+                // Serialize terminal-triggered handshakes with explicit connect and
+                // disconnect operations. A separate terminal-only lock allowed a
+                // late PTY handshake to overwrite or resurrect an SSH transport.
+                let lock_id = conn.id.clone();
                 let conn_lock = {
-                    let mut locks = HANDSHAKE_LOCKS.lock();
-                    locks.entry(conn_id.clone()).or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(()))).clone()
+                    let mut locks = state.connection_locks.lock();
+                    locks.retain(|_, weak_lock| weak_lock.strong_count() > 0);
+                    match locks.get(&lock_id).and_then(std::sync::Weak::upgrade) {
+                        Some(existing) => existing,
+                        None => {
+                            let created = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                            locks.insert(lock_id.clone(), std::sync::Arc::downgrade(&created));
+                            created
+                        }
+                    }
                 };
-                let _lock = conn_lock.lock().await;
+                let _lock = conn_lock.lock_owned().await;
 
-                // Re-check if session was established while waiting for lock
+                // Re-check after acquiring the shared lifecycle lock.
                 let recheck = {
                     let sessions = state.sessions.lock().await;
                     sessions.get(&conn_id).cloned().or_else(|| {
@@ -230,9 +239,22 @@ pub async fn terminal_create(
                         Ok(new_handle) => {
                             let arc_h = std::sync::Arc::new(new_handle);
                             let mut sessions = state.sessions.lock().await;
-                            sessions.insert(conn_id.clone(), arc_h.clone());
-                            sessions.entry("default".to_string()).or_insert_with(|| arc_h.clone());
-                            Some(arc_h)
+                            if sessions.contains_key(&conn_id) {
+                                drop(sessions);
+                                let _ = tokio::time::timeout(
+                                    std::time::Duration::from_millis(800),
+                                    new_handle.disconnect(
+                                        russh::Disconnect::ByApplication,
+                                        "Superseded terminal SSH handshake",
+                                        "en",
+                                    ),
+                                ).await;
+                                None
+                            } else {
+                                sessions.insert(conn_id.clone(), arc_h.clone());
+                                sessions.entry("default".to_string()).or_insert_with(|| arc_h.clone());
+                                Some(arc_h)
+                            }
                         }
                         Err(e) => {
                             log::warn!("SSH Desktop: russh on-demand connect failed for {}: {}", host, e);
