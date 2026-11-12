@@ -236,3 +236,35 @@ pub async fn service_logs(
 
     Err(format!("No journal logs found for service '{}'", name))
 }
+
+
+#[cfg(test)]
+mod service_validation_tests {
+    use super::*;
+
+    #[test]
+    fn service_names_reject_options_paths_and_controls() {
+        for bad in ["", "-evil.service", "../sshd.service", "sshd.service;id", "sshd.service\\n"] {
+            assert!(!valid_service_name(bad), "accepted unsafe service name: {:?}", bad);
+        }
+        assert!(valid_service_name("ssh.service"));
+        assert!(valid_service_name("user@100.service"));
+        assert!(valid_service_name("dbus-org.freedesktop.service"));
+    }
+
+    #[test]
+    fn service_names_enforce_byte_limit() {
+        assert!(!valid_service_name(&"a".repeat(257)));
+        assert!(valid_service_name(&"a".repeat(256)));
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn shell_quote_keeps_input_as_one_argument() {
+        assert_eq!(shell_quote("ssh.service; id"), "'ssh.service; id'");
+    }
+}
