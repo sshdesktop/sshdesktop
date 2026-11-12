@@ -249,6 +249,7 @@ pub fn check_policy_permission_for_role(role: &str, action: &str) -> Result<(), 
             | "firewall_delete_rule_advanced"
             | "firewall_toggle"
             | "firewall_install"
+            | "firewall_reload"
             | "firewall_set_default_policy"
             | "firewall_reset"
             | "user_create"
@@ -512,6 +513,10 @@ mod tests {
         assert!(check_policy_permission_for_role("operator", "firewall_reset").is_err());
         assert!(check_policy_permission_for_role("operator", "disk_format_filesystem").is_err());
         assert!(check_policy_permission_for_role("read_only", "firewall_add_rule").is_err());
+        assert!(check_policy_permission_for_role("read_only", "firewall_add_rule_advanced").is_err());
+        assert!(check_policy_permission_for_role("read_only", "firewall_delete_rule_advanced").is_err());
+        assert!(check_policy_permission_for_role("read_only", "firewall_install").is_err());
+        assert!(check_policy_permission_for_role("read_only", "firewall_reload").is_err());
         assert!(check_policy_permission_for_role("read_only", "user_delete").is_err());
     }
 
