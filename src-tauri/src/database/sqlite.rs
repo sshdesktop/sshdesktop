@@ -6,6 +6,11 @@ fn validate_sqlite_identifier(value: &str, kind: &str) -> Result<(), String> {
 }
 
 fn secure_sqlite_cache_file(path: &std::path::Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("Could not inspect SQLite cache file: {}", e))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("SQLite cache path must be a regular file, not a symlink or special file.".into());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -55,6 +60,9 @@ pub async fn connect_sqlite(
     state: Option<&crate::AppState>,
 ) -> Result<(DriverInstance, ServerCapabilities), String> {
     let raw_path = config.sqlite_path.as_deref().unwrap_or(&config.database).trim();
+    if raw_path.len() > 4096 || raw_path.chars().any(|c| c.is_control() || c == '\0') {
+        return Err("SQLite database path exceeds 4096 bytes or contains control characters.".into());
+    }
     if raw_path.is_empty() {
         return Err("SQLite file path is empty. Please specify a database file path.".to_string());
     }
@@ -94,6 +102,11 @@ pub async fn connect_sqlite(
                 if touch_code != 0 {
                     return Err(format!("Failed to create remote SQLite file '{}': {}", raw_path, touch_out.trim()));
                 }
+                if let Ok(meta) = std::fs::symlink_metadata(&local_cache) {
+                    if meta.file_type().is_symlink() || !meta.is_file() {
+                        return Err("Refusing to replace a non-regular SQLite cache path.".into());
+                    }
+                }
                 std::fs::File::create(&local_cache)
                     .map_err(|e| format!("Failed to create local SQLite cache: {}", e))?;
                 secure_sqlite_cache_file(&local_cache)?;
@@ -108,9 +121,20 @@ pub async fn connect_sqlite(
                 }
                 let bytes = from_base64(cmd_out.trim())
                     .ok_or_else(|| "Remote SQLite download returned invalid base64 data.".to_string())?;
-                std::fs::write(&local_cache, bytes)
-                    .map_err(|e| format!("Failed to write local SQLite cache: {}", e))?;
-                secure_sqlite_cache_file(&local_cache)?;
+                if bytes.len() > 256 * 1024 * 1024 {
+                    return Err("Decoded remote SQLite database exceeds the 256 MiB cache limit.".into());
+                }
+                let temp_cache = local_cache.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+                {
+                    use std::io::Write;
+                    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp_cache)
+                        .map_err(|e| format!("Failed to create temporary SQLite cache: {}", e))?;
+                    file.write_all(&bytes).map_err(|e| format!("Failed to write temporary SQLite cache: {}", e))?;
+                    file.sync_all().map_err(|e| format!("Failed to flush temporary SQLite cache: {}", e))?;
+                }
+                secure_sqlite_cache_file(&temp_cache)?;
+                std::fs::rename(&temp_cache, &local_cache)
+                    .map_err(|e| { let _ = std::fs::remove_file(&temp_cache); format!("Failed to publish downloaded SQLite cache: {}", e) })?;
             }
 
             local_cache.to_string_lossy().to_string()
@@ -203,13 +227,20 @@ pub async fn execute_query_sqlite(
             || s_upper.starts_with("REINDEX") || s_upper.starts_with("VACUUM")
             || s_upper.starts_with("ANALYZE") || s_upper.starts_with("ATTACH")
             || s_upper.starts_with("DETACH") || s_upper.starts_with("PRAGMA")
+            || s_upper.starts_with("BEGIN") || s_upper.starts_with("COMMIT")
+            || s_upper.starts_with("END") || s_upper.starts_with("ROLLBACK")
+            || s_upper.starts_with("SAVEPOINT") || s_upper.starts_with("RELEASE")
             || (s_upper.starts_with("WITH") && (s_upper.contains("INSERT") || s_upper.contains("UPDATE") || s_upper.contains("DELETE") || s_upper.contains("REPLACE")));
 
         if is_write_query {
             had_mutation = true;
         }
 
-        let is_mutation = is_write_query && !s_upper.contains("RETURNING");
+        // Transaction control can commit or discard prior writes; it must pass
+        // through the mutation path and trigger remote cache synchronization.
+        let is_transaction_control = ["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"]
+            .iter().any(|kw| s_upper == *kw || s_upper.starts_with(&format!("{} ", kw)));
+        let is_mutation = (is_write_query && !s_upper.contains("RETURNING")) || is_transaction_control;
         if is_mutation {
             let res = sqlx::raw_sql(stmt)
                 .execute(pool)
@@ -303,7 +334,9 @@ pub async fn execute_query_sqlite(
     if had_mutation && session.config.use_ssh {
         if let Some(conn_id) = remote_sync_id {
             let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
-            if raw_path.is_empty() { return Err("Remote SQLite sync requires a non-empty remote file path.".into()); }
+            if raw_path.is_empty() || raw_path.len() > 4096 || raw_path.chars().any(|c| c.is_control() || c == '\0') {
+                return Err("Remote SQLite sync path is invalid.".into());
+            }
             let local_cache = sqlite_cache_path(&session.config, raw_path)?;
             let bytes = std::fs::read(&local_cache)
                 .map_err(|e| format!("Failed to read updated local SQLite cache: {}", e))?;
@@ -400,6 +433,9 @@ pub async fn execute_operation_sqlite(
     let res = sqlx::raw_sql(sql).execute(pool).await.map_err(|e| e.to_string())?;
     if let Some(conn_id) = remote_conn_id {
         let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
+        if raw_path.is_empty() || raw_path.len() > 4096 || raw_path.chars().any(|c| c.is_control() || c == '\0') {
+            return Err("Remote SQLite operation path is invalid.".into());
+        }
         let local_cache = sqlite_cache_path(&session.config, raw_path)?;
         let bytes = std::fs::read(&local_cache)
             .map_err(|e| format!("Failed to read updated local SQLite cache: {}", e))?;
@@ -419,4 +455,26 @@ pub async fn get_object_definition_sqlite(
     let row = sqlx::query(q).bind(name).fetch_one(pool).await.map_err(|e| e.to_string())?;
     let def: Option<String> = row.try_get(0).map_err(|e| format!("Invalid SQLite object definition: {}", e))?;
     def.ok_or_else(|| format!("SQLite object '{}' has no stored SQL definition.", name))
+}
+
+#[cfg(test)]
+mod sqlite_path_and_transaction_tests {
+    use super::*;
+
+    #[test]
+    fn validates_sqlite_remote_paths() {
+        assert!(validate_sqlite_identifier("users", "table name").is_ok());
+        assert!(validate_sqlite_identifier("", "table name").is_err());
+        assert!(validate_sqlite_identifier("users\\n", "table name").is_err());
+    }
+
+    #[test]
+    fn recognizes_transaction_control_statements() {
+        for sql in ["BEGIN", "BEGIN IMMEDIATE", "COMMIT", "END", "ROLLBACK", "SAVEPOINT point_a", "RELEASE point_a"] {
+            let upper = sql.trim().to_uppercase();
+            let is_transaction_control = ["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"]
+                .iter().any(|kw| upper == *kw || upper.starts_with(&format!("{} ", kw)));
+            assert!(is_transaction_control, "not recognized: {}", sql);
+        }
+    }
 }
