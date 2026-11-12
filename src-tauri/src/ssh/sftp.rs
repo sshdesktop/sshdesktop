@@ -479,6 +479,7 @@ pub async fn sftp_write_bytes(
     path: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
+    crate::store::audit::enforce_policy_permission("sftp_mutate")?;
     if bytes.len() > 256 * 1024 * 1024 {
         return Err("Remote file upload is limited to 256 MiB per operation.".into());
     }
@@ -644,6 +645,7 @@ pub async fn sftp_mkdir(
     conn_id: String,
     path: String,
 ) -> Result<(), String> {
+    crate::store::audit::enforce_policy_permission("sftp_mutate")?;
     if !valid_remote_path(&path) {
         return Err("Remote directory path must be absolute and contain no traversal or control characters.".into());
     }
@@ -667,6 +669,7 @@ pub async fn sftp_delete(
     conn_id: String,
     path: String,
 ) -> Result<(), String> {
+    crate::store::audit::enforce_policy_permission("sftp_mutate")?;
     // Canonicalize on the remote host before applying protected-root checks.
     // This blocks traversal aliases such as /etc/../ and repeated separators.
     if !valid_remote_path(&path) {
@@ -713,6 +716,7 @@ pub async fn sftp_rename(
     old_path: String,
     new_path: String,
  ) -> Result<(), String> {
+    crate::store::audit::enforce_policy_permission("sftp_mutate")?;
     if !valid_remote_path(&old_path) || !valid_remote_path(&new_path) {
         return Err("Rename paths must be absolute and contain no traversal or control characters.".into());
     }
@@ -738,6 +742,7 @@ pub async fn sftp_chmod(
     path: String,
     mode: u32,
 ) -> Result<(), String> {
+    crate::store::audit::enforce_policy_permission("sftp_mutate")?;
     if !valid_remote_path(&path) || mode > 0o7777 {
         return Err("Invalid remote path or permission mode.".into());
     }
@@ -766,6 +771,7 @@ pub async fn sftp_chown(
     owner: String,
     group: String,
 ) -> Result<(), String> {
+    crate::store::audit::enforce_policy_permission("sftp_mutate")?;
     let valid_owner = !owner.is_empty() && owner.len() <= 64
         && owner.as_bytes()[0].is_ascii_alphanumeric()
         && owner.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
