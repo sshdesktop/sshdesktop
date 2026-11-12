@@ -399,22 +399,67 @@ pub async fn ssh_start_tunnel(
         if maybe_handle.is_none() {
             let is_ppk = selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
             if !is_ppk {
-            if let Ok(new_handle) = crate::ssh::session::connect_session_with_passphrase_auth(
-                &conn.config.host,
-                conn.config.port,
-                &conn.config.username,
-                if is_key_auth { None } else { conn.config.password.as_deref() },
-                selected_key_path,
-                conn.config.passphrase.as_deref(),
-                conn.config.auth_method.as_deref() != Some("password"),
-            ).await {
-                    let arc_h = Arc::new(new_handle);
-                    {
-                        let mut lock = state.sessions.lock().await;
-                        lock.insert(conn.id.clone(), arc_h.clone());
-                        lock.entry("default".to_string()).or_insert_with(|| arc_h.clone());
+                // Share the same lifecycle lock as explicit connect/disconnect and
+                // terminal handshakes; otherwise a late tunnel handshake can
+                // overwrite a newer session or resurrect one after disconnect.
+                let lock_id = conn.id.clone();
+                let connection_lock = {
+                    let mut locks = state.connection_locks.lock();
+                    locks.retain(|_, weak_lock| weak_lock.strong_count() > 0);
+                    match locks.get(&lock_id).and_then(std::sync::Weak::upgrade) {
+                        Some(existing) => existing,
+                        None => {
+                            let created = Arc::new(tokio::sync::Mutex::new(()));
+                            locks.insert(lock_id.clone(), Arc::downgrade(&created));
+                            created
+                        }
                     }
-                    maybe_handle = Some(arc_h);
+                };
+                let _connection_guard = connection_lock.lock_owned().await;
+
+                // Re-check while holding the lifecycle lock before starting a handshake.
+                maybe_handle = {
+                    let sessions = state.sessions.lock().await;
+                    sessions.get(&conn_id).cloned()
+                        .or_else(|| sessions.get(&conn.id).cloned())
+                        .or_else(|| if conn_id == "default" { sessions.get("default").cloned() } else { None })
+                };
+
+                if maybe_handle.is_none() {
+                    match crate::ssh::session::connect_session_with_passphrase_auth(
+                        &conn.config.host,
+                        conn.config.port,
+                        &conn.config.username,
+                        if is_key_auth { None } else { conn.config.password.as_deref() },
+                        selected_key_path,
+                        conn.config.passphrase.as_deref(),
+                        conn.config.auth_method.as_deref() != Some("password"),
+                    ).await {
+                        Ok(new_handle) => {
+                            let arc_h = Arc::new(new_handle);
+                            let mut sessions = state.sessions.lock().await;
+                            if sessions.contains_key(&conn_id) || sessions.contains_key(&conn.id) {
+                                maybe_handle = sessions.get(&conn_id).cloned()
+                                    .or_else(|| sessions.get(&conn.id).cloned());
+                                drop(sessions);
+                                let _ = tokio::time::timeout(
+                                    std::time::Duration::from_millis(800),
+                                    arc_h.disconnect(
+                                        russh::Disconnect::ByApplication,
+                                        "Superseded tunnel SSH handshake",
+                                        "en",
+                                    ),
+                                ).await;
+                            } else {
+                                sessions.insert(conn.id.clone(), arc_h.clone());
+                                sessions.entry("default".to_string()).or_insert_with(|| arc_h.clone());
+                                maybe_handle = Some(arc_h);
+                            }
+                        }
+                        Err(error) => {
+                            log::warn!("SSH Desktop: Tunnel SSH handshake failed for {}: {}", conn.config.host, error);
+                        }
+                    }
                 }
             }
         }
