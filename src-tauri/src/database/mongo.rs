@@ -10,12 +10,21 @@ use super::serialization::split_sql_statements;
 
 #[inline]
 pub fn get_effective_mongo_db<'a>(db: &'a str) -> &'a str {
+
     let trimmed = db.trim();
     if trimmed.is_empty() {
         "admin"
     } else {
         trimmed
     }
+}
+
+pub fn validate_mongo_name(value: &str, kind: &str) -> Result<(), String> {
+    let name = value.trim();
+    if name.is_empty() || name.len() > 255 || name.chars().any(|c| c.is_control() || c == '\0') {
+        return Err(format!("MongoDB {} must be 1–255 bytes and contain no control characters.", kind));
+    }
+    Ok(())
 }
 
 pub async fn connect_mongo(
@@ -812,12 +821,29 @@ pub async fn collect_mongo_cursor_results(
     let mut key_types: HashMap<String, String> = HashMap::new();
     let mut count = 0usize;
 
+    const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_RESULT_BYTES: usize = 12 * 1024 * 1024;
+    let mut result_bytes = 0usize;
     while let Some(doc_res) = cursor.next().await {
         if count >= limit {
             break;
         }
-        count += 1;
         let doc = doc_res.map_err(|e| format!("MongoDB cursor error: {}", e))?;
+        let bson_bytes = mongodb::bson::to_vec(&doc)
+            .map_err(|e| format!("Could not measure MongoDB document size: {}", e))?
+            .len();
+        if bson_bytes > MAX_DOCUMENT_BYTES {
+            return Err("MongoDB document exceeds the 8 MiB desktop display limit.".into());
+        }
+        let json_row = bson_to_clean_json(mongodb::bson::Bson::Document(doc.clone()));
+        let row_bytes = serde_json::to_vec(&json_row)
+            .map_err(|e| format!("Could not serialize MongoDB document: {}", e))?
+            .len();
+        result_bytes = result_bytes.saturating_add(row_bytes);
+        if result_bytes > MAX_RESULT_BYTES {
+            return Err("MongoDB query result exceeds the 12 MiB display limit; reduce the result limit or projection.".into());
+        }
+        count += 1;
         for (k, v) in &doc {
             if !key_types.contains_key(k) {
                 if k == "_id" {
@@ -842,7 +868,7 @@ pub async fn collect_mongo_cursor_results(
                 key_types.insert(k.clone(), t_name);
             }
         }
-        rows.push(bson_to_clean_json(mongodb::bson::Bson::Document(doc)));
+        rows.push(json_row);
     }
 
     let columns = if key_order.is_empty() {
@@ -1098,6 +1124,7 @@ pub async fn execute_mongodb_single_command(
     if trimmed_clean.to_lowercase().starts_with("use ") {
         let after_use = trimmed_clean[4..].trim().trim_end_matches(';').trim();
         let target_db = after_use.trim_matches(|c| c == '\'' || c == '"' || c == '`').trim();
+        validate_mongo_name(target_db, "database name")?;
         if target_db.is_empty() {
             return Err("Database name cannot be empty in 'use <db>'".to_string());
         }
@@ -2508,14 +2535,21 @@ pub async fn execute_mongodb_query(
 ) -> Result<QueryResult, String> {
     let start = Instant::now();
     let statements = split_mongo_statements(raw_query);
+    if raw_query.len() > 5 * 1024 * 1024 {
+        return Err("MongoDB query exceeds the 5 MiB input limit.".into());
+    }
     if statements.is_empty() {
         return Err("MongoDB query is empty".to_string());
     }
-
+    if statements.len() > 100 {
+        return Err("MongoDB batch exceeds the 100-statement limit.".into());
+    }
+    validate_mongo_name(database_name, "database name")?;
+    let effective_limit = limit_override.clamp(1, 10_000);
     let mut current_db = database_name.to_string();
 
     if statements.len() == 1 {
-        let mut single_res = execute_mongodb_single_command(client, &current_db, &statements[0], limit_override, server_version).await?;
+        let mut single_res = execute_mongodb_single_command(client, &current_db, &statements[0], effective_limit, server_version).await?;
         let batch_item = BatchStatementResult {
             statement: statements[0].clone(),
             columns: single_res.columns.clone(),
@@ -2532,12 +2566,18 @@ pub async fn execute_mongodb_query(
     let mut batch_results = Vec::new();
     let mut last_res = None;
     let mut total_affected = 0u64;
+    let mut remaining_rows = effective_limit;
 
     for stmt in &statements {
         let stmt_start = Instant::now();
-        match execute_mongodb_single_command(client, &current_db, stmt, limit_override, server_version.clone()).await {
-            Ok(res) => {
-                total_affected += res.affected_rows;
+        let statement_limit = remaining_rows.max(1);
+        match execute_mongodb_single_command(client, &current_db, stmt, statement_limit, server_version.clone()).await {
+            Ok(mut res) => {
+                if res.rows.len() > remaining_rows {
+                    res.rows.truncate(remaining_rows);
+                }
+                remaining_rows = remaining_rows.saturating_sub(res.rows.len());
+                total_affected = total_affected.saturating_add(res.affected_rows);
                 if res.command_type == "MongoDB Use" {
                     if let Some(first_row) = res.rows.first() {
                         if let Some(new_db) = first_row.get("database").and_then(|v| v.as_str()) {
@@ -2631,8 +2671,8 @@ pub async fn get_collection_columns_mongo(
     let mut key_types: HashMap<String, String> = HashMap::new();
 
     while let Some(doc_res) = cursor.next().await {
-        if let Ok(doc) = doc_res {
-            for (k, v) in doc {
+        let doc = doc_res.map_err(|e| format!("MongoDB schema sampling failed: {}", e))?;
+        for (k, v) in doc {
                 if !key_types.contains_key(&k) {
                     if k == "_id" {
                         key_order.insert(0, k.clone());
@@ -2654,9 +2694,11 @@ pub async fn get_collection_columns_mongo(
                         other => format!("{:?}", other),
                     };
                     key_types.insert(k, t_name);
+                    if key_order.len() > 512 {
+                        return Err("MongoDB schema sample contains more than 512 distinct fields; narrow the sample before inspecting columns.".into());
+                    }
                 }
             }
-        }
     }
 
     if key_order.is_empty() {
@@ -2781,7 +2823,8 @@ pub async fn get_object_definition_mongo(
 ) -> Result<String, String> {
     let db = client.database(get_effective_mongo_db(&session.config.database));
     let coll = db.collection::<mongodb::bson::Document>(name);
-    let count = coll.count_documents(mongodb::bson::doc! {}, None).await.unwrap_or(0);
+    let count = coll.count_documents(mongodb::bson::doc! {}, None).await
+        .map_err(|e| format!("MongoDB collection count failed: {}", e))?;
     Ok(format!("// MongoDB Collection: {}\n// Document Count: {}\ndb.getCollection('{}').find({{}});", name, count, name))
 }
 
@@ -2839,6 +2882,13 @@ pub async fn mongodb_find_documents(
             mongodb::bson::doc! {}
         };
 
+        validate_mongo_name(&collection, "collection name")?;
+        if filter_json.as_ref().map(|v| v.len() > 1024 * 1024).unwrap_or(false) {
+            return Err("MongoDB filter exceeds the 1 MiB input limit.".into());
+        }
+        if skip.unwrap_or(0) > 1_000_000_000 {
+            return Err("MongoDB skip value exceeds the supported limit.".into());
+        }
         let safe_limit = limit.unwrap_or(100).clamp(1, 10000);
         let mut find_options = mongodb::options::FindOptions::default();
         find_options.skip = skip;
@@ -2874,6 +2924,10 @@ pub async fn mongodb_insert_document(
         let db = client.database(get_effective_mongo_db(&session.config.database));
         let coll = db.collection::<mongodb::bson::Document>(&collection);
 
+        validate_mongo_name(&collection, "collection name")?;
+        if doc_json.len() > 15 * 1024 * 1024 {
+            return Err("MongoDB document input exceeds the 15 MiB desktop limit.".into());
+        }
         let doc: mongodb::bson::Document = serde_json::from_str(&doc_json).map_err(|e| e.to_string())?;
         let res = coll.insert_one(doc, None).await.map_err(|e| e.to_string())?;
 
