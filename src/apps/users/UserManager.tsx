@@ -704,8 +704,14 @@ export default function UserManager() {
       ),
       onConfirm: async () => {
         try {
+          const cleanTty = (session.tty || '').trim().replace(/^\/dev\//, '');
+          if (!/^[a-zA-Z0-9_\/-]+$/.test(cleanTty)) {
+            showErrorModal('Invalid Terminal Session', 'Session terminal device name contains invalid characters.');
+            return;
+          }
+          const sq = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
           setConfirmModal(prev => prev ? { ...prev, isExecuting: true } : null);
-          const res = await sshExec(activeConnId, `sudo pkill -9 -t '${session.tty}' 2>&1 || sudo fuser -k '/dev/${session.tty}' 2>&1`);
+          const res = await sshExec(activeConnId, `sudo pkill -9 -t ${sq(cleanTty)} 2>&1 || sudo fuser -k ${sq(`/dev/${cleanTty}`)} 2>&1`);
           if (res.exit_code !== 0 && !res.stdout.includes('killed')) {
             throw new Error(res.stderr || res.stdout || 'Command failed to kill session process');
           }

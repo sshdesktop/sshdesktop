@@ -283,15 +283,15 @@ export default function CronManager() {
     setIsSavingRaw(true);
     try {
       const escaped = rawCrontab.replace(/'/g, "'\\''");
-      const res = await sshExec(activeConnId, `echo '${escaped}' | crontab -`);
+      const res = await sshExec(activeConnId, `printf '%s\\n' '${escaped}' | crontab -`);
       if (res.exit_code === 0) {
         showNotification('Crontab saved and reloaded');
         await loadCrons();
       } else {
-        alert(`Failed to save crontab:\n${res.stderr}`);
+        showNotification(`Failed to save crontab: ${res.stderr || res.stdout}`, 'error');
       }
     } catch (err: any) {
-      alert(`Error saving raw crontab: ${err?.message || err}`);
+      showNotification(`Error saving raw crontab: ${err?.message || err}`, 'error');
     } finally {
       setIsSavingRaw(false);
     }

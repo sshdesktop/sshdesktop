@@ -1,6 +1,10 @@
 import { sshExec } from '../../lib/tauri-bridge';
 import { SslCertificate, CertbotStatus, IssueCertForm, SelfSignedForm, SslDiagnosticResult, CertStatus } from './types';
 
+const sq = (s: string) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+const DOMAIN_REGEX = /^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
+const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+
 /**
  * Detect Certbot CLI, systemd auto-renewal timer, and installed web servers on the remote host
  */
@@ -588,15 +592,25 @@ export async function issueCertificate(
     throw new Error('At least one domain name is required.');
   }
 
+  for (const d of domainList) {
+    if (!DOMAIN_REGEX.test(d) || d.length > 253) {
+      throw new Error(`Invalid domain name: "${d}". Domain must follow standard DNS syntax.`);
+    }
+  }
+
   const primaryDomain = domainList[0];
   const allDomains = domainList.join(' ');
   const serverAliases = domainList.length > 1
     ? `ServerAlias ${domainList.slice(1).join(' ')}`
     : '';
 
-  const domainFlags = domainList.map(d => `-d "${d}"`).join(' ');
-  const emailFlag = form.email.trim()
-    ? `-m "${form.email.trim()}" --no-eff-email`
+  const domainFlags = domainList.map(d => `-d ${sq(d)}`).join(' ');
+  const trimmedEmail = form.email.trim();
+  if (trimmedEmail && (!EMAIL_REGEX.test(trimmedEmail) || trimmedEmail.length > 254 || /['"\\;\$`\s]/.test(trimmedEmail))) {
+    throw new Error(`Invalid email address: "${trimmedEmail}".`);
+  }
+  const emailFlag = trimmedEmail
+    ? `-m ${sq(trimmedEmail)} --no-eff-email`
     : '--register-unsafely-without-email --no-eff-email';
 
   const dryRunFlag = form.dryRun ? '--dry-run' : '';
@@ -1022,7 +1036,12 @@ export async function renewCertificates(
 ): Promise<{ success: boolean; output: string }> {
   let subcmd = 'renew --non-interactive --no-eff-email';
   if (dryRun) subcmd += ' --dry-run';
-  if (certName) subcmd += ` --cert-name "${certName}" --force-renewal`;
+  if (certName) {
+    if (!/^[a-zA-Z0-9._-]+$/.test(certName)) {
+      throw new Error('Invalid certificate name for renewal.');
+    }
+    subcmd += ` --cert-name ${sq(certName)} --force-renewal`;
+  }
 
   const script = `
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
@@ -1070,6 +1089,10 @@ export async function revokeCertificate(
   certName: string,
   reason: string = 'unspecified'
 ): Promise<{ success: boolean; output: string }> {
+  if (!/^[a-zA-Z0-9._-]+$/.test(certName)) {
+    throw new Error('Invalid certificate name for revocation.');
+  }
+  const safeReason = /^[a-zA-Z0-9_-]+$/.test(reason) ? reason : 'unspecified';
   const script = `
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
 
@@ -1081,7 +1104,7 @@ else
   CERTBOT="certbot"
 fi
 
-sudo $CERTBOT revoke --cert-name "${certName}" --reason "${reason}" --delete-after-revoke --non-interactive 2>&1
+sudo $CERTBOT revoke --cert-name ${sq(certName)} --reason ${sq(safeReason)} --delete-after-revoke --non-interactive 2>&1
 `;
 
   const res = await sshExec(connId, script);
@@ -1098,6 +1121,9 @@ export async function deleteCertificate(
   connId: string,
   certName: string
 ): Promise<{ success: boolean; output: string }> {
+  if (!/^[a-zA-Z0-9._-]+$/.test(certName)) {
+    throw new Error('Invalid certificate name for deletion.');
+  }
   const script = `
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$PATH"
 
@@ -1109,7 +1135,7 @@ else
   CERTBOT="certbot"
 fi
 
-sudo $CERTBOT delete --cert-name "${certName}" --non-interactive 2>&1
+sudo $CERTBOT delete --cert-name ${sq(certName)} --non-interactive 2>&1
 `;
 
   const res = await sshExec(connId, script);
@@ -1126,7 +1152,8 @@ export async function inspectCertificate(
   connId: string,
   certPath: string
 ): Promise<string> {
-  const cmd = `sudo openssl x509 -in "${certPath}" -text -noout 2>/dev/null || openssl x509 -in "${certPath}" -text -noout`;
+  const qPath = sq(certPath);
+  const cmd = `sudo openssl x509 -in ${qPath} -text -noout 2>/dev/null || openssl x509 -in ${qPath} -text -noout`;
   const res = await sshExec(connId, cmd);
   return res.stdout || res.stderr || 'No certificate details available.';
 }
@@ -1138,7 +1165,8 @@ export async function readCertificatePem(
   connId: string,
   certPath: string
 ): Promise<string> {
-  const cmd = `sudo cat "${certPath}" 2>/dev/null || cat "${certPath}"`;
+  const qPath = sq(certPath);
+  const cmd = `sudo cat ${qPath} 2>/dev/null || cat ${qPath}`;
   const res = await sshExec(connId, cmd);
   return res.stdout || '';
 }
@@ -1151,13 +1179,19 @@ export async function generateSelfSignedCertificate(
   connId: string,
   form: SelfSignedForm
 ): Promise<{ success: boolean; certPath: string; keyPath: string; output: string }> {
-  const outDir = form.outputDir.replace(/\/+$/, '') || '/etc/ssl/certs';
-  const cleanDomain = (form.domain || 'localhost').trim().replace(/[^a-zA-Z0-9.-]/g, '');
+  const outDir = (form.outputDir || '/etc/ssl/certs').trim().replace(/\/+$/, '') || '/etc/ssl/certs';
+  if (!/^\/[a-zA-Z0-9._\/-]+$/.test(outDir)) {
+    throw new Error('Invalid output directory path.');
+  }
+  const cleanDomain = (form.domain || 'localhost').trim().toLowerCase();
+  if (!DOMAIN_REGEX.test(cleanDomain) && cleanDomain !== 'localhost') {
+    throw new Error(`Invalid domain name for self-signed certificate: "${cleanDomain}".`);
+  }
   const certPath = `${outDir}/${cleanDomain}.crt`;
   const keyPath = `${outDir}/${cleanDomain}.key`;
-  const country = (form.country || 'US').trim().substring(0, 2).toUpperCase() || 'US';
-  const org = (form.organization || 'Local Development').trim().replace(/[\/="]/g, '') || 'Dev';
-  const days = Number(form.validDays) || 365;
+  const country = (form.country || 'US').trim().substring(0, 2).toUpperCase().replace(/[^A-Z]/g, '') || 'US';
+  const org = (form.organization || 'Local Development').trim().replace(/[^a-zA-Z0-9\s._-]/g, '') || 'Dev';
+  const days = Math.max(1, Math.min(3650, Number(form.validDays) || 365));
 
   const script = `
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
@@ -1168,17 +1202,17 @@ else
   SUDO=""
 fi
 
-$SUDO mkdir -p "${outDir}" 2>&1
+$SUDO mkdir -p ${sq(outDir)} 2>&1
 
 $SUDO openssl req -x509 -nodes -days ${days} -newkey rsa:2048 -batch \\
-  -keyout "${keyPath}" \\
-  -out "${certPath}" \\
+  -keyout ${sq(keyPath)} \\
+  -out ${sq(certPath)} \\
   -subj "/C=${country}/O=${org}/CN=${cleanDomain}" 2>&1
 
-$SUDO chmod 644 "${certPath}" 2>/dev/null || true
-$SUDO chmod 600 "${keyPath}" 2>/dev/null || true
+$SUDO chmod 644 ${sq(certPath)} 2>/dev/null || true
+$SUDO chmod 600 ${sq(keyPath)} 2>/dev/null || true
 
-if [ -s "${certPath}" ] && [ -s "${keyPath}" ]; then
+if [ -s ${sq(certPath)} ] && [ -s ${sq(keyPath)} ]; then
   echo "===SELF_SIGNED_DONE==="
   echo "Certificate File : ${certPath}"
   echo "Private Key File : ${keyPath}"
@@ -1209,8 +1243,12 @@ export async function testSslDiagnostics(
   domain: string,
   port: number = 443
 ): Promise<SslDiagnosticResult> {
-  const cleanDomain = domain.trim().replace(/^https?:\/\//i, '').replace(/:\d+$/, '');
-  const cmd = `echo | openssl s_client -servername "${cleanDomain}" -connect "${cleanDomain}:${port}" 2>&1`;
+  const cleanDomain = domain.trim().replace(/^https?:\/\//i, '').replace(/:\d+$/, '').toLowerCase();
+  if (!DOMAIN_REGEX.test(cleanDomain) && cleanDomain !== 'localhost' && !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(cleanDomain)) {
+    throw new Error(`Invalid target domain or IP: "${domain}".`);
+  }
+  const safePort = Math.max(1, Math.min(65535, Number(port) || 443));
+  const cmd = `echo | openssl s_client -servername ${sq(cleanDomain)} -connect ${sq(`${cleanDomain}:${safePort}`)} 2>&1`;
 
   try {
     const res = await sshExec(connId, cmd);
@@ -1228,7 +1266,8 @@ export async function testSslDiagnostics(
 
     const certTextMatch = out.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/);
     if (certTextMatch) {
-      const inspectRes = await sshExec(connId, `printf '%s' "${certTextMatch[0]}" | openssl x509 -noout -subject -issuer -dates`);
+      const b64 = btoa(certTextMatch[0]);
+      const inspectRes = await sshExec(connId, `printf '%s' '${b64}' | base64 -d | openssl x509 -noout -subject -issuer -dates`);
       const details = inspectRes.stdout || '';
       for (const line of details.split('\n')) {
         if (line.startsWith('subject=')) subject = line.replace('subject=', '').trim();

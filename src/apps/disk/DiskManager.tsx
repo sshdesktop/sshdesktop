@@ -204,8 +204,13 @@ export default function DiskManager() {
     setLoadingSmart(true);
     try {
       const devName = targetDevice?.name || currentDisk?.name || 'sda';
-      const cleanDev = devName.replace(/^\/dev\//, '');
-      const res = await sshExec(activeConnId, `sudo smartctl -H -A /dev/${cleanDev} 2>/dev/null || smartctl -H -A /dev/${cleanDev} 2>/dev/null || echo "UNKNOWN"`);
+      const cleanDev = devName.replace(/^\/dev\//, '').trim();
+      if (!/^[a-zA-Z0-9_\/-]+$/.test(cleanDev) || cleanDev.includes('..')) {
+        showToast('Invalid device name for SMART scan', 'error');
+        return;
+      }
+      const sq = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
+      const res = await sshExec(activeConnId, `sudo smartctl -H -A -- ${sq(`/dev/${cleanDev}`)} 2>/dev/null || smartctl -H -A -- ${sq(`/dev/${cleanDev}`)} 2>/dev/null || echo "UNKNOWN"`);
       const out = res.stdout || '';
       if (out.includes('PASSED') || out.includes('OK')) {
         const tempMatch = out.match(/Temperature_Celsius.*?(\d+)/i);

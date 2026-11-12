@@ -113,9 +113,9 @@ export const LiveArchiveModal: React.FC<LiveArchiveModalProps> = ({
 
       let cmd = '';
       if (archiveFormat === 'tar.gz') {
-        cmd = `cd '${cleanDir.replace(/'/g, "'\\''")}' && tar -czvf ${escapedOutput} ${escapedItems}`;
+        cmd = `cd '${cleanDir.replace(/'/g, "'\\''")}' && tar -czvf ${escapedOutput} -- ${escapedItems}`;
       } else {
-        cmd = `cd '${cleanDir.replace(/'/g, "'\\''")}' && (command -v zip >/dev/null 2>&1 && zip -rv ${escapedOutput} ${escapedItems} || python3 -m zipfile -c ${escapedOutput} ${escapedItems})`;
+        cmd = `cd '${cleanDir.replace(/'/g, "'\\''")}' && (command -v zip >/dev/null 2>&1 && zip -rv ${escapedOutput} -- ${escapedItems} || python3 -m zipfile -c ${escapedOutput} ${escapedItems})`;
       }
 
       await sshExecStream(activeConnId, cmd, streamId);

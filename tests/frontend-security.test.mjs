@@ -10,6 +10,31 @@ const tempOutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sshdesktop-fe-test-'))
 const outFile = path.join(tempOutDir, 'tauri-bridge.mjs');
 const secUtilsOutFile = path.join(tempOutDir, 'security-utils.mjs');
 const dockerSvcOutFile = path.join(tempOutDir, 'docker-service.mjs');
+const certbotOutFile = path.join(tempOutDir, 'certbot-service.mjs');
+
+await build({
+  entryPoints: [path.resolve('src/apps/ssl/certbot-service.ts')],
+  bundle: true,
+  format: 'esm',
+  platform: 'browser',
+  outfile: certbotOutFile,
+  external: ['@tauri-apps/*'],
+  plugins: [
+    {
+      name: 'stub-tauri',
+      setup(b) {
+        b.onResolve({ filter: /^@tauri-apps\// }, (args) => ({
+          path: args.path,
+          namespace: 'tauri-stub',
+        }));
+        b.onLoad({ filter: /.*/, namespace: 'tauri-stub' }, () => ({
+          contents: 'export const invoke = async () => ({ exit_code: 0, stdout: "", stderr: "" }); export const open = async () => {}; export const save = async () => null;',
+          loader: 'js',
+        }));
+      },
+    },
+  ],
+});
 
 await build({
   entryPoints: [path.resolve('src/apps/docker/docker-service.ts')],
@@ -75,6 +100,7 @@ globalThis.CustomEvent = globalThis.window.CustomEvent;
 const bridge = await import(pathToFileURL(outFile).href);
 const secUtils = await import(pathToFileURL(secUtilsOutFile).href);
 const dockerSvc = await import(pathToFileURL(dockerSvcOutFile).href);
+const certbotSvc = await import(pathToFileURL(certbotOutFile).href);
 
 test('getStoredSession scrubs legacy bearer tokens and expired sessions from storage', () => {
   mockLocalStorage.clear();
@@ -220,4 +246,44 @@ test('buildDockerRunCommand validates limits and quotes arguments safely', () =>
   assert.match(cmd, /--pids-limit '256'/);
   assert.throws(() => dockerSvc.buildDockerRunCommand({ image: 'nginx', name: 'bad;id' }), /Invalid container name/);
   assert.throws(() => dockerSvc.buildDockerRunCommand({ image: 'nginx', memoryLimit: '512m;id' }), /Invalid memory limit/);
+});
+
+test('certbot-service validates domain names and email addresses and rejects command injection payloads', async () => {
+  await assert.rejects(
+    () => certbotSvc.issueCertificate('conn-1', {
+      domains: 'example.com"; rm -rf /; echo "',
+      email: 'admin@example.com',
+      plugin: 'standalone',
+      redirectHttps: true,
+      dryRun: false,
+    }),
+    /Invalid domain name/
+  );
+
+  await assert.rejects(
+    () => certbotSvc.issueCertificate('conn-1', {
+      domains: 'example.com',
+      email: 'admin@example.com"; id; echo "',
+      plugin: 'standalone',
+      redirectHttps: true,
+      dryRun: false,
+    }),
+    /Invalid email address/
+  );
+
+  await assert.rejects(
+    () => certbotSvc.generateSelfSignedCertificate('conn-1', {
+      outputDir: '/tmp"; rm -rf /; echo "',
+      domain: 'localhost',
+      organization: 'Dev',
+      country: 'US',
+      validDays: 365,
+    }),
+    /Invalid output directory path/
+  );
+
+  await assert.rejects(
+    () => certbotSvc.testSslDiagnostics('conn-1', 'example.com"; reboot; echo "'),
+    /Invalid target domain/
+  );
 });

@@ -14,6 +14,8 @@ import {
   TargetServer,
 } from './types';
 
+const sq = (s: string) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+
 // ==========================================
 // BUILT-IN RECIPES
 // ==========================================
@@ -803,7 +805,7 @@ export async function saveAutomationToServer(
 
   try {
     // 1. Ensure remote ~/.sshdesktop directory exists
-    await sshExec(connId, `mkdir -p "${dirPath}"`).catch(() => {});
+    await sshExec(connId, `mkdir -p ${sq(dirPath)}`).catch(() => {});
     await sftpMkdir(connId, dirPath).catch(() => {});
 
     // 2. Build complete server data payload
@@ -833,7 +835,7 @@ export async function saveAutomationToServer(
       const b64 = btoa(unescape(encodeURIComponent(jsonStr)));
       const res = await sshExec(
         connId,
-        `mkdir -p "${dirPath}" && printf '%s' '${b64}' | base64 -d > "${filePath}" && chmod 600 "${filePath}"`
+        `mkdir -p ${sq(dirPath)} && printf '%s' '${b64}' | base64 -d > ${sq(filePath)} && chmod 600 ${sq(filePath)}`
       );
       wroteOk = res.exit_code === 0;
       if (!wroteOk) {
@@ -842,7 +844,7 @@ export async function saveAutomationToServer(
     }
 
     // Ensure proper user-only read/write permissions
-    await sshExec(connId, `chmod 600 "${filePath}" 2>/dev/null || true`).catch(() => {});
+    await sshExec(connId, `chmod 600 ${sq(filePath)} 2>/dev/null || true`).catch(() => {});
 
     // Also update local storage cache
     localStorage.setItem(STORAGE_KEY_RECIPES, JSON.stringify(data.customRecipes));
@@ -880,7 +882,7 @@ export async function loadAutomationFromServer(
     let content = await sftpReadTextFile(connId, filePath).catch(() => '');
 
     if (!content) {
-      const res = await sshExec(connId, `cat "${filePath}" 2>/dev/null`).catch(() => null);
+      const res = await sshExec(connId, `cat ${sq(filePath)} 2>/dev/null`).catch(() => null);
       if (res && res.exit_code === 0 && res.stdout.trim()) {
         content = res.stdout;
       }
@@ -930,7 +932,7 @@ export async function checkAutomationServerFileStatus(
   try {
     const res = await sshExec(
       connId,
-      `if [ -f "${filePath}" ]; then stat -c "%s %Y" "${filePath}" 2>/dev/null || stat -f "%z %m" "${filePath}" 2>/dev/null || wc -c < "${filePath}"; fi`
+      `if [ -f ${sq(filePath)} ]; then stat -c "%s %Y" ${sq(filePath)} 2>/dev/null || stat -f "%z %m" ${sq(filePath)} 2>/dev/null || wc -c < ${sq(filePath)}; fi`
     );
 
     if (res.exit_code === 0 && res.stdout.trim()) {
@@ -939,7 +941,7 @@ export async function checkAutomationServerFileStatus(
       const modTimestamp = parts[1] ? Number(parts[1]) * 1000 : Date.now();
       const modified = new Date(modTimestamp).toLocaleString();
 
-      const catRes = await sshExec(connId, `cat "${filePath}" 2>/dev/null`);
+      const catRes = await sshExec(connId, `cat ${sq(filePath)} 2>/dev/null`);
       const rawJson = catRes.exit_code === 0 ? catRes.stdout : undefined;
 
       return {

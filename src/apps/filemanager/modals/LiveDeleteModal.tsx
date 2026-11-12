@@ -87,7 +87,7 @@ export const LiveDeleteModal: React.FC<LiveDeleteModalProps> = ({
 
       const cleanDir = currentPath === '/' ? '/' : currentPath.replace(/\/+$/, '');
       const escapedItems = items.map((it) => `'${it.replace(/'/g, "'\\''")}'`).join(' ');
-      const cmd = `cd '${cleanDir.replace(/'/g, "'\\''")}' && rm -rfv ${escapedItems}`;
+      const cmd = `cd '${cleanDir.replace(/'/g, "'\\''")}' && rm -rfv -- ${escapedItems}`;
 
       await sshExecStream(activeConnId, cmd, streamId);
     } catch (err: any) {

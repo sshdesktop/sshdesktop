@@ -284,11 +284,23 @@ export default function SpeedTestDashboard({ connId, onInspectTerminal }: SpeedT
       if (cancelledRef.current) return;
       addLog(`Testing download stream: ${chunk.label}...`);
 
-      const targetUrl = engine === 'custom' && customDownloadUrl.trim() 
-        ? customDownloadUrl.trim() 
-        : `https://speed.cloudflare.com/__down?bytes=${chunk.size}`;
+      let targetUrl = `https://speed.cloudflare.com/__down?bytes=${chunk.size}`;
+      if (engine === 'custom' && customDownloadUrl.trim()) {
+        const candidate = customDownloadUrl.trim();
+        try {
+          const parsed = new URL(candidate);
+          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+            targetUrl = candidate;
+          } else {
+            addLog(`Invalid protocol in custom URL: "${candidate}". Falling back to Cloudflare.`);
+          }
+        } catch {
+          addLog(`Invalid custom URL: "${candidate}". Falling back to Cloudflare.`);
+        }
+      }
 
-      const dlCmd = `curl -s -o /dev/null -w "%{speed_download} %{time_total} %{size_download}\\n" --connect-timeout 10 --max-time 15 "${targetUrl}"`;
+      const sq = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
+      const dlCmd = `curl -s -o /dev/null -w "%{speed_download} %{time_total} %{size_download}\\n" --connect-timeout 10 --max-time 15 -- ${sq(targetUrl)}`;
       const dlRes = await sshExec(connId, dlCmd);
 
       const parts = (dlRes.stdout || '').trim().split(/\s+/);
