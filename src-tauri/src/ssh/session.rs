@@ -4,6 +4,23 @@ use russh::client::*;
 use russh_keys::PublicKeyBase64;
 use directories::BaseDirs;
 
+lazy_static::lazy_static! {
+    static ref LAST_HOST_KEY_DIAGNOSTICS: parking_lot::Mutex<std::collections::HashMap<String, (String, String)>> =
+        parking_lot::Mutex::new(std::collections::HashMap::new());
+}
+
+pub fn get_last_host_key_diagnostic(host: &str, port: u16) -> Option<(String, String)> {
+    LAST_HOST_KEY_DIAGNOSTICS.lock().remove(&format!("{}:{}", host, port))
+}
+
+pub fn set_last_host_key_diagnostic(host: &str, port: u16, status: String, msg: String) {
+    let mut map = LAST_HOST_KEY_DIAGNOSTICS.lock();
+    if map.len() > 100 {
+        map.clear();
+    }
+    map.insert(format!("{}:{}", host, port), (status, msg));
+}
+
 pub struct ClientHandler {
     pub host: String,
     pub port: u16,
@@ -25,9 +42,19 @@ impl client::Handler for ClientHandler {
             return Ok(true);
         }
 
+        set_last_host_key_diagnostic(&self.host, self.port, status.clone(), msg.clone());
+
         if status == "changed" {
             log::error!(
                 "SECURITY ALERT: Remote host identification for {}:{} has changed! {}",
+                self.host, self.port, msg
+            );
+            return Ok(false);
+        }
+
+        if status == "revoked" {
+            log::error!(
+                "SECURITY ALERT: Remote host key for {}:{} is marked REVOKED in known_hosts! {}",
                 self.host, self.port, msg
             );
             return Ok(false);
@@ -57,8 +84,8 @@ pub async fn run_exec_channel(
         std::time::Duration::from_secs(15),
         channel.exec(true, cmd)
     ).await.map_err(|_| "Timed out starting remote command")??;
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
+    let mut stdout = Vec::with_capacity(8192);
+    let mut stderr = Vec::with_capacity(2048);
     let mut exit_code: Option<i32> = None;
     const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
@@ -82,6 +109,10 @@ pub async fn run_exec_channel(
                 ChannelMsg::ExitStatus { exit_status } => {
                     exit_code = Some(exit_status as i32);
                 }
+                ChannelMsg::Close => {
+                    break;
+                }
+                ChannelMsg::Eof => {}
                 _ => {}
             }
         }
@@ -402,6 +433,30 @@ pub async fn connect_session_with_passphrase_auth(
     passphrase: Option<&str>,
     allow_default_keys: bool,
 ) -> Result<ClientHandle, Box<dyn std::error::Error + Send + Sync>> {
+    connect_session_full(
+        host,
+        port,
+        user,
+        password,
+        key_path,
+        passphrase,
+        allow_default_keys,
+        None,
+        None,
+    ).await
+}
+
+pub async fn connect_session_full(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: Option<&str>,
+    key_path: Option<&str>,
+    passphrase: Option<&str>,
+    allow_default_keys: bool,
+    keepalive_interval_sec: Option<u32>,
+    proxy_jump: Option<&str>,
+) -> Result<ClientHandle, Box<dyn std::error::Error + Send + Sync>> {
     crate::ssh::connection::validate_ssh_target(host, port, user)
         .map_err(|error| format!("Invalid SSH connection target: {}", error))?;
     if key_path.map(|key| key.len() > 16 * 1024 * 1024).unwrap_or(false) {
@@ -413,15 +468,57 @@ pub async fn connect_session_with_passphrase_auth(
     if passphrase.map(|value| value.len() > 16 * 1024).unwrap_or(false) {
         return Err("SSH key passphrase exceeds the 16 KiB safety limit.".into());
     }
-    let config = Arc::new(russh::client::Config::default());
+
+    let mut client_config = russh::client::Config::default();
+    let keepalive = match keepalive_interval_sec {
+        Some(0) => None,
+        Some(s) => Some(std::time::Duration::from_secs(s.min(3600) as u64)),
+        None => Some(std::time::Duration::from_secs(15)),
+    };
+    client_config.keepalive_interval = keepalive;
+    client_config.keepalive_max = 3;
+    client_config.inactivity_timeout = Some(std::time::Duration::from_secs(300));
+    let config = Arc::new(client_config);
+
     let handler = ClientHandler {
         host: host.to_string(),
         port,
     };
-    let mut handle = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        russh::client::connect(config, (host, port), handler)
-    ).await??;
+
+    let mut handle = if let Some(pj_str) = proxy_jump {
+        let (jump_host, jump_port, jump_user_opt) = crate::ssh::connection::parse_and_validate_proxy_jump(pj_str)
+            .map_err(|e| format!("Invalid ProxyJump configuration: {}", e))?;
+        let effective_jump_user = jump_user_opt.as_deref().unwrap_or(user);
+
+        log::info!("SSH Desktop: Routing connection through ProxyJump bastion {}:{}", jump_host, jump_port);
+        let bastion_handle = Box::pin(connect_session_full(
+            &jump_host,
+            jump_port,
+            effective_jump_user,
+            password,
+            key_path,
+            passphrase,
+            allow_default_keys,
+            keepalive_interval_sec,
+            None,
+        )).await.map_err(|e| format!("Failed to connect to ProxyJump bastion {}:{}: {}", jump_host, jump_port, e))?;
+
+        let channel = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            bastion_handle.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)
+        ).await.map_err(|_| "Timed out opening ProxyJump direct-tcpip channel")??;
+        let stream = channel.into_stream();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            russh::client::connect_stream(config, stream, handler)
+        ).await.map_err(|_| "Timed out connecting over ProxyJump tunnel")??
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            russh::client::connect(config, (host, port), handler)
+        ).await.map_err(|_| format!("Timed out connecting to {}:{}", host, port))??
+    };
 
     let mut authenticated = false;
 
@@ -603,3 +700,4 @@ pub async fn open_pty_shell(
     let stream = channel.into_stream();
     Ok(tokio::io::split(stream))
 }
+

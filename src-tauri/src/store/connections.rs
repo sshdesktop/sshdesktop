@@ -172,6 +172,10 @@ pub struct SavedConnection {
     pub group: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub keepalive_interval_sec: Option<u32>,
+    #[serde(default)]
+    pub proxy_jump: Option<String>,
 }
 
 fn get_storage_path() -> PathBuf {

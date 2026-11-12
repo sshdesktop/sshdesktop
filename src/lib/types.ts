@@ -13,6 +13,8 @@ export interface SavedConnection {
   color?: string;
   group?: string;
   tags?: string[];
+  keepalive_interval_sec?: number;
+  proxy_jump?: string;
   lastConnected?: number;
   last_connected_at?: number;
   created_at?: number;

@@ -199,7 +199,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                 Some("key") => true,
                 _ => conn_clone.config.private_key_path.is_some() || conn_clone.config.password.is_none(),
             };
-            let handle = match crate::ssh::session::connect_session_with_passphrase_auth(
+            let handle = match crate::ssh::session::connect_session_full(
                 &conn_clone.config.host,
                 conn_clone.config.port,
                 &conn_clone.config.username,
@@ -207,6 +207,8 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                 if is_key_auth { conn_clone.config.private_key_path.as_deref() } else { None },
                 conn_clone.config.passphrase.as_deref(),
                 conn_clone.config.auth_method.as_deref() != Some("password"),
+                conn_clone.config.keepalive_interval_sec,
+                conn_clone.config.proxy_jump.as_deref(),
             ).await {
                 Ok(handle) => handle,
                 Err(error) => {
@@ -452,8 +454,12 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         .arg("-o").arg("BatchMode=yes")
         .arg("-o").arg("IdentitiesOnly=yes")
         .arg("-o").arg("ConnectTimeout=8")
-        .arg("-o").arg("ServerAliveInterval=10")
-        .arg("-o").arg("ServerAliveCountMax=2");
+        .arg("-o").arg(format!("ServerAliveInterval={}", conn.config.keepalive_interval_sec.unwrap_or(15)))
+        .arg("-o").arg("ServerAliveCountMax=3");
+
+    if let Some(ref pj) = conn.config.proxy_jump {
+        ssh_cmd.arg("-J").arg(pj);
+    }
 
     if let Some(key_path) = selected_key_path {
         if let Some(resolved_key) = crate::ssh::connection::resolve_key_path(key_path) {
@@ -821,9 +827,15 @@ pub async fn run_cmd_with_stdin(
         .arg("-o").arg("StrictHostKeyChecking=yes")
         .arg("-o").arg("BatchMode=yes")
         .arg("-o").arg("IdentitiesOnly=yes")
-        .arg("-o").arg("ConnectTimeout=10");
+        .arg("-o").arg("ConnectTimeout=10")
+        .arg("-o").arg(format!("ServerAliveInterval={}", conn.config.keepalive_interval_sec.unwrap_or(15)))
+        .arg("-o").arg("ServerAliveCountMax=3");
     if !is_key_auth {
         ssh_cmd.arg("-o").arg("PubkeyAuthentication=no");
+    }
+
+    if let Some(ref pj) = conn.config.proxy_jump {
+        ssh_cmd.arg("-J").arg(pj);
     }
 
     if let Some(key_path) = selected_key_path {

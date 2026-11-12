@@ -13,6 +13,8 @@ pub struct TunnelInfo {
     pub remote_host: String,
     pub remote_port: u16,
     pub created_at: i64,
+    #[serde(default)]
+    pub bytes_transferred: u64,
 }
 
 pub struct ActiveTunnel {
@@ -21,6 +23,7 @@ pub struct ActiveTunnel {
     pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub task_alive: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub password_file: Option<Arc<crate::ssh::connection::SshPasswordFile>>,
+    pub bytes_transferred: Arc<std::sync::atomic::AtomicU64>,
 }
 
 const MAX_SOCKS5_CONCURRENT_STREAMS: usize = 64;
@@ -69,6 +72,7 @@ async fn handle_socks5_client(
     handle: &Arc<crate::ssh::session::ClientHandle>,
     local_port: u16,
     auth: Option<&(String, String)>,
+    bytes_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -206,7 +210,11 @@ async fn handle_socks5_client(
             // SOCKS5 success reply: 0x05 (ver), 0x00 (success), 0x00 (rsv), 0x01 (IPv4), 127.0.0.1:0
             stream.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0]).await?;
             let mut ssh_stream = channel.into_stream();
-            let _ = tokio::io::copy_bidirectional(stream, &mut ssh_stream).await;
+            if let Ok((from_client, from_server)) = tokio::io::copy_bidirectional(stream, &mut ssh_stream).await {
+                if let Some(counter) = bytes_counter {
+                    counter.fetch_add(from_client + from_server, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             Ok(())
         }
         Ok(Err(e)) => {
@@ -223,6 +231,22 @@ async fn handle_socks5_client(
 lazy_static! {
     static ref ACTIVE_TUNNELS: Mutex<HashMap<String, ActiveTunnel>> = Mutex::new(HashMap::new());
     static ref ACTIVE_SOCKS5: Mutex<HashMap<String, ActiveTunnel>> = Mutex::new(HashMap::new());
+}
+
+async fn bind_listener_with_retry(addr: (&str, u16)) -> Result<tokio::net::TcpListener, std::io::Error> {
+    let mut last_err = None;
+    for attempt in 0..5 {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrInUse, "Failed to bind tunnel address after retries")))
 }
 
 fn is_port_available(port: u16) -> bool {
@@ -468,7 +492,7 @@ pub async fn ssh_start_tunnel(
         }
 
         if let Some(handle) = maybe_handle {
-            let listener = match tokio::net::TcpListener::bind(("127.0.0.1", effective_local_port)).await {
+            let listener = match bind_listener_with_retry(("127.0.0.1", effective_local_port)).await {
                 Ok(l) => l,
                 Err(e) => {
                     return Err(format!("Failed to bind local tunnel port {}: {}", effective_local_port, e));
@@ -482,6 +506,8 @@ pub async fn ssh_start_tunnel(
             let conn_sem = Arc::new(tokio::sync::Semaphore::new(128));
             let task_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
             let task_alive_guard = task_alive.clone();
+            let bytes_transferred = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let bytes_transferred_worker = bytes_transferred.clone();
 
             tokio::spawn(async move {
                 loop {
@@ -503,6 +529,7 @@ pub async fn ssh_start_tunnel(
                                     };
                                     let h = handle.clone();
                                     let r_host = target_host.clone();
+                                    let byte_counter = bytes_transferred_worker.clone();
                                     tokio::spawn(async move {
                                         let _permit = permit;
                                         let channel_result = tokio::time::timeout(
@@ -512,7 +539,9 @@ pub async fn ssh_start_tunnel(
                                         match channel_result {
                                             Ok(Ok(channel)) => {
                                                 let mut ssh_stream = channel.into_stream();
-                                                let _ = tokio::io::copy_bidirectional(&mut local_stream, &mut ssh_stream).await;
+                                                if let Ok((from_client, from_server)) = tokio::io::copy_bidirectional(&mut local_stream, &mut ssh_stream).await {
+                                                    byte_counter.fetch_add(from_client + from_server, std::sync::atomic::Ordering::Relaxed);
+                                                }
                                             }
                                             Ok(Err(e)) => {
                                                 log::error!("Failed to open direct-tcpip channel to {}:{}: {}", r_host, target_port, e);
@@ -541,6 +570,7 @@ pub async fn ssh_start_tunnel(
                 remote_host: remote_target,
                 remote_port,
                 created_at: chrono::Utc::now().timestamp(),
+                bytes_transferred: 0,
             };
 
             {
@@ -551,6 +581,7 @@ pub async fn ssh_start_tunnel(
                     shutdown_tx: Some(shutdown_tx),
                     task_alive: Some(task_alive),
                     password_file: None,
+                    bytes_transferred,
                 });
             }
 
@@ -811,6 +842,7 @@ pub async fn ssh_start_tunnel(
         remote_host: remote_target,
         remote_port,
         created_at: chrono::Utc::now().timestamp(),
+        bytes_transferred: 0,
     };
 
     {
@@ -821,6 +853,7 @@ pub async fn ssh_start_tunnel(
             shutdown_tx: None,
             task_alive: None,
             password_file: password_file.clone(),
+            bytes_transferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
     }
 
@@ -904,11 +937,19 @@ pub async fn ssh_list_tunnels() -> Result<Vec<TunnelInfo>, String> {
     let mut list = Vec::new();
     {
         let lock = ACTIVE_TUNNELS.lock();
-        list.extend(lock.values().map(|a| a.info.clone()));
+        list.extend(lock.values().map(|a| {
+            let mut info = a.info.clone();
+            info.bytes_transferred = a.bytes_transferred.load(std::sync::atomic::Ordering::Relaxed);
+            info
+        }));
     }
     {
         let lock = ACTIVE_SOCKS5.lock();
-        list.extend(lock.values().map(|a| a.info.clone()));
+        list.extend(lock.values().map(|a| {
+            let mut info = a.info.clone();
+            info.bytes_transferred = a.bytes_transferred.load(std::sync::atomic::Ordering::Relaxed);
+            info
+        }));
     }
     Ok(list)
 }
@@ -987,7 +1028,7 @@ pub async fn ssh_start_socks5(
         lock.get(&conn_id).cloned()
     };
     if let Some(client_handle) = native_handle {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", effective_local_port))
+        let listener = bind_listener_with_retry(("127.0.0.1", effective_local_port))
             .await
             .map_err(|e| format!("Failed to bind SOCKS5 listener on 127.0.0.1:{}: {}", effective_local_port, e))?;
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -997,6 +1038,8 @@ pub async fn ssh_start_socks5(
         let listen_port = effective_local_port;
         let task_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let task_alive_guard = task_alive.clone();
+        let bytes_transferred = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let bytes_transferred_worker = bytes_transferred.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -1009,9 +1052,10 @@ pub async fn ssh_start_socks5(
                                 };
                                 let handle_clone = client_handle.clone();
                                 let auth_clone = auth_arc.clone();
+                                let byte_counter = bytes_transferred_worker.clone();
                                 tokio::spawn(async move {
                                     let _permit = permit;
-                                    let _ = handle_socks5_client(&mut sock, &handle_clone, listen_port, auth_clone.as_deref()).await;
+                                    let _ = handle_socks5_client(&mut sock, &handle_clone, listen_port, auth_clone.as_deref(), Some(&byte_counter)).await;
                                 });
                             }
                             Err(_) => break,
@@ -1028,6 +1072,7 @@ pub async fn ssh_start_socks5(
             remote_host: "127.0.0.1".to_string(),
             remote_port: 0,
             created_at: chrono::Utc::now().timestamp(),
+            bytes_transferred: 0,
         };
         {
             let mut lock = ACTIVE_SOCKS5.lock();
@@ -1037,6 +1082,7 @@ pub async fn ssh_start_socks5(
                 shutdown_tx: Some(shutdown_tx),
                 task_alive: Some(task_alive),
                 password_file: None,
+                bytes_transferred,
             });
         }
         log::info!("SSH Desktop: Native SOCKS5 Proxy active on 127.0.0.1:{} (auth={})", effective_local_port, auth_enabled);
@@ -1272,6 +1318,7 @@ pub async fn ssh_start_socks5(
         remote_host: "0.0.0.0".to_string(),
         remote_port: 0,
         created_at: chrono::Utc::now().timestamp(),
+        bytes_transferred: 0,
     };
 
     {
@@ -1282,6 +1329,7 @@ pub async fn ssh_start_socks5(
             shutdown_tx: None,
             task_alive: None,
             password_file: password_file.clone(),
+            bytes_transferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
     }
 

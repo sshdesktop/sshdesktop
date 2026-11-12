@@ -393,7 +393,8 @@ pub async fn sftp_read_file(
             ).await
                 .map_err(|_| format!("SFTP open timed out for '{}'.", path))?
                 .map_err(|e| format!("SFTP could not open '{}': {}", path, e))?;
-            let mut content = Vec::new();
+            let initial_cap = sftp.metadata(&path).await.ok().and_then(|m| m.size).map(|s| (s as usize).min(MAX_READ_BYTES as usize)).unwrap_or(8192);
+            let mut content = Vec::with_capacity(initial_cap);
             const MAX_READ_BYTES: u64 = 48 * 1024 * 1024; // 48 MiB safety limit
             let bytes_read = tokio::time::timeout(
                 std::time::Duration::from_secs(60),
@@ -521,9 +522,15 @@ pub async fn sftp_write_bytes(
             if let Ok(mut file) = tokio::time::timeout(std::time::Duration::from_secs(15), sftp.create(&tmp_path)).await
                 .map_err(|_| "Timed out creating temporary remote upload file.".to_string())?
             {
+                const SFTP_CHUNK_SIZE: usize = 64 * 1024;
                 let transfer_res = tokio::time::timeout(
                     std::time::Duration::from_secs(300),
-                    async { file.write_all(bytes).await?; file.flush().await }
+                    async {
+                        for chunk in bytes.chunks(SFTP_CHUNK_SIZE) {
+                            file.write_all(chunk).await?;
+                        }
+                        file.flush().await
+                    }
                 ).await;
                 drop(file);
                 match transfer_res {
@@ -538,7 +545,17 @@ pub async fn sftp_write_bytes(
                     }
                 }
                 match tokio::time::timeout(std::time::Duration::from_secs(30), sftp.rename(&tmp_path, clean_path)).await {
-                    Ok(Ok(())) => return Ok(()),
+                    Ok(Ok(())) => {
+                        // Integrity check: verify remote size matches source payload
+                        if let Ok(meta) = sftp.metadata(clean_path).await {
+                            if let Some(remote_size) = meta.size {
+                                if remote_size != bytes.len() as u64 {
+                                    return Err(format!("File integrity check failed: uploaded size ({} bytes) does not match source ({} bytes).", remote_size, bytes.len()));
+                                }
+                            }
+                        }
+                        return Ok(());
+                    },
                     Ok(Err(e)) => {
                         // SFTP v3 rename fails on OpenSSH when destination exists; try atomic mv -f if target exists
                         let escaped_tmp = shell_escape(&tmp_path);
@@ -546,6 +563,13 @@ pub async fn sftp_write_bytes(
                         let mv_cmd = format!("mv -f -- '{}' '{}'", escaped_tmp, escaped_clean);
                         let (_, mv_code) = crate::ssh::exec::run_cmd(state, conn_id, &mv_cmd).await;
                         if mv_code == 0 {
+                            if let Ok(meta) = sftp.metadata(clean_path).await {
+                                if let Some(remote_size) = meta.size {
+                                    if remote_size != bytes.len() as u64 {
+                                        return Err(format!("File integrity check failed: uploaded size ({} bytes) does not match source ({} bytes).", remote_size, bytes.len()));
+                                    }
+                                }
+                            }
                             return Ok(());
                         }
                         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.remove_file(&tmp_path)).await;

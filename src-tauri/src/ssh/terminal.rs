@@ -227,7 +227,7 @@ pub async fn terminal_create(
                     Some(h)
                 } else {
                     let key_str = resolved_key_path.as_deref().or(selected_key_path);
-                    match crate::ssh::session::connect_session_with_passphrase_auth(
+                    match crate::ssh::session::connect_session_full(
                         &host,
                         conn.config.port,
                         &user,
@@ -235,6 +235,8 @@ pub async fn terminal_create(
                         if is_key_auth { key_str } else { None },
                         conn.config.passphrase.as_deref(),
                         conn.config.auth_method.as_deref() != Some("password"),
+                        conn.config.keepalive_interval_sec,
+                        conn.config.proxy_jump.as_deref(),
                     ).await {
                         Ok(new_handle) => {
                             let arc_h = std::sync::Arc::new(new_handle);
@@ -383,7 +385,12 @@ pub async fn terminal_create(
                 .arg("-p").arg(&port)
                 .arg("-o").arg("StrictHostKeyChecking=yes")
                 .arg("-o").arg("IdentitiesOnly=yes")
-                .arg("-o").arg("ConnectTimeout=10");
+                .arg("-o").arg("ConnectTimeout=10")
+                .arg("-o").arg(format!("ServerAliveInterval={}", conn.config.keepalive_interval_sec.unwrap_or(15)))
+                .arg("-o").arg("ServerAliveCountMax=3");
+            if let Some(ref pj) = conn.config.proxy_jump {
+                c.arg("-J").arg(pj);
+            }
             if let Some(ref k) = resolved_key_path {
                 c.arg("-i").arg(k);
             }
@@ -559,6 +566,10 @@ pub async fn terminal_resize(
     let mut terminals = state.terminals.lock();
     let term = terminals.get_mut(&terminal_id)
         .ok_or_else(|| format!("Terminal session '{}' not found.", terminal_id))?;
+    // Optimization: Skip resize if dimensions have not changed
+    if term.rows == rows && term.cols == cols {
+        return Ok(());
+    }
     let action_tx = term.action_tx.as_ref().ok_or_else(|| {
         "Terminal resize is unavailable for the external SSH process backend.".to_string()
     })?;

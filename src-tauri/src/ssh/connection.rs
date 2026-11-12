@@ -32,6 +32,64 @@ pub fn validate_ssh_target(host: &str, port: u16, username: &str) -> Result<(), 
     Ok(())
 }
 
+pub fn parse_and_validate_proxy_jump(proxy_jump: &str) -> Result<(String, u16, Option<String>), String> {
+    let trimmed = proxy_jump.trim();
+    if trimmed.is_empty() {
+        return Err("ProxyJump cannot be empty if specified.".into());
+    }
+    if trimmed.len() > 300
+        || trimmed.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, ';' | '&' | '|' | '`' | '$' | '>' | '<' | '"' | '\''))
+    {
+        return Err("ProxyJump contains invalid control or shell metacharacters.".into());
+    }
+
+    let (username_opt, rest) = if let Some((u, r)) = trimmed.split_once('@') {
+        if u.is_empty() || u.len() > 128
+            || !u.as_bytes()[0].is_ascii_alphanumeric()
+            || !u.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+        {
+            return Err("Invalid ProxyJump username.".into());
+        }
+        (Some(u.to_string()), r)
+    } else {
+        (None, trimmed)
+    };
+
+    let (host, port) = if rest.starts_with('[') {
+        if let Some(closing) = rest.find(']') {
+            let ip_candidate = &rest[1..closing];
+            let after_bracket = &rest[closing + 1..];
+            let p = if after_bracket.is_empty() {
+                22
+            } else if let Some(p_str) = after_bracket.strip_prefix(':') {
+                p_str.parse::<u16>().map_err(|_| "Invalid ProxyJump port number.".to_string())?
+            } else {
+                return Err("Invalid ProxyJump IPv6 host specification.".into());
+            };
+            (ip_candidate.to_string(), p)
+        } else {
+            return Err("Unclosed bracket in ProxyJump IPv6 address.".into());
+        }
+    } else if let Some((h, p_str)) = rest.rsplit_once(':') {
+        if let Ok(p) = p_str.parse::<u16>() {
+            if p == 0 {
+                return Err("ProxyJump port must be between 1 and 65535.".into());
+            }
+            (h.to_string(), p)
+        } else {
+            (rest.to_string(), 22)
+        }
+    } else {
+        (rest.to_string(), 22)
+    };
+
+    let host_user = username_opt.as_deref().unwrap_or("root");
+    validate_ssh_target(&host, port, host_user)
+        .map_err(|e| format!("Invalid ProxyJump target ({}): {}", host, e))?;
+
+    Ok((host, port, username_opt))
+}
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::AppState;
@@ -58,6 +116,10 @@ pub struct ConnectionConfig {
     pub group: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub keepalive_interval_sec: Option<u32>,
+    #[serde(default)]
+    pub proxy_jump: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -527,13 +589,17 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
     }
     let is_ppk = selected_key_path.map(is_ppk_key).unwrap_or(false);
 
+    if let Some(ref pj) = config.proxy_jump {
+        parse_and_validate_proxy_jump(pj)?;
+    }
+
     // Keep the new transport private until authentication and connection metadata
     // are committed. This prevents a failed reconnect from replacing a live session.
     let mut native_handle = None;
 
     // 0. Primary Fast Path: Try establishing persistent in-memory SSH transport
     if !is_ppk {
-        if let Ok(handle) = crate::ssh::session::connect_session_with_passphrase_auth(
+        match crate::ssh::session::connect_session_full(
             host,
             config.port,
             user,
@@ -541,10 +607,37 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
             selected_key_path,
             config.passphrase.as_deref(),
             config.auth_method.as_deref() != Some("password"),
+            config.keepalive_interval_sec,
+            config.proxy_jump.as_deref(),
         ).await {
-            verified = true;
-            native_handle = Some(std::sync::Arc::new(handle));
-            log::info!("SSH Desktop: Native persistent SSH session established for {}", host);
+            Ok(handle) => {
+                verified = true;
+                native_handle = Some(std::sync::Arc::new(handle));
+                log::info!("SSH Desktop: Native persistent SSH session established for {}", host);
+            }
+            Err(e) => {
+                if let Some((diag_status, diag_msg)) = crate::ssh::session::get_last_host_key_diagnostic(host, config.port) {
+                    if diag_status == "changed" {
+                        let alert = format!(
+                            "SECURITY ALERT: Remote host identification for {}:{} has changed! Verification rejected to prevent MITM attacks: {}",
+                            host, config.port, diag_msg
+                        );
+                        log::error!("{}", alert);
+                        return Err(alert);
+                    }
+                    if diag_status == "revoked" {
+                        let alert = format!(
+                            "SECURITY ALERT: Remote host key for {}:{} is marked REVOKED in known_hosts! Connection aborted.",
+                            host, config.port
+                        );
+                        log::error!("{}", alert);
+                        return Err(alert);
+                    }
+                    last_error = format!("Host key verification failed: {}", diag_msg);
+                } else {
+                    last_error = format!("{}", e);
+                }
+            }
         }
     }
 
@@ -624,7 +717,15 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
                 .arg("-o")
                 .arg("IdentitiesOnly=yes")
                 .arg("-o")
-                .arg("ConnectTimeout=6");
+                .arg("ConnectTimeout=6")
+                .arg("-o")
+                .arg(format!("ServerAliveInterval={}", config.keepalive_interval_sec.unwrap_or(15)))
+                .arg("-o")
+                .arg("ServerAliveCountMax=3");
+
+            if let Some(ref pj) = config.proxy_jump {
+                ssh_test.arg("-J").arg(pj);
+            }
 
             if let Some(key) = &config.private_key_path {
                 if let Some(resolved_key) = resolve_key_path(key) {
@@ -794,6 +895,8 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
         color: config.color.clone(),
         group: config.group.clone(),
         tags: config.tags.clone(),
+        keepalive_interval_sec: config.keepalive_interval_sec,
+        proxy_jump: config.proxy_jump.clone(),
     };
     let _ = crate::store::connections::save_or_update_connection_on_disk(saved);
 
@@ -816,6 +919,8 @@ impl From<crate::store::connections::SavedConnection> for ConnectionConfig {
             color: s.color,
             group: s.group,
             tags: s.tags,
+            keepalive_interval_sec: s.keepalive_interval_sec,
+            proxy_jump: s.proxy_jump,
         }
     }
 }
@@ -1013,7 +1118,7 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
 
     // 1. In-memory persistent probe (for PEM keys / password)
     if !is_ppk {
-        if let Ok(handle) = crate::ssh::session::connect_session_with_passphrase_auth(
+        match crate::ssh::session::connect_session_full(
             &config.host,
             config.port,
             &config.username,
@@ -1021,22 +1126,34 @@ pub async fn ssh_test_connection(mut config: ConnectionConfig) -> Result<bool, S
             selected_key_path,
             config.passphrase.as_deref(),
             config.auth_method.as_deref() != Some("password"),
+            config.keepalive_interval_sec,
+            config.proxy_jump.as_deref(),
         ).await {
-            // A connection test is a short-lived probe, not a persistent session.
-            // Always close its authenticated transport before returning or falling
-            // through to the external-client probe.
-            let probe_succeeded = match crate::ssh::session::run_exec_channel(&handle, "echo sshdesktop-ok").await {
-                Ok((out, _err, code)) => {
-                    code == 0 && (out.contains("sshdesktop-ok") || out.contains("clouddesk-ok"))
+            Ok(handle) => {
+                // A connection test is a short-lived probe, not a persistent session.
+                // Always close its authenticated transport before returning or falling
+                // through to the external-client probe.
+                let probe_succeeded = match crate::ssh::session::run_exec_channel(&handle, "echo sshdesktop-ok").await {
+                    Ok((out, _err, code)) => {
+                        code == 0 && (out.contains("sshdesktop-ok") || out.contains("clouddesk-ok"))
+                    }
+                    Err(_) => false,
+                };
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(800),
+                    handle.disconnect(russh::Disconnect::ByApplication, "Connection test completed", "en"),
+                ).await;
+                if probe_succeeded {
+                    return Ok(true);
                 }
-                Err(_) => false,
-            };
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_millis(800),
-                handle.disconnect(russh::Disconnect::ByApplication, "Connection test completed", "en"),
-            ).await;
-            if probe_succeeded {
-                return Ok(true);
+            }
+            Err(e) => {
+                if let Some((diag_status, diag_msg)) = crate::ssh::session::get_last_host_key_diagnostic(&config.host, config.port) {
+                    if diag_status == "changed" || diag_status == "revoked" {
+                        return Err(format!("SECURITY ALERT: Remote host identification for {}:{} is invalid: {}", config.host, config.port, diag_msg));
+                    }
+                }
+                log::debug!("SSH Desktop: In-memory probe failed for {}: {}", config.host, e);
             }
         }
     }
@@ -1240,5 +1357,53 @@ pub async fn ssh_get_user_privilege(
     set_cached_user_privilege(&conn_id, info.clone());
     Ok(info)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_jump_validation_accepts_valid_targets() {
+        let (host, port, user) = parse_and_validate_proxy_jump("bastion.corp.example.com").unwrap();
+        assert_eq!(host, "bastion.corp.example.com");
+        assert_eq!(port, 22);
+        assert_eq!(user, None);
+
+        let (host, port, user) = parse_and_validate_proxy_jump("ec2-user@bastion.corp.example.com:2222").unwrap();
+        assert_eq!(host, "bastion.corp.example.com");
+        assert_eq!(port, 2222);
+        assert_eq!(user.as_deref(), Some("ec2-user"));
+
+        let (host, port, user) = parse_and_validate_proxy_jump("jump@[2001:db8::1]:2200").unwrap();
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 2200);
+        assert_eq!(user.as_deref(), Some("jump"));
+    }
+
+    #[test]
+    fn proxy_jump_validation_rejects_malicious_and_invalid_inputs() {
+        assert!(parse_and_validate_proxy_jump("").is_err());
+        assert!(parse_and_validate_proxy_jump("bastion.net; rm -rf /").is_err());
+        assert!(parse_and_validate_proxy_jump("user$(whoami)@bastion").is_err());
+        assert!(parse_and_validate_proxy_jump("bastion|reboot").is_err());
+        assert!(parse_and_validate_proxy_jump("bastion:99999").is_err());
+        assert!(parse_and_validate_proxy_jump("-badflag@bastion:22").is_err());
+    }
+
+    #[test]
+    fn connection_config_deserializes_with_optional_enterprise_fields() {
+        let json = r#"{"name":"prod","host":"10.0.0.1","port":22,"username":"ubuntu"}"#;
+        let config: ConnectionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.host, "10.0.0.1");
+        assert_eq!(config.keepalive_interval_sec, None);
+        assert_eq!(config.proxy_jump, None);
+
+        let json_with_pj = r#"{"name":"prod","host":"10.0.0.1","port":22,"username":"ubuntu","keepalive_interval_sec":30,"proxy_jump":"bastion.corp.net:2222"}"#;
+        let config_pj: ConnectionConfig = serde_json::from_str(json_with_pj).unwrap();
+        assert_eq!(config_pj.keepalive_interval_sec, Some(30));
+        assert_eq!(config_pj.proxy_jump.as_deref(), Some("bastion.corp.net:2222"));
+    }
+}
+
 
 
