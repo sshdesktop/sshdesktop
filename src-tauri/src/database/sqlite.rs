@@ -299,11 +299,37 @@ pub async fn connect_sqlite(
         pool.close().await;
         return Err(format!("Failed to enable SQLite foreign-key enforcement: {}", e));
     }
+    if let Err(e) = sqlx::query("PRAGMA synchronous = FULL").execute(&pool).await {
+        pool.close().await;
+        return Err(format!("Could not enable durable SQLite synchronization: {}", e));
+    }
+    if let Err(e) = sqlx::query("PRAGMA busy_timeout = 5000").execute(&pool).await {
+        pool.close().await;
+        return Err(format!("Could not configure SQLite lock wait timeout: {}", e));
+    }
     let fk_enabled: (i64,) = match sqlx::query_as("PRAGMA foreign_keys").fetch_one(&pool).await {
         Ok(value) => value,
         Err(e) => { pool.close().await; return Err(format!("Could not verify SQLite foreign-key enforcement: {}", e)); }
     };
     if fk_enabled.0 != 1 { pool.close().await; return Err("SQLite foreign-key enforcement could not be enabled.".into()); }
+    let synchronous: (i64,) = match sqlx::query_as("PRAGMA synchronous").fetch_one(&pool).await {
+        Ok(value) => value,
+        Err(e) => { pool.close().await; return Err(format!("Could not verify SQLite durability mode: {}", e)); }
+    };
+    if synchronous.0 != 2 { pool.close().await; return Err("SQLite FULL synchronous durability could not be enabled.".into()); }
+    let busy_timeout: (i64,) = match sqlx::query_as("PRAGMA busy_timeout").fetch_one(&pool).await {
+        Ok(value) => value,
+        Err(e) => { pool.close().await; return Err(format!("Could not verify SQLite busy timeout: {}", e)); }
+    };
+    if busy_timeout.0 < 5000 { pool.close().await; return Err("SQLite busy timeout is below the required 5000 ms.".into()); }
+    let quick_check: (String,) = match sqlx::query_as("PRAGMA quick_check(1)").fetch_one(&pool).await {
+        Ok(value) => value,
+        Err(e) => { pool.close().await; return Err(format!("SQLite quick integrity check failed: {}", e)); }
+    };
+    if !quick_check.0.eq_ignore_ascii_case("ok") {
+        pool.close().await;
+        return Err(format!("SQLite database integrity check reported: {}", quick_check.0));
+    }
     let version_row: (String,) = match sqlx::query_as("SELECT sqlite_version()").fetch_one(&pool).await {
         Ok(value) => value,
         Err(e) => { pool.close().await; return Err(format!("Could not read SQLite server version: {}", e)); }
