@@ -676,7 +676,7 @@ pub async fn sftp_delete(
     // Resolve the parent but preserve the final path component. Full realpath()
     // would follow a final symlink and could delete its target instead of the link.
     let canonical_cmd = format!(
-        "target='{}'; parent=$(dirname -- \"$target\") || exit 1; base=$(basename -- \"$target\") || exit 1; canonical_parent=$(realpath -m -- \"$parent\") || exit 1; if [ \"$base\" = . ] || [ \"$base\" = .. ]; then realpath -m -- \"$target\"; elif [ \"$canonical_parent\" = / ]; then printf '/%s' \"$base\"; else printf '%s/%s' \"$canonical_parent\" \"$base\"; fi",
+        "target='{}'; parent=$(dirname \"$target\") || exit 1; base=$(basename \"$target\") || exit 1; canonical_parent=$(realpath -m \"$parent\" 2>/dev/null) || canonical_parent=$(CDPATH= cd -P \"$parent\" 2>/dev/null && pwd -P) || exit 1; if [ \"$base\" = . ] || [ \"$base\" = .. ]; then printf '%s' \"$canonical_parent\"; elif [ \"$canonical_parent\" = / ]; then printf '/%s' \"$base\"; else printf '%s/%s' \"$canonical_parent\" \"$base\"; fi",
         escaped
     );
     let (canonical, canonical_code) = run_cmd(&state, &conn_id, &canonical_cmd).await;
