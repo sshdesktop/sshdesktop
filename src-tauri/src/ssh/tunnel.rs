@@ -53,7 +53,7 @@ fn is_cloud_metadata_target(host: &str) -> bool {
                 || ip == std::net::Ipv4Addr::new(169, 254, 170, 2)
         }
         Ok(std::net::IpAddr::V6(ip)) => {
-            ip == "fd00:ec2::254".parse::<std::net::Ipv6Addr>().unwrap()
+            ip.to_string() == "fd00:ec2::254"
                 || ip.to_ipv4_mapped().map(|mapped| {
                     mapped == std::net::Ipv4Addr::new(169, 254, 169, 254)
                         || mapped == std::net::Ipv4Addr::new(169, 254, 170, 2)
