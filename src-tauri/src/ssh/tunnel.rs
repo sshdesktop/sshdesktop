@@ -308,9 +308,8 @@ pub async fn ssh_start_tunnel(
     // 2. Resolve SSH connection configuration
     let conn = crate::ssh::connection::resolve_connection(&state, &conn_id)
         .ok_or_else(|| format!("No active SSH connection found for '{}'. Please connect to a server first.", conn_id))?;
-    if local_port == 0 {
-        return Err("Local tunnel port must be between 1 and 65535.".into());
-    }
+    // Port 0 is a valid request for an automatically selected local listener
+    // port. The effective port is resolved below before binding/launching.
     crate::ssh::connection::validate_ssh_target(&remote_host, remote_port, &conn.config.username)
         .map_err(|e| format!("Invalid tunnel destination: {}", e))?;
     let is_key_auth = match conn.config.auth_method.as_deref() {
