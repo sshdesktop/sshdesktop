@@ -96,6 +96,14 @@ export default function Window({ window: win, children }: { window: WindowState;
 
   const [snapPreview, setSnapPreview] = useState<'none' | 'maximize' | 'left' | 'right' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'>('none');
 
+  useEffect(() => {
+    return () => {
+      if (snapMenuTimeoutRef.current) {
+        clearTimeout(snapMenuTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const handleGreenButtonHoverEnter = () => {
     if (snapMenuTimeoutRef.current) clearTimeout(snapMenuTimeoutRef.current);
     snapMenuTimeoutRef.current = setTimeout(() => {
@@ -158,8 +166,8 @@ export default function Window({ window: win, children }: { window: WindowState;
             const dist = Math.hypot(mouseX - startX, mouseY - startY);
             if (dist > 10) {
               const restoredWidth = win.width || 850;
-              const newX = mouseX - Math.floor(restoredWidth / 2);
-              const newY = Math.max(topBarH, mouseY - 15);
+              const newX = Math.round(mouseX - Math.floor(restoredWidth / 2));
+              const newY = Math.round(Math.max(topBarH, mouseY - 15));
               restoreToNormal(win.id, newX, newY);
             }
             return;
@@ -267,6 +275,8 @@ export default function Window({ window: win, children }: { window: WindowState;
             onDoubleClick={() => {
               if (win.fullscreen) {
                 toggleFullscreen(win.id);
+              } else if (isMaximized || isSnapped) {
+                restoreToNormal(win.id, win.x, win.y);
               } else {
                 maximizeWindow(win.id);
               }

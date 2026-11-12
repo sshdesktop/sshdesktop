@@ -533,7 +533,7 @@ interface WindowStoreState {
   bringToFront: (id: string) => void;
   minimizeAllWindows: () => void;
   restoreAllWindows: () => void;
-  restoreToNormal: (id: string, x: number, y: number) => void;
+  restoreToNormal: (id: string, x?: number, y?: number) => void;
   closeAllWindows: (serverId?: string) => void;
 }
 
@@ -650,8 +650,8 @@ export const useWindowStore = create<WindowStoreState>((set, get) => ({
       snapState: 'none',
       minimized: false,
       focused: true,
-      x,
-      y,
+      x: typeof x === 'number' ? x : w.x,
+      y: typeof y === 'number' ? y : w.y,
     } : w)
   })),
   updatePosition: (id, x, y) => set((state) => ({

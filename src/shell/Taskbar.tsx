@@ -97,6 +97,8 @@ export default function Taskbar({
     username: 'root',
     password: '',
     privateKeyPath: '',
+    keepalive_interval_sec: 15,
+    proxy_jump: '',
   });
 
   const cpuUsage = useTelemetryStore(s => s.cpu);
@@ -178,7 +180,9 @@ export default function Taskbar({
         color: '#89b4fa',
         group: 'Servers',
         tags: ['Linux', 'SSH2 direct'],
-        created_at: Date.now()
+        created_at: Date.now(),
+        keepalive_interval_sec: Number(newServerForm.keepalive_interval_sec) || 15,
+        proxy_jump: newServerForm.proxy_jump?.trim() || undefined,
       };
       const profileToSave = {
         ...targetConfig,
@@ -188,7 +192,16 @@ export default function Taskbar({
       addConnection(profileToSave);
       await connect(targetId, targetConfig);
       setShowAddServerModal(false);
-      setNewServerForm({ name: '', host: '', port: 22, username: 'root', password: '', privateKeyPath: '' });
+      setNewServerForm({
+        name: '',
+        host: '',
+        port: 22,
+        username: 'root',
+        password: '',
+        privateKeyPath: '',
+        keepalive_interval_sec: 15,
+        proxy_jump: '',
+      });
       setUploadedKeyFile(null);
     } catch (err: any) {
       setConnectError(err?.message || 'Failed to connect to server');

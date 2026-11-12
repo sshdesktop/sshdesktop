@@ -67,6 +67,8 @@ export default function App() {
           color: c.color,
           group: c.group,
           tags: c.tags || [],
+          keepalive_interval_sec: (c as any).keepalive_interval_sec ?? (c as any).keepaliveIntervalSec,
+          proxy_jump: (c as any).proxy_jump || (c as any).proxyJump,
         }).catch(() => {});
       }
     }
@@ -120,11 +122,24 @@ export default function App() {
       const reason = e?.detail?.reason || 'SSH connection was lost or server was stopped.';
       useConnectionStore.getState().triggerDisconnectAlert(reason, connId || activeConnectionId);
     };
+
+    // Global listener for cryptographic host key warnings and security alerts
+    const handleSecurityAlertEvent = (e: any) => {
+      const reason = e?.detail?.reason || 'Untrusted remote host key or cryptographic verification failure.';
+      useNotificationStore.getState().addNotification({
+        title: 'Security Alert: Untrusted Host Key',
+        message: reason,
+        type: 'error',
+      });
+    };
+
     window.addEventListener('sshdesktop-ssh-disconnected', handleDisconnectEvent);
     window.addEventListener('clouddesk-ssh-disconnected', handleDisconnectEvent);
+    window.addEventListener('sshdesktop-security-alert', handleSecurityAlertEvent);
     return () => {
       window.removeEventListener('sshdesktop-ssh-disconnected', handleDisconnectEvent);
       window.removeEventListener('clouddesk-ssh-disconnected', handleDisconnectEvent);
+      window.removeEventListener('sshdesktop-security-alert', handleSecurityAlertEvent);
     };
   }, []);
 

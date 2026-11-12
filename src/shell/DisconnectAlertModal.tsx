@@ -115,9 +115,14 @@ export default function DisconnectAlertModal() {
     try {
       const ok = await sshTestConnection({
         host: activeServer.host,
-        port: activeServer.port,
+        port: Number(activeServer.port) || 22,
         username: activeServer.username,
         name: activeServer.name,
+        password: activeServer.password,
+        private_key_path: (activeServer as any).privateKeyPath || (activeServer as any).private_key_path,
+        auth_method: activeServer.authMethod || (activeServer as any).auth_method,
+        keepalive_interval_sec: activeServer.keepalive_interval_sec,
+        proxy_jump: activeServer.proxy_jump,
         tags: activeServer.tags || [],
       });
       setProbeStatus(ok ? 'reachable' : 'unreachable');

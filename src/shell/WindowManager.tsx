@@ -1,5 +1,6 @@
 import React, { lazy, Suspense } from 'react';
 import { useWindowManager } from '../lib/hooks/useWindowManager';
+import { useConnectionStore } from '../lib/store';
 import Window from './Window';
 
 // Lazy-load all app components for performance
@@ -55,6 +56,67 @@ const APP_COMPONENTS: Record<string, React.LazyExoticComponent<React.FC>> = {
   env: EnvManager,
 };
 
+interface ErrorBoundaryProps {
+  appId: string;
+  onReset?: () => void;
+  children: React.ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class AppErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error(`[AppErrorBoundary] App "${this.props.appId}" caught crash:`, error, errorInfo);
+  }
+
+  handleReset = () => {
+    this.setState({ hasError: false, error: null });
+    this.props.onReset?.();
+  };
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="w-full h-full flex flex-col items-center justify-center p-6 bg-[var(--bg)] text-[var(--text)] select-text">
+          <div className="max-w-md w-full bg-red-500/10 border border-red-500/30 rounded-2xl p-5 shadow-xl flex flex-col items-center text-center space-y-3">
+            <div className="w-12 h-12 rounded-full bg-red-500/20 text-red-400 flex items-center justify-center font-bold text-xl">
+              !
+            </div>
+            <h3 className="font-semibold text-base text-red-400">
+              Application Notice ({this.props.appId})
+            </h3>
+            <p className="text-xs text-[var(--text-secondary)] font-mono break-all line-clamp-3">
+              {this.state.error?.message || 'An unexpected rendering error occurred in this window.'}
+            </p>
+            <div className="flex space-x-3 pt-2">
+              <button
+                type="button"
+                onClick={this.handleReset}
+                className="px-4 py-1.5 rounded-lg bg-[var(--accent)] text-white text-xs font-medium hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow-md"
+              >
+                Reload App
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function AppLoader() {
   return (
     <div className="w-full h-full flex items-center justify-center bg-[var(--bg)]">
@@ -65,8 +127,6 @@ function AppLoader() {
     </div>
   );
 }
-
-import { useConnectionStore } from '../lib/store';
 
 export default function WindowManager() {
   const { allWindows } = useWindowManager();
@@ -92,9 +152,11 @@ export default function WindowManager() {
             style={{ display: isCurrentServer ? 'contents' : 'none' }}
           >
             <Window window={win}>
-              <Suspense fallback={<AppLoader />}>
-                <AppComp />
-              </Suspense>
+              <AppErrorBoundary appId={win.appId}>
+                <Suspense fallback={<AppLoader />}>
+                  <AppComp />
+                </Suspense>
+              </AppErrorBoundary>
             </Window>
           </div>
         );
