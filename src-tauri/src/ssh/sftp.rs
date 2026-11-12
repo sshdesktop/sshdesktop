@@ -61,9 +61,14 @@ async fn run_scp_transfer(
             command.stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
-            let output = tokio::time::timeout(std::time::Duration::from_secs(300), command.output())
-                .await.map_err(|_| "PuTTY file transfer timed out after 300 seconds.".to_string())?
+            let child = command.spawn()
                 .map_err(|e| format!("Failed to start pscp: {}", e))?;
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                crate::ssh::exec::wait_with_limited_output(child),
+            ).await
+                .map_err(|_| "PuTTY file transfer timed out after 300 seconds.".to_string())?
+                ?;
             if output.status.success() { return Ok(()); }
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
         }
@@ -94,9 +99,14 @@ async fn run_scp_transfer(
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output())
-        .await.map_err(|_| "SCP file transfer timed out after 300 seconds.".to_string())?
+    let child = cmd.spawn()
         .map_err(|e| format!("Failed to start SCP: {}", e))?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        crate::ssh::exec::wait_with_limited_output(child),
+    ).await
+        .map_err(|_| "SCP file transfer timed out after 300 seconds.".to_string())?
+        ?;
     if output.status.success() {
         Ok(())
     } else {
