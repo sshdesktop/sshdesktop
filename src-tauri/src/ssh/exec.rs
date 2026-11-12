@@ -48,6 +48,56 @@ async fn write_child_stdin(
     Ok(())
 }
 
+
+/// Drain a subprocess pipe while retaining at most the configured number of bytes.
+/// Continuing to drain after the cap prevents a child from deadlocking on a full pipe.
+async fn read_subprocess_output<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    limit: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    use tokio::io::AsyncReadExt;
+    let mut retained = Vec::with_capacity(limit.min(64 * 1024));
+    let mut buffer = [0u8; 16 * 1024];
+    let mut exceeded = false;
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(retained.len());
+        let keep = remaining.min(count);
+        retained.extend_from_slice(&buffer[..keep]);
+        if keep < count {
+            exceeded = true;
+        }
+    }
+    Ok((retained, exceeded))
+}
+
+/// Wait for an SSH client without allowing remote output to exhaust local memory.
+/// Each stream is capped at 8 MiB; excess bytes are drained but never retained.
+async fn wait_with_limited_output(
+    mut child: tokio::process::Child,
+) -> Result<std::process::Output, String> {
+    const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
+    let stdout = child.stdout.take().ok_or("SSH subprocess stdout was not piped")?;
+    let stderr = child.stderr.take().ok_or("SSH subprocess stderr was not piped")?;
+    let (stdout_result, stderr_result, status_result) = tokio::join!(
+        read_subprocess_output(stdout, MAX_STREAM_BYTES),
+        read_subprocess_output(stderr, MAX_STREAM_BYTES),
+        child.wait()
+    );
+    let (stdout, stdout_exceeded) = stdout_result
+        .map_err(|e| format!("Failed reading SSH subprocess stdout: {}", e))?;
+    let (stderr, stderr_exceeded) = stderr_result
+        .map_err(|e| format!("Failed reading SSH subprocess stderr: {}", e))?;
+    let status = status_result.map_err(|e| format!("Failed waiting for SSH subprocess: {}", e))?;
+    if stdout_exceeded || stderr_exceeded {
+        return Err("SSH command output exceeded the 8 MiB per-stream safety limit; output was truncated.".into());
+    }
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
 /// Helper: run a command on the remote server via SSH (plink or openssh).
 /// Returns (stdout, exit_code). exit_code = -1 means no connection / spawn error.
 pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String, i32) {
@@ -322,7 +372,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                 if let Ok(child) = cmd.spawn() {
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(35),
-                        child.wait_with_output(),
+                        wait_with_limited_output(child),
                     ).await {
                         Ok(Ok(output)) => {
                             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -394,7 +444,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
             if let Ok(child) = cmd.spawn() {
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(35),
-                    child.wait_with_output(),
+                    wait_with_limited_output(child),
                 ).await {
                     Ok(Ok(output)) => {
                         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -460,9 +510,16 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
+    let child = match ssh_cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            log::warn!("SSH Desktop: ssh spawn error for {}: {}", host, e);
+            return (String::new(), -1);
+        }
+    };
     match tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        ssh_cmd.output(),
+        wait_with_limited_output(child),
     ).await {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -477,7 +534,7 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
             return (String::new(), exit_code);
         }
         Ok(Err(e)) => {
-            log::warn!("SSH Desktop: ssh spawn error for {}: {}", host, e);
+            log::warn!("SSH Desktop: bounded command output failed for {}: {}", host, e);
         }
         Err(_) => {
             log::warn!("SSH Desktop: OpenSSH command timed out for {}", host);
@@ -739,7 +796,7 @@ pub async fn run_cmd_with_stdin(
                     let _ = child.kill().await;
                     return (error, -1);
                 }
-                let output = match tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
+                let output = match tokio::time::timeout(std::time::Duration::from_secs(60), wait_with_limited_output(child)).await {
                     Ok(Ok(output)) => output,
                     Ok(Err(error)) => return (format!("SSH subprocess wait failed: {}", error), -1),
                     Err(_) => return ("SSH subprocess timed out; refusing authentication fallback to avoid replay.".into(), -1),
@@ -786,7 +843,7 @@ pub async fn run_cmd_with_stdin(
                 let _ = child.kill().await;
                 return (error, -1);
             }
-            let output = match tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
+            let output = match tokio::time::timeout(std::time::Duration::from_secs(60), wait_with_limited_output(child)).await {
                 Ok(Ok(output)) => output,
                 Ok(Err(error)) => return (format!("SSH subprocess wait failed: {}", error), -1),
                 Err(_) => return ("SSH subprocess timed out; refusing authentication fallback to avoid replay.".into(), -1),
@@ -836,7 +893,7 @@ pub async fn run_cmd_with_stdin(
             let _ = child.kill().await;
             return (error, -1);
         }
-        let output = match tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output()).await {
+        let output = match tokio::time::timeout(std::time::Duration::from_secs(60), wait_with_limited_output(child)).await {
             Ok(Ok(output)) => output,
             Ok(Err(error)) => return (format!("SSH subprocess wait failed: {}", error), -1),
             Err(_) => return ("SSH subprocess timed out; refusing authentication fallback to avoid replay.".into(), -1),
