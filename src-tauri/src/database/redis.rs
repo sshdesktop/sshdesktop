@@ -16,8 +16,8 @@ fn parse_redis_args(input: &str) -> Result<Vec<String>, String> {
     if input.len() > 1024 * 1024 {
         return Err("Redis command exceeds the 1 MiB input limit.".into());
     }
-    if input.chars().any(|c| c == '\0') {
-        return Err("Redis command contains a NUL byte.".into());
+    if input.chars().any(|c| c.is_control()) {
+        return Err("Redis command contains control characters.".into());
     }
     let mut args = Vec::new();
     let mut current = String::new();
@@ -116,16 +116,16 @@ pub async fn connect_redis(
     .map_err(|_| "Redis connection timed out after 8 seconds".to_string())?
     .map_err(|e| format!("Redis connect error: {}", e))?;
 
-    let _pong: String = redis::cmd("PING")
-        .query_async(&mut con)
-        .await
+    let _pong: String = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        redis::cmd("PING").query_async(&mut con),
+    ).await.map_err(|_| "Redis PING timed out after 10 seconds.".to_string())?
         .map_err(|e| format!("Redis PING error: {}", e))?;
 
-    let info: String = redis::cmd("INFO")
-        .arg("server")
-        .query_async(&mut con)
-        .await
-        .unwrap_or_default();
+    let info: String = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        redis::cmd("INFO").arg("server").query_async(&mut con),
+    ).await.ok().and_then(Result::ok).unwrap_or_default();
     let version = info
         .lines()
         .find(|l| l.starts_with("redis_version:"))
@@ -407,9 +407,13 @@ pub async fn get_object_definition_redis(
     let mut con = tokio::time::timeout(std::time::Duration::from_secs(10), client.get_multiplexed_tokio_connection())
         .await.map_err(|_| "Redis connection timed out after 10 seconds.".to_string())?
         .map_err(|e| format!("Redis connection error: {}", e))?;
-    let k_type: String = redis::cmd("TYPE").arg(name).query_async(&mut con).await
+    let k_type: String = tokio::time::timeout(
+        std::time::Duration::from_secs(10), redis::cmd("TYPE").arg(name).query_async(&mut con),
+    ).await.map_err(|_| "Redis TYPE timed out.".to_string())?
         .map_err(|e| format!("Redis TYPE failed: {}", e))?;
-    let ttl: i64 = redis::cmd("TTL").arg(name).query_async(&mut con).await
+    let ttl: i64 = tokio::time::timeout(
+        std::time::Duration::from_secs(10), redis::cmd("TTL").arg(name).query_async(&mut con),
+    ).await.map_err(|_| "Redis TTL timed out.".to_string())?
         .map_err(|e| format!("Redis TTL failed: {}", e))?;
     Ok(format!("// Redis Key: {}\n// Type: {}\n// TTL: {}\nGET \"{}\"", name, k_type, ttl, name))
 }
@@ -585,11 +589,17 @@ pub async fn redis_set_value(
     ).await.map_err(|_| "Redis connection timed out after 10 seconds.".to_string())?
         .map_err(|e| format!("Redis connection error: {}", e))?;
     if let Some(seconds) = ttl {
-        let _: () = redis::cmd("SETEX").arg(&key).arg(seconds).arg(&value)
-            .query_async(&mut con).await.map_err(|e| format!("Redis SETEX failed: {}", e))?;
+        let _: () = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            redis::cmd("SETEX").arg(&key).arg(seconds).arg(&value).query_async(&mut con),
+        ).await.map_err(|_| "Redis SETEX timed out after 30 seconds.".to_string())?
+            .map_err(|e| format!("Redis SETEX failed: {}", e))?;
     } else {
-        let _: () = redis::cmd("SET").arg(&key).arg(&value)
-            .query_async(&mut con).await.map_err(|e| format!("Redis SET failed: {}", e))?;
+        let _: () = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            redis::cmd("SET").arg(&key).arg(&value).query_async(&mut con),
+        ).await.map_err(|_| "Redis SET timed out after 30 seconds.".to_string())?
+            .map_err(|e| format!("Redis SET failed: {}", e))?;
     }
     Ok(())
 }
@@ -618,7 +628,10 @@ pub async fn redis_delete_key(
         client.get_multiplexed_tokio_connection(),
     ).await.map_err(|_| "Redis connection timed out after 10 seconds.".to_string())?
         .map_err(|e| format!("Redis connection error: {}", e))?;
-    let deleted: i64 = redis::cmd("DEL").arg(&key).query_async(&mut con).await
+    let deleted: i64 = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        redis::cmd("DEL").arg(&key).query_async(&mut con),
+    ).await.map_err(|_| "Redis DEL timed out after 30 seconds.".to_string())?
         .map_err(|e| format!("Redis DEL failed: {}", e))?;
     Ok(deleted > 0)
 }
