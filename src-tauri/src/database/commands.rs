@@ -522,7 +522,7 @@ pub async fn db_execute_operation(
             (sql, format!("{} '{}' dropped successfully", object_type, name))
         }
         DatabaseOperation::TruncateTable { table, .. } => {
-            let sql = generate_truncate_table_sql(&engine, table);
+            let sql = generate_truncate_table_sql(&engine, table)?;
             (sql, format!("Table '{}' truncated", table))
         }
         DatabaseOperation::AddColumn { table, column, .. } => {
@@ -530,7 +530,7 @@ pub async fn db_execute_operation(
             (sql, format!("Column '{}' added to table '{}'", column.name, table))
         }
         DatabaseOperation::DropColumn { table, column_name, .. } => {
-            let sql = generate_drop_column_sql(&engine, table, column_name);
+            let sql = generate_drop_column_sql(&engine, table, column_name)?;
             (sql, format!("Column '{}' dropped from table '{}'", column_name, table))
         }
         DatabaseOperation::CreateIndex { table, index_name, columns, is_unique, .. } => {
@@ -538,7 +538,7 @@ pub async fn db_execute_operation(
             (sql, format!("Index '{}' created on table '{}'", index_name, table))
         }
         DatabaseOperation::DropIndex { table, index_name, .. } => {
-            let sql = generate_drop_index_sql(&engine, table, index_name);
+            let sql = generate_drop_index_sql(&engine, table, index_name)?;
             (sql, format!("Index '{}' dropped", index_name))
         }
     };
