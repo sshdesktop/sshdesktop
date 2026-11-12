@@ -465,6 +465,23 @@ pub async fn ssh_connect(state: tauri::State<'_, AppState>, mut config: Connecti
     }
     let id = config.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     config.id = Some(id.clone());
+
+    // Serialize connection attempts for this ID. Weak entries are pruned on
+    // each acquisition so completed IDs do not accumulate in AppState.
+    let connection_lock = {
+        let mut locks = state.connection_locks.lock();
+        locks.retain(|_, weak_lock| weak_lock.strong_count() > 0);
+        match locks.get(&id).and_then(std::sync::Weak::upgrade) {
+            Some(existing) => existing,
+            None => {
+                let created = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(id.clone(), std::sync::Arc::downgrade(&created));
+                created
+            }
+        }
+    };
+    let _connection_guard = connection_lock.lock_owned().await;
+
     invalidate_user_privilege_cache(&id);
     log::info!("SSH Desktop: Establishing SSH connection [{}] for {} ({}:{})", id, config.name, config.host, config.port);
 
