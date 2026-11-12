@@ -130,14 +130,17 @@ pub async fn db_connect(
         capabilities: capabilities.clone(),
     };
 
-    {
+    let old_session = {
         let mut lock = db_mgr.sessions.lock().await;
-        if let Some(old) = lock.remove(&config.id) {
-            if let Some(tx) = old.tunnel_shutdown.lock().await.take() {
-                let _ = tx.send(());
-            }
-        }
+        let old = lock.remove(&config.id);
         lock.insert(config.id.clone(), Arc::new(session));
+        old
+    };
+    // Never await a per-session mutex while holding the global session map lock.
+    if let Some(old) = old_session {
+        if let Some(tx) = old.tunnel_shutdown.lock().await.take() {
+            let _ = tx.send(());
+        }
     }
 
     Ok(capabilities)
@@ -148,8 +151,13 @@ pub async fn db_disconnect(
     db_mgr: tauri::State<'_, Arc<DatabaseManager>>,
     connection_id: String,
 ) -> Result<(), String> {
-    let mut lock = db_mgr.sessions.lock().await;
-    if let Some(session) = lock.remove(&connection_id) {
+    let session = {
+        let mut lock = db_mgr.sessions.lock().await;
+        lock.remove(&connection_id)
+    };
+    // Removing the map entry is the only operation performed under the global lock.
+    // Tunnel shutdown may contend with connection setup/cleanup and must happen outside it.
+    if let Some(session) = session {
         if let Some(tx) = session.tunnel_shutdown.lock().await.take() {
             let _ = tx.send(());
         }
@@ -350,10 +358,15 @@ pub async fn db_execute_query(
 
         if let Some(new_db) = new_db_name {
             let mut lock = db_mgr.sessions.lock().await;
+            // A query may finish after disconnect/reconnect with the same ID.
+            // Update only the exact session that executed this query; never replace
+            // a newer connection with a stale clone holding the old driver/tunnel.
             if let Some(existing) = lock.get_mut(&connection_id) {
-                let mut updated = (**existing).clone();
-                updated.config.database = new_db;
-                *existing = Arc::new(updated);
+                if Arc::ptr_eq(existing, &session) {
+                    let mut updated = (**existing).clone();
+                    updated.config.database = new_db;
+                    *existing = Arc::new(updated);
+                }
             }
         }
     }
