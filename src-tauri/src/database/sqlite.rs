@@ -520,20 +520,22 @@ pub async fn execute_operation_sqlite(
         Some(session.config.ssh_connection_id.as_deref().filter(|id| !id.trim().is_empty())
             .ok_or_else(|| "Remote SQLite operation has no explicit SSH connection ID.".to_string())?)
     } else { None };
-    let _cache_guard = if session.config.use_ssh {
+    let remote_cache_path = if session.config.use_ssh {
         let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
-        let cache_path = sqlite_cache_path(&session.config, raw_path)?;
-        Some(sqlite_cache_lock(&cache_path)?.lock_owned().await)
+        validate_remote_sqlite_path(raw_path)?;
+        Some(sqlite_cache_path(&session.config, raw_path)?)
+    } else { None };
+    let _cache_guard = if let Some(cache_path) = remote_cache_path.as_ref() {
+        Some(sqlite_cache_lock(cache_path)?.lock_owned().await)
     } else { None };
     let res = sqlx::raw_sql(sql).execute(pool).await.map_err(|e| e.to_string())?;
     if let Some(conn_id) = remote_conn_id {
         let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
-        if raw_path.is_empty() || raw_path.len() > 4096 || raw_path.chars().any(|c| c.is_control() || c == '\0')
-            || !raw_path.starts_with('/') || raw_path.split('/').any(|part| part == "." || part == "..") {
-            return Err("Remote SQLite operation path is invalid.".into());
-        }
-        let local_cache = sqlite_cache_path(&session.config, raw_path)?;
-        let bytes = std::fs::read(&local_cache)
+        validate_remote_sqlite_path(raw_path)?;
+        let local_cache = remote_cache_path.as_ref().ok_or_else(|| "Remote SQLite cache path was not initialized.".to_string())?;
+        prepare_remote_sqlite_sync(pool).await?;
+        ensure_no_pending_local_wal(local_cache)?;
+        let bytes = std::fs::read(local_cache)
             .map_err(|e| format!("Failed to read updated local SQLite cache: {}", e))?;
         crate::ssh::sftp::sftp_write_bytes(state, conn_id, raw_path, &bytes).await
             .map_err(|e| format!("SQLite operation succeeded locally but remote sync failed: {}", e))?;
