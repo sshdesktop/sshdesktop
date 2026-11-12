@@ -79,8 +79,48 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                     return (out, code);
                 }
                 Err(e) => {
-                    log::warn!("SSH Desktop: Persistent command channel failed for {}: {}; refusing automatic replay", conn_id, e);
-                    return (format!("SSH command channel failed; command was not retried to avoid duplicate execution: {}", e), -1);
+                    // A failed channel open/command exchange is evidence that this
+                    // persistent transport may no longer be usable. Evict only this
+                    // exact handle (it may have been replaced concurrently), mark its
+                    // owning connection disconnected, and never replay the command.
+                    let target_id = {
+                        let map = state.connections.lock();
+                        if conn_id == "default" {
+                            map.get("default").map(|connection| connection.id.clone())
+                        } else {
+                            Some(conn_id.to_string())
+                        }
+                    };
+
+                    {
+                        let mut sessions = state.sessions.lock().await;
+                        sessions.retain(|_, candidate| !std::sync::Arc::ptr_eq(candidate, &handle));
+                    }
+
+                    if let Some(ref id) = target_id {
+                        let mut map = state.connections.lock();
+                        if let Some(connection) = map.get_mut(id) {
+                            connection.connected = false;
+                        }
+                        if map.get("default").map(|connection| connection.id == *id).unwrap_or(false) {
+                            if let Some(default_connection) = map.get_mut("default") {
+                                default_connection.connected = false;
+                            }
+                        }
+                        crate::ssh::connection::invalidate_user_privilege_cache(id);
+                    }
+
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(800),
+                        handle.disconnect(
+                            russh::Disconnect::ByApplication,
+                            "SSH transport became unhealthy",
+                            "en",
+                        ),
+                    ).await;
+
+                    log::warn!("SSH Desktop: Persistent SSH transport evicted after command channel failure for {}: {}; command was not replayed", conn_id, e);
+                    return (format!("SSH connection is no longer healthy; command was not retried to avoid duplicate execution: {}", e), -1);
                 }
             }
         }
