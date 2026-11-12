@@ -99,15 +99,26 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
 
 /// Match an OpenSSH host token, including hashed, wildcard and non-default-port forms.
 fn host_token_matches(token: &str, host: &str, port: u16) -> bool {
+    // OpenSSH hashed known_hosts entries use HMAC over the exact host token,
+    // so preserve the caller's original casing for hash verification. DNS
+    // wildcard matching remains case-insensitive as required for hostnames.
+    let hashed_candidates = if port == 22 {
+        vec![host.to_string(), format!("[{}]:{}", host, port)]
+    } else {
+        vec![format!("[{}]:{}", host, port)]
+    };
+    if token.starts_with("|1|") {
+        return hashed_candidates
+            .iter()
+            .any(|candidate| matches_hashed_host(token, candidate));
+    }
+
     let normalized_host = host.to_lowercase();
     let candidates = if port == 22 {
         vec![normalized_host.clone(), format!("[{}]:{}", normalized_host, port)]
     } else {
         vec![format!("[{}]:{}", normalized_host, port)]
     };
-    if token.starts_with("|1|") {
-        return candidates.iter().any(|candidate| matches_hashed_host(token, candidate));
-    }
     let pattern = token.to_lowercase();
     candidates.iter().any(|candidate| wildcard_match(&pattern, candidate))
 }
