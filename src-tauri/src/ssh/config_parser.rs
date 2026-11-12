@@ -71,6 +71,19 @@ fn strip_inline_comment(line: &str) -> &str {
 }
 
 /// Decode a single SSH config value, preserving whitespace inside quotes.
+fn is_exact_host_block_header(line: &str, alias: &str) -> bool {
+    let clean = strip_inline_comment(line).trim();
+    let Some(separator) = clean.find(char::is_whitespace) else {
+        return false;
+    };
+    if !clean[..separator].eq_ignore_ascii_case("host") {
+        return false;
+    }
+    let value = parse_config_value(&clean[separator..]);
+    let mut aliases = value.split_whitespace();
+    matches!((aliases.next(), aliases.next()), (Some(candidate), None) if candidate == alias)
+}
+
 fn parse_config_value(raw: &str) -> String {
     let value = raw.trim();
     let quoted = value.len() >= 2
@@ -440,23 +453,22 @@ pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
     }
 
     // Check if host block already exists; replace or append
-    let host_header = format!("Host {}", entry.name);
     let mut updated = String::new();
     let mut replacing = false;
     let mut replaced = false;
 
     for line in existing_content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("Host ") {
-            let host_val = trimmed["Host ".len()..].trim();
-            if host_val == entry.name {
-                replacing = true;
-                replaced = true;
-                updated.push_str(&block);
-                continue;
-            } else if replacing {
-                replacing = false;
-            }
+        if is_exact_host_block_header(line, &entry.name) {
+            replacing = true;
+            replaced = true;
+            updated.push_str(&block);
+            continue;
+        } else if replacing
+            && strip_inline_comment(line).trim().split_whitespace().next()
+                .map(|directive| directive.eq_ignore_ascii_case("host"))
+                .unwrap_or(false)
+        {
+            replacing = false;
         }
 
         if !replacing {
@@ -587,5 +599,19 @@ mod include_glob_tests {
         assert!(wildcard_match("hosts/*.conf", "hosts/prod.conf"));
         assert!(wildcard_match("hosts/?.conf", "hosts/é.conf"));
         assert!(!wildcard_match("hosts/?.conf", "hosts/prod.conf"));
+    }
+}
+
+
+#[cfg(test)]
+mod host_header_tests {
+    use super::is_exact_host_block_header;
+
+    #[test]
+    fn host_block_replacement_recognizes_case_and_whitespace() {
+        assert!(is_exact_host_block_header("host\\tprod # managed", "prod"));
+        assert!(is_exact_host_block_header(" HOST prod ", "prod"));
+        assert!(!is_exact_host_block_header("Host prod other", "prod"));
+        assert!(!is_exact_host_block_header("HostName prod", "prod"));
     }
 }
