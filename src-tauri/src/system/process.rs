@@ -94,8 +94,8 @@ async fn process_list_aux(state: &AppState, conn_id: &str) -> Result<Vec<Process
         if parts.len() >= 11 {
             let user     = parts[0].to_string();
             let pid      = parts[1].parse::<u32>().unwrap_or(0);
-            let cpu_pct  = parts[2].parse::<f32>().unwrap_or(0.0);
-            let mem_pct  = parts[3].parse::<f32>().unwrap_or(0.0);
+            let cpu_pct  = parts[2].parse::<f32>().ok().filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0);
+            let mem_pct  = parts[3].parse::<f32>().ok().filter(|v| v.is_finite() && (0.0..=100.0).contains(v)).unwrap_or(0.0);
             let vsz      = parts[4].parse::<u64>().unwrap_or(0) * 1024;
             let rss      = parts[5].parse::<u64>().unwrap_or(0) * 1024;
             let status   = parts[7].to_string();
@@ -105,7 +105,8 @@ async fn process_list_aux(state: &AppState, conn_id: &str) -> Result<Vec<Process
             let name     = parts[10].split('/').last().unwrap_or("proc").to_string();
             if pid > 0 {
                 list.push(ProcessInfo {
-                    pid, ppid: 1, name, user, cpu_percent: cpu_pct, mem_percent: mem_pct,
+                    // ps aux does not expose PPID; zero means unavailable, not PID 1.
+                    pid, ppid: 0, name, user, cpu_percent: cpu_pct, mem_percent: mem_pct,
                     vsz, rss, status, command, start_time: start, cpu_time, threads: 1,
                 });
             }
