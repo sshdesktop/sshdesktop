@@ -26,7 +26,7 @@ pub fn get_ssh_config_path() -> Option<PathBuf> {
 /// otherwise be interpreted as separators or comments. Escape backslashes and
 /// double quotes inside the quoted value.
 fn format_config_value(value: &str) -> String {
-    if value.chars().any(|c| c.is_whitespace() || c == '#' || c == '"') {
+    if value.chars().any(|c| c.is_whitespace() || c == '#' || c == '"' || c == '\\') {
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
         format!("\"{}\"", escaped)
     } else {
@@ -379,12 +379,12 @@ pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
     }
     if entry.hostname.trim().is_empty()
         || has_control(&entry.hostname)
-        || entry.hostname.chars().any(|c| c.is_whitespace() || c == '#')
+        || entry.hostname.chars().any(|c| c.is_whitespace() || matches!(c, '#' | '"' | '\\' | '\''))
     {
         return Err("Invalid SSH hostname.".into());
     }
     if entry.user.as_deref()
-        .map(|v| v.trim().is_empty() || has_control(v) || v.chars().any(|c| c.is_whitespace() || c == '#'))
+        .map(|v| v.trim().is_empty() || has_control(v) || v.chars().any(|c| c.is_whitespace() || matches!(c, '#' | '"' | '\\' | '\'')))
         .unwrap_or(false)
     {
         return Err("Invalid SSH username.".into());
@@ -398,7 +398,7 @@ pub async fn ssh_config_save_host(entry: SshConfigHost) -> Result<(), String> {
         .map(|v| {
             v.trim().is_empty()
                 || has_control(v)
-                || v.chars().any(|c| c.is_whitespace() || c == '#' || c == '"' || c == '\'')
+                || v.chars().any(|c| c.is_whitespace() || matches!(c, '#' | '"' | '\\' | '\''))
         })
         .unwrap_or(false)
     {
