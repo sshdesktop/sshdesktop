@@ -489,7 +489,10 @@ pub async fn redis_get_value(
         DriverInstance::Redis(client) => client.clone(),
         _ => return Err("Active connection is not Redis".to_string()),
     };
-    let mut con = client.get_multiplexed_tokio_connection().await
+    let mut con = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.get_multiplexed_tokio_connection(),
+    ).await.map_err(|_| "Redis connection timed out after 10 seconds.".to_string())?
         .map_err(|e| format!("Redis connection error: {}", e))?;
     let ty: String = redis::cmd("TYPE").arg(&key).query_async(&mut con).await
         .map_err(|e| format!("Redis TYPE failed: {}", e))?;
@@ -576,7 +579,10 @@ pub async fn redis_set_value(
         DriverInstance::Redis(client) => client.clone(),
         _ => return Err("Active connection is not Redis".to_string()),
     };
-    let mut con = client.get_multiplexed_tokio_connection().await
+    let mut con = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.get_multiplexed_tokio_connection(),
+    ).await.map_err(|_| "Redis connection timed out after 10 seconds.".to_string())?
         .map_err(|e| format!("Redis connection error: {}", e))?;
     if let Some(seconds) = ttl {
         let _: () = redis::cmd("SETEX").arg(&key).arg(seconds).arg(&value)
@@ -607,9 +613,58 @@ pub async fn redis_delete_key(
         DriverInstance::Redis(client) => client.clone(),
         _ => return Err("Active connection is not Redis".to_string()),
     };
-    let mut con = client.get_multiplexed_tokio_connection().await
+    let mut con = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.get_multiplexed_tokio_connection(),
+    ).await.map_err(|_| "Redis connection timed out after 10 seconds.".to_string())?
         .map_err(|e| format!("Redis connection error: {}", e))?;
     let deleted: i64 = redis::cmd("DEL").arg(&key).query_async(&mut con).await
         .map_err(|e| format!("Redis DEL failed: {}", e))?;
     Ok(deleted > 0)
+}
+
+
+#[cfg(test)]
+mod redis_input_validation_tests {
+    use super::*;
+
+    #[test]
+    fn redis_key_rejects_empty_oversized_and_control_values() {
+        assert!(validate_redis_key("users:1").is_ok());
+        assert!(validate_redis_key("").is_err());
+        assert!(validate_redis_key(&"k".repeat(1025)).is_err());
+        assert!(validate_redis_key("bad\nkey").is_err());
+        assert!(validate_redis_key("bad\0key").is_err());
+    }
+
+    #[test]
+    fn redis_pattern_rejects_controls_and_oversized_values() {
+        assert!(validate_redis_pattern("cache:*").is_ok());
+        assert!(validate_redis_pattern("bad\tpattern").is_err());
+        assert!(validate_redis_pattern(&"x".repeat(1025)).is_err());
+    }
+
+    #[test]
+    fn redis_command_parser_rejects_nul_and_control_characters() {
+        assert!(parse_redis_args("GET key\0").is_err());
+        assert!(parse_redis_args("GET bad\nkey").is_err());
+    }
+
+    #[test]
+    fn redis_command_parser_enforces_argument_count() {
+        let command = std::iter::repeat("x").take(4097).collect::<Vec<_>>().join(" ");
+        assert!(parse_redis_args(&command).is_err());
+    }
+
+    #[test]
+    fn redis_command_parser_preserves_quoted_and_escaped_arguments() {
+        assert_eq!(
+            parse_redis_args("SET greeting \"hello world\"").unwrap(),
+            vec!["SET", "greeting", "hello world"]
+        );
+        assert_eq!(
+            parse_redis_args("SET key hello\\ world").unwrap(),
+            vec!["SET", "key", "hello world"]
+        );
+    }
 }
