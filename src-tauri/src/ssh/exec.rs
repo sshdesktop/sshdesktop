@@ -336,17 +336,9 @@ pub async fn run_cmd(state: &AppState, conn_id: &str, command: &str) -> (String,
                                 .to_string();
                             let exit_code = output.status.code().unwrap_or(-1);
 
-                            // Retry once if transient handshake dropped due to concurrency / rate-limit
-                            if !output.status.success() && stdout.is_empty() && attempt == 0 {
-                                if raw_stderr.contains("Server refused our key")
-                                    || raw_stderr.contains("Connection reset")
-                                    || raw_stderr.contains("fatal")
-                                    || exit_code == -1
-                                {
-                                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                                    continue;
-                                }
-                            }
+                            // Once Plink has spawned, the remote command may already have
+                            // started even when the SSH transport exits with an error.
+                            // Never replay a potentially non-idempotent command automatically.
 
                             if !stdout.is_empty() || output.status.success() {
                                 return (stdout, exit_code);
