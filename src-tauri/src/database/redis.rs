@@ -1,6 +1,23 @@
+fn validate_redis_key(key: &str) -> Result<(), String> {
+    if key.is_empty() || key.len() > 1024 || key.chars().any(|c| c.is_control()) {
+        return Err("Redis key must contain 1–1024 bytes and no control characters.".into());
+    }
+    Ok(())
+}
+
+fn validate_redis_pattern(pattern: &str) -> Result<(), String> {
+    if pattern.len() > 1024 || pattern.chars().any(|c| c.is_control()) {
+        return Err("Redis key pattern must be at most 1024 bytes and contain no control characters.".into());
+    }
+    Ok(())
+}
+
 fn parse_redis_args(input: &str) -> Result<Vec<String>, String> {
     if input.len() > 1024 * 1024 {
         return Err("Redis command exceeds the 1 MiB input limit.".into());
+    }
+    if input.chars().any(|c| c == '\0') {
+        return Err("Redis command contains a NUL byte.".into());
     }
     let mut args = Vec::new();
     let mut current = String::new();
@@ -50,8 +67,11 @@ fn parse_redis_args(input: &str) -> Result<Vec<String>, String> {
     if token_started {
         args.push(current);
     }
-    if args.len() > 10_000 || args.iter().any(|arg| arg.len() > 256 * 1024) {
-        return Err("Redis command exceeds the argument count or per-argument size limit.".into());
+    if args.len() > 4096 || args.iter().any(|arg| arg.len() > 256 * 1024) {
+        return Err("Redis command exceeds the 4096 argument count or per-argument size limit.".into());
+    }
+    if args.iter().any(|arg| arg.chars().any(|c| c.is_control())) {
+        return Err("Redis command arguments must not contain control characters.".into());
     }
     Ok(args)
 }
@@ -139,16 +159,15 @@ pub async fn execute_query_redis(
     session: &ActiveDatabaseSession,
     start: Instant,
 ) -> Result<QueryResult, String> {
-    let mut con = client
-        .get_multiplexed_tokio_connection()
-        .await
-        .map_err(|e| format!("Redis connection error: {}", e))?;
-
     let parts = parse_redis_args(query)?;
     if parts.is_empty() {
         return Err("Empty Redis command".to_string());
     }
-
+    let mut con = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.get_multiplexed_tokio_connection(),
+    ).await.map_err(|_| "Redis connection timed out after 10 seconds.".to_string())?
+        .map_err(|e| format!("Redis connection error: {}", e))?;
     if session.config.read_only {
         let command = parts[0].to_ascii_uppercase();
         const READ_ONLY_COMMANDS: &[&str] = &[
@@ -169,9 +188,10 @@ pub async fn execute_query_redis(
         cmd.arg(arg);
     }
 
-    let val: redis::Value = cmd
-        .query_async(&mut con)
-        .await
+    let val: redis::Value = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        cmd.query_async(&mut con),
+    ).await.map_err(|_| "Redis command timed out after 60 seconds.".to_string())?
         .map_err(|e| format!("Redis query error: {}", e))?;
 
     let json_val = match val {
@@ -193,6 +213,12 @@ pub async fn execute_query_redis(
         redis::Value::Okay => serde_json::Value::String("OK".to_string()),
         _ => serde_json::Value::String(format!("{:?}", val)),
     };
+
+    let encoded_size = serde_json::to_vec(&json_val)
+        .map_err(|e| format!("Could not serialize Redis response: {}", e))?.len();
+    if encoded_size > 16 * 1024 * 1024 {
+        return Err("Redis response exceeds the 16 MiB display limit.".into());
+    }
 
     Ok(QueryResult {
         columns: vec![ColumnMeta {
@@ -341,9 +367,7 @@ pub async fn redis_scan_keys(
     };
 
     let pat = pattern.unwrap_or_else(|| "*".to_string());
-    if pat.len() > 1024 || pat.chars().any(|c| c.is_control()) {
-        return Err("Redis key pattern must be at most 1024 bytes and contain no control characters.".into());
-    }
+    validate_redis_pattern(&pat)?;
     let cnt = count.unwrap_or(200).clamp(1, 1000);
     let mut con = tokio::time::timeout(
         std::time::Duration::from_secs(10),
