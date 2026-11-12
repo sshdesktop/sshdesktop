@@ -1288,6 +1288,7 @@ pub async fn execute_mongodb_single_command(
 
         // db.runCommand(doc)
         if after_db.starts_with("runCommand(") {
+            crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let inner = extract_paren_args(after_db, "runCommand")?;
             let doc_cmd = parse_relaxed_document(&inner)?;
             let db = client.database(database_name);
@@ -1297,6 +1298,7 @@ pub async fn execute_mongodb_single_command(
 
         // db.adminCommand(doc)
         if after_db.starts_with("adminCommand(") {
+            crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let inner = extract_paren_args(after_db, "adminCommand")?;
             let doc_cmd = parse_relaxed_document(&inner)?;
             let db = client.database("admin");
@@ -1306,6 +1308,7 @@ pub async fn execute_mongodb_single_command(
 
         // db.createCollection("name", options)
         if after_db.starts_with("createCollection(") {
+            crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let inner = extract_paren_args(after_db, "createCollection")?;
             let args = split_top_level_args(&inner);
             if args.is_empty() {
@@ -1331,6 +1334,7 @@ pub async fn execute_mongodb_single_command(
 
         // db.createView("viewName", "viewOn", pipeline, options)
         if after_db.starts_with("createView(") {
+            crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let inner = extract_paren_args(after_db, "createView")?;
             let args = split_top_level_args(&inner);
             if args.len() < 3 {
@@ -1420,6 +1424,7 @@ pub async fn execute_mongodb_single_command(
 
         // db.killOp(opid)
         if after_db.starts_with("killOp(") {
+            crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let inner = extract_paren_args(after_db, "killOp")?;
             let opid_str = inner.trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
             let opid: i64 = opid_str.parse().map_err(|_| "killOp requires numeric opid, e.g. db.killOp(12345)".to_string())?;
@@ -1433,6 +1438,7 @@ pub async fn execute_mongodb_single_command(
 
         // db.fsyncLock()
         if after_db.starts_with("fsyncLock(") || after_db == "fsyncLock" {
+            crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let admin_db = client.database("admin");
             let res = admin_db.run_command(mongodb::bson::doc! { "fsync": 1, "lock": true }, None).await.map_err(|e| format!("MongoDB fsyncLock error: {}", e))?;
             return unpack_mongo_command_result(res, "MongoDB FsyncLock", start, server_version);
@@ -1440,6 +1446,7 @@ pub async fn execute_mongodb_single_command(
 
         // db.fsyncUnlock()
         if after_db.starts_with("fsyncUnlock(") || after_db == "fsyncUnlock" {
+            crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let admin_db = client.database("admin");
             let res = admin_db.run_command(mongodb::bson::doc! { "fsyncUnlock": 1 }, None).await.map_err(|e| format!("MongoDB fsyncUnlock error: {}", e))?;
             return unpack_mongo_command_result(res, "MongoDB FsyncUnlock", start, server_version);
@@ -1447,6 +1454,7 @@ pub async fn execute_mongodb_single_command(
 
         // db.repairDatabase()
         if after_db.starts_with("repairDatabase(") || after_db == "repairDatabase" {
+            crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let db = client.database(database_name);
             let res = db.run_command(mongodb::bson::doc! { "repairDatabase": 1 }, None).await.map_err(|e| format!("MongoDB repairDatabase error: {}", e))?;
             return unpack_mongo_command_result(res, "MongoDB RepairDatabase", start, server_version);
@@ -1498,6 +1506,7 @@ pub async fn execute_mongodb_single_command(
 
         // db.setProfilingLevel(level, slowms)
         if after_db.starts_with("setProfilingLevel(") {
+            crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let inner = extract_paren_args(after_db, "setProfilingLevel")?;
             let args = split_top_level_args(&inner);
             let level: i32 = args.get(0).ok_or_else(|| "setProfilingLevel requires a level from 0 to 2.".to_string())?
@@ -1518,6 +1527,7 @@ pub async fn execute_mongodb_single_command(
 
         // db.dropDatabase()
         if after_db.starts_with("dropDatabase(") || after_db == "dropDatabase" {
+            crate::store::audit::enforce_policy_permission("db_execute_operation")?;
             let db = client.database(database_name);
             db.drop(None).await.map_err(|e| format!("MongoDB dropDatabase error: {}", e))?;
             return Ok(QueryResult {
@@ -1908,6 +1918,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "insertOne" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let doc = parse_relaxed_document(primary_args)?;
                 let res = coll.insert_one(doc, None).await.map_err(|e| format!("MongoDB insertOne error: {}", e))?;
                 let clean_id = bson_to_clean_json(res.inserted_id);
@@ -1935,6 +1946,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "insertMany" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let strict = relax_to_strict_json(primary_args);
                 let val: serde_json::Value = serde_json::from_str(&strict)
                     .map_err(|e| format!("Invalid MongoDB insertMany array: {}", e))?;
@@ -1993,6 +2005,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "updateOne" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let args = split_top_level_args(primary_args);
                 if args.len() < 2 {
                     return Err("updateOne requires (filter, update) arguments".to_string());
@@ -2040,6 +2053,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "updateMany" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let args = split_top_level_args(primary_args);
                 if args.len() < 2 {
                     return Err("updateMany requires (filter, update) arguments".to_string());
@@ -2087,6 +2101,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "replaceOne" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let args = split_top_level_args(primary_args);
                 if args.len() < 2 {
                     return Err("replaceOne requires (filter, replacement) arguments".to_string());
@@ -2137,6 +2152,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "deleteOne" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let filter_doc = parse_relaxed_document(primary_args)?;
                 if filter_doc.is_empty() {
                     return Err("MongoDB deleteOne requires a non-empty filter.".into());
@@ -2166,6 +2182,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "deleteMany" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let filter_doc = parse_relaxed_document(primary_args)?;
                 if filter_doc.is_empty() {
                     return Err("MongoDB deleteMany requires a non-empty filter to prevent accidental full-collection deletion.".into());
@@ -2195,6 +2212,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "drop" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 coll.drop(None).await.map_err(|e| format!("MongoDB drop error: {}", e))?;
                 return Ok(QueryResult {
                     columns: vec![ColumnMeta {
@@ -2220,6 +2238,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "createIndex" | "createIndexes" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let doc = parse_relaxed_document(primary_args)?;
                 let db = client.database(database_name);
                 let res = db.run_command(mongodb::bson::doc! {
@@ -2235,6 +2254,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "dropIndex" | "dropIndexes" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let idx_name = primary_args.trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
                 let db = client.database(database_name);
                 let res = db.run_command(mongodb::bson::doc! {
@@ -2284,6 +2304,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "bulkWrite" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let args = split_top_level_args(primary_args);
                 if args.is_empty() {
                     return Err("bulkWrite requires an array of operations".to_string());
@@ -2463,6 +2484,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "renameCollection" | "rename" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let args = split_top_level_args(primary_args);
                 if args.is_empty() {
                     return Err("renameCollection requires new collection name".to_string());
@@ -2487,6 +2509,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "reIndex" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let db = client.database(database_name);
                 let res = db.run_command(mongodb::bson::doc! {
                     "reIndex": &coll_name
@@ -2495,6 +2518,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "compact" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let db = client.database(database_name);
                 let res = db.run_command(mongodb::bson::doc! {
                     "compact": &coll_name
@@ -2556,6 +2580,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "findOneAndUpdate" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let args = split_top_level_args(primary_args);
                 if args.len() < 2 {
                     return Err("findOneAndUpdate requires (filter, update) arguments".to_string());
@@ -2577,6 +2602,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "findOneAndDelete" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let filter = parse_relaxed_document(primary_args)?;
                 if filter.is_empty() {
                     return Err("MongoDB findOneAndDelete requires a non-empty filter.".into());
@@ -2590,6 +2616,7 @@ pub async fn execute_mongodb_single_command(
             }
 
             "findOneAndReplace" => {
+                crate::store::audit::enforce_policy_permission("db_execute_operation")?;
                 let args = split_top_level_args(primary_args);
                 if args.len() < 2 {
                     return Err("findOneAndReplace requires (filter, replacement) arguments".to_string());
@@ -2681,6 +2708,7 @@ pub async fn execute_mongodb_single_command(
 
     // 7. Try parsing as relaxed JSON document command as final fallback
     if let Ok(doc_cmd) = parse_relaxed_document(&clean) {
+        crate::store::audit::enforce_policy_permission("db_execute_operation")?;
         let db = client.database(database_name);
         let res = db.run_command(doc_cmd, None).await
             .map_err(|e| format!("MongoDB command failed: {}", e))?;
