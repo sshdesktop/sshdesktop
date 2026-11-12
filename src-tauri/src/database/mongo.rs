@@ -1236,24 +1236,33 @@ pub async fn execute_mongodb_single_command(
     let upper = clean.to_uppercase();
     if upper.starts_with("SELECT ") {
         if let Some(from_pos) = upper.find(" FROM ") {
+            let projection = clean[..from_pos].trim();
+            if !projection.eq_ignore_ascii_case("SELECT *") {
+                return Err("MongoDB SQL-like syntax currently supports SELECT * only; use MongoDB find() for projections.".into());
+            }
             let after_from = clean[from_pos + 6..].trim();
             let tokens: Vec<&str> = after_from.split_whitespace().collect();
-            if !tokens.is_empty() {
-                let coll_name = tokens[0].trim_matches(|c| c == '`' || c == '\'' || c == '"' || c == ';');
-                validate_mongo_name(coll_name, "collection name")?;
-                let mut limit = limit_override.clamp(1, 10_000) as i64;
-                for (idx, tok) in tokens.iter().enumerate() {
-                    if tok.eq_ignore_ascii_case("LIMIT") && idx + 1 < tokens.len() {
-                        if let Ok(l) = tokens[idx + 1].trim_matches(';').parse::<i64>() {
-                            limit = l.clamp(1, 10_000);
-                        }
-                    }
-                }
-                let coll = client.database(database_name).collection::<mongodb::bson::Document>(coll_name);
-                let find_opts = mongodb::options::FindOptions::builder().limit(Some(limit)).build();
-                let mut cursor = coll.find(None, find_opts).await.map_err(|e| format!("MongoDB error: {}", e))?;
-                return collect_mongo_cursor_results(&mut cursor, "MongoDB SQL Query", start, server_version, limit as usize).await;
+            if tokens.is_empty() || tokens.len() > 3 {
+                return Err("Supported syntax: SELECT * FROM collection [LIMIT 1..10000].".into());
             }
+            let coll_name = tokens[0].trim_matches(|c| c == '`' || c == '\'' || c == '"' || c == ';');
+            validate_mongo_name(coll_name, "collection name")?;
+            let mut limit = limit_override.clamp(1, 10_000) as i64;
+            if tokens.len() > 1 {
+                if !tokens[1].eq_ignore_ascii_case("LIMIT") || tokens.len() != 3 {
+                    return Err("Unsupported SQL-like clause; only LIMIT is supported. Use MongoDB find() for filters and sorting.".into());
+                }
+                let parsed = tokens[2].trim_end_matches(';').parse::<i64>()
+                    .map_err(|_| "MongoDB SELECT LIMIT must be an integer.".to_string())?;
+                if parsed <= 0 {
+                    return Err("MongoDB SELECT LIMIT must be greater than zero.".into());
+                }
+                limit = parsed.clamp(1, 10_000);
+            }
+            let coll = client.database(database_name).collection::<mongodb::bson::Document>(coll_name);
+            let find_opts = mongodb::options::FindOptions::builder().limit(Some(limit)).build();
+            let mut cursor = coll.find(None, find_opts).await.map_err(|e| format!("MongoDB error: {}", e))?;
+            return collect_mongo_cursor_results(&mut cursor, "MongoDB SQL Query", start, server_version, limit as usize).await;
         }
     }
 
@@ -2451,6 +2460,8 @@ pub async fn execute_mongodb_single_command(
                     return Err("renameCollection requires new collection name".to_string());
                 }
                 let target_name = args[0].trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
+                validate_mongo_name(target_name, "collection name")?;
+                validate_mongo_name(database_name, "database name")?;
                 let drop_target = if args.len() > 1 {
                     args[1].trim() == "true"
                 } else {
