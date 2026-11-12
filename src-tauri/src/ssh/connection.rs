@@ -1138,37 +1138,43 @@ pub async fn ssh_get_user_privilege(
         return Ok(cached);
     }
 
-    // 3. Fast identity probe via basic shell commands (runs as unprivileged user)
-    // Output:
-    // Line 1: UID
-    // Line 2: GID
-    // Line 3: Username
-    // Line 4: Groups
-    // Line 5: $HOME
-    let probe_script = r#"id -u; id -g; id -un; id -Gn; echo "$HOME""#;
-    let (stdout, _) = crate::ssh::exec::run_cmd(&state, &conn_id, probe_script).await;
+    // 3. Probe the actual remote identity. Never infer UID/GID or privileges
+    // from the configured SSH username when the remote command fails.
+    // set -e ensures a failed id command cannot be hidden by a later printf.
+    let probe_script = r#"set -e; id -u; id -g; id -un; id -Gn; printf '%s\\n' "$HOME""#;
+    let (stdout, probe_code) = crate::ssh::exec::run_cmd(&state, &conn_id, probe_script).await;
+    if probe_code != 0 {
+        return Err("Could not verify the remote user identity; privilege detection was stopped.".into());
+    }
 
-    let lines: Vec<&str> = stdout.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    // Preserve empty lines so fields cannot shift if the groups field is empty.
+    let lines: Vec<&str> = stdout.lines().collect();
+    if lines.len() < 5 {
+        return Err("Remote identity probe returned incomplete data; privilege detection was stopped.".into());
+    }
 
-    let uid = lines.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or_else(|| {
-        if configured_user == "root" { 0 } else { 1000 }
-    });
-    let gid = lines.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(uid);
-    let username = lines.get(2).map(|s| s.to_string()).unwrap_or(configured_user.clone());
-    let groups: Vec<String> = lines.get(3)
-        .map(|s| s.split_whitespace().map(|g| g.to_string()).collect())
-        .unwrap_or_default();
-    let home_dir = lines.get(4).map(|s| s.to_string()).unwrap_or_else(|| {
-        if uid == 0 || username == "root" { "/root".to_string() } else { format!("/home/{}", username) }
-    });
+    let uid = lines[0].trim().parse::<u32>()
+        .map_err(|_| "Remote identity probe returned an invalid UID; privilege detection was stopped.")?;
+    let gid = lines[1].trim().parse::<u32>()
+        .map_err(|_| "Remote identity probe returned an invalid GID; privilege detection was stopped.")?;
+    let username = lines[2].trim().to_string();
+    let home_dir = lines[4].trim().to_string();
+    if username.is_empty() || home_dir.is_empty() {
+        return Err("Remote identity probe returned an incomplete username or home directory.".into());
+    }
+    let groups: Vec<String> = lines[3]
+        .split_whitespace()
+        .map(|g| g.to_string())
+        .collect();
 
-    // 4. If root, return immediately
-    if uid == 0 || username == "root" {
+    // Only a verified UID of zero establishes root. A configured username
+    // named "root" is not proof of the remote process identity.
+    if uid == 0 {
         let info = UserPrivilegeInfo {
             username,
-            uid: 0,
-            gid: 0,
-            home_dir: if home_dir.is_empty() { "/root".into() } else { home_dir },
+            uid,
+            gid,
+            home_dir,
             is_root: true,
             has_sudo: true,
             sudo_type: "root".to_string(),
@@ -1214,17 +1220,8 @@ pub async fn ssh_get_user_privilege(
         }
     }
 
-    // 7. If not verified via password test yet, check if user belongs to standard sudo/wheel/admin groups
-    if !has_sudo {
-        let is_in_sudo_group = groups.iter().any(|g| {
-            let lower = g.to_lowercase();
-            lower == "sudo" || lower == "wheel" || lower == "admin"
-        });
-        if is_in_sudo_group {
-            has_sudo = true;
-            sudo_type = "password".to_string();
-        }
-    }
+    // Group membership alone does not prove an effective sudoers rule.
+    // Keep has_sudo false unless one of the actual sudo probes succeeded.
 
     let info = UserPrivilegeInfo {
         username,
