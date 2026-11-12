@@ -1,0 +1,70 @@
+name: 🐛 Bug Report
+description: Create a report to help us fix a bug in SSH Desktop
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please verify that you are running the latest version from `dev` or the latest GitHub release.
+  - type: input
+    id: version
+    attributes:
+      label: SSH Desktop Version / Commit
+      description: What version of SSH Desktop are you using? (e.g. v2.4.2, commit hash)
+      placeholder: "v2.4.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Operating Environment & Runtime
+      description: Which environment are you running SSH Desktop on?
+      options:
+        - Windows Desktop App (Tauri)
+        - macOS Desktop App (Tauri)
+        - Linux Desktop App (Tauri AppImage / .deb / .rpm)
+        - Web Browser Mode (Node.js Server)
+    validations:
+      required: true
+  - type: input
+    id: remote_os
+    attributes:
+      label: Remote Server OS & Distribution
+      description: What OS is the remote SSH host running? (e.g. Ubuntu 24.04, Debian 12, RHEL 9, Arch Linux)
+      placeholder: "Ubuntu 22.04 LTS"
+    validations:
+      required: false
+  - type: textarea
+    id: description
+    attributes:
+      label: Description of the Bug
+      description: Clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Exact steps to reproduce the behavior.
+      placeholder: |
+        1. Open '...' application
+        2. Click on '....'
+        3. Scroll down to '....'
+        4. Observe error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs or Error Output
+      description: Paste any console or terminal error messages (remember to sanitize sensitive tokens/passwords).
+      render: shell
+    validations:
+      required: false

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: SSH Desktop Interactive Live Demo
+    url: https://sshdesktop.com
+    about: Experience the web browser edition and explore all 24 apps live.
+  - name: Security Vulnerability Reporting
+    url: https://github.com/sshdesktop/sshdesktop/security/advisories/new
+    about: Please report security vulnerabilities privately rather than in public issues.
