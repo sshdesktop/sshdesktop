@@ -25,6 +25,11 @@ fn sqlite_cache_path(config: &DatabaseConnectionConfig, remote_path: &str) -> Re
     let cache_dir = std::env::temp_dir().join("sshdesktop_sqlite");
     std::fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("Failed to create SQLite cache directory: {}", e))?;
+    let cache_meta = std::fs::symlink_metadata(&cache_dir)
+        .map_err(|e| format!("Could not inspect SQLite cache directory: {}", e))?;
+    if cache_meta.file_type().is_symlink() || !cache_meta.is_dir() {
+        return Err("SQLite cache directory must be a real directory, not a symlink or special file.".into());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -63,8 +68,8 @@ pub async fn connect_sqlite(
     if raw_path.len() > 4096 || raw_path.chars().any(|c| c.is_control() || c == '\0') {
         return Err("SQLite database path exceeds 4096 bytes or contains control characters.".into());
     }
-    if config.use_ssh && !raw_path.starts_with('/') {
-        return Err("Remote SQLite requires an absolute POSIX file path.".into());
+    if config.use_ssh && (!raw_path.starts_with('/') || raw_path.split('/').any(|part| part == "." || part == "..")) {
+        return Err("Remote SQLite requires a normalized absolute POSIX path without dot segments.".into());
     }
     if raw_path.is_empty() {
         return Err("SQLite file path is empty. Please specify a database file path.".to_string());
@@ -87,7 +92,7 @@ pub async fn connect_sqlite(
             let (test_out, test_code) = crate::ssh::exec::run_cmd(
                 app_state,
                 &conn_id,
-                &format!("if [ -f '{}' ]; then echo EXISTS; elif [ ! -e '{}' ]; then echo MISSING; else echo INVALID; exit 2; fi", escaped, escaped),
+                &format!("if [ -L '{}' ]; then echo INVALID; exit 2; elif [ -f '{}' ]; then echo EXISTS; elif [ ! -e '{}' ]; then echo MISSING; else echo INVALID; exit 2; fi", escaped, escaped, escaped),
             ).await;
             if test_code != 0 || (!test_out.contains("EXISTS") && !test_out.contains("MISSING")) {
                 return Err(format!("Could not inspect remote SQLite file '{}': {}", raw_path, test_out.trim()));
@@ -350,7 +355,8 @@ pub async fn execute_query_sqlite(
     if had_mutation && session.config.use_ssh {
         if let Some(conn_id) = remote_sync_id {
             let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
-            if raw_path.is_empty() || raw_path.len() > 4096 || raw_path.chars().any(|c| c.is_control() || c == '\0') {
+            if raw_path.is_empty() || raw_path.len() > 4096 || raw_path.chars().any(|c| c.is_control() || c == '\0')
+                || !raw_path.starts_with('/') || raw_path.split('/').any(|part| part == "." || part == "..") {
                 return Err("Remote SQLite sync path is invalid.".into());
             }
             let local_cache = sqlite_cache_path(&session.config, raw_path)?;
@@ -449,7 +455,8 @@ pub async fn execute_operation_sqlite(
     let res = sqlx::raw_sql(sql).execute(pool).await.map_err(|e| e.to_string())?;
     if let Some(conn_id) = remote_conn_id {
         let raw_path = session.config.sqlite_path.as_deref().unwrap_or(&session.config.database).trim();
-        if raw_path.is_empty() || raw_path.len() > 4096 || raw_path.chars().any(|c| c.is_control() || c == '\0') {
+        if raw_path.is_empty() || raw_path.len() > 4096 || raw_path.chars().any(|c| c.is_control() || c == '\0')
+            || !raw_path.starts_with('/') || raw_path.split('/').any(|part| part == "." || part == "..") {
             return Err("Remote SQLite operation path is invalid.".into());
         }
         let local_cache = sqlite_cache_path(&session.config, raw_path)?;
