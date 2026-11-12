@@ -35,6 +35,10 @@ pub async fn process_list(
         return Err("No active SSH connection.".into());
     }
 
+    if code != 0 {
+        return Err(format!("Unable to list remote processes (exit code {}): {}", code, stdout.trim()));
+    }
+
     let mut list = Vec::new();
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -42,8 +46,8 @@ pub async fn process_list(
             let user       = parts[0].to_string();
             let pid        = parts[1].parse::<u32>().unwrap_or(0);
             let ppid       = parts[2].parse::<u32>().unwrap_or(0);
-            let cpu_pct    = parts[3].parse::<f32>().unwrap_or(0.0);
-            let mem_pct    = parts[4].parse::<f32>().unwrap_or(0.0);
+            let cpu_pct    = parts[3].parse::<f32>().ok().filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0);
+            let mem_pct    = parts[4].parse::<f32>().ok().filter(|v| v.is_finite() && (0.0..=100.0).contains(v)).unwrap_or(0.0);
             let vsz        = parts[5].parse::<u64>().unwrap_or(0) * 1024; // kB → bytes
             let rss        = parts[6].parse::<u64>().unwrap_or(0) * 1024;
             let status     = parts[7].to_string();
@@ -142,6 +146,10 @@ pub async fn process_kill(
         return Ok(());
     }
 
+    if code == -1 {
+        return Err("No active SSH connection.".into());
+    }
+
     // 2. Direct kill failed (e.g. Operation not permitted for non-root user).
     // Automatically elevate with sudo using run_cmd_priv!
     let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &format!("kill -s {} {}", safe_signal, pid)).await;
@@ -196,6 +204,10 @@ pub async fn process_renice(
     if code == 0 {
         log::info!("SSH Desktop: Renice PID {} to nice {}", pid, value);
         return Ok(());
+    }
+
+    if code == -1 {
+        return Err("No active SSH connection.".into());
     }
 
     // Elevate with sudo
