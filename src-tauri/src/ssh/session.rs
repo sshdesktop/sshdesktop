@@ -192,9 +192,19 @@ pub async fn run_stream_channel(
     const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
 
     loop {
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(300), channel.wait())
-            .await
-            .map_err(|_| "SSH command stream was idle for 5 minutes")?;
+        let msg = match tokio::time::timeout(std::time::Duration::from_secs(300), channel.wait()).await {
+            Ok(msg) => msg,
+            Err(_) => {
+                let _ = app.emit("exec-output", crate::ssh::exec::StreamChunk {
+                    stream_id: stream_id.to_string(),
+                    data: "\r\n[SSH command stream timed out after 5 minutes without output]\r\n".into(),
+                    is_stderr: true,
+                    is_done: true,
+                    exit_code: Some(1),
+                });
+                return Err("SSH command stream was idle for 5 minutes".into());
+            }
+        };
         let Some(msg) = msg else { break };
         match msg {
             ChannelMsg::Data { ref data } => {
@@ -285,12 +295,21 @@ pub async fn run_log_stream_channel(
     let mut total_streamed: usize = 0;
     const MAX_LOG_STREAM_BYTES: usize = 64 * 1024 * 1024;
     loop {
-        let msg = tokio::time::timeout(
+        let msg = match tokio::time::timeout(
             std::time::Duration::from_secs(300),
             channel.wait()
-        )
-        .await
-        .map_err(|_| "SSH log stream was idle for 5 minutes")?;
+        ).await {
+            Ok(msg) => msg,
+            Err(_) => {
+                let _ = app.emit("log-stream-data", serde_json::json!({
+                    "stream_id": stream_id,
+                    "data": "\\r\\n[SSH log stream timed out after 5 minutes without output]\\r\\n",
+                    "done": true,
+                    "exit_code": 1
+                }));
+                return Err("SSH log stream was idle for 5 minutes".into());
+            }
+        };
         let Some(msg) = msg else { break };
         match msg {
             ChannelMsg::Data { ref data } => {
