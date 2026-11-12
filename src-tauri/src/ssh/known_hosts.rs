@@ -45,6 +45,14 @@ pub fn format_host_pattern(host: &str, port: u16) -> String {
     }
 }
 
+/// Validate a literal SSH destination before using it as a known_hosts token.
+/// OpenSSH treats '*' and '?' as pattern operators, so they must never be
+/// accepted as part of a host supplied to the explicit trust command.
+fn validate_known_hosts_host(host: &str, port: u16) -> Result<(), String> {
+    crate::ssh::connection::validate_ssh_target(host, port, "sshdesktop")
+        .map_err(|_| "Invalid SSH hostname or IP address for known_hosts.".to_string())
+}
+
 /// Match an OpenSSH hashed host token (|1|salt|hmac) against a candidate host.
 fn matches_hashed_host(token: &str, candidate: &str) -> bool {
     use hmac::{Hmac, Mac};
@@ -258,13 +266,7 @@ pub async fn ssh_verify_host_key(
     host: String,
     port: u16,
 ) -> Result<HostKeyVerification, String> {
-    if host.trim().is_empty()
-        || host.len() > 253
-        || host.chars().any(|ch| ch.is_control() || ch.is_whitespace() || ch == '/' || ch == '\\')
-        || port == 0
-    {
-        return Err("Invalid SSH host or port for host-key verification.".into());
-    }
+    validate_known_hosts_host(&host, port)?;
     let config = std::sync::Arc::new(russh::client::Config::default());
     let captured = std::sync::Arc::new(parking_lot::Mutex::new(None));
     let handler = ProbeHandler {
@@ -333,13 +335,7 @@ pub async fn ssh_trust_host_key(
     let key_type = key_type.trim();
     let public_key_b64 = public_key_b64.trim();
 
-    if host.is_empty()
-        || host.len() > 253
-        || host.chars().any(|c| c.is_whitespace() || c.is_control() || c == ',' || c == '!' || c == '#')
-        || port == 0
-    {
-        return Err("Invalid host or port for known_hosts entry".into());
-    }
+    validate_known_hosts_host(host, port)?;
     if key_type.is_empty()
         || !key_type.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'@' || b == b'.')
     {
@@ -495,6 +491,15 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(salt),
             base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
         )
+    }
+
+    #[test]
+    fn rejects_wildcard_hosts_for_explicit_trust() {
+        assert!(validate_known_hosts_host("*.example.com", 22).is_err());
+        assert!(validate_known_hosts_host("server?.example.com", 22).is_err());
+        assert!(validate_known_hosts_host("server.example.com", 22).is_ok());
+        assert!(validate_known_hosts_host("192.0.2.10", 22).is_ok());
+        assert!(validate_known_hosts_host("[2001:db8::1]", 22).is_ok());
     }
 
     #[test]
