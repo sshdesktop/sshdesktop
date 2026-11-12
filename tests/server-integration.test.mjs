@@ -143,6 +143,19 @@ test('HTTP Integration: Full admin login, HttpOnly cookie, TOTP 2FA, team RBAC, 
   const loadedCast = await invokeHttp('recordings_get', { id: savedCast.json.result.id }, { cookie: adminCookie });
   assert.match(loadedCast.json.result, /"version":2/);
 
+  // SIEM export in CEF, Syslog, and NDJSON formats
+  const cefExport = await invokeHttp('audit_export_siem', { format: 'cef' }, { cookie: adminCookie });
+  assert.equal(cefExport.status, 200);
+  assert.match(cefExport.json.result, /CEF:0\|SSHDesktop/);
+
+  const syslogExport = await invokeHttp('audit_export_siem', { format: 'syslog' }, { cookie: adminCookie });
+  assert.equal(syslogExport.status, 200);
+  assert.match(syslogExport.json.result, /sshdesktop/);
+
+  const ndjsonExport = await invokeHttp('audit_export_siem', { format: 'ndjson' }, { cookie: adminCookie });
+  assert.equal(ndjsonExport.status, 200);
+  assert.match(ndjsonExport.json.result, /\{/);
+
   // Validation & typed web-mode errors
   const nativeDbErr = await invokeHttp('db_execute_query', { connectionId: 'x', query: 'SELECT 1' }, { cookie: adminCookie });
   assert.equal(nativeDbErr.status, 501);

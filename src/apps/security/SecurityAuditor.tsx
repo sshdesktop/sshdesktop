@@ -395,26 +395,44 @@ export default function SecurityAuditor() {
     }
   };
 
-  const handleExportAudit = (format: 'json' | 'csv') => {
+  const handleExportAudit = (format: 'json' | 'csv' | 'cef' | 'syslog') => {
     const filtered = auditEntries.filter(e =>
       !auditFilter.trim() || JSON.stringify(e).toLowerCase().includes(auditFilter.toLowerCase())
     );
     let content = '';
     let mime = 'application/json';
+    let ext = format as string;
     if (format === 'json') {
       content = JSON.stringify({ exportedAt: new Date().toISOString(), integrity: chainVerification, entries: filtered }, null, 2);
-    } else {
+    } else if (format === 'csv') {
       mime = 'text/csv;charset=utf-8';
       const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
       content = ['ts,event,username,target,status,details,hash']
         .concat(filtered.map(e => [esc(e.ts), esc(e.event), esc(e.username), esc(e.target), esc(e.status), esc(e.details), esc(e.hash)].join(',')))
         .join('\n');
+    } else if (format === 'cef') {
+      mime = 'text/plain;charset=utf-8';
+      ext = 'cef';
+      content = filtered.map(e => {
+        const severity = e.status === 'ok' ? '3' : '7';
+        const safeDetails = String(e.details || '').replace(/\|/g, '\\|');
+        return `CEF:0|SSHDesktop|SSHDesktop|2.4.2|${e.event}|${e.event}|${severity}|suser=${e.username} dst=${e.target} outcome=${e.status} cs1=${e.hash} cs1Label=EventHash cs2=${e.prev_hash || 'root'} cs2Label=PrevHash msg=${safeDetails}`;
+      }).join('\n');
+    } else if (format === 'syslog') {
+      mime = 'text/plain;charset=utf-8';
+      ext = 'log';
+      content = filtered.map(e => {
+        const pri = e.status === 'ok' ? '<134>' : '<131>';
+        const ts = e.ts || new Date().toISOString();
+        const details = e.details ? ` ${e.details}` : '';
+        return `${pri}1 ${ts} localhost sshdesktop audit - [audit@5424 event="${e.event}" user="${e.username || 'unknown'}" target="${e.target || 'local'}" status="${e.status || 'unknown'}" hash="${e.hash || ''}"]${details}`;
+      }).join('\n');
     }
     const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `sshdesktop-audit-${new Date().toISOString().slice(0, 10)}.${format}`;
+    a.download = `sshdesktop-audit-${new Date().toISOString().slice(0, 10)}.${ext}`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -1097,9 +1115,23 @@ export default function SecurityAuditor() {
                 </button>
                 <button
                   onClick={() => handleExportAudit('csv')}
-                  className="px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 text-xs font-semibold"
+                  className="px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 text-xs font-semibold cursor-pointer"
                 >
                   Export CSV
+                </button>
+                <button
+                  onClick={() => handleExportAudit('cef')}
+                  className="px-3 py-1.5 rounded-xl bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white border border-amber-500/30 text-xs font-semibold cursor-pointer"
+                  title="Export Common Event Format (.cef) for ArcSight, Splunk, and QRadar"
+                >
+                  Export CEF (SIEM)
+                </button>
+                <button
+                  onClick={() => handleExportAudit('syslog')}
+                  className="px-3 py-1.5 rounded-xl bg-cyan-600/20 hover:bg-cyan-600 text-cyan-300 hover:text-white border border-cyan-500/30 text-xs font-semibold cursor-pointer"
+                  title="Export RFC 5424 Syslog format for Datadog and Elastic"
+                >
+                  Export Syslog
                 </button>
                 <button
                   onClick={() => void handleExportComplianceReport()}

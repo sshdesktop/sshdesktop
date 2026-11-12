@@ -155,6 +155,7 @@ export const UNIFIED_COMMAND_CONTRACT: Record<string, CommandContractSpec> = {
   auth_totp_disable: { domain: 'auth', mutating: true, webSupported: true, defaultTimeoutMs: 10_000 },
   audit_get_logs: { domain: 'audit', mutating: false, webSupported: true, defaultTimeoutMs: 10_000 },
   audit_verify_chain: { domain: 'audit', mutating: false, webSupported: true, defaultTimeoutMs: 10_000 },
+  audit_export_siem: { domain: 'audit', mutating: false, webSupported: true, defaultTimeoutMs: 15_000 },
   policy_get_mode: { domain: 'audit', mutating: false, webSupported: true, defaultTimeoutMs: 10_000 },
   policy_set_mode: { domain: 'audit', mutating: true, webSupported: true, defaultTimeoutMs: 10_000 },
   runtime_capabilities: { domain: 'audit', mutating: false, webSupported: true, defaultTimeoutMs: 10_000 },

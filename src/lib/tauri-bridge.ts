@@ -2086,6 +2086,10 @@ export async function auditVerifyChain(): Promise<AuditChainVerification> {
   });
 }
 
+export async function auditExportSiem(format: 'cef' | 'syslog' | 'ndjson'): Promise<string> {
+  return safeInvoke<string>('audit_export_siem', { format }, '');
+}
+
 export async function policyGetMode(): Promise<WorkspaceSecurityPolicy> {
   return safeInvoke<WorkspaceSecurityPolicy>('policy_get_mode', {}, {
     role: 'admin',

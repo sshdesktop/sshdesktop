@@ -2837,6 +2837,38 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       return verifyAuditChain();
     }
 
+    case 'audit_export_siem': {
+      const format = String(args?.format || 'cef').toLowerCase().trim();
+      let entries = [];
+      if (fs.existsSync(AUDIT_LOG_FILE)) {
+        try {
+          const lines = fs.readFileSync(AUDIT_LOG_FILE, 'utf8').trim().split('\n').filter(Boolean);
+          entries = lines.slice(-2000).reverse().map(l => {
+            try { return JSON.parse(l); } catch { return null; }
+          }).filter(Boolean);
+        } catch {
+          entries = [];
+        }
+      }
+      if (format === 'cef') {
+        return entries.map(e => {
+          const severity = e.status === 'ok' ? '3' : '7';
+          const safeDetails = String(e.details || '').replace(/\|/g, '\\|');
+          return `CEF:0|SSHDesktop|SSHDesktop|2.4.2|${e.event}|${e.event}|${severity}|suser=${e.username} dst=${e.target} outcome=${e.status} cs1=${e.hash} cs1Label=EventHash cs2=${e.prevHash || 'root'} cs2Label=PrevHash msg=${safeDetails}`;
+        }).join('\n');
+      } else if (format === 'syslog') {
+        return entries.map(e => {
+          const pri = e.status === 'ok' ? '<134>' : '<131>';
+          const ts = e.timestamp || new Date().toISOString();
+          const details = e.details ? ` ${e.details}` : '';
+          return `${pri}1 ${ts} localhost sshdesktop audit ${e.id} [audit@5424 event="${e.event}" user="${e.username}" target="${e.target}" status="${e.status}" hash="${e.hash}"]${details}`;
+        }).join('\n');
+      } else if (format === 'ndjson') {
+        return entries.map(e => JSON.stringify(e)).join('\n');
+      }
+      throw new Error("Supported SIEM formats: 'cef', 'syslog', 'ndjson'.");
+    }
+
     case 'policy_get_mode': {
       return getSecurityPolicy();
     }

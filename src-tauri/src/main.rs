@@ -361,6 +361,7 @@ fn main() {
             // Audit Log, Security Policy, Capabilities, API Tokens & Workspace Backup
             store::audit::audit_get_logs,
             store::audit::audit_verify_chain,
+            store::audit::audit_export_siem,
             store::audit::policy_get_mode,
             store::audit::policy_set_mode,
             store::audit::runtime_capabilities,

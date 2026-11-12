@@ -337,6 +337,59 @@ pub async fn audit_verify_chain() -> Result<AuditVerifyResult, String> {
 }
 
 #[tauri::command]
+pub async fn audit_export_siem(format: String) -> Result<String, String> {
+    let logs = audit_get_logs(Some(2000)).await?;
+    match format.trim().to_ascii_lowercase().as_str() {
+        "cef" => {
+            let mut out = String::new();
+            for e in &logs {
+                let severity = if e.status == "ok" { 3 } else { 7 };
+                let safe_details = e.details.as_deref().unwrap_or("").replace('|', "\\|");
+                let prev = if e.prev_hash.is_empty() { "root" } else { e.prev_hash.as_str() };
+                out.push_str(&format!(
+                    "CEF:0|SSHDesktop|SSHDesktop|{}|{}|{}|{}|suser={} dst={} outcome={} cs1={} cs1Label=EventHash cs2={} cs2Label=PrevHash msg={}\n",
+                    env!("CARGO_PKG_VERSION"),
+                    e.event,
+                    e.event,
+                    severity,
+                    e.username,
+                    e.target,
+                    e.status,
+                    e.hash,
+                    prev,
+                    safe_details
+                ));
+            }
+            Ok(out)
+        }
+        "syslog" => {
+            let mut out = String::new();
+            for e in &logs {
+                let pri = if e.status == "ok" { "<134>" } else { "<131>" };
+                let ts = &e.ts;
+                let details = e.details.as_deref().unwrap_or("");
+                out.push_str(&format!(
+                    "{}1 {} localhost sshdesktop audit - [audit@5424 event=\"{}\" user=\"{}\" target=\"{}\" status=\"{}\" hash=\"{}\"] {}\n",
+                    pri, ts, e.event, e.username, e.target, e.status, e.hash, details
+                ));
+            }
+            Ok(out)
+        }
+        "ndjson" => {
+            let mut out = String::new();
+            for e in &logs {
+                if let Ok(line) = serde_json::to_string(e) {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+            Ok(out)
+        }
+        _ => Err("Supported SIEM formats: 'cef', 'syslog', 'ndjson'.".into()),
+    }
+}
+
+#[tauri::command]
 pub async fn policy_get_mode() -> Result<SecurityPolicy, String> {
     Ok(load_security_policy())
 }
@@ -909,5 +962,16 @@ mod tests {
         assert_eq!(caps.db_engines["cassandra"], serde_json::json!(true));
         assert_eq!(caps.db_engines["oracle"], serde_json::json!(false));
         assert_eq!(caps.db_engines["db2"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn siem_export_formats_support_cef_syslog_and_ndjson() {
+        let cef = audit_export_siem("cef".to_string()).await.unwrap();
+        let syslog = audit_export_siem("syslog".to_string()).await.unwrap();
+        let ndjson = audit_export_siem("ndjson".to_string()).await.unwrap();
+        assert!(audit_export_siem("invalid".to_string()).await.is_err());
+        assert!(cef.is_empty() || cef.contains("CEF:0|SSHDesktop"));
+        assert!(syslog.is_empty() || syslog.contains("sshdesktop"));
+        assert!(ndjson.is_empty() || ndjson.starts_with('{'));
     }
 }

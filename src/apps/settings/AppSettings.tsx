@@ -36,12 +36,15 @@ import {
   approvalDecide,
   recordingsList,
   recordingsGet,
+  auditVerifyChain,
+  auditExportSiem,
   WorkspaceSecurityPolicy,
   ScopedApiToken,
   TeamMember,
   SsoOidcConfig,
   CommandApprovalRecord,
   SessionRecordingMeta,
+  AuditChainVerification,
 } from '../../lib/tauri-bridge';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
 import { SshDesktopLogo } from '../../components/SshDesktopLogo';
@@ -130,6 +133,7 @@ export default function AppSettings() {
     redirect_uri: '',
     default_role: 'read_only',
   });
+  const [auditVerification, setAuditVerification] = useState<AuditChainVerification | null>(null);
   const [approvals, setApprovals] = useState<CommandApprovalRecord[]>([]);
   const [approvalActionInput, setApprovalActionInput] = useState('firewall_reset');
   const [approvalTargetInput, setApprovalTargetInput] = useState('');
@@ -663,6 +667,7 @@ export default function AppSettings() {
       ssoGetConfig().then(setSsoCfg).catch(() => {});
       approvalList().then((list) => setApprovals(Array.isArray(list) ? list : [])).catch(() => {});
       recordingsList().then((list) => setRecordings(Array.isArray(list) ? list : [])).catch(() => {});
+      auditVerifyChain().then(setAuditVerification).catch(() => {});
     }
   }, [activeTab]);
 
@@ -837,6 +842,18 @@ export default function AppSettings() {
     }
   };
 
+  const deriveBackupAesKey = async (passphrase: string, salt: Uint8Array, usages: KeyUsage[]): Promise<CryptoKey> => {
+    const enc = new TextEncoder();
+    const keyMat = await window.crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+    return window.crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: salt as BufferSource, iterations: 100_000, hash: 'SHA-256' },
+      keyMat,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      usages
+    );
+  };
+
   const handleExportWorkspaceBundle = async () => {
     try {
       const bundle = await backupExportConfig();
@@ -854,17 +871,76 @@ export default function AppSettings() {
     }
   };
 
+  const handleExportEncryptedBundle = async () => {
+    const pass = window.prompt('Enter an encryption passphrase to protect your Workspace backup (.sshdesk.enc):');
+    if (!pass) return;
+    try {
+      const bundle = await backupExportConfig();
+      if (!bundle) throw new Error('Backup export returned empty response');
+      const salt = window.crypto.getRandomValues(new Uint8Array(16));
+      const iv = window.crypto.getRandomValues(new Uint8Array(12));
+      const key = await deriveBackupAesKey(pass, salt, ['encrypt']);
+      const pt = new TextEncoder().encode(JSON.stringify(bundle));
+      const ct = new Uint8Array(await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, pt));
+      const payload = {
+        schema: 'sshdesktop-encrypted-v1',
+        salt: Array.from(salt),
+        iv: Array.from(iv),
+        ciphertext: Array.from(ct),
+        createdAt: new Date().toISOString(),
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `sshdesktop-backup-encrypted-${new Date().toISOString().slice(0, 10)}.sshdesk.enc`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setPolicyStatusMsg('Encrypted workspace configuration backup downloaded.');
+    } catch (e: any) {
+      setPolicyStatusMsg(e?.message || 'Failed to export encrypted backup');
+    }
+  };
+
   const handleImportWorkspaceBundle = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const parsed = JSON.parse(await file.text());
+      const rawText = await file.text();
+      let parsed = JSON.parse(rawText);
+      if (parsed.schema === 'sshdesktop-encrypted-v1') {
+        const pass = window.prompt('This backup is AES-256-GCM encrypted. Enter the decryption passphrase:');
+        if (!pass) return;
+        const salt = new Uint8Array(parsed.salt);
+        const iv = new Uint8Array(parsed.iv);
+        const key = await deriveBackupAesKey(pass, salt, ['decrypt']);
+        const pt = await window.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, new Uint8Array(parsed.ciphertext));
+        parsed = JSON.parse(new TextDecoder().decode(pt));
+      }
       await backupImportConfig(parsed);
       setPolicyStatusMsg('Workspace configuration bundle restored cleanly.');
     } catch (err: any) {
-      setPolicyStatusMsg(err?.message || 'Invalid backup bundle');
+      setPolicyStatusMsg(err?.message || 'Invalid or failed to decrypt backup bundle');
     } finally {
       e.target.value = '';
+    }
+  };
+
+  const handleDownloadSiemExport = async (format: 'cef' | 'syslog' | 'ndjson') => {
+    try {
+      const content = await auditExportSiem(format);
+      const ext = format === 'cef' ? 'cef' : format === 'syslog' ? 'log' : 'ndjson';
+      const mime = format === 'ndjson' ? 'application/x-ndjson' : 'text/plain';
+      const blob = new Blob([content], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `sshdesktop-audit-${new Date().toISOString().slice(0, 10)}.${ext}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setPolicyStatusMsg(`SIEM audit export (${format.toUpperCase()}) downloaded successfully.`);
+    } catch (e: any) {
+      setPolicyStatusMsg(e?.message || `Failed to export SIEM audit logs in ${format}`);
     }
   };
 
@@ -2077,12 +2153,19 @@ export default function AppSettings() {
                   <span className="text-xs font-bold text-white block">Workspace Configuration Backup &amp; Restore</span>
                   <span className="text-[11px] text-gray-400">Export or restore SSH connection profiles, settings, and security policy (passwords/passphrases remain protected in keychain/vault).</span>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                   <button
                     onClick={handleExportWorkspaceBundle}
                     className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold cursor-pointer"
                   >
-                    Export Workspace Config (.json)
+                    Export Config (.json)
+                  </button>
+                  <button
+                    onClick={handleExportEncryptedBundle}
+                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer"
+                    title="Export AES-256-GCM encrypted backup protected by your passphrase"
+                  >
+                    Export Encrypted Backup (.enc)
                   </button>
                   <button
                     onClick={() => configImportRef.current?.click()}
@@ -2093,7 +2176,7 @@ export default function AppSettings() {
                   <input
                     ref={configImportRef}
                     type="file"
-                    accept="application/json,.json"
+                    accept="application/json,.json,.enc,.sshdesk"
                     onChange={handleImportWorkspaceBundle}
                     className="hidden"
                   />
@@ -2513,6 +2596,55 @@ export default function AppSettings() {
                     ))}
                   </div>
                 )}
+              </div>
+
+              {/* Enterprise SIEM Integration & Audit Export */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3 shadow-xl">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-white block">Enterprise SIEM Integration &amp; Audit Log Export</span>
+                    <span className="text-[11px] text-gray-400">Export cryptographically verified SHA-256 audit events formatted for enterprise SIEM ingestion (Splunk, ArcSight, QRadar, Datadog).</span>
+                  </div>
+                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase border ${
+                    auditVerification?.valid ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+                  }`}>
+                    {auditVerification?.valid ? `Chain Verified (${auditVerification.verified} events)` : 'Chain Active'}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2.5 pt-1">
+                  <button
+                    onClick={() => void handleDownloadSiemExport('cef')}
+                    className="px-3.5 py-1.5 rounded-xl bg-amber-600/20 hover:bg-amber-600 text-amber-300 hover:text-white border border-amber-500/30 text-xs font-semibold cursor-pointer"
+                    title="Export Common Event Format (.cef) for ArcSight, Splunk, and IBM QRadar"
+                  >
+                    Export CEF (ArcSight/Splunk)
+                  </button>
+                  <button
+                    onClick={() => void handleDownloadSiemExport('syslog')}
+                    className="px-3.5 py-1.5 rounded-xl bg-cyan-600/20 hover:bg-cyan-600 text-cyan-300 hover:text-white border border-cyan-500/30 text-xs font-semibold cursor-pointer"
+                    title="Export RFC 5424 Syslog format for Datadog and Elastic"
+                  >
+                    Export RFC 5424 Syslog
+                  </button>
+                  <button
+                    onClick={() => void handleDownloadSiemExport('ndjson')}
+                    className="px-3.5 py-1.5 rounded-xl bg-purple-600/20 hover:bg-purple-600 text-purple-300 hover:text-white border border-purple-500/30 text-xs font-semibold cursor-pointer"
+                    title="Export NDJSON (JSON Lines) for Elasticsearch / Logstash"
+                  >
+                    Export NDJSON
+                  </button>
+                  <button
+                    onClick={() => {
+                      auditVerifyChain().then((v) => {
+                        setAuditVerification(v);
+                        setPolicyStatusMsg(v.valid ? `Audit trail cryptographically verified (${v.verified}/${v.total} events intact).` : 'Audit chain alert: tampering detected.');
+                      }).catch((e) => setPolicyStatusMsg(e?.message || 'Verification failed'));
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 text-gray-200 text-xs font-semibold cursor-pointer"
+                  >
+                    Verify Cryptographic Chain
+                  </button>
+                </div>
               </div>
             </div>
           )}
