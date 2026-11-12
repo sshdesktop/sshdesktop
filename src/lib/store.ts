@@ -83,24 +83,20 @@ export const useConnectionStore = create<ConnectionState>()(
           }));
           return priv;
         } catch (err) {
+          // Privilege information is security-sensitive. Never infer root or
+          // sudo access from the configured SSH username when remote detection
+          // fails; leave the privilege state unknown and let callers handle the
+          // failed lookup explicitly.
           console.warn('Failed to fetch user privilege:', err);
-          const conn = get().connections.find(c => c.id === id);
-          const uname = conn?.username || 'root';
-          const fallback: UserPrivilegeInfo = {
-            username: uname,
-            uid: uname === 'root' ? 0 : 1000,
-            gid: uname === 'root' ? 0 : 1000,
-            home_dir: uname === 'root' ? '/root' : `/home/${uname}`,
-            is_root: uname === 'root',
-            has_sudo: uname === 'root',
-            sudo_type: uname === 'root' ? 'root' : 'none',
-            groups: [uname],
-          };
-          set(state => ({
-            userPrivileges: { ...state.userPrivileges, [id]: fallback },
-            userPrivilege: state.activeConnectionId === id ? fallback : state.userPrivilege,
-          }));
-          return fallback;
+          set(state => {
+            const userPrivileges = { ...state.userPrivileges };
+            delete userPrivileges[id];
+            return {
+              userPrivileges,
+              userPrivilege: state.activeConnectionId === id ? null : state.userPrivilege,
+            };
+          });
+          throw err;
         }
       },
       addConnection: (conn) => {
