@@ -276,18 +276,24 @@ pub async fn terminal_create(
                     tokio::spawn(async move {
                         loop {
                             tokio::select! {
-                                Some(action) = action_rx.recv() => {
+                                action = action_rx.recv() => {
                                     match action {
-                                        TerminalAction::Data(data) => {
+                                        Some(TerminalAction::Data(data)) => {
                                             if channel.data(&data[..]).await.is_err() {
                                                 break;
                                             }
                                         }
-                                        TerminalAction::Resize { rows, cols } => {
+                                        Some(TerminalAction::Resize { rows, cols }) => {
                                             let _ = channel.window_change(cols as u32, rows as u32, 0, 0).await;
                                         }
-                                        TerminalAction::Close => {
-                                            let _ = channel.eof().await;
+                                        Some(TerminalAction::Close) | None => {
+                                            // Closing/removing the terminal drops its sender.
+                                            // Treat that as a close signal even if the bounded
+                                            // queue was full when terminal_close tried to enqueue.
+                                            let _ = tokio::time::timeout(
+                                                std::time::Duration::from_millis(800),
+                                                channel.eof(),
+                                            ).await;
                                             break;
                                         }
                                     }
