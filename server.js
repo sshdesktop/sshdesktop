@@ -1835,7 +1835,7 @@ function safeEqualUtf8(buf, expectedStr) {
   return crypto.timingSafeEqual(a, b);
 }
 
-function startSocks5Proxy(sshClient, preferredPort = 1080, socksAuth = null) {
+function startSocks5Proxy(sshClient, preferredPort = 1080, socksAuth = null, onDataMetric = null) {
   return new Promise((resolve, reject) => {
     let activeStreams = 0;
     const server = net.createServer(socket => {
@@ -1875,6 +1875,7 @@ function startSocks5Proxy(sshClient, preferredPort = 1080, socksAuth = null) {
       });
 
       socket.on('data', chunk => {
+        if (onDataMetric && chunk) onDataMetric(chunk.length);
         if (state === 'STREAM') {
           return;
         }
@@ -1982,6 +1983,9 @@ function startSocks5Proxy(sshClient, preferredPort = 1080, socksAuth = null) {
               if (initialPayload.length > 0) {
                 sshStream.write(initialPayload);
               }
+              sshStream.on('data', chunk => {
+                if (onDataMetric && chunk) onDataMetric(chunk.length);
+              });
               socket.pipe(sshStream);
               sshStream.pipe(socket);
               socket.resume();
@@ -2088,6 +2092,164 @@ function sshHostFieldMatches(field, candidates) {
   return positive;
 }
 
+let lastHostKeyDiagnostic = null;
+
+function getLastHostKeyDiagnostic() {
+  const d = lastHostKeyDiagnostic;
+  lastHostKeyDiagnostic = null;
+  return d;
+}
+
+function setLastHostKeyDiagnostic(host, port, status, message) {
+  lastHostKeyDiagnostic = { host, port, status, message };
+}
+
+/**
+ * Parse and strictly validate an SSH ProxyJump target ([user@]host[:port]).
+ * Enforces hostname/IP syntax, port range (1-65535, default 22), username syntax,
+ * and strictly rejects shell metacharacters and control characters.
+ */
+function parseAndValidateProxyJump(proxyJump) {
+  if (!proxyJump || typeof proxyJump !== 'string') return null;
+  const raw = proxyJump.trim();
+  if (!raw) return null;
+
+  // Reject shell metacharacters, whitespace, and control characters
+  if (/[\s;`$|&><\0\r\n"'\\]/.test(raw)) {
+    throw new Error('ProxyJump destination contains invalid shell or control characters.');
+  }
+
+  let username = null;
+  let remainder = raw;
+
+  if (remainder.includes('@')) {
+    const atIdx = remainder.indexOf('@');
+    username = remainder.slice(0, atIdx).trim();
+    remainder = remainder.slice(atIdx + 1).trim();
+    if (!username || username.length > 255 || !/^[a-zA-Z0-9_.-]+$/.test(username)) {
+      throw new Error(`ProxyJump username '${username}' is invalid.`);
+    }
+  }
+
+  let host = remainder;
+  let port = 22;
+
+  if (host.startsWith('[')) {
+    const closeBracket = host.indexOf(']');
+    if (closeBracket === -1) {
+      throw new Error(`Invalid IPv6 ProxyJump address: ${host}`);
+    }
+    const ip = host.slice(1, closeBracket);
+    const after = host.slice(closeBracket + 1);
+    if (after.startsWith(':')) {
+      const portStr = after.slice(1);
+      const parsedPort = Number(portStr);
+      if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+        throw new Error(`Invalid ProxyJump port '${portStr}'.`);
+      }
+      port = parsedPort;
+    } else if (after.length > 0) {
+      throw new Error(`Trailing characters after IPv6 ProxyJump target: ${after}`);
+    }
+    host = ip;
+  } else if (host.includes(':')) {
+    const parts = host.split(':');
+    if (parts.length > 2) {
+      throw new Error(`IPv6 ProxyJump address must be enclosed in brackets '[addr]:port': ${host}`);
+    }
+    host = parts[0];
+    const parsedPort = Number(parts[1]);
+    if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+      throw new Error(`Invalid ProxyJump port '${parts[1]}'.`);
+    }
+    port = parsedPort;
+  }
+
+  const isIp = net.isIP(host);
+  if (!host || host.length > 253 || (isIp === 0 && !/^[a-zA-Z0-9.-]+$/.test(host))) {
+    throw new Error(`ProxyJump host '${host}' is invalid.`);
+  }
+
+  return { host, port, username };
+}
+
+function createSshStreamViaProxyJump(proxyJump, targetHost, targetPort, baseConfig) {
+  return new Promise((resolve, reject) => {
+    let bastionTarget;
+    try {
+      bastionTarget = parseAndValidateProxyJump(proxyJump);
+    } catch (e) {
+      return reject(e);
+    }
+    if (!bastionTarget) return reject(new Error('Invalid ProxyJump destination.'));
+
+    const bastionClient = new Client();
+    let settled = false;
+
+    const cleanup = () => {
+      if (!settled) {
+        settled = true;
+        try { bastionClient.end(); } catch {}
+      }
+    };
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`ProxyJump connection to ${bastionTarget.host}:${bastionTarget.port} timed out after 30s.`));
+    }, 30000);
+
+    bastionClient.on('error', err => {
+      clearTimeout(timer);
+      cleanup();
+      if (err.message && err.message.includes('Host key verification failed')) {
+        const diag = getLastHostKeyDiagnostic();
+        const msg = diag ? diag.message : 'Host key verification failed or changed in known_hosts.';
+        reject(new Error(`SECURITY ALERT: ProxyJump host key verification failed for bastion ${bastionTarget.host}:${bastionTarget.port}. ${msg}`));
+        return;
+      }
+      reject(new Error(`ProxyJump bastion connection failed (${bastionTarget.host}:${bastionTarget.port}): ${err.message}`));
+    });
+
+    bastionClient.on('ready', () => {
+      clearTimeout(timer);
+      bastionClient.forwardOut('127.0.0.1', 0, targetHost, targetPort, (err, stream) => {
+        if (err) {
+          cleanup();
+          return reject(new Error(`ProxyJump direct-tcpip channel open failed to ${targetHost}:${targetPort}: ${err.message}`));
+        }
+        settled = true;
+        resolve({ stream, bastionClient });
+      });
+    });
+
+    const bastionConfig = {
+      host: bastionTarget.host,
+      port: bastionTarget.port,
+      username: bastionTarget.username || baseConfig.username || 'root',
+      readyTimeout: 30000,
+      keepaliveInterval: baseConfig.keepaliveInterval || 15000,
+      keepaliveCountMax: 3,
+      hostVerifier: key => verifySshHostKey(bastionTarget.host, bastionTarget.port, key),
+      algorithms: baseConfig.algorithms,
+    };
+
+    if (baseConfig.privateKey) {
+      bastionConfig.privateKey = baseConfig.privateKey;
+      if (baseConfig.passphrase) bastionConfig.passphrase = baseConfig.passphrase;
+    } else if (baseConfig.password) {
+      bastionConfig.password = baseConfig.password;
+    }
+
+    try {
+      bastionClient.connect(bastionConfig);
+    } catch (e) {
+      clearTimeout(timer);
+      cleanup();
+      reject(e);
+    }
+  });
+}
+
 // Verify the SSH wire-format key against OpenSSH known_hosts. Unknown, changed,
 // revoked, malformed, and unreadable entries fail closed.
 function verifySshHostKey(host, port, keyBlob) {
@@ -2099,33 +2261,22 @@ function verifySshHostKey(host, port, keyBlob) {
     const keyType = key.subarray(4, 4 + typeLength).toString('ascii');
     if (!/^[A-Za-z0-9@._+-]+$/.test(keyType)) return false;
     const keyB64 = key.toString('base64');
-    const normalizedHost = String(host).toLowerCase();
-    const candidates = port === 22 ? [normalizedHost, '[' + normalizedHost + ']:22'] : ['[' + normalizedHost + ']:' + port];
     const knownHostsPath = path.join(os.homedir(), '.ssh', 'known_hosts');
-    const contents = fs.readFileSync(knownHostsPath, 'utf8');
-    let trusted = false;
-    let revoked = false;
-    for (const line of contents.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const fields = trimmed.split(/\s+/);
-      let marker = null, hostField, storedType, storedKey;
-      if (fields[0].startsWith('@')) {
-        if (fields.length < 4) continue;
-        [marker, hostField, storedType, storedKey] = fields;
-      } else {
-        if (fields.length < 3) continue;
-        [hostField, storedType, storedKey] = fields;
-      }
-      if (marker === '@cert-authority' || !sshHostFieldMatches(hostField, candidates)) continue;
-      if (storedType === keyType && storedKey === keyB64) {
-        if (marker === '@revoked') revoked = true;
-        else if (!marker) trusted = true;
-      }
+    if (!fs.existsSync(knownHostsPath)) {
+      setLastHostKeyDiagnostic(host, port, 'not_found', `Host key not found in ${knownHostsPath}.`);
+      return false;
     }
-    return trusted && !revoked;
+    const contents = fs.readFileSync(knownHostsPath, 'utf8');
+    const evalResult = evaluateKnownHostsContent(contents, host, port, keyType, keyB64);
+    if (evalResult.status === 'trusted') {
+      lastHostKeyDiagnostic = null;
+      return true;
+    }
+    setLastHostKeyDiagnostic(host, port, evalResult.status, evalResult.message);
+    return false;
   } catch (error) {
     if (error.code !== 'ENOENT') console.warn('[SSH Desktop] Host-key verification failed closed:', error.message);
+    setLastHostKeyDiagnostic(host, port, 'error', error.message);
     return false;
   }
 }
@@ -2144,12 +2295,18 @@ function buildSshClientConfig(config, targetId) {
     throw new Error('Invalid SSH username.');
   }
 
+  const keepaliveSec = config.keepalive_interval_sec ?? config.keepaliveIntervalSec ?? config.keepalive_interval;
+  const keepaliveInterval = (typeof keepaliveSec === 'number' && keepaliveSec > 0 && keepaliveSec <= 3600)
+    ? keepaliveSec * 1000
+    : 15000;
+
   const connectConfig = {
     host,
     port,
     username,
     readyTimeout: 30000,
-    keepaliveInterval: 10000,
+    keepaliveInterval,
+    keepaliveCountMax: 3,
     hostVerifier: key => verifySshHostKey(host, port, key),
     tryKeyboard: true,
     algorithms: {
@@ -2982,9 +3139,28 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       const targetId = config.id || `conn-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
       const client = new Client();
 
-      return new Promise((resolve, reject) => {
+      return new Promise(async (resolve, reject) => {
         let connected = false;
-        const connectConfig = buildSshClientConfig(config, targetId);
+        let bastionClient = null;
+        let connectConfig;
+
+        try {
+          connectConfig = buildSshClientConfig(config, targetId);
+          const proxyJump = config.proxy_jump || config.proxyJump;
+          if (proxyJump && String(proxyJump).trim()) {
+            const jumpResult = await createSshStreamViaProxyJump(
+              String(proxyJump).trim(),
+              connectConfig.host,
+              connectConfig.port,
+              connectConfig
+            );
+            bastionClient = jumpResult.bastionClient;
+            connectConfig.sock = jumpResult.stream;
+          }
+        } catch (setupErr) {
+          if (bastionClient) { try { bastionClient.end(); } catch {} }
+          return reject(setupErr);
+        }
 
         client.on('keyboard-interactive', (name, instructions, instructionsLang, prompts, finish) => {
           const pwd = config.password || '';
@@ -2999,6 +3175,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
           }
           activeConnections.set(targetId, {
             client,
+            bastionClient,
             sftp: sftpInstance,
             config,
             connectedAt: Date.now()
@@ -3007,11 +3184,21 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
         });
 
         client.on('error', (err) => {
-          if (!connected) reject(new Error(`SSH connection failed: ${err.message}`));
+          if (!connected) {
+            if (bastionClient) { try { bastionClient.end(); } catch {} }
+            if (err.message && err.message.includes('Host key verification failed')) {
+              const diag = getLastHostKeyDiagnostic();
+              const msg = diag ? diag.message : 'The server host key has changed or is marked @revoked in known_hosts.';
+              reject(new Error(`SECURITY ALERT: Host key verification failed for ${connectConfig.host}:${connectConfig.port}. ${msg}`));
+              return;
+            }
+            reject(new Error(`SSH connection failed: ${err.message}`));
+          }
         });
 
         client.on('close', () => {
           activeConnections.delete(targetId);
+          if (bastionClient) { try { bastionClient.end(); } catch {} }
         });
 
         client.connect(connectConfig);
@@ -3020,16 +3207,19 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
 
     case 'ssh_disconnect': {
       if (activeSocksServers.has(connId)) {
-        try { activeSocksServers.get(connId).server.close(); } catch {}
+        const socks = activeSocksServers.get(connId);
+        try { socks.server.close(); } catch {}
+        if (socks.tunnelId) activeTunnels.delete(socks.tunnelId);
         activeSocksServers.delete(connId);
       }
       for (const [tid, t] of activeTunnels.entries()) {
-        if (t.info.conn_id === connId) {
+        if (t.info && t.info.conn_id === connId) {
           try { t.server.close(); } catch {}
           activeTunnels.delete(tid);
         }
       }
       if (entry) {
+        if (entry.bastionClient) { try { entry.bastionClient.end(); } catch {} }
         try { entry.client.end(); } catch {}
         activeConnections.delete(connId);
       }
@@ -3054,15 +3244,32 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
         return activeSocksServers.get(connId).port;
       }
 
+      const tunnelId = `socks5-${connId}`;
+      const info = {
+        tunnel_id: tunnelId,
+        conn_id: connId,
+        tunnel_type: 'dynamic',
+        local_port: 0,
+        remote_host: 'dynamic (SOCKS5)',
+        remote_port: 0,
+        bytes_transferred: 0,
+        created_at: Date.now()
+      };
+      const onMetric = (bytes) => { info.bytes_transferred += bytes; };
+
       try {
-        const { server, port } = await startSocks5Proxy(entry.client, preferred, socksAuth);
-        activeSocksServers.set(connId, { server, port, authEnabled: Boolean(socksAuth) });
+        const { server, port } = await startSocks5Proxy(entry.client, preferred, socksAuth, onMetric);
+        info.local_port = port;
+        activeSocksServers.set(connId, { server, port, tunnelId, info, authEnabled: Boolean(socksAuth) });
+        activeTunnels.set(tunnelId, { server, info });
         console.log(`[SSH Desktop SOCKS5] Dynamic proxy active on 127.0.0.1:${port} for connection ${connId} (auth=${Boolean(socksAuth)})`);
         return port;
       } catch (err) {
         if (err.code === 'EADDRINUSE') {
-          const { server, port } = await startSocks5Proxy(entry.client, 0, socksAuth);
-          activeSocksServers.set(connId, { server, port, authEnabled: Boolean(socksAuth) });
+          const { server, port } = await startSocks5Proxy(entry.client, 0, socksAuth, onMetric);
+          info.local_port = port;
+          activeSocksServers.set(connId, { server, port, tunnelId, info, authEnabled: Boolean(socksAuth) });
+          activeTunnels.set(tunnelId, { server, info });
           console.log(`[SSH Desktop SOCKS5] Dynamic proxy active on 127.0.0.1:${port} (fallback, auth=${Boolean(socksAuth)})`);
           return port;
         }
@@ -3074,6 +3281,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       if (activeSocksServers.has(connId)) {
         const socks = activeSocksServers.get(connId);
         try { socks.server.close(); } catch {}
+        if (socks.tunnelId) activeTunnels.delete(socks.tunnelId);
         activeSocksServers.delete(connId);
       }
       return undefined;
@@ -3091,6 +3299,17 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       }
 
       const tunnelId = `tun-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const info = {
+        tunnel_id: tunnelId,
+        conn_id: connId,
+        tunnel_type: tunnelType,
+        local_port: 0,
+        remote_host: remoteHost,
+        remote_port: remotePort,
+        bytes_transferred: 0,
+        created_at: Date.now()
+      };
+
       const server = net.createServer((socket) => {
         socket.on('error', () => { try { socket.destroy(); } catch {} });
         entry.client.forwardOut('127.0.0.1', socket.remotePort || 0, remoteHost, remotePort, (err, stream) => {
@@ -3099,6 +3318,12 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
             return;
           }
           stream.on('error', () => { try { socket.destroy(); } catch {} });
+          socket.on('data', chunk => {
+            info.bytes_transferred += (chunk ? chunk.length : 0);
+          });
+          stream.on('data', chunk => {
+            info.bytes_transferred += (chunk ? chunk.length : 0);
+          });
           socket.pipe(stream).pipe(socket);
         });
       });
@@ -3107,16 +3332,10 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
         server.on('error', (err) => reject(err));
         server.listen(localPort, '127.0.0.1', () => {
           const assignedPort = server.address().port;
+          info.local_port = assignedPort;
           activeTunnels.set(tunnelId, {
             server,
-            info: {
-              tunnel_id: tunnelId,
-              conn_id: connId,
-              local_port: assignedPort,
-              remote_host: remoteHost,
-              remote_port: remotePort,
-              created_at: Date.now()
-            }
+            info
           });
           resolve(assignedPort);
         });
@@ -3126,8 +3345,14 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
     case 'ssh_stop_tunnel': {
       const tid = args?.tunnel_id || args?.tunnelId;
       if (tid && activeTunnels.has(tid)) {
-        try { activeTunnels.get(tid).server.close(); } catch {}
+        const t = activeTunnels.get(tid);
+        try { t.server.close(); } catch {}
         activeTunnels.delete(tid);
+        for (const [cid, s] of activeSocksServers.entries()) {
+          if (s.tunnelId === tid || s.server === t.server) {
+            activeSocksServers.delete(cid);
+          }
+        }
       }
       return true;
     }
@@ -3135,7 +3360,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
     case 'ssh_list_tunnels': {
       const list = [];
       for (const t of activeTunnels.values()) {
-        list.push(t.info);
+        list.push({ ...t.info });
       }
       return list;
     }
@@ -3174,26 +3399,67 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       const { config } = args || {};
       if (!config) return false;
       const client = new Client();
-      return new Promise((resolve) => {
+      return new Promise(async (resolve, reject) => {
+        let bastionClient = null;
+        let connectConfig;
+        try {
+          connectConfig = buildSshClientConfig(config, 'test');
+          const proxyJump = config.proxy_jump || config.proxyJump;
+          if (proxyJump && String(proxyJump).trim()) {
+            const jumpResult = await createSshStreamViaProxyJump(
+              String(proxyJump).trim(),
+              connectConfig.host,
+              connectConfig.port,
+              connectConfig
+            );
+            bastionClient = jumpResult.bastionClient;
+            connectConfig.sock = jumpResult.stream;
+          }
+        } catch (e) {
+          if (bastionClient) { try { bastionClient.end(); } catch {} }
+          if (e.message && e.message.includes('SECURITY ALERT')) {
+            return reject(e);
+          }
+          return resolve(false);
+        }
+
         const timer = setTimeout(() => {
           try { client.end(); } catch {}
+          if (bastionClient) { try { bastionClient.end(); } catch {} }
           resolve(false);
-        }, 12000);
+        }, 15000);
+
         client.on('keyboard-interactive', (name, instructions, instructionsLang, prompts, finish) => {
           const pwd = config.password || '';
           finish(prompts.map(() => pwd));
         });
+
         client.on('ready', () => {
           clearTimeout(timer);
           try { client.end(); } catch {}
+          if (bastionClient) { try { bastionClient.end(); } catch {} }
           resolve(true);
         });
-        client.on('error', () => {
+
+        client.on('error', (err) => {
           clearTimeout(timer);
+          if (bastionClient) { try { bastionClient.end(); } catch {} }
+          if (err.message && err.message.includes('Host key verification failed')) {
+            const diag = getLastHostKeyDiagnostic();
+            const msg = diag ? diag.message : 'The server host key has changed or is marked @revoked in known_hosts.';
+            reject(new Error(`SECURITY ALERT: Host key verification failed for ${connectConfig.host}:${connectConfig.port}. ${msg}`));
+            return;
+          }
           resolve(false);
         });
-        const connectConfig = buildSshClientConfig(config, 'test');
-        try { client.connect(connectConfig); } catch { resolve(false); }
+
+        try {
+          client.connect(connectConfig);
+        } catch {
+          clearTimeout(timer);
+          if (bastionClient) { try { bastionClient.end(); } catch {} }
+          resolve(false);
+        }
       });
     }
 
@@ -5333,6 +5599,15 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
             }
           });
         });
+        await new Promise((resolve, reject) => {
+          sftp.stat(targetPath, (err, stats) => {
+            if (err) return reject(new Error(`SFTP post-upload verification failed on '${targetPath}': ${err.message}`));
+            if (stats.size !== buf.length) {
+              return reject(new Error(`SFTP post-upload size verification mismatch: expected ${buf.length} bytes, got ${stats.size} bytes.`));
+            }
+            resolve();
+          });
+        });
         appendAuditEvent({ event: 'sftp_write', target: targetPath, bytes: buf.length, status: 'ok' });
         return true;
       } catch (err) {
@@ -5373,6 +5648,15 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
           stream.on('close', () => resolve());
           stream.on('error', err => reject(err));
           stream.end(buf);
+        });
+        await new Promise((resolve, reject) => {
+          sftp.stat(targetPath, (err, stats) => {
+            if (err) return reject(new Error(`SFTP post-upload verification failed on '${targetPath}': ${err.message}`));
+            if (stats.size !== buf.length) {
+              return reject(new Error(`SFTP post-upload size verification mismatch: expected ${buf.length} bytes, got ${stats.size} bytes.`));
+            }
+            resolve();
+          });
         });
         appendAuditEvent({ event: 'sftp_write', target: targetPath, bytes: buf.length, status: 'ok' });
         return true;
@@ -5579,7 +5863,9 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
               setWindow: () => {}
             },
             connId: 'local',
-            buffer: ''
+            buffer: '',
+            rows: 24,
+            cols: 80
           });
           pendingTerminalResizes.delete(termId);
           proc.stdout.on('data', chunk => {
@@ -5611,7 +5897,7 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
         entry.client.shell({ term: 'xterm-256color', rows: actualRows, cols: actualCols }, (err, stream) => {
           if (err) return reject(new Error(`Terminal spawn failed: ${err.message}`));
-          activeTerminals.set(termId, { stream, connId, buffer: '' });
+          activeTerminals.set(termId, { stream, connId, buffer: '', rows: actualRows, cols: actualCols });
           if (pending && typeof stream.setWindow === 'function') {
             try { stream.setWindow(pending.rows, pending.cols, 0, 0); } catch {}
           }
@@ -5648,14 +5934,21 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'terminal_resize': {
       const { terminalId, rows, cols } = args || {};
-      if (terminalId && rows && cols) {
-        pendingTerminalResizes.set(terminalId, { rows, cols });
-      }
+      const r = parseInt(rows, 10);
+      const c = parseInt(cols, 10);
+      if (!terminalId || !Number.isInteger(r) || !Number.isInteger(c)) return undefined;
       const session = activeTerminals.get(terminalId);
-      if (session && session.stream && typeof session.stream.setWindow === 'function') {
-        try {
-          session.stream.setWindow(rows || 24, cols || 80, 0, 0);
-        } catch {}
+      if (session) {
+        if (session.rows === r && session.cols === c) return undefined;
+        session.rows = r;
+        session.cols = c;
+        if (session.stream && typeof session.stream.setWindow === 'function') {
+          try {
+            session.stream.setWindow(r, c, 0, 0);
+          } catch {}
+        }
+      } else {
+        pendingTerminalResizes.set(terminalId, { rows: r, cols: c });
       }
       return undefined;
     }
@@ -8273,6 +8566,7 @@ export {
   parseSocks5GreetingFrame,
   parseSocks5UserPassFrame,
   parseSocks5ConnectFrame,
+  parseAndValidateProxyJump,
   validateVaultKeyName,
   vaultEncryptValue,
   vaultDecryptValue,

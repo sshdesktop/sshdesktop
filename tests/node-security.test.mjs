@@ -13,6 +13,7 @@ const {
   parseSocks5GreetingFrame,
   parseSocks5UserPassFrame,
   parseSocks5ConnectFrame,
+  parseAndValidateProxyJump,
   validateVaultKeyName,
   vaultEncryptValue,
   vaultDecryptValue,
@@ -178,4 +179,27 @@ test('known_hosts evaluation handles @revoked, @cert-authority, custom ports, an
 
   const unseen = evaluateKnownHostsContent(knownHosts, 'brandnew.internal', 22, 'ssh-ed25519', 'AAAAC3NzaC1lZDI1NTE5AAAAINewKey');
   assert.equal(unseen.status, 'not_found');
+});
+
+test('ProxyJump validation accepts valid targets and rejects malicious/invalid inputs', () => {
+  // Valid targets
+  assert.deepEqual(parseAndValidateProxyJump('bastion.corp'), { host: 'bastion.corp', port: 22, username: null });
+  assert.deepEqual(parseAndValidateProxyJump('bastion.corp:2222'), { host: 'bastion.corp', port: 2222, username: null });
+  assert.deepEqual(parseAndValidateProxyJump('jumpuser@bastion.corp:22'), { host: 'bastion.corp', port: 22, username: 'jumpuser' });
+  assert.deepEqual(parseAndValidateProxyJump('ops_admin@192.168.1.1:2200'), { host: '192.168.1.1', port: 2200, username: 'ops_admin' });
+  assert.deepEqual(parseAndValidateProxyJump('[2001:db8::1]:2222'), { host: '2001:db8::1', port: 2222, username: null });
+  assert.equal(parseAndValidateProxyJump(''), null);
+  assert.equal(parseAndValidateProxyJump(null), null);
+
+  // Invalid targets / command injection attempts
+  assert.throws(() => parseAndValidateProxyJump('bastion; rm -rf /'), /invalid shell/i);
+  assert.throws(() => parseAndValidateProxyJump('bastion$(whoami)'), /invalid shell/i);
+  assert.throws(() => parseAndValidateProxyJump('bastion`id`'), /invalid shell/i);
+  assert.throws(() => parseAndValidateProxyJump('bastion|reboot'), /invalid shell/i);
+  assert.throws(() => parseAndValidateProxyJump('bastion:0'), /invalid proxyjump port/i);
+  assert.throws(() => parseAndValidateProxyJump('bastion:70000'), /invalid proxyjump port/i);
+  assert.throws(() => parseAndValidateProxyJump('bastion:notaport'), /invalid proxyjump port/i);
+  assert.throws(() => parseAndValidateProxyJump('@bastion'), /proxyjump username/i);
+  assert.throws(() => parseAndValidateProxyJump('user with spaces@bastion'), /invalid shell/i);
+  assert.throws(() => parseAndValidateProxyJump('2001:db8::1:22'), /must be enclosed in brackets/i);
 });
