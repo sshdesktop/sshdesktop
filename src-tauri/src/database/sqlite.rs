@@ -324,6 +324,7 @@ pub async fn execute_query_sqlite(
     start: Instant,
 ) -> Result<QueryResult, String> {
     if query.len() > 5 * 1024 * 1024 { return Err("SQLite query exceeds the 5 MiB input limit.".into()); }
+    if query.chars().any(|c| c == '\0') { return Err("SQLite query contains a NUL byte.".into()); }
     let statements = split_sql_statements_for_engine(query, "sqlite");
     if statements.is_empty() { return Err("Query string is empty".to_string()); }
     if statements.len() > 100 { return Err("SQLite batch exceeds the 100-statement limit.".into()); }
@@ -512,6 +513,9 @@ pub async fn list_tables_sqlite(pool: &sqlx::SqlitePool) -> Result<Vec<DatabaseO
     if rows.len() > 10_000 { return Err("SQLite database contains more than 10,000 tables and views.".into()); }
     rows.into_iter().map(|r| {
         let name: String = r.try_get(0).map_err(|e| format!("Invalid SQLite schema name: {}", e))?;
+        if name.is_empty() || name.len() > 255 || name.chars().any(|c| c.is_control()) {
+            return Err("SQLite returned an invalid or oversized schema object name.".to_string());
+        }
         let obj_type: String = r.try_get(1).map_err(|e| format!("Invalid SQLite object type: {}", e))?;
         Ok(DatabaseObject { name, object_type: obj_type, schema: None, row_count: None, size_bytes: None, definition: None })
     }).collect()
@@ -527,6 +531,9 @@ pub async fn get_table_columns_sqlite(
     let fk_rows = sqlx::query(&fk_q).fetch_all(pool).await
         .map_err(|e| format!("SQLite foreign-key metadata query failed: {}", e))?;
     let mut fk_map: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    if fk_rows.len() > 2048 {
+        return Err("SQLite table has more than 2048 foreign-key metadata entries.".into());
+    }
     for fkr in fk_rows {
         let from_col: String = fkr.try_get("from").map_err(|e| format!("Invalid SQLite foreign-key column metadata: {}", e))?;
         let to_table: String = fkr.try_get("table").map_err(|e| format!("Invalid SQLite foreign-key table metadata: {}", e))?;
@@ -539,6 +546,9 @@ pub async fn get_table_columns_sqlite(
     let q = format!("PRAGMA table_info('{}');", table_name.replace('\'', "''"));
     let rows = sqlx::query(&q).fetch_all(pool).await.map_err(|e| e.to_string())?;
 
+    if rows.len() > 2048 {
+        return Err("SQLite table has more than 2048 columns; refusing oversized metadata response.".into());
+    }
     let mut cols = Vec::new();
     for r in rows {
         let name: String = r.try_get("name").map_err(|e| format!("Invalid SQLite column name metadata: {}", e))?;
@@ -573,6 +583,11 @@ pub async fn execute_operation_sqlite(
     if session.config.read_only { return Err("This SQLite connection is read-only.".into()); }
     if sql.trim().is_empty() { return Err("SQLite operation SQL is empty.".into()); }
     if sql.len() > 5 * 1024 * 1024 { return Err("SQLite operation SQL exceeds the 5 MiB input limit.".into()); }
+    if sql.chars().any(|c| c == '\0') { return Err("SQLite operation SQL contains a NUL byte.".into()); }
+    let operation_statements = split_sql_statements_for_engine(sql, "sqlite");
+    if operation_statements.len() != 1 {
+        return Err("A SQLite schema operation must contain exactly one SQL statement.".into());
+    }
     let remote_conn_id = if session.config.use_ssh {
         Some(session.config.ssh_connection_id.as_deref().filter(|id| !id.trim().is_empty())
             .ok_or_else(|| "Remote SQLite operation has no explicit SSH connection ID.".to_string())?)
@@ -615,7 +630,11 @@ pub async fn get_object_definition_sqlite(
     validate_sqlite_identifier(name, "object name")?;
     let row = sqlx::query(q).bind(name).fetch_one(pool).await.map_err(|e| e.to_string())?;
     let def: Option<String> = row.try_get(0).map_err(|e| format!("Invalid SQLite object definition: {}", e))?;
-    def.ok_or_else(|| format!("SQLite object '{}' has no stored SQL definition.", name))
+    let definition = def.ok_or_else(|| format!("SQLite object '{}' has no stored SQL definition.", name))?;
+    if definition.len() > 5 * 1024 * 1024 {
+        return Err("SQLite object definition exceeds the 5 MiB metadata limit.".into());
+    }
+    Ok(definition)
 }
 
 #[cfg(test)]
