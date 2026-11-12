@@ -310,14 +310,13 @@ pub fn generate_drop_sql(
     }
 }
 
-pub fn generate_truncate_table_sql(engine: &str, table: &str) -> String {
-    validate_identifier(table, "Table name").expect("table identifier validated by caller");
-
+pub fn generate_truncate_table_sql(engine: &str, table: &str) -> Result<String, String> {
+    validate_identifier(table, "Table name")?;
     let q = quote_ident(engine, table);
-    match engine {
+    Ok(match engine {
         "sqlite" => format!("DELETE FROM {};", q),
         _ => format!("TRUNCATE TABLE {};", q),
-    }
+    })
 }
 
 pub fn generate_add_column_sql(engine: &str, table: &str, col: &ColumnSpec) -> Result<String, String> {
@@ -335,13 +334,12 @@ pub fn generate_add_column_sql(engine: &str, table: &str, col: &ColumnSpec) -> R
     ))
 }
 
-pub fn generate_drop_column_sql(engine: &str, table: &str, col_name: &str) -> String {
-    validate_identifier(table, "Table name").expect("table identifier validated by caller");
-    validate_identifier(col_name, "Column name").expect("column identifier validated by caller");
-
+pub fn generate_drop_column_sql(engine: &str, table: &str, col_name: &str) -> Result<String, String> {
+    validate_identifier(table, "Table name")?;
+    validate_identifier(col_name, "Column name")?;
     let q_table = quote_ident(engine, table);
     let q_col = quote_ident(engine, col_name);
-    format!("ALTER TABLE {} DROP COLUMN {};", q_table, q_col)
+    Ok(format!("ALTER TABLE {} DROP COLUMN {};", q_table, q_col))
 }
 
 pub fn generate_create_index_sql(
@@ -374,15 +372,15 @@ pub fn generate_create_index_sql(
     Ok(format!("CREATE {}INDEX {} ON {} ({});", u, q_idx, q_tbl, q_cols))
 }
 
-pub fn generate_drop_index_sql(engine: &str, table: &str, index_name: &str) -> String {
-    validate_identifier(table, "Table name").expect("table identifier validated by caller");
-    validate_identifier(index_name, "Index name").expect("index identifier validated by caller");
-
+pub fn generate_drop_index_sql(engine: &str, table: &str, index_name: &str) -> Result<String, String> {
+    validate_identifier(table, "Table name")?;
+    validate_identifier(index_name, "Index name")?;
     let q_idx = quote_ident(engine, index_name);
     let q_tbl = quote_ident(engine, table);
-    match engine {
+    Ok(match engine {
         "mysql" | "mariadb" => format!("DROP INDEX {} ON {};", q_idx, q_tbl),
         "mssql" => format!("DROP INDEX {} ON {};", q_idx, q_tbl),
         _ => format!("DROP INDEX {};", q_idx),
-    }
+    })
 }
+
