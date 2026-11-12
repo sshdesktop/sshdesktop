@@ -267,10 +267,10 @@ pub async fn ssh_list_local_keys() -> Result<Vec<LocalKeyInfo>, String> {
             .unwrap_or(false);
         if is_regular_private_key {
             let pub_p = ssh_dir.join(format!("{}.pub", name));
-            let pub_content = if std::fs::symlink_metadata(&pub_p)
+            let pub_is_regular = std::fs::symlink_metadata(&pub_p)
                 .map(|metadata| metadata.file_type().is_file())
-                .unwrap_or(false)
-            {
+                .unwrap_or(false);
+            let pub_content = if pub_is_regular {
                 std::fs::read_to_string(&pub_p).ok().map(|s| s.trim().to_string())
             } else {
                 None
@@ -279,7 +279,7 @@ pub async fn ssh_list_local_keys() -> Result<Vec<LocalKeyInfo>, String> {
             keys.push(LocalKeyInfo {
                 name: name.to_string(),
                 path: priv_p.to_string_lossy().to_string(),
-                public_key_path: if pub_p.exists() { Some(pub_p.to_string_lossy().to_string()) } else { None },
+                public_key_path: if pub_is_regular { Some(pub_p.to_string_lossy().to_string()) } else { None },
                 public_key_content: pub_content,
                 key_type: ktype.to_string(),
                 is_default: is_def,
