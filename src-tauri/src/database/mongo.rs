@@ -1334,6 +1334,9 @@ pub async fn execute_mongodb_single_command(
             let pipeline_json = relax_to_strict_json(&args[2]);
             let pipeline_val: serde_json::Value = serde_json::from_str(&pipeline_json)
                 .map_err(|e| format!("Invalid createView pipeline: {}", e))?;
+            if pipeline_val.as_array().map(|v| v.is_empty() || v.len() > 100).unwrap_or(true) {
+                return Err("MongoDB createView pipeline must contain 1–100 stages.".into());
+            }
             let pipeline_bson = match json_to_bson_value(pipeline_val) {
                 mongodb::bson::Bson::Array(arr) => arr,
                 _ => return Err("createView pipeline must be an array of stages".to_string()),
@@ -1411,6 +1414,9 @@ pub async fn execute_mongodb_single_command(
             let inner = extract_paren_args(after_db, "killOp")?;
             let opid_str = inner.trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
             let opid: i64 = opid_str.parse().map_err(|_| "killOp requires numeric opid, e.g. db.killOp(12345)".to_string())?;
+            if opid <= 0 {
+                return Err("killOp requires a positive operation id.".into());
+            }
             let admin_db = client.database("admin");
             let res = admin_db.run_command(mongodb::bson::doc! { "killOp": 1, "op": opid }, None).await.map_err(|e| format!("MongoDB killOp error: {}", e))?;
             return unpack_mongo_command_result(res, "MongoDB KillOp", start, server_version);
@@ -1485,8 +1491,17 @@ pub async fn execute_mongodb_single_command(
         if after_db.starts_with("setProfilingLevel(") {
             let inner = extract_paren_args(after_db, "setProfilingLevel")?;
             let args = split_top_level_args(&inner);
-            let level: i32 = args.get(0).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
-            let slowms: i32 = args.get(1).and_then(|v| v.trim().parse().ok()).unwrap_or(100);
+            let level: i32 = args.get(0).ok_or_else(|| "setProfilingLevel requires a level from 0 to 2.".to_string())?
+                .trim().parse().map_err(|_| "Profiling level must be an integer from 0 to 2.".to_string())?;
+            if !(0..=2).contains(&level) {
+                return Err("Profiling level must be between 0 and 2.".into());
+            }
+            let slowms: i32 = if let Some(value) = args.get(1) {
+                value.trim().parse().map_err(|_| "slowms must be a non-negative integer.".to_string())?
+            } else { 100 };
+            if slowms < 0 || slowms > 600_000 {
+                return Err("slowms must be between 0 and 600000.".into());
+            }
             let db = client.database(database_name);
             let res = db.run_command(mongodb::bson::doc! { "profile": level, "slowms": slowms }, None).await.map_err(|e| format!("MongoDB setProfilingLevel error: {}", e))?;
             return unpack_mongo_command_result(res, "MongoDB SetProfilingLevel", start, server_version);
@@ -2527,7 +2542,13 @@ pub async fn execute_mongodb_single_command(
                     return Err("findOneAndUpdate requires (filter, update) arguments".to_string());
                 }
                 let filter = parse_relaxed_document(&args[0])?;
+                if filter.is_empty() {
+                    return Err("MongoDB findOneAndUpdate requires a non-empty filter.".into());
+                }
                 let update = parse_relaxed_document(&args[1])?;
+                if update.is_empty() {
+                    return Err("MongoDB findOneAndUpdate requires a non-empty update document.".into());
+                }
                 let doc = coll.find_one_and_update(filter, update, None).await.map_err(|e| format!("MongoDB findOneAndUpdate error: {}", e))?;
                 if let Some(d) = doc {
                     return unpack_mongo_command_result(d, "MongoDB findOneAndUpdate", start, server_version);
@@ -2538,6 +2559,9 @@ pub async fn execute_mongodb_single_command(
 
             "findOneAndDelete" => {
                 let filter = parse_relaxed_document(primary_args)?;
+                if filter.is_empty() {
+                    return Err("MongoDB findOneAndDelete requires a non-empty filter.".into());
+                }
                 let doc = coll.find_one_and_delete(filter, None).await.map_err(|e| format!("MongoDB findOneAndDelete error: {}", e))?;
                 if let Some(d) = doc {
                     return unpack_mongo_command_result(d, "MongoDB findOneAndDelete", start, server_version);
@@ -2552,7 +2576,13 @@ pub async fn execute_mongodb_single_command(
                     return Err("findOneAndReplace requires (filter, replacement) arguments".to_string());
                 }
                 let filter = parse_relaxed_document(&args[0])?;
+                if filter.is_empty() {
+                    return Err("MongoDB findOneAndReplace requires a non-empty filter.".into());
+                }
                 let replacement = parse_relaxed_document(&args[1])?;
+                if replacement.is_empty() {
+                    return Err("MongoDB findOneAndReplace requires a non-empty replacement.".into());
+                }
                 let doc = coll.find_one_and_replace(filter, replacement, None).await.map_err(|e| format!("MongoDB findOneAndReplace error: {}", e))?;
                 if let Some(d) = doc {
                     return unpack_mongo_command_result(d, "MongoDB findOneAndReplace", start, server_version);
