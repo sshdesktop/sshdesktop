@@ -2988,6 +2988,22 @@ mod mongo_input_validation_tests {
         assert!(validate_mongo_name(&"x".repeat(256), "collection name").is_err());
         assert!(validate_mongo_name("users\\nadmin", "collection name").is_err());
         assert!(validate_mongo_name("users\\0admin", "collection name").is_err());
+        assert!(validate_mongo_name(" users", "collection name").is_err());
+        assert!(validate_mongo_name("users ", "collection name").is_err());
+        assert!(validate_mongo_name("users\\t", "collection name").is_err());
+    }
+
+    #[test]
+    fn database_names_reject_mongo_reserved_characters() {
+        for bad in ["app.db", "app/db", "app\\\\db", "app$db", "app?db", "app|db"] {
+            assert!(validate_mongo_name(bad, "database name").is_err(), "accepted {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn collection_names_reject_surrounding_whitespace() {
+        assert!(validate_mongo_name(" users ", "collection name").is_err());
+        assert!(validate_mongo_name("users.items", "collection name").is_ok());
     }
 
     #[test]
