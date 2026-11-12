@@ -76,7 +76,7 @@ async fn read_subprocess_output<R: tokio::io::AsyncRead + Unpin>(
 
 /// Wait for an SSH client without allowing remote output to exhaust local memory.
 /// Each stream is capped at 8 MiB; excess bytes are drained but never retained.
-async fn wait_with_limited_output(
+pub(crate) async fn wait_with_limited_output(
     mut child: tokio::process::Child,
 ) -> Result<std::process::Output, String> {
     const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
