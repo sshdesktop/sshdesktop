@@ -151,7 +151,7 @@ pub async fn terminal_create(
                 data: diag.as_bytes().to_vec(),
                 text: Some(diag),
             });
-            return Ok(term_id);
+            return Err(format!("SSH terminal could not connect to {}:{}: {}", host, port, e));
         }
         Err(_) => {
             let diag = format!(
@@ -170,7 +170,7 @@ pub async fn terminal_create(
                 data: diag.as_bytes().to_vec(),
                 text: Some(diag),
             });
-            return Ok(term_id);
+            return Err(format!("SSH terminal connection to {}:{} timed out after 3.5 seconds.", host, port));
         }
     }
 
