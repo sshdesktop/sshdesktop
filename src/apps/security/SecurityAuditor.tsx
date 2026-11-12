@@ -6,7 +6,7 @@ import {
   ArrowRight, CornerDownRight, Sliders, Unlock, Plus, Trash2, 
   Eye, HelpCircle, ShieldX
 } from 'lucide-react';
-import { sshExec, auditGetLogs, auditVerifyChain, WorkspaceAuditEntry, AuditChainVerification } from '../../lib/tauri-bridge';
+import { sshExec, auditGetLogs, auditVerifyChain, policyGetMode, WorkspaceAuditEntry, AuditChainVerification } from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
 import { useUserPrivilege } from '../../lib/permissions';
 import PermissionAlertBanner from '../../components/PermissionAlertBanner';
@@ -415,6 +415,45 @@ export default function SecurityAuditor() {
     const a = document.createElement('a');
     a.href = url;
     a.download = `sshdesktop-audit-${new Date().toISOString().slice(0, 10)}.${format}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportComplianceReport = async () => {
+    const policy = await policyGetMode().catch(() => null);
+    const verify = await auditVerifyChain().catch(() => chainVerification);
+    const logs = auditEntries.length ? auditEntries : await auditGetLogs(200).catch(() => []);
+    const passed = checks.filter(c => c.status === 'passed').length;
+    const total = checks.length;
+    const score = total > 0 ? Math.round((passed / total) * 100) : 0;
+    const lines: string[] = [
+      '# SSH Desktop Compliance & Hardening Evidence Report',
+      '',
+      `- Generated: ${new Date().toISOString()}`,
+      `- Target Connection: ${activeConnId || 'default'} (user: ${username || 'unknown'})`,
+      `- CIS Hardening Score: ${score}% (${passed}/${total} checks passed)`,
+      `- Workspace RBAC Policy Role: \`${policy?.role || 'unknown'}\``,
+      `- Cloud Metadata Egress Blocked (SOCKS5): ${policy?.blockMetadataEgress !== false ? 'Enabled' : 'Disabled'}`,
+      `- Audit Chain Integrity: ${verify?.valid ? `VERIFIED (${verify.verified}/${verify.total} entries)` : `FAILED (brokenAt=${verify?.broken_at ?? verify?.brokenAt ?? 'unknown'})`}`,
+      '',
+      '## Hardening Checks',
+      '',
+      '| ID | Title | Severity | Status | Details |',
+      '| --- | --- | --- | --- | --- |',
+      ...checks.map(c => `| ${c.id} | ${c.title} | ${c.severity} | ${c.status.toUpperCase()} | ${String(c.description || '').replace(/\|/g, '\\|')} |`),
+      '',
+      '## Recent Signed Audit Events (Top 50)',
+      '',
+      '| Timestamp | Event | User | Target | Status | Hash |',
+      '| --- | --- | --- | --- | --- | --- |',
+      ...logs.slice(0, 50).map(e => `| ${e.ts || ''} | ${e.event || ''} | ${e.username || ''} | ${String(e.target || '').replace(/\|/g, '\\|')} | ${e.status || ''} | \`${String(e.hash || '').slice(0, 16)}\` |`),
+      '',
+    ];
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sshdesktop-compliance-report-${new Date().toISOString().slice(0, 10)}.md`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -1061,6 +1100,12 @@ export default function SecurityAuditor() {
                   className="px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 text-xs font-semibold"
                 >
                   Export CSV
+                </button>
+                <button
+                  onClick={() => void handleExportComplianceReport()}
+                  className="px-3 py-1.5 rounded-xl bg-purple-600/20 hover:bg-purple-600 text-purple-300 hover:text-white border border-purple-500/30 text-xs font-semibold cursor-pointer"
+                >
+                  Compliance Report (.md)
                 </button>
               </div>
             </div>

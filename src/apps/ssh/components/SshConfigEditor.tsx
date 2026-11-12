@@ -476,41 +476,59 @@ Host *
         throw new Error(`Failed to stage config: ${stageRes.stderr || stageRes.stdout}`);
       }
 
-      // 2. Determine sudo / copy strategy
+      // 2. Determine sudo / copy strategy with pre-commit sshd -t validation & automatic .bak backup/recovery
       const isRoot = activeServer?.username === 'root';
       const password = explicitPassword || activeServer?.password;
+      const isDaemonCfg = targetFile === '/etc/ssh/sshd_config';
+      const buildPrivilegedSaveCmd = (prefix: string) => {
+        if (!isDaemonCfg) {
+          return `${prefix} cp "${stagingFile}" "${targetFile}" && ${prefix} chmod 644 "${targetFile}" && rm -f "${stagingFile}"`;
+        }
+        return (
+          `if ${prefix} command -v sshd >/dev/null 2>&1 || [ -x /usr/sbin/sshd ]; then ` +
+          `  SSHD_BIN=$(command -v sshd || echo /usr/sbin/sshd); ` +
+          `  ${prefix} "$SSHD_BIN" -t -f "${stagingFile}" 2>&1 || { rm -f "${stagingFile}"; echo "SSHD_VALIDATION_FAILED" >&2; exit 42; }; ` +
+          `fi && ` +
+          `${prefix} cp -p "${targetFile}" "${targetFile}.sshdesktop.bak" 2>/dev/null || true && ` +
+          `${prefix} cp "${stagingFile}" "${targetFile}" && ` +
+          `${prefix} chmod 644 "${targetFile}" && ` +
+          `rm -f "${stagingFile}" && ` +
+          `(if command -v sshd >/dev/null 2>&1 || [ -x /usr/sbin/sshd ]; then ` +
+          `  SSHD_BIN=$(command -v sshd || echo /usr/sbin/sshd); ` +
+          `  ${prefix} "$SSHD_BIN" -t 2>&1 || { ${prefix} cp -p "${targetFile}.sshdesktop.bak" "${targetFile}" 2>/dev/null || true; echo "POST_WRITE_SSHD_ROLLBACK: Active sshd_config failed verification; restored previous backup." >&2; exit 43; }; ` +
+          `fi)`
+        );
+      };
 
       let moveRes: any;
       if (targetFile === '~/.ssh/config') {
         moveRes = await sshExec(
           activeConnectionId,
-          `mkdir -p ~/.ssh && cp "${stagingFile}" ~/.ssh/config && chmod 600 ~/.ssh/config && rm -f "${stagingFile}"`
+          `mkdir -p ~/.ssh && cp -p ~/.ssh/config ~/.ssh/config.sshdesktop.bak 2>/dev/null || true && cp "${stagingFile}" ~/.ssh/config && chmod 600 ~/.ssh/config && rm -f "${stagingFile}"`
         );
       } else if (isRoot) {
-        moveRes = await sshExec(
-          activeConnectionId,
-          `cp "${stagingFile}" "${targetFile}" && chmod 644 "${targetFile}" && rm -f "${stagingFile}"`
-        );
+        moveRes = await sshExec(activeConnectionId, buildPrivilegedSaveCmd(''));
       } else if (password) {
         const escapedPwd = password.replace(/'/g, "'\\''");
-        moveRes = await sshExec(
-          activeConnectionId,
-          `echo '${escapedPwd}' | sudo -S cp "${stagingFile}" "${targetFile}" && echo '${escapedPwd}' | sudo -S chmod 644 "${targetFile}" && rm -f "${stagingFile}"`
-        );
+        const sudoPassCmd = buildPrivilegedSaveCmd(`echo '${escapedPwd}' | sudo -S`);
+        moveRes = await sshExec(activeConnectionId, sudoPassCmd);
       } else {
         // Attempt passwordless sudo first
-        moveRes = await sshExec(
-          activeConnectionId,
-          `sudo -n cp "${stagingFile}" "${targetFile}" 2>/dev/null && sudo -n chmod 644 "${targetFile}" && rm -f "${stagingFile}"`
-        );
+        moveRes = await sshExec(activeConnectionId, buildPrivilegedSaveCmd('sudo -n'));
 
-        if (moveRes.exit_code !== 0) {
+        if (moveRes.exit_code !== 0 && moveRes.exit_code !== 42 && moveRes.exit_code !== 43) {
           // Password is required for sudo - prompt the user
           setPendingTextToSave(textToSave);
           setShowSudoPrompt(true);
           setIsSaving(false);
           return;
         }
+      }
+
+      if (moveRes.exit_code === 42 || moveRes.exit_code === 43) {
+        const detail = (moveRes.stderr || moveRes.stdout || 'Invalid sshd_config syntax').trim();
+        setValidationResult({ valid: false, output: detail });
+        throw new Error(`OpenSSH daemon validation blocked save to prevent lockout: ${detail}`);
       }
 
       if (moveRes.exit_code !== 0) {
@@ -590,6 +608,32 @@ Host *
       setValidationResult({ valid: false, output: String(err?.message || err) });
     } finally {
       setIsValidating(false);
+    }
+  };
+
+  const handleRestoreBackup = async () => {
+    if (!activeConnectionId) return;
+    if (!confirm(`Restore ${targetFile} from ${targetFile}.sshdesktop.bak?`)) return;
+    setIsSaving(true);
+    setError(null);
+    try {
+      const cmd = targetFile === '~/.ssh/config'
+        ? `if [ ! -f ~/.ssh/config.sshdesktop.bak ]; then echo 'No backup found.' >&2; exit 2; fi; cp ~/.ssh/config.sshdesktop.bak ~/.ssh/config && chmod 600 ~/.ssh/config && cat ~/.ssh/config`
+        : `BAK="${targetFile}.sshdesktop.bak"; if ! sudo -n test -f "$BAK" 2>/dev/null && ! test -f "$BAK"; then echo 'No backup found.' >&2; exit 2; fi; sudo -n cp -p "$BAK" "${targetFile}" 2>/dev/null || cp -p "$BAK" "${targetFile}"; cat "${targetFile}"`;
+      const res = await sshExec(activeConnectionId, cmd);
+      if (res.exit_code !== 0) {
+        throw new Error(res.stderr || res.stdout || 'No backup snapshot found on remote host.');
+      }
+      setRawText(res.stdout);
+      setOriginalText(res.stdout);
+      const parsed = parseConfigContent(res.stdout);
+      setDirectiveValues(parsed.directives);
+      setCustomHosts(parsed.hosts);
+      setValidationResult({ valid: true, output: `Restored ${targetFile} cleanly from .sshdesktop.bak backup.` });
+    } catch (err: any) {
+      setError(String(err?.message || err));
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -739,6 +783,17 @@ Host *
           >
             <ShieldCheck className={`w-3.5 h-3.5 ${isValidating ? 'animate-spin text-cyan-400' : 'text-emerald-400'}`} />
             <span>Validate</span>
+          </button>
+
+          {/* Restore Previous Backup */}
+          <button
+            onClick={() => void handleRestoreBackup()}
+            disabled={isSaving}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-amber-500/15 text-gray-300 hover:text-amber-300 border border-white/10 text-xs font-medium cursor-pointer transition-colors"
+            title={`Restore ${targetFile}.sshdesktop.bak snapshot`}
+          >
+            <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+            <span>Restore .bak</span>
           </button>
 
           {/* Reload OpenSSH Service */}

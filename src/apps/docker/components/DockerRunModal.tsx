@@ -10,6 +10,9 @@ interface DockerRunModalProps {
   restart: string;
   volumes: string;
   env: string;
+  memoryLimit?: string;
+  cpuLimit?: string;
+  pidsLimit?: string;
   error: string | null;
   isSubmitting: boolean;
   onImageChange: (val: string) => void;
@@ -18,6 +21,9 @@ interface DockerRunModalProps {
   onRestartChange: (val: string) => void;
   onVolumesChange: (val: string) => void;
   onEnvChange: (val: string) => void;
+  onMemoryLimitChange?: (val: string) => void;
+  onCpuLimitChange?: (val: string) => void;
+  onPidsLimitChange?: (val: string) => void;
   onClose: () => void;
   onSubmit: (e: React.FormEvent) => void;
 }
@@ -30,6 +36,9 @@ export const DockerRunModal: React.FC<DockerRunModalProps> = ({
   restart,
   volumes,
   env,
+  memoryLimit = '',
+  cpuLimit = '',
+  pidsLimit = '',
   error,
   isSubmitting,
   onImageChange,
@@ -38,6 +47,9 @@ export const DockerRunModal: React.FC<DockerRunModalProps> = ({
   onRestartChange,
   onVolumesChange,
   onEnvChange,
+  onMemoryLimitChange,
+  onCpuLimitChange,
+  onPidsLimitChange,
   onClose,
   onSubmit,
 }) => {
@@ -48,6 +60,9 @@ export const DockerRunModal: React.FC<DockerRunModalProps> = ({
     const parts = ['docker run -d'];
     if (name.trim()) parts.push(`--name ${name.trim()}`);
     if (restart && restart !== 'no') parts.push(`--restart ${restart}`);
+    if (memoryLimit.trim()) parts.push(`--memory ${memoryLimit.trim()}`);
+    if (cpuLimit.trim()) parts.push(`--cpus ${cpuLimit.trim()}`);
+    if (pidsLimit.trim()) parts.push(`--pids-limit ${pidsLimit.trim()}`);
     
     if (ports.trim()) {
       ports.split(',').map(p => p.trim()).filter(Boolean).forEach(p => {
@@ -69,7 +84,7 @@ export const DockerRunModal: React.FC<DockerRunModalProps> = ({
 
     parts.push(image.trim() || 'nginx:alpine');
     return parts.join(' ');
-  }, [image, name, ports, restart, volumes, env]);
+  }, [image, name, ports, restart, volumes, env, memoryLimit, cpuLimit, pidsLimit]);
 
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-50 flex items-center justify-center p-6 animate-in fade-in duration-200">
@@ -184,6 +199,39 @@ export const DockerRunModal: React.FC<DockerRunModalProps> = ({
               onChange={e => onEnvChange(e.target.value)}
               className="w-full bg-[#13131c] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono"
             />
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="block text-[11px] font-medium text-gray-300 mb-1">Memory Limit (--memory)</label>
+              <input
+                type="text"
+                placeholder="e.g. 512m, 2g"
+                value={memoryLimit}
+                onChange={e => onMemoryLimitChange?.(e.target.value)}
+                className="w-full bg-[#13131c] border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-medium text-gray-300 mb-1">CPU Quota (--cpus)</label>
+              <input
+                type="text"
+                placeholder="e.g. 0.5, 2"
+                value={cpuLimit}
+                onChange={e => onCpuLimitChange?.(e.target.value)}
+                className="w-full bg-[#13131c] border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-medium text-gray-300 mb-1">PIDs Limit (--pids-limit)</label>
+              <input
+                type="text"
+                placeholder="e.g. 256"
+                value={pidsLimit}
+                onChange={e => onPidsLimitChange?.(e.target.value)}
+                className="w-full bg-[#13131c] border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono"
+              />
+            </div>
           </div>
 
           {/* Live Colorful Command Preview */}

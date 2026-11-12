@@ -9,7 +9,7 @@ import { SshKeyItem, SshKeyAlgorithm } from '../types';
 import { useSshStore } from '../sshStore';
 import { generateSshKeyPair, parseAuthorizedKeyLine } from '../utils/sshKeyCrypto';
 import { useConnectionStore } from '../../../lib/store';
-import { sshExec } from '../../../lib/tauri-bridge';
+import { sshExec, sshRotateServerKey } from '../../../lib/tauri-bridge';
 
 export default function SshKeyVault({ isLight = false }: { isLight?: boolean }) {
   const { keys, addKey, removeKey, markKeyPushedToServer, addAuditLog } = useSshStore();
@@ -22,6 +22,7 @@ export default function SshKeyVault({ isLight = false }: { isLight?: boolean }) 
   const [viewingKey, setViewingKey] = useState<SshKeyItem | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [pushingKeyId, setPushingKeyId] = useState<string | null>(null);
+  const [rotatingKeyId, setRotatingKeyId] = useState<string | null>(null);
   const [pushedSuccessId, setPushedSuccessId] = useState<string | null>(null);
   const [pushError, setPushError] = useState<string | null>(null);
 
@@ -108,6 +109,41 @@ export default function SshKeyVault({ isLight = false }: { isLight?: boolean }) 
       setPushError(String(err?.message || err));
     } finally {
       setPushingKeyId(null);
+    }
+  };
+
+  const handleRotateServerKey = async (key: SshKeyItem) => {
+    if (!activeConnectionId || !activeServer) {
+      setPushError('No active server connection. Connect to a server before rotating keys.');
+      return;
+    }
+    if (!window.confirm(`Generate a new ED25519 keypair, install it on ${activeServer.host}, and remove the superseded key '${key.name}' from ~/.ssh/authorized_keys?`)) {
+      return;
+    }
+    setRotatingKeyId(key.id);
+    setPushError(null);
+    try {
+      const res = await sshRotateServerKey(
+        activeConnectionId,
+        key.publicKey,
+        `${key.name}_rot_${Date.now()}`,
+        key.comment,
+      );
+      if (res?.public_key_content) {
+        addAuditLog({
+          action: 'SSH Key Rotated on Server',
+          host: activeServer.host,
+          username: activeServer.username,
+          status: 'success',
+          details: `Rotated ${key.name} -> ${res.fingerprint_sha256 || 'ed25519'}`,
+        });
+        setPushedSuccessId(key.id);
+        setTimeout(() => setPushedSuccessId(null), 3000);
+      }
+    } catch (err: any) {
+      setPushError(String(err?.message || err));
+    } finally {
+      setRotatingKeyId(null);
     }
   };
 
@@ -353,6 +389,18 @@ export default function SshKeyVault({ isLight = false }: { isLight?: boolean }) 
                       {isPushing ? 'Pushing...' : isPushedSuccess ? 'Authorized!' : isPushedToActive ? 'Re-push Key' : 'Push to Server'}
                     </span>
                   </button>
+
+                  {activeServer && (
+                    <button
+                      onClick={() => void handleRotateServerKey(key)}
+                      disabled={rotatingKeyId === key.id}
+                      className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-xs font-medium transition-colors cursor-pointer"
+                      title="Rotate key: generate replacement ED25519 key, authorize on server, and retire old public key"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${rotatingKeyId === key.id ? 'animate-spin' : ''}`} />
+                      <span>{rotatingKeyId === key.id ? 'Rotating...' : 'Rotate'}</span>
+                    </button>
+                  )}
 
                   {/* Copy Public Key */}
                   <button

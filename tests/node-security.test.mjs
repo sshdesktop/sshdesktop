@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,10 +16,15 @@ const {
   validateVaultKeyName,
   vaultEncryptValue,
   vaultDecryptValue,
+  vaultRotateKey,
+  base32Encode,
+  computeTotpAt,
+  verifyTotpCode,
   appendAuditEvent,
   verifyAuditChain,
   getSecurityPolicy,
   enforcePolicyPermission,
+  evaluateKnownHostsContent,
 } = await import('../server.js');
 
 test('SOCKS5 greeting parser handles byte-by-byte TCP fragmentation', () => {
@@ -111,4 +117,65 @@ test('Security policy enforces role permissions cleanly', () => {
 
   fs.writeFileSync(path.join(tempDataDir, 'policy.json'), JSON.stringify({ role: 'read_only', blockMetadataEgress: true }));
   assert.throws(() => enforcePolicyPermission('firewall_add_rule', {}), /POLICY_DENIED/);
+
+  // Scoped API token clamps permissions even when workspace policy is admin
+  fs.writeFileSync(path.join(tempDataDir, 'policy.json'), JSON.stringify({ role: 'admin', blockMetadataEgress: true }));
+  assert.doesNotThrow(() => enforcePolicyPermission('firewall_add_rule', {}, { role: 'operator' }));
+  assert.throws(() => enforcePolicyPermission('tokens_create', {}, { role: 'operator' }), /POLICY_DENIED/);
+  assert.throws(() => enforcePolicyPermission('firewall_add_rule', {}, { role: 'read_only' }), /POLICY_DENIED/);
+});
+
+test('RFC 6238 TOTP matches standard test vector and validates drift window', () => {
+  const secretBytes = Buffer.from('12345678901234567890', 'ascii');
+  assert.equal(computeTotpAt(secretBytes, 59), '287082');
+  const b32 = base32Encode(secretBytes);
+  assert.equal(verifyTotpCode(b32, '287082', 59), true);
+  assert.equal(verifyTotpCode(b32, '287082', 88), true); // +29s within 30s drift step
+  assert.equal(verifyTotpCode(b32, '000000', 59), false);
+});
+
+test('Vault key rotation re-encrypts persisted secrets under a fresh 256-bit key', () => {
+  const vaultFile = path.join(tempDataDir, 'vault.enc.json');
+  const keyFile = path.join(tempDataDir, 'vault.key');
+  const staleCiphertext = vaultEncryptValue('rotated-secret-value-42');
+  fs.writeFileSync(vaultFile, JSON.stringify({ 'db-profile:rot-1:password': staleCiphertext }), 'utf8');
+  const oldKeyHex = fs.readFileSync(keyFile, 'utf8').trim();
+
+  const res = vaultRotateKey();
+  assert.equal(res.rotated, true);
+  assert.equal(res.entriesReencrypted, 1);
+
+  const newKeyHex = fs.readFileSync(keyFile, 'utf8').trim();
+  assert.notEqual(newKeyHex, oldKeyHex);
+  const rotatedVault = JSON.parse(fs.readFileSync(vaultFile, 'utf8'));
+  assert.equal(vaultDecryptValue(rotatedVault['db-profile:rot-1:password']), 'rotated-secret-value-42');
+  assert.throws(() => vaultDecryptValue(staleCiphertext));
+});
+
+test('known_hosts evaluation handles @revoked, @cert-authority, custom ports, and |1| HMAC-SHA1 hashes', () => {
+  const salt = Buffer.from('0123456789abcdef0123');
+  const digest = crypto.createHmac('sha1', salt).update('[bastion.corp]:2222', 'utf8').digest();
+  const hashedEntry = `|1|${salt.toString('base64')}|${digest.toString('base64')}`;
+  const knownHosts = [
+    `@revoked *.corp.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRevokedKey`,
+    `@cert-authority *.ca.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockCAKey`,
+    `${hashedEntry} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHashedHostKey`,
+    `app.internal ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAppKey`,
+  ].join('\n');
+
+  const revoked = evaluateKnownHostsContent(knownHosts, 'edge.corp.example', 22, 'ssh-ed25519', 'AAAAC3NzaC1lZDI1NTE5AAAAIRevokedKey');
+  assert.equal(revoked.status, 'changed');
+  assert.match(revoked.message, /REVOKED/i);
+
+  const ca = evaluateKnownHostsContent(knownHosts, 'db.ca.example', 22, 'ssh-ed25519', 'AAAAC3NzaC1lZDI1NTE5AAAAISomeHostKey');
+  assert.equal(ca.status, 'unsupported_cert_authority');
+
+  const hashed = evaluateKnownHostsContent(knownHosts, 'bastion.corp', 2222, 'ssh-ed25519', 'AAAAC3NzaC1lZDI1NTE5AAAAIHashedHostKey');
+  assert.equal(hashed.status, 'trusted');
+
+  const changed = evaluateKnownHostsContent(knownHosts, 'app.internal', 22, 'ssh-ed25519', 'AAAAC3NzaC1lZDI1NTE5AAAAIMitmKey');
+  assert.equal(changed.status, 'changed');
+
+  const unseen = evaluateKnownHostsContent(knownHosts, 'brandnew.internal', 22, 'ssh-ed25519', 'AAAAC3NzaC1lZDI1NTE5AAAAINewKey');
+  assert.equal(unseen.status, 'not_found');
 });

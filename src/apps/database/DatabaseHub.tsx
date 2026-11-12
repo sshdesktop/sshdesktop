@@ -38,10 +38,11 @@ import {
   storeSecretSave,
   storeSecretLoad,
   storeSecretDelete,
+  getRuntimeCapabilities,
 } from '../../lib/tauri-bridge';
 import { useConnectionStore } from '../../lib/store';
 
-const UNIMPLEMENTED_ENGINES = new Set<DbEngine>(['oracle', 'dynamodb', 'cosmos', 'cassandra', 'db2']);
+const UNIMPLEMENTED_ENGINES = new Set<DbEngine>(['oracle', 'db2']);
 
 function stripProfileSecrets(p: DbConnectionProfile): DbConnectionProfile {
   const { password: _p, accessKeyId: _a, secretAccessKey: _s, ...safe } = p;
@@ -93,11 +94,11 @@ const ENGINE_BADGES: Record<DbEngine, { label: string; icon: string; color: stri
   mssql: { label: 'SQL Server', icon: '🏢', color: 'from-red-600/20 to-red-800/10 border-red-500/30 text-red-400' },
   mongodb: { label: 'MongoDB', icon: '🍃', color: 'from-green-600/20 to-green-800/10 border-green-500/30 text-green-400' },
   redis: { label: 'Redis', icon: '⚡', color: 'from-rose-600/20 to-rose-800/10 border-rose-500/30 text-rose-400' },
-  oracle: { label: 'Oracle (Planned)', icon: '🏛️', color: 'from-orange-600/20 to-orange-800/10 border-orange-500/30 text-orange-400' },
-  dynamodb: { label: 'DynamoDB (Planned)', icon: '📦', color: 'from-amber-600/20 to-amber-800/10 border-amber-500/30 text-amber-400' },
-  cosmos: { label: 'Cosmos DB (Planned)', icon: '🪐', color: 'from-sky-600/20 to-sky-800/10 border-sky-500/30 text-sky-400' },
-  cassandra: { label: 'Cassandra (Planned)', icon: '👁️', color: 'from-violet-600/20 to-violet-800/10 border-violet-500/30 text-violet-400' },
-  db2: { label: 'IBM DB2 (Planned)', icon: '🔷', color: 'from-indigo-600/20 to-indigo-800/10 border-indigo-500/30 text-indigo-400' },
+  oracle: { label: 'Oracle (SDK Req.)', icon: '🏛️', color: 'from-orange-600/20 to-orange-800/10 border-orange-500/30 text-orange-400' },
+  dynamodb: { label: 'DynamoDB', icon: '📦', color: 'from-amber-600/20 to-amber-800/10 border-amber-500/30 text-amber-400' },
+  cosmos: { label: 'Cosmos DB', icon: '🪐', color: 'from-sky-600/20 to-sky-800/10 border-sky-500/30 text-sky-400' },
+  cassandra: { label: 'Cassandra', icon: '👁️', color: 'from-violet-600/20 to-violet-800/10 border-violet-500/30 text-violet-400' },
+  db2: { label: 'IBM DB2 (CLI Req.)', icon: '🔷', color: 'from-indigo-600/20 to-indigo-800/10 border-indigo-500/30 text-indigo-400' },
 };
 
 export const DatabaseHub: React.FC = () => {
@@ -189,6 +190,11 @@ export const DatabaseHub: React.FC = () => {
   const [searchFilter, setSearchFilter] = useState('');
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<{ id: string; message: string } | null>(null);
+  const [runtimeCaps, setRuntimeCaps] = useState<any>(null);
+
+  useEffect(() => {
+    getRuntimeCapabilities().then(setRuntimeCaps).catch(() => {});
+  }, []);
 
   const username = activeSshServer?.username || 'root';
   const userHome = username === 'root' ? '/root' : `/home/${username}`;
@@ -470,6 +476,14 @@ export const DatabaseHub: React.FC = () => {
       {/* Grid of Database Profiles */}
       <div className="flex-1 overflow-y-auto p-6">
         <div className="max-w-6xl mx-auto space-y-6">
+          {runtimeCaps?.runtime === 'web' && (
+            <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-center justify-between gap-3">
+              <span>
+                <strong>Web Runtime Capability Notice:</strong> Direct database client drivers (PostgreSQL, MySQL, MariaDB, SQLite, MSSQL, MongoDB, Redis) execute only inside the Native Tauri Desktop runtime. Profiles and encrypted vault credentials remain synced here.
+              </span>
+              <span className="px-2 py-0.5 rounded bg-amber-500/20 text-[10px] font-mono uppercase shrink-0">web-mode</span>
+            </div>
+          )}
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">
               Configured Database Servers ({filteredProfiles.length})

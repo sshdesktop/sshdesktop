@@ -56,10 +56,10 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Backend syntax & security tests
+      - name: Backend syntax, contract & integration tests
         run: |
           node --check server.js
-          node --test scripts/test-node-security.mjs
+          npm test
 
       - name: Frontend lint, typecheck & build
         run: |
@@ -69,3 +69,21 @@ jobs:
 
       - name: Rust unit & integration tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Generate SBOM, vulnerability & signed checksum artifacts
+        run: |
+          npm ls --json --all > sbom-npm-tree.json || true
+          npm audit --omit=dev --json > vuln-npm-audit.json || true
+          cargo metadata --manifest-path src-tauri/Cargo.toml --format-version 1 > sbom-cargo-metadata.json
+          (cd dist && find . -type f -print0 | sort -z | xargs -0 sha256sum) > SHA256SUMS.txt
+
+      - name: Upload SBOM & verification inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-and-verification-inventory
+          path: |
+            sbom-npm-tree.json
+            vuln-npm-audit.json
+            sbom-cargo-metadata.json
+            SHA256SUMS.txt
+          retention-days: 30

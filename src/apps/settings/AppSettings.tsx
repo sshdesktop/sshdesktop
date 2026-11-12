@@ -16,7 +16,32 @@ import {
   policySetMode,
   backupExportConfig,
   backupImportConfig,
+  getRuntimeCapabilities,
+  authGetStatus,
+  authTotpSetup,
+  authTotpEnable,
+  authTotpDisable,
+  tokensList,
+  tokensCreate,
+  tokensRevoke,
+  vaultRotateKey,
+  teamList,
+  teamAdd,
+  teamSetRole,
+  teamRemove,
+  ssoGetConfig,
+  ssoSetConfig,
+  approvalList,
+  approvalRequest,
+  approvalDecide,
+  recordingsList,
+  recordingsGet,
   WorkspaceSecurityPolicy,
+  ScopedApiToken,
+  TeamMember,
+  SsoOidcConfig,
+  CommandApprovalRecord,
+  SessionRecordingMeta,
 } from '../../lib/tauri-bridge';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
 import { SshDesktopLogo } from '../../components/SshDesktopLogo';
@@ -82,6 +107,34 @@ export default function AppSettings() {
   const [securityPolicy, setSecurityPolicy] = useState<WorkspaceSecurityPolicy>({ role: 'admin', blockMetadataEgress: true });
   const [policyStatusMsg, setPolicyStatusMsg] = useState<string | null>(null);
   const configImportRef = useRef<HTMLInputElement | null>(null);
+  const [totpEnabled, setTotpEnabled] = useState(false);
+  const [totpSetup, setTotpSetup] = useState<{ secret: string; otpauth_url: string } | null>(null);
+  const [totpVerifyCode, setTotpVerifyCode] = useState('');
+  const [totpDisablePassword, setTotpDisablePassword] = useState('');
+  const [totpDisableCode, setTotpDisableCode] = useState('');
+  const [apiTokens, setApiTokens] = useState<ScopedApiToken[]>([]);
+  const [newTokenName, setNewTokenName] = useState('');
+  const [newTokenRole, setNewTokenRole] = useState<'admin' | 'operator' | 'read_only'>('read_only');
+  const [newTokenExpiryDays, setNewTokenExpiryDays] = useState('90');
+  const [createdTokenSecret, setCreatedTokenSecret] = useState<string | null>(null);
+  const [runtimeCaps, setRuntimeCaps] = useState<any>(null);
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [newTeamUser, setNewTeamUser] = useState('');
+  const [newTeamPass, setNewTeamPass] = useState('');
+  const [newTeamRole, setNewTeamRole] = useState<'admin' | 'operator' | 'read_only'>('operator');
+  const [ssoCfg, setSsoCfg] = useState<SsoOidcConfig>({
+    enabled: false,
+    provider_name: 'OIDC Identity Provider',
+    issuer_url: '',
+    client_id: '',
+    redirect_uri: '',
+    default_role: 'read_only',
+  });
+  const [approvals, setApprovals] = useState<CommandApprovalRecord[]>([]);
+  const [approvalActionInput, setApprovalActionInput] = useState('firewall_reset');
+  const [approvalTargetInput, setApprovalTargetInput] = useState('');
+  const [approvalReasonInput, setApprovalReasonInput] = useState('');
+  const [recordings, setRecordings] = useState<SessionRecordingMeta[]>([]);
   const [navSearch, setNavSearch] = useState('');
   const [customUrl, setCustomUrl] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -603,8 +656,176 @@ export default function AppSettings() {
   useEffect(() => {
     if (activeTab === 'security') {
       policyGetMode().then(setSecurityPolicy).catch(() => {});
+      authGetStatus().then((st) => setTotpEnabled(Boolean(st.totp_enabled))).catch(() => {});
+      tokensList().then((list) => setApiTokens(Array.isArray(list) ? list : [])).catch(() => {});
+      getRuntimeCapabilities().then(setRuntimeCaps).catch(() => {});
+      teamList().then((list) => setTeamMembers(Array.isArray(list) ? list : [])).catch(() => {});
+      ssoGetConfig().then(setSsoCfg).catch(() => {});
+      approvalList().then((list) => setApprovals(Array.isArray(list) ? list : [])).catch(() => {});
+      recordingsList().then((list) => setRecordings(Array.isArray(list) ? list : [])).catch(() => {});
     }
   }, [activeTab]);
+
+  const handleAddTeamMember = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTeamUser.trim() || !newTeamPass) return;
+    try {
+      await teamAdd(newTeamUser.trim(), newTeamPass, newTeamRole);
+      setNewTeamUser('');
+      setNewTeamPass('');
+      const list = await teamList();
+      setTeamMembers(Array.isArray(list) ? list : []);
+      setPolicyStatusMsg('Team administrator added cleanly.');
+    } catch (err: any) {
+      setPolicyStatusMsg(err?.message || 'Failed adding team member');
+    }
+  };
+
+  const handleToggleTeamRole = async (username: string, role: 'admin' | 'operator' | 'read_only', disabled?: boolean) => {
+    try {
+      await teamSetRole(username, role, disabled);
+      setTeamMembers(await teamList());
+      setPolicyStatusMsg(`Updated access for '${username}'.`);
+    } catch (err: any) {
+      setPolicyStatusMsg(err?.message || 'Failed updating team member');
+    }
+  };
+
+  const handleRemoveTeamMember = async (username: string) => {
+    try {
+      await teamRemove(username);
+      setTeamMembers(await teamList());
+      setPolicyStatusMsg(`Removed team member '${username}'.`);
+    } catch (err: any) {
+      setPolicyStatusMsg(err?.message || 'Failed removing team member');
+    }
+  };
+
+  const handleSaveSsoConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const saved = await ssoSetConfig(ssoCfg);
+      setSsoCfg(saved);
+      setPolicyStatusMsg('OIDC SSO settings saved cleanly.');
+    } catch (err: any) {
+      setPolicyStatusMsg(err?.message || 'Failed saving OIDC SSO configuration');
+    }
+  };
+
+  const handleRequestApproval = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!approvalTargetInput.trim()) return;
+    try {
+      await approvalRequest(approvalActionInput.trim(), approvalTargetInput.trim(), approvalReasonInput.trim());
+      setApprovalTargetInput('');
+      setApprovalReasonInput('');
+      setApprovals(await approvalList());
+      setPolicyStatusMsg('Approval request submitted.');
+    } catch (err: any) {
+      setPolicyStatusMsg(err?.message || 'Failed submitting approval request');
+    }
+  };
+
+  const handleDecideApproval = async (id: string, decision: 'approved' | 'rejected') => {
+    try {
+      await approvalDecide(id, decision);
+      setApprovals(await approvalList());
+      setPolicyStatusMsg(`Approval request ${decision}.`);
+    } catch (err: any) {
+      setPolicyStatusMsg(err?.message || 'Failed deciding approval request');
+    }
+  };
+
+  const handleDownloadRecording = async (meta: SessionRecordingMeta) => {
+    try {
+      const cast = await recordingsGet(meta.id);
+      const blob = new Blob([cast], { type: 'application/x-asciicast' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `sshdesktop-session-${meta.id.slice(0, 8)}.cast`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setPolicyStatusMsg(err?.message || 'Failed downloading session recording');
+    }
+  };
+
+  const handleStartTotpSetup = async () => {
+    try {
+      const setup = await authTotpSetup();
+      setTotpSetup({ secret: setup.secret, otpauth_url: setup.otpauth_url });
+      setTotpVerifyCode('');
+      setPolicyStatusMsg('Enter the Secret Key into Google Authenticator / 1Password / Authy, then verify a 6-digit code.');
+    } catch (e: any) {
+      setPolicyStatusMsg(e?.message || 'Failed to initiate TOTP setup');
+    }
+  };
+
+  const handleEnableTotp = async () => {
+    if (!totpSetup) return;
+    try {
+      await authTotpEnable(totpSetup.secret, totpVerifyCode.trim());
+      setTotpEnabled(true);
+      setTotpSetup(null);
+      setTotpVerifyCode('');
+      setPolicyStatusMsg('Two-factor authentication (TOTP) enabled.');
+    } catch (e: any) {
+      setPolicyStatusMsg(e?.message || 'TOTP verification failed');
+    }
+  };
+
+  const handleDisableTotp = async () => {
+    try {
+      await authTotpDisable(totpDisablePassword, totpDisableCode.trim());
+      setTotpEnabled(false);
+      setTotpDisablePassword('');
+      setTotpDisableCode('');
+      setPolicyStatusMsg('Two-factor authentication (TOTP) disabled.');
+    } catch (e: any) {
+      setPolicyStatusMsg(e?.message || 'Failed to disable TOTP');
+    }
+  };
+
+  const handleCreateApiToken = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTokenName.trim()) return;
+    try {
+      const daysNum = parseInt(newTokenExpiryDays, 10);
+      const created = await tokensCreate(
+        newTokenName.trim(),
+        newTokenRole,
+        Number.isFinite(daysNum) && daysNum > 0 ? daysNum : undefined,
+      );
+      setCreatedTokenSecret(created.token);
+      setNewTokenName('');
+      const refreshed = await tokensList();
+      setApiTokens(Array.isArray(refreshed) ? refreshed : []);
+      setPolicyStatusMsg(`Scoped API token '${created.name}' minted. Copy the secret now; it will not be shown again.`);
+    } catch (err: any) {
+      setPolicyStatusMsg(err?.message || 'Failed to create scoped API token');
+    }
+  };
+
+  const handleRevokeApiToken = async (id: string) => {
+    try {
+      await tokensRevoke(id);
+      const refreshed = await tokensList();
+      setApiTokens(Array.isArray(refreshed) ? refreshed : []);
+      setPolicyStatusMsg('API token revoked.');
+    } catch (err: any) {
+      setPolicyStatusMsg(err?.message || 'Failed to revoke API token');
+    }
+  };
+
+  const handleRotateVaultKey = async () => {
+    try {
+      const res = await vaultRotateKey();
+      setPolicyStatusMsg(`Vault master encryption key rotated (${res.entriesReencrypted ?? 0} secret(s) re-encrypted).`);
+    } catch (err: any) {
+      setPolicyStatusMsg(err?.message || 'Failed to rotate vault encryption key');
+    }
+  };
 
   const handleUpdateSecurityPolicy = async (role: 'admin' | 'operator' | 'read_only', blockMeta: boolean) => {
     try {
@@ -1877,6 +2098,421 @@ export default function AppSettings() {
                     className="hidden"
                   />
                 </div>
+              </div>
+
+              {/* Two-Factor Authentication (TOTP MFA) */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3 shadow-xl">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-white block">Two-Factor Authentication (RFC 6238 TOTP)</span>
+                    <span className="text-[11px] text-gray-400">Require a 6-digit authenticator app code at web desktop login.</span>
+                  </div>
+                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase border ${
+                    totpEnabled
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                      : 'bg-white/10 text-gray-300 border-white/10'
+                  }`}>
+                    {totpEnabled ? 'Enabled' : 'Disabled'}
+                  </span>
+                </div>
+
+                {!totpEnabled && !totpSetup && (
+                  <button
+                    onClick={() => void handleStartTotpSetup()}
+                    className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer"
+                  >
+                    Set Up Authenticator App
+                  </button>
+                )}
+
+                {!totpEnabled && totpSetup && (
+                  <div className="space-y-3 p-3.5 rounded-xl bg-black/30 border border-indigo-500/30 text-xs">
+                    <div className="space-y-1">
+                      <div className="text-gray-400">Manual Setup Secret (Base32):</div>
+                      <code className="block bg-black/60 px-3 py-1.5 rounded-lg text-amber-300 font-mono select-all break-all">
+                        {totpSetup.secret}
+                      </code>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-gray-400">OTPAuth Provisioning URI:</div>
+                      <code className="block bg-black/60 px-3 py-1.5 rounded-lg text-sky-300 font-mono text-[10px] select-all break-all">
+                        {totpSetup.otpauth_url}
+                      </code>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={8}
+                        placeholder="6-digit code"
+                        value={totpVerifyCode}
+                        onChange={(e) => setTotpVerifyCode(e.target.value.replace(/[^0-9]/g, ''))}
+                        className="px-3 py-1.5 rounded-lg bg-black/50 border border-white/10 text-white font-mono text-xs w-36"
+                      />
+                      <button
+                        onClick={() => void handleEnableTotp()}
+                        className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer"
+                      >
+                        Verify &amp; Enable
+                      </button>
+                      <button
+                        onClick={() => setTotpSetup(null)}
+                        className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-gray-300 text-xs cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {totpEnabled && (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <input
+                      type="password"
+                      placeholder="Current password"
+                      value={totpDisablePassword}
+                      onChange={(e) => setTotpDisablePassword(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white text-xs w-44"
+                    />
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={8}
+                      placeholder="6-digit code"
+                      value={totpDisableCode}
+                      onChange={(e) => setTotpDisableCode(e.target.value.replace(/[^0-9]/g, ''))}
+                      className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white font-mono text-xs w-32"
+                    />
+                    <button
+                      onClick={() => void handleDisableTotp()}
+                      className="px-3.5 py-1.5 rounded-lg bg-rose-600/80 hover:bg-rose-600 text-white text-xs font-semibold cursor-pointer"
+                    >
+                      Disable TOTP MFA
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Scoped API Tokens */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-4 shadow-xl">
+                <div>
+                  <span className="text-xs font-bold text-white block">Scoped Automation API Tokens</span>
+                  <span className="text-[11px] text-gray-400">Issue least-privilege Bearer tokens for CI/CD pipelines and scripts without sharing login passwords.</span>
+                </div>
+
+                {createdTokenSecret && (
+                  <div className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 space-y-1 text-xs">
+                    <div className="font-semibold text-emerald-300">Copy your new API token now (shown once):</div>
+                    <code className="block bg-black/60 px-3 py-1.5 rounded-lg text-white font-mono select-all break-all">
+                      {createdTokenSecret}
+                    </code>
+                  </div>
+                )}
+
+                <form onSubmit={handleCreateApiToken} className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder="Token label (e.g. ci-readonly)"
+                    value={newTokenName}
+                    onChange={(e) => setNewTokenName(e.target.value)}
+                    className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white text-xs flex-1 min-w-[160px]"
+                  />
+                  <select
+                    value={newTokenRole}
+                    onChange={(e) => setNewTokenRole(e.target.value as 'admin' | 'operator' | 'read_only')}
+                    className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white text-xs"
+                  >
+                    <option value="read_only">read_only</option>
+                    <option value="operator">operator</option>
+                    <option value="admin">admin</option>
+                  </select>
+                  <input
+                    type="number"
+                    min={1}
+                    max={3650}
+                    placeholder="Days"
+                    value={newTokenExpiryDays}
+                    onChange={(e) => setNewTokenExpiryDays(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white text-xs w-20"
+                    title="Expiration in days"
+                  />
+                  <button
+                    type="submit"
+                    className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold cursor-pointer"
+                  >
+                    Mint Token
+                  </button>
+                </form>
+
+                {apiTokens.length > 0 && (
+                  <div className="divide-y divide-white/10 border border-white/10 rounded-xl overflow-hidden text-xs">
+                    {apiTokens.map((t) => (
+                      <div key={t.id} className="px-3.5 py-2 flex items-center justify-between gap-3 bg-black/20">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-white truncate">{t.name}</span>
+                            <span className="px-1.5 py-0.5 rounded bg-white/10 text-[10px] font-mono text-sky-300">{t.role}</span>
+                            <code className="text-[10px] text-gray-400 font-mono">{t.prefix}…</code>
+                            {t.revoked && <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[10px] font-bold">REVOKED</span>}
+                          </div>
+                          <div className="text-[10px] text-gray-500">
+                            Created {t.createdAt || t.created_at || '—'} · Expires {(t.expiresAt || t.expires_at) || 'Never'}
+                          </div>
+                        </div>
+                        {!t.revoked && (
+                          <button
+                            onClick={() => void handleRevokeApiToken(t.id)}
+                            className="px-2.5 py-1 rounded-lg bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white text-[11px] font-semibold cursor-pointer shrink-0"
+                          >
+                            Revoke
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Vault Master Key Rotation (Web Mode Server Encrypted Vault) */}
+              {runtimeCaps?.features?.vault_rotation && (
+                <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 flex items-center justify-between gap-4 shadow-xl">
+                  <div>
+                    <span className="text-xs font-bold text-white block">Server Secret Vault Key Rotation</span>
+                    <span className="text-[11px] text-gray-400">Generate a fresh 256-bit AES-GCM master key and re-encrypt all stored database &amp; registry credentials.</span>
+                  </div>
+                  <button
+                    onClick={() => void handleRotateVaultKey()}
+                    className="px-4 py-2 rounded-xl bg-amber-600/80 hover:bg-amber-600 text-white text-xs font-semibold shrink-0 cursor-pointer"
+                  >
+                    Rotate Vault Master Key
+                  </button>
+                </div>
+              )}
+
+              {/* Team Administrators (Multi-User RBAC) */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-4 shadow-xl">
+                <div>
+                  <span className="text-xs font-bold text-white block">Team Administrators &amp; Role Assignment</span>
+                  <span className="text-[11px] text-gray-400">Provision additional administrator, operator, or read-only accounts without sharing primary credentials.</span>
+                </div>
+                <form onSubmit={handleAddTeamMember} className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder="Username (3-64 chars)"
+                    value={newTeamUser}
+                    onChange={(e) => setNewTeamUser(e.target.value)}
+                    className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white text-xs w-44"
+                  />
+                  <input
+                    type="password"
+                    placeholder="Password (min 12 chars)"
+                    value={newTeamPass}
+                    onChange={(e) => setNewTeamPass(e.target.value)}
+                    className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white text-xs flex-1 min-w-[160px]"
+                  />
+                  <select
+                    value={newTeamRole}
+                    onChange={(e) => setNewTeamRole(e.target.value as 'admin' | 'operator' | 'read_only')}
+                    className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white text-xs"
+                  >
+                    <option value="read_only">read_only</option>
+                    <option value="operator">operator</option>
+                    <option value="admin">admin</option>
+                  </select>
+                  <button type="submit" className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold cursor-pointer">
+                    Add Member
+                  </button>
+                </form>
+                {teamMembers.length > 0 && (
+                  <div className="divide-y divide-white/10 border border-white/10 rounded-xl overflow-hidden text-xs">
+                    {teamMembers.map((m) => (
+                      <div key={m.username} className="px-3.5 py-2 flex items-center justify-between gap-2 bg-black/20">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-white font-mono">{m.username}</span>
+                          {m.disabled && <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[10px]">DISABLED</span>}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <select
+                            value={m.role}
+                            onChange={(e) => void handleToggleTeamRole(m.username, e.target.value as 'admin' | 'operator' | 'read_only', m.disabled)}
+                            className="px-2 py-1 rounded bg-black/40 border border-white/10 text-white text-[11px]"
+                          >
+                            <option value="read_only">read_only</option>
+                            <option value="operator">operator</option>
+                            <option value="admin">admin</option>
+                          </select>
+                          <button
+                            onClick={() => void handleToggleTeamRole(m.username, m.role, !m.disabled)}
+                            className="px-2 py-1 rounded bg-white/10 hover:bg-white/15 text-[11px] text-gray-200 cursor-pointer"
+                          >
+                            {m.disabled ? 'Enable' : 'Disable'}
+                          </button>
+                          <button
+                            onClick={() => void handleRemoveTeamMember(m.username)}
+                            className="px-2 py-1 rounded bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white text-[11px] cursor-pointer"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Destructive Command Approval Workflow */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-4 shadow-xl">
+                <div>
+                  <span className="text-xs font-bold text-white block">Destructive Change Approval Queue</span>
+                  <span className="text-[11px] text-gray-400">Request and record peer/admin sign-off before executing high-risk operations (disk format, firewall reset, key rotation).</span>
+                </div>
+                <form onSubmit={handleRequestApproval} className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={approvalActionInput}
+                    onChange={(e) => setApprovalActionInput(e.target.value)}
+                    className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white text-xs"
+                  >
+                    <option value="firewall_reset">firewall_reset</option>
+                    <option value="disk_format_filesystem">disk_format_filesystem</option>
+                    <option value="disk_delete_partition">disk_delete_partition</option>
+                    <option value="user_delete">user_delete</option>
+                    <option value="ssh_rotate_server_key">ssh_rotate_server_key</option>
+                  </select>
+                  <input
+                    type="text"
+                    placeholder="Target host / device (e.g. prod-db-1:/dev/sdb1)"
+                    value={approvalTargetInput}
+                    onChange={(e) => setApprovalTargetInput(e.target.value)}
+                    className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white text-xs flex-1 min-w-[160px]"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Change ticket / reason"
+                    value={approvalReasonInput}
+                    onChange={(e) => setApprovalReasonInput(e.target.value)}
+                    className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white text-xs w-44"
+                  />
+                  <button type="submit" className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer">
+                    Request Sign-Off
+                  </button>
+                </form>
+                {approvals.length > 0 && (
+                  <div className="divide-y divide-white/10 border border-white/10 rounded-xl overflow-hidden text-xs max-h-56 overflow-y-auto">
+                    {approvals.slice(0, 20).map((ap) => (
+                      <div key={ap.id} className="px-3.5 py-2 flex items-center justify-between gap-2 bg-black/20">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-sky-300 font-semibold">{ap.action}</span>
+                            <span className="text-white truncate">{ap.target}</span>
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                              ap.status === 'approved' ? 'bg-emerald-500/20 text-emerald-300' :
+                              ap.status === 'rejected' ? 'bg-rose-500/20 text-rose-300' :
+                              'bg-amber-500/20 text-amber-300'
+                            }`}>{ap.status}</span>
+                          </div>
+                          {ap.reason && <div className="text-[10px] text-gray-400 truncate">Ticket: {ap.reason}</div>}
+                        </div>
+                        {ap.status === 'pending' && (
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              onClick={() => void handleDecideApproval(ap.id, 'approved')}
+                              className="px-2.5 py-1 rounded bg-emerald-600/25 hover:bg-emerald-600 text-emerald-300 hover:text-white text-[11px] font-semibold cursor-pointer"
+                            >
+                              Approve
+                            </button>
+                            <button
+                              onClick={() => void handleDecideApproval(ap.id, 'rejected')}
+                              className="px-2.5 py-1 rounded bg-rose-600/25 hover:bg-rose-600 text-rose-300 hover:text-white text-[11px] font-semibold cursor-pointer"
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* OIDC Single Sign-On Configuration */}
+              <form onSubmit={handleSaveSsoConfig} className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3 shadow-xl">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-white block">Enterprise SSO (OIDC / OAuth2 PKCE)</span>
+                    <span className="text-[11px] text-gray-400">Configure OpenID Connect discovery and PKCE redirect for centralized identity providers (Okta, Entra ID, Keycloak).</span>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-gray-200 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={ssoCfg.enabled}
+                      onChange={(e) => setSsoCfg(prev => ({ ...prev, enabled: e.target.checked }))}
+                    />
+                    <span>Enable OIDC SSO</span>
+                  </label>
+                </div>
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <input
+                    type="text"
+                    placeholder="Provider Display Name (e.g. Okta Prod)"
+                    value={ssoCfg.provider_name}
+                    onChange={(e) => setSsoCfg(prev => ({ ...prev, provider_name: e.target.value }))}
+                    className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white"
+                  />
+                  <input
+                    type="url"
+                    placeholder="OIDC Issuer URL (https://...)"
+                    value={ssoCfg.issuer_url}
+                    onChange={(e) => setSsoCfg(prev => ({ ...prev, issuer_url: e.target.value }))}
+                    className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white font-mono"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Client ID"
+                    value={ssoCfg.client_id}
+                    onChange={(e) => setSsoCfg(prev => ({ ...prev, client_id: e.target.value }))}
+                    className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white font-mono"
+                  />
+                  <select
+                    value={ssoCfg.default_role}
+                    onChange={(e) => setSsoCfg(prev => ({ ...prev, default_role: e.target.value as 'admin' | 'operator' | 'read_only' }))}
+                    className="px-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-white"
+                  >
+                    <option value="read_only">Default SSO Role: read_only</option>
+                    <option value="operator">Default SSO Role: operator</option>
+                    <option value="admin">Default SSO Role: admin</option>
+                  </select>
+                </div>
+                <button type="submit" className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer">
+                  Save SSO Configuration
+                </button>
+              </form>
+
+              {/* Terminal Audit Recordings (.cast) */}
+              <div className="bg-[#1e1e2e]/90 border border-white/10 rounded-2xl p-5 space-y-3 shadow-xl">
+                <div>
+                  <span className="text-xs font-bold text-white block">Terminal Session Audit Recordings (asciicast v2)</span>
+                  <span className="text-[11px] text-gray-400">Download captured terminal session recordings saved from the SSH Terminal Record button.</span>
+                </div>
+                {recordings.length === 0 ? (
+                  <div className="text-[11px] text-gray-500">No session recordings stored yet.</div>
+                ) : (
+                  <div className="divide-y divide-white/10 border border-white/10 rounded-xl overflow-hidden text-xs max-h-48 overflow-y-auto">
+                    {recordings.map((r) => (
+                      <div key={r.id} className="px-3.5 py-2 flex items-center justify-between gap-2 bg-black/20">
+                        <div>
+                          <div className="text-white font-semibold">{r.title}</div>
+                          <div className="text-[10px] text-gray-400 font-mono">{r.host} · {(r.bytes / 1024).toFixed(1)} KB · {r.created_at}</div>
+                        </div>
+                        <button
+                          onClick={() => void handleDownloadRecording(r)}
+                          className="px-3 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-sky-300 text-[11px] font-semibold cursor-pointer shrink-0"
+                        >
+                          Download .cast
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}

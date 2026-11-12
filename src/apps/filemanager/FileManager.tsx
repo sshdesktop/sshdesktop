@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import { useConnectionStore, useEditorStore, useSettingsStore, useFileClipboardStore } from '../../lib/store';
 import { useWindowManager } from '../../lib/hooks/useWindowManager';
+import { useWindowedList } from '../../lib/hooks/useWindowedList';
 import { 
   sftpListDir, sftpReadFileBase64, sftpReadTextFile, sftpWriteFile, sftpWriteTextFile,
   sftpRename, sftpMkdir, sftpDownloadFile, sshExec, sendDesktopNotification, sftpFolderSize 
@@ -545,6 +546,14 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
   });
 
   const activeDisplayFiles = search.trim().length >= 2 ? globalResults : sortedFiles;
+  const {
+    visibleItems: windowedDisplayFiles,
+    hasMore: hasMoreFiles,
+    visibleCount: visibleFilesCount,
+    totalCount: totalFilesCount,
+    loadMore: loadMoreFiles,
+    showAll: showAllFiles,
+  } = useWindowedList(activeDisplayFiles, 250, 250, `${activeConnId}:${currentPath}:${search}`);
   const selectedFileObj = activeDisplayFiles.find(f => selectedFiles.has(f.name)) || activeDisplayFiles[0];
 
   const availableLetters = React.useMemo(() => {
@@ -1996,7 +2005,7 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
             </div>
           ) : view === 'icons' ? (
             <IconsView
-              files={activeDisplayFiles}
+              files={windowedDisplayFiles}
               selectedFiles={selectedFiles}
               iconSize={iconSize}
               isLoading={isLoading}
@@ -2025,7 +2034,7 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
             />
           ) : view === 'list' ? (
             <ListView
-              files={activeDisplayFiles}
+              files={windowedDisplayFiles}
               selectedFiles={selectedFiles}
               sortField={sortField}
               sortOrder={sortOrder}
@@ -2071,7 +2080,7 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
             />
           ) : (
             <GalleryView
-              files={activeDisplayFiles}
+              files={windowedDisplayFiles}
               selectedFiles={selectedFiles}
               openingFolder={openingFolder}
               draggedItem={draggedItem}
@@ -2092,6 +2101,25 @@ window.dispatchEvent(new CustomEvent('clouddesk:files-changed'));
               handleQuickLookToggle={handleQuickLookToggle}
               openFileTarget={openFileTarget}
             />
+          )}
+          {hasMoreFiles && (
+            <div className="px-4 py-2 bg-[#14141f] border-t border-white/10 flex items-center justify-between text-xs text-gray-300 shrink-0">
+              <span>Showing {visibleFilesCount} of {totalFilesCount} items</span>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={loadMoreFiles}
+                  className="px-3 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 font-semibold cursor-pointer"
+                >
+                  Load +250
+                </button>
+                <button
+                  onClick={showAllFiles}
+                  className="px-3 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-gray-200 cursor-pointer"
+                >
+                  Show All
+                </button>
+              </div>
+            </div>
           )}
         </div>
 

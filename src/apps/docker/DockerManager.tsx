@@ -31,8 +31,7 @@ import {
   DockerAuthInfo, SavedDockerCredential, ResourceDeleteTarget, ResourceInUseItem
 } from './types';
 import { DOCKERFILE_TEMPLATES, COMPOSE_TEMPLATES, POPULAR_IMAGES } from './templates';
-
-const sq = (value: string): string => `'${String(value).replace(/'/g, "'\\''")}'`;
+import { sq, buildDockerRunCommand } from './docker-service';
 import { DockerDeleteModal } from './components/DockerDeleteModal';
 import { DockerInspectModal } from './components/DockerInspectModal';
 import { DockerPruneModal } from './components/DockerPruneModal';
@@ -171,6 +170,9 @@ export default function DockerManager() {
   const [runVolumes, setRunVolumes] = useState('');
   const [runEnv, setRunEnv] = useState('');
   const [runRestart, setRunRestart] = useState('unless-stopped');
+  const [runMemoryLimit, setRunMemoryLimit] = useState('512m');
+  const [runCpuLimit, setRunCpuLimit] = useState('1');
+  const [runPidsLimit, setRunPidsLimit] = useState('256');
   const [isSubmittingRun, setIsSubmittingRun] = useState(false);
   const [runModalError, setRunModalError] = useState<string | null>(null);
 
@@ -1545,32 +1547,17 @@ export default function DockerManager() {
     setIsSubmittingRun(true);
     setRunModalError(null);
     try {
-      let cmd = `docker run -d`;
-      if (runName.trim()) cmd += ` --name ${sq(runName.trim())}`;
-      if (runRestart) cmd += ` --restart ${sq(runRestart)}`;
-      
-      if (runPorts.trim()) {
-        const portList = runPorts.split(',').map(p => p.trim()).filter(Boolean);
-        portList.forEach(p => {
-          cmd += ` -p ${sq(p)}`;
-        });
-      }
-
-      if (runVolumes.trim()) {
-        const volList = runVolumes.split(',').map(v => v.trim()).filter(Boolean);
-        volList.forEach(v => {
-          cmd += ` -v ${sq(v)}`;
-        });
-      }
-
-      if (runEnv.trim()) {
-        const envList = runEnv.split(',').map(e => e.trim()).filter(Boolean);
-        envList.forEach(envItem => {
-          cmd += ` -e ${sq(envItem)}`;
-        });
-      }
-
-      cmd += ` ${sq(runImage.trim())}`;
+      const cmd = buildDockerRunCommand({
+        image: runImage,
+        name: runName,
+        restart: runRestart,
+        memoryLimit: runMemoryLimit,
+        cpuLimit: runCpuLimit,
+        pidsLimit: runPidsLimit,
+        ports: runPorts,
+        volumes: runVolumes,
+        env: runEnv,
+      });
 
       const res = await sshExec(activeConnId, cmd);
       if (res.exit_code === 0) {
@@ -3529,6 +3516,9 @@ export default function DockerManager() {
         restart={runRestart}
         volumes={runVolumes}
         env={runEnv}
+        memoryLimit={runMemoryLimit}
+        cpuLimit={runCpuLimit}
+        pidsLimit={runPidsLimit}
         error={runModalError}
         isSubmitting={isSubmittingRun}
         onImageChange={setRunImage}
@@ -3537,6 +3527,9 @@ export default function DockerManager() {
         onRestartChange={setRunRestart}
         onVolumesChange={setRunVolumes}
         onEnvChange={setRunEnv}
+        onMemoryLimitChange={setRunMemoryLimit}
+        onCpuLimitChange={setRunCpuLimit}
+        onPidsLimitChange={setRunPidsLimit}
         onClose={() => { setShowRunModal(false); setRunModalError(null); }}
         onSubmit={handleRunSubmit}
       />

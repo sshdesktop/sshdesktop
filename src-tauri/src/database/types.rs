@@ -5,7 +5,7 @@ use tokio::sync::oneshot;
 
 // ─── Data Transfer Models ──────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct DatabaseConnectionConfig {
     pub id: String,
     pub name: String,

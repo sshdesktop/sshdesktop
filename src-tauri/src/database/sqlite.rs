@@ -401,3 +401,54 @@ pub async fn get_object_definition_sqlite(
     let def: String = row.try_get(0).unwrap_or_default();
     Ok(def)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sqlite_real_connection_crud_and_readonly_enforcement() {
+        let db_path = std::env::temp_dir().join(format!("sshdesktop-sqlite-it-{}.db", uuid::Uuid::new_v4().simple()));
+        let base_cfg = DatabaseConnectionConfig {
+            id: "it-sqlite".into(),
+            name: "IT SQLite".into(),
+            engine: "sqlite".into(),
+            database: db_path.to_string_lossy().to_string(),
+            sqlite_path: Some(db_path.to_string_lossy().to_string()),
+            timeout_seconds: Some(5),
+            ..Default::default()
+        };
+
+        let (driver, caps) = connect_sqlite(&base_cfg, None).await.expect("connect_sqlite rw");
+        assert_eq!(caps.engine, "sqlite");
+        let DriverInstance::Sqlite(pool) = driver else {
+            panic!("Expected Sqlite driver instance");
+        };
+
+        sqlx::raw_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT NOT NULL); INSERT INTO items (label) VALUES ('alpha'), ('beta');")
+            .execute(&pool)
+            .await
+            .expect("seed table");
+
+        let objs = list_tables_sqlite(&pool).await.expect("list_tables_sqlite");
+        assert!(objs.iter().any(|o| o.name == "items"));
+        let cols = get_table_columns_sqlite(&pool, "items").await.expect("columns");
+        assert_eq!(cols.len(), 2);
+        assert!(cols[0].is_primary_key);
+
+        pool.close().await;
+
+        let mut ro_cfg = base_cfg.clone();
+        ro_cfg.read_only = true;
+        let (ro_driver, _) = connect_sqlite(&ro_cfg, None).await.expect("connect_sqlite ro");
+        let DriverInstance::Sqlite(ro_pool) = ro_driver else {
+            panic!("Expected Sqlite ro driver");
+        };
+        let row_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM items").fetch_one(&ro_pool).await.expect("select count");
+        assert_eq!(row_count.0, 2);
+        let write_attempt = sqlx::raw_sql("DROP TABLE items;").execute(&ro_pool).await;
+        assert!(write_attempt.is_err());
+        ro_pool.close().await;
+        let _ = std::fs::remove_file(&db_path);
+    }
+}

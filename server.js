@@ -155,6 +155,11 @@ const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const AUDIT_LOG_FILE = path.join(DATA_DIR, 'audit.log');
 const POLICY_FILE = path.join(DATA_DIR, 'policy.json');
+const TOKENS_FILE = path.join(DATA_DIR, 'tokens.json');
+const TEAM_FILE = path.join(DATA_DIR, 'team.json');
+const APPROVALS_FILE = path.join(DATA_DIR, 'approvals.json');
+const SSO_FILE = path.join(DATA_DIR, 'sso.json');
+const RECORDINGS_DIR = path.join(DATA_DIR, 'recordings');
 const VAULT_FILE = path.join(DATA_DIR, 'vault.enc.json');
 const VAULT_KEY_FILE = path.join(DATA_DIR, 'vault.key');
 const KEYS_DIR = path.join(DATA_DIR, 'keys');
@@ -192,6 +197,124 @@ const activeWsClients = new Map();   // termId -> WebSocket
 const pendingTerminalResizes = new Map(); // termId -> { rows, cols }
 
 // Helper: Safely resolve active SSH connection (strict matching: no cross-server fallback)
+function matchKnownHostToken(pattern, host, port) {
+  const token = port === 22 ? host : `[${host}]:${port}`;
+  if (pattern.startsWith('|1|')) {
+    const segments = pattern.slice(3).split('|');
+    if (segments.length !== 2) return false;
+    try {
+      const salt = Buffer.from(segments[0], 'base64');
+      const expectedDigest = Buffer.from(segments[1], 'base64');
+      if (!salt.length || !expectedDigest.length) return false;
+      const digest = crypto.createHmac('sha1', salt).update(token, 'utf8').digest();
+      return digest.length === expectedDigest.length && crypto.timingSafeEqual(digest, expectedDigest);
+    } catch {
+      return false;
+    }
+  }
+  const wildcardToRegex = (glob) => {
+    const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+    return new RegExp(`^${escaped}$`);
+  };
+  if (pattern.includes('*') || pattern.includes('?')) {
+    return wildcardToRegex(pattern).test(token) || (port === 22 && wildcardToRegex(pattern).test(host));
+  }
+  return pattern === token || (port === 22 && pattern === host);
+}
+
+function knownHostFieldMatches(hostField, host, port) {
+  let matched = false;
+  for (const raw of String(hostField || '').split(',')) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    if (entry.startsWith('!')) {
+      if (matchKnownHostToken(entry.slice(1), host, port)) return false;
+    } else if (matchKnownHostToken(entry, host, port)) {
+      matched = true;
+    }
+  }
+  return matched;
+}
+
+function formatSshFingerprint(keyB64) {
+  if (!keyB64) return '';
+  return 'SHA256:' + crypto.createHash('sha256').update(Buffer.from(keyB64, 'base64')).digest('base64').replace(/=+$/, '');
+}
+
+/**
+ * Evaluate OpenSSH known_hosts content with @revoked, @cert-authority, and |1| HMAC-SHA1 support.
+ */
+function evaluateKnownHostsContent(content, host, port, keyType, keyB64) {
+  const fp = formatSshFingerprint(keyB64);
+  const regularMatches = [];
+  let sawCertAuthority = false;
+
+  for (const rawLine of String(content || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const parts = line.split(/\s+/);
+    if (parts[0] === '@revoked' && parts.length >= 4) {
+      if (knownHostFieldMatches(parts[1], host, port) && parts[2] === keyType && parts[3] === keyB64) {
+        return {
+          status: 'changed',
+          key_type: keyType,
+          fingerprint_sha256: fp,
+          raw_public_key_b64: keyB64,
+          known_key_type: parts[2],
+          known_fingerprint_sha256: formatSshFingerprint(parts[3]),
+          message: 'CRITICAL SECURITY ALERT: Server presented a REVOKED SSH host key (@revoked)!',
+        };
+      }
+      continue;
+    }
+    if (parts[0] === '@cert-authority' && parts.length >= 4) {
+      if (knownHostFieldMatches(parts[1], host, port)) sawCertAuthority = true;
+      continue;
+    }
+    if (!parts[0]?.startsWith('@') && parts.length >= 3 && knownHostFieldMatches(parts[0], host, port)) {
+      regularMatches.push({ keyType: parts[1], keyB64: parts[2] });
+    }
+  }
+
+  if (regularMatches.some(m => m.keyType === keyType && m.keyB64 === keyB64)) {
+    return {
+      status: 'trusted',
+      key_type: keyType,
+      fingerprint_sha256: fp,
+      raw_public_key_b64: keyB64,
+      message: 'Host key verified against known_hosts.',
+    };
+  }
+  if (regularMatches.length > 0) {
+    const firstKnown = regularMatches[0];
+    return {
+      status: 'changed',
+      key_type: keyType,
+      fingerprint_sha256: fp,
+      raw_public_key_b64: keyB64,
+      known_key_type: firstKnown.keyType || '',
+      known_fingerprint_sha256: formatSshFingerprint(firstKnown.keyB64),
+      message: 'WARNING: Remote SSH host key changed from previously trusted key!',
+    };
+  }
+  if (sawCertAuthority) {
+    return {
+      status: 'unsupported_cert_authority',
+      key_type: keyType,
+      fingerprint_sha256: fp,
+      raw_public_key_b64: keyB64,
+      message: 'known_hosts contains @cert-authority for this host, which requires explicit SSH certificate verification or pinning the concrete host key.',
+    };
+  }
+  return {
+    status: 'not_found',
+    key_type: keyType,
+    fingerprint_sha256: fp,
+    raw_public_key_b64: keyB64,
+    message: 'Host key is not yet recorded in known_hosts.',
+  };
+}
+
 function sendTerminalOutput(termId, text) {
   const ws = activeWsClients.get(termId);
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -306,6 +429,154 @@ function vaultDecryptValue(record) {
   const decipher = crypto.createDecipheriv('aes-256-gcm', masterKey, iv);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+}
+
+function vaultRotateKey() {
+  const existingVault = readJsonSafe(VAULT_FILE, {});
+  const decryptedEntries = {};
+  let count = 0;
+  for (const [k, encRecord] of Object.entries(existingVault || {})) {
+    const plain = vaultDecryptValue(encRecord);
+    if (plain !== null) {
+      decryptedEntries[k] = plain;
+      count += 1;
+    }
+  }
+  const newKey = crypto.randomBytes(32);
+  const dir = path.dirname(VAULT_KEY_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tempKeyPath = `${VAULT_KEY_FILE}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(tempKeyPath, newKey.toString('hex'), { encoding: 'utf8', mode: 0o600 });
+  try { fs.chmodSync(tempKeyPath, 0o600); } catch {}
+
+  const reencryptedVault = {};
+  for (const [k, plain] of Object.entries(decryptedEntries)) {
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', newKey, iv);
+    const enc = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    reencryptedVault[k] = {
+      v: 1,
+      iv: iv.toString('hex'),
+      tag: tag.toString('hex'),
+      data: enc.toString('hex'),
+    };
+  }
+  const tempVaultPath = `${VAULT_FILE}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(tempVaultPath, JSON.stringify(reencryptedVault, null, 2), { encoding: 'utf8', mode: 0o600 });
+  try { fs.chmodSync(tempVaultPath, 0o600); } catch {}
+  fs.renameSync(tempVaultPath, VAULT_FILE);
+  fs.renameSync(tempKeyPath, VAULT_KEY_FILE);
+  try { fs.chmodSync(VAULT_FILE, 0o600); } catch {}
+  try { fs.chmodSync(VAULT_KEY_FILE, 0o600); } catch {}
+  return { rotated: true, entriesReencrypted: count };
+}
+
+// -------------------------------------------------------------
+// RFC 6238 TOTP (SHA-1, 6 digits, 30s step) & Scoped API Tokens
+// -------------------------------------------------------------
+
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+function base32Encode(buf) {
+  const bytes = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  let out = '';
+  let buffer = 0;
+  let bitsLeft = 0;
+  for (const b of bytes) {
+    buffer = (buffer << 8) | b;
+    bitsLeft += 8;
+    while (bitsLeft >= 5) {
+      bitsLeft -= 5;
+      out += BASE32_ALPHABET[(buffer >> bitsLeft) & 0x1f];
+    }
+  }
+  if (bitsLeft > 0) {
+    out += BASE32_ALPHABET[(buffer << (5 - bitsLeft)) & 0x1f];
+  }
+  return out;
+}
+
+function base32Decode(str) {
+  const clean = String(str || '').replace(/[\s=]+/g, '').toUpperCase();
+  if (!clean) return null;
+  let buffer = 0;
+  let bitsLeft = 0;
+  const bytes = [];
+  for (const ch of clean) {
+    const val = BASE32_ALPHABET.indexOf(ch);
+    if (val === -1) return null;
+    buffer = (buffer << 5) | val;
+    bitsLeft += 5;
+    if (bitsLeft >= 8) {
+      bitsLeft -= 8;
+      bytes.push((buffer >> bitsLeft) & 0xff);
+    }
+  }
+  return bytes.length ? Buffer.from(bytes) : null;
+}
+
+function computeTotpAt(secretBuf, unixSecs) {
+  const counter = BigInt(Math.floor(Number(unixSecs) / 30));
+  const counterBuf = Buffer.alloc(8);
+  counterBuf.writeBigUInt64BE(counter, 0);
+  const hmac = crypto.createHmac('sha1', secretBuf).update(counterBuf).digest();
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const binary =
+    ((hmac[offset] & 0x7f) << 24) |
+    ((hmac[offset + 1] & 0xff) << 16) |
+    ((hmac[offset + 2] & 0xff) << 8) |
+    (hmac[offset + 3] & 0xff);
+  return String(binary % 1000000).padStart(6, '0');
+}
+
+function verifyTotpCode(secretBase32, code, nowSecs = Math.floor(Date.now() / 1000)) {
+  const cleanCode = String(code || '').replace(/\s+/g, '');
+  if (!/^\d{6}$/.test(cleanCode)) return false;
+  const secretBuf = base32Decode(secretBase32);
+  if (!secretBuf || !secretBuf.length) return false;
+  const codeBuf = Buffer.from(cleanCode, 'utf8');
+  for (const delta of [-30, 0, 30]) {
+    const candidate = Buffer.from(computeTotpAt(secretBuf, nowSecs + delta), 'utf8');
+    if (candidate.length === codeBuf.length && crypto.timingSafeEqual(candidate, codeBuf)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function loadTokensRaw() {
+  const data = readJsonSafe(TOKENS_FILE, []);
+  return Array.isArray(data) ? data : [];
+}
+
+function saveTokensRaw(tokens) {
+  return writeJsonSafe(TOKENS_FILE, tokens);
+}
+
+function resolveApiToken(rawToken) {
+  const tok = String(rawToken || '').trim();
+  if (!tok.startsWith('sshdesktop_tok_')) return null;
+  const tokenHash = crypto.createHash('sha256').update(tok, 'utf8').digest('hex');
+  const tokens = loadTokensRaw();
+  const now = Date.now();
+  for (const record of tokens) {
+    if (!record || record.revoked) continue;
+    if (record.expiresAt && Date.parse(record.expiresAt) <= now) continue;
+    if (typeof record.tokenHash === 'string' && record.tokenHash.length === tokenHash.length) {
+      try {
+        if (crypto.timingSafeEqual(Buffer.from(record.tokenHash, 'hex'), Buffer.from(tokenHash, 'hex'))) {
+          return {
+            username: `api-token:${record.name}`,
+            role: record.role || 'read_only',
+            tokenId: record.id,
+            isApiToken: true,
+          };
+        }
+      } catch {}
+    }
+  }
+  return null;
 }
 
 // -------------------------------------------------------------
@@ -518,12 +789,13 @@ function persistSessions() {
   writeJsonSafe(SESSIONS_FILE, obj);
 }
 
-function createSession(username) {
+function createSession(username, role = 'admin') {
   const token = 'sshsess_' + crypto.randomBytes(32).toString('hex');
   const now = Date.now();
   const session = {
     token,
     username,
+    role,
     createdAt: now,
     expiresAt: now + SESSION_TTL_MS,
   };
@@ -778,8 +1050,14 @@ function getSecurityPolicy() {
   };
 }
 
-function enforcePolicyPermission(cmd, args) {
+function enforcePolicyPermission(cmd, args, currentSession = null) {
   const policy = getSecurityPolicy();
+  const roleRank = { read_only: 0, operator: 1, admin: 2 };
+  const policyRole = policy.role || 'admin';
+  const sessionRole = currentSession?.role;
+  const effectiveRole = (sessionRole && roleRank[sessionRole] !== undefined && roleRank[sessionRole] < (roleRank[policyRole] ?? 2))
+    ? sessionRole
+    : policyRole;
   const readOnlyBlocked = new Set([
     'firewall_add_rule', 'firewall_add_rule_advanced', 'firewall_delete_rule', 'firewall_delete_rule_advanced',
     'firewall_toggle', 'firewall_install', 'firewall_set_default_policy', 'firewall_reset',
@@ -788,24 +1066,31 @@ function enforcePolicyPermission(cmd, args) {
     'disk_set_partition_flag', 'disk_format_filesystem', 'disk_set_label', 'disk_manage_swap', 'disk_manage_tmp',
     'service_action', 'package_install', 'package_remove', 'cron_add', 'cron_delete',
     'sftp_write_file', 'sftp_write_text_file', 'sftp_delete', 'sftp_rename', 'sftp_chmod', 'sftp_chown',
-    'sftp_mkdir', 'sftp_extract_archive_pure', 'backup_import_config'
+    'sftp_mkdir', 'sftp_extract_archive_pure', 'backup_import_config',
+    'tokens_create', 'tokens_revoke', 'vault_rotate_key', 'policy_set_mode',
+    'auth_totp_setup', 'auth_totp_enable', 'auth_totp_disable',
+    'process_kill', 'process_renice', 'cron_rollback',
+    'team_add', 'team_set_role', 'team_remove', 'sso_set_config', 'approval_decide', 'ssh_rotate_server_key'
   ]);
   const operatorBlocked = new Set([
     'firewall_reset', 'firewall_set_default_policy',
     'disk_create_label', 'disk_create_partition', 'disk_delete_partition', 'disk_format_filesystem',
-    'user_delete', 'user_sudo_toggle'
+    'user_delete', 'user_sudo_toggle',
+    'tokens_create', 'tokens_revoke', 'vault_rotate_key', 'policy_set_mode', 'backup_import_config',
+    'auth_totp_setup', 'auth_totp_enable', 'auth_totp_disable',
+    'team_add', 'team_set_role', 'team_remove', 'sso_set_config', 'approval_decide'
   ]);
-  if (policy.role === 'read_only' && readOnlyBlocked.has(cmd)) {
-    const err = new Error(`POLICY_DENIED: Command '${cmd}' is blocked while workspace role is set to 'read_only'.`);
+  if (effectiveRole === 'read_only' && readOnlyBlocked.has(cmd)) {
+    const err = new Error(`POLICY_DENIED: Command '${cmd}' is blocked while effective role is 'read_only'.`);
     err.statusCode = 403;
     throw err;
   }
-  if (policy.role === 'operator' && operatorBlocked.has(cmd)) {
-    const err = new Error(`POLICY_DENIED: Destructive command '${cmd}' requires 'admin' role (current role: 'operator').`);
+  if (effectiveRole === 'operator' && operatorBlocked.has(cmd)) {
+    const err = new Error(`POLICY_DENIED: Destructive command '${cmd}' requires 'admin' role (effective role: 'operator').`);
     err.statusCode = 403;
     throw err;
   }
-  if (policy.role === 'read_only' && cmd === 'ssh_exec' && args?.command) {
+  if (effectiveRole === 'read_only' && cmd === 'ssh_exec' && args?.command) {
     // Allow diagnostic/read inspections; destructive explicit UI actions go through dedicated commands
   }
 }
@@ -1943,7 +2228,7 @@ function buildSshClientConfig(config, targetId) {
 }
 
 async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = '127.0.0.1') {
-  enforcePolicyPermission(cmd, args);
+  enforcePolicyPermission(cmd, args, currentSession);
   const connId = args?.connId;
   const entry = getActiveEntry(connId);
 
@@ -1970,6 +2255,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
           : 0,
         session_duration_seconds: Math.floor(SESSION_TTL_MS / 1000),
         must_change_password: !!auth.must_change_password,
+        totp_enabled: Boolean(auth.totp_enabled),
         is_first_login: isFirstLogin,
         initial_credentials_cmd: 'sudo cat /var/lib/sshdesktop/initial-admin-credentials.txt',
         username: session ? session.username : (isFirstLogin ? 'admin' : (auth.username || '')),
@@ -1978,7 +2264,8 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
     }
 
     case 'auth_login': {
-      const { username, password } = args || {};
+      const { username, password, totpCode, totp_code } = args || {};
+      const mfaCode = totpCode || totp_code || '';
       const now = Date.now();
       const ipRecord = loginAttempts.get(clientIp) || { count: 0, lastAttempt: 0, lockedUntil: 0 };
       if (ipRecord.lockedUntil > now) {
@@ -1986,6 +2273,7 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
         return {
           success: false,
           must_change_password: false,
+          mfa_required: false,
           username,
           message: `Too many failed login attempts. Locked out for ${remainingSec}s.`
         };
@@ -2006,8 +2294,33 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
         inputUser === validUser &&
         passwordMatches
       ) {
+        if (auth.totp_enabled && auth.totp_secret) {
+          if (!String(mfaCode).trim()) {
+            return {
+              success: false,
+              mfa_required: true,
+              must_change_password: false,
+              username: auth.username,
+              message: 'Two-factor authentication code required.'
+            };
+          }
+          if (!verifyTotpCode(auth.totp_secret, mfaCode)) {
+            ipRecord.count += 1;
+            ipRecord.lastAttempt = now;
+            if (ipRecord.count >= 5) ipRecord.lockedUntil = now + 60 * 1000;
+            loginAttempts.set(clientIp, ipRecord);
+            appendAuditEvent({ event: 'auth_login_totp', username: auth.username, ip: clientIp, status: 'failed' });
+            return {
+              success: false,
+              mfa_required: true,
+              must_change_password: false,
+              username: auth.username,
+              message: 'Invalid authenticator code.'
+            };
+          }
+        }
         loginAttempts.delete(clientIp);
-        const session = createSession(auth.username);
+        const session = createSession(auth.username, 'admin');
         appendAuditEvent({ event: 'auth_login', username: auth.username, ip: clientIp, status: 'success' });
 
         return {
@@ -2016,8 +2329,37 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
           expires_at: session.expiresAt,
           expires_in_seconds: Math.floor(SESSION_TTL_MS / 1000),
           must_change_password: !!auth.must_change_password,
+          mfa_required: false,
           username: auth.username
         };
+      }
+
+      // Check configured team members
+      const teamList = readJsonSafe(TEAM_FILE, []);
+      if (Array.isArray(teamList)) {
+        const teamUser = teamList.find(u => u && String(u.username || '').trim().toLowerCase() === inputUser);
+        if (teamUser) {
+          if (teamUser.disabled) {
+            return { success: false, must_change_password: false, mfa_required: false, username, message: 'Account disabled by administrator.' };
+          }
+          const teamMatch = await verifyPasswordAsync(teamUser, password);
+          if (teamMatch) {
+            loginAttempts.delete(clientIp);
+            teamUser.last_login_at = Math.floor(Date.now() / 1000);
+            writeJsonSafe(TEAM_FILE, teamList);
+            const session = createSession(teamUser.username, teamUser.role || 'read_only');
+            appendAuditEvent({ event: 'auth_login', username: teamUser.username, ip: clientIp, role: session.role, status: 'success' });
+            return {
+              success: true,
+              token: session.token,
+              expires_at: session.expiresAt,
+              expires_in_seconds: Math.floor(SESSION_TTL_MS / 1000),
+              must_change_password: false,
+              mfa_required: false,
+              username: teamUser.username
+            };
+          }
+        }
       }
 
       ipRecord.count += 1;
@@ -2140,6 +2482,344 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
       return true;
     }
 
+    case 'auth_totp_setup': {
+      const auth = readJsonSafe(AUTH_FILE, {});
+      const secret = base32Encode(crypto.randomBytes(20));
+      const user = encodeURIComponent(auth.username || 'admin');
+      return {
+        secret,
+        otpauth_url: `otpauth://totp/SSHDesktop:${user}?secret=${secret}&issuer=SSHDesktop&digits=6&period=30`,
+        totp_enabled: Boolean(auth.totp_enabled),
+      };
+    }
+
+    case 'auth_totp_enable': {
+      const secret = String(args?.secret || '').trim();
+      const code = String(args?.code || '').trim();
+      if (!verifyTotpCode(secret, code)) {
+        const err = new Error('Invalid 6-digit TOTP verification code for this setup key.');
+        err.statusCode = 400;
+        throw err;
+      }
+      const auth = readJsonSafe(AUTH_FILE, {});
+      auth.totp_enabled = true;
+      auth.totp_secret = secret;
+      if (!writeJsonSafe(AUTH_FILE, auth)) {
+        throw new Error('Failed to persist TOTP configuration.');
+      }
+      appendAuditEvent({ event: 'auth_totp_enable', username: currentSession?.username || auth.username || '', ip: clientIp, status: 'ok' });
+      return true;
+    }
+
+    case 'auth_totp_disable': {
+      const password = String(args?.password || '');
+      const code = String(args?.code || '').trim();
+      const auth = readJsonSafe(AUTH_FILE, {});
+      const passwordOk = await verifyPasswordAsync(auth, password);
+      if (!passwordOk) {
+        const err = new Error('Current password is incorrect.');
+        err.statusCode = 401;
+        throw err;
+      }
+      if (auth.totp_enabled && auth.totp_secret && !verifyTotpCode(auth.totp_secret, code)) {
+        const err = new Error('Invalid 6-digit TOTP code.');
+        err.statusCode = 401;
+        throw err;
+      }
+      auth.totp_enabled = false;
+      delete auth.totp_secret;
+      if (!writeJsonSafe(AUTH_FILE, auth)) {
+        throw new Error('Failed to persist TOTP configuration.');
+      }
+      appendAuditEvent({ event: 'auth_totp_disable', username: currentSession?.username || auth.username || '', ip: clientIp, status: 'ok' });
+      return true;
+    }
+
+    case 'tokens_list': {
+      return loadTokensRaw().map((t) => ({
+        id: t.id,
+        name: t.name,
+        role: t.role,
+        prefix: t.prefix,
+        createdAt: t.createdAt,
+        expiresAt: t.expiresAt || null,
+        revoked: Boolean(t.revoked),
+      }));
+    }
+
+    case 'tokens_create': {
+      const cleanName = String(args?.name || '').trim();
+      if (!cleanName || cleanName.length > 64) {
+        throw new Error('Token name must be 1 to 64 characters.');
+      }
+      const cleanRole = validateSafeToken(String(args?.role || 'read_only').trim().toLowerCase(), /^(?:admin|operator|read_only)$/, 'role');
+      const daysRaw = args?.expiresInDays ?? args?.expires_in_days;
+      let expiresAt = null;
+      if (daysRaw !== undefined && daysRaw !== null && Number(daysRaw) > 0) {
+        const days = validateInt(Number(daysRaw), 1, 3650, 'expiresInDays');
+        expiresAt = new Date(Date.now() + days * 86400 * 1000).toISOString();
+      }
+      const rawSecret = `sshdesktop_tok_${crypto.randomBytes(24).toString('hex')}`;
+      const tokenHash = crypto.createHash('sha256').update(rawSecret, 'utf8').digest('hex');
+      const id = crypto.randomUUID();
+      const prefix = rawSecret.slice(0, 20);
+      const record = {
+        id,
+        name: cleanName,
+        role: cleanRole,
+        tokenHash,
+        prefix,
+        createdAt: new Date().toISOString(),
+        expiresAt,
+        revoked: false,
+      };
+      const list = loadTokensRaw();
+      list.push(record);
+      if (!saveTokensRaw(list)) {
+        throw new Error('Failed to save API token.');
+      }
+      appendAuditEvent({ event: 'tokens_create', username: currentSession?.username || 'admin', ip: clientIp, tokenId: id, role: cleanRole, status: 'ok' });
+      return {
+        id,
+        name: cleanName,
+        role: cleanRole,
+        prefix,
+        token: rawSecret,
+        expiresAt,
+      };
+    }
+
+    case 'tokens_revoke': {
+      const id = String(args?.id || '').trim();
+      if (!id) throw new Error('Token ID is required.');
+      const list = loadTokensRaw();
+      let found = false;
+      for (const t of list) {
+        if (t.id === id) {
+          t.revoked = true;
+          found = true;
+        }
+      }
+      if (found) {
+        saveTokensRaw(list);
+        appendAuditEvent({ event: 'tokens_revoke', username: currentSession?.username || 'admin', ip: clientIp, tokenId: id, status: 'ok' });
+      }
+      return found;
+    }
+
+    case 'vault_rotate_key': {
+      const outcome = vaultRotateKey();
+      appendAuditEvent({
+        event: 'vault_rotate_key',
+        username: currentSession?.username || 'admin',
+        ip: clientIp,
+        entriesReencrypted: outcome.entriesReencrypted,
+        status: 'ok',
+      });
+      return outcome;
+    }
+
+    case 'team_list': {
+      const list = readJsonSafe(TEAM_FILE, []);
+      return (Array.isArray(list) ? list : []).map(u => ({
+        username: u.username,
+        role: u.role,
+        disabled: Boolean(u.disabled),
+        created_at: u.created_at || 0,
+        last_login_at: u.last_login_at || null,
+      }));
+    }
+
+    case 'team_add': {
+      const uname = validateSafeToken(String(args?.username || '').trim(), /^[a-zA-Z0-9._-]{3,64}$/, 'username');
+      const pw = String(args?.password || '');
+      if (pw.length < 12 || Buffer.byteLength(pw, 'utf8') > 4096) {
+        throw new Error('Team member password must be at least 12 characters.');
+      }
+      const role = validateSafeToken(String(args?.role || 'read_only').toLowerCase(), /^(?:admin|operator|read_only)$/, 'role');
+      const primaryAuth = readJsonSafe(AUTH_FILE, {});
+      if (String(primaryAuth.username || '').toLowerCase() === uname.toLowerCase()) {
+        throw new Error('Username conflicts with primary administrator account.');
+      }
+      const list = Array.isArray(readJsonSafe(TEAM_FILE, [])) ? readJsonSafe(TEAM_FILE, []) : [];
+      if (list.some(u => String(u.username || '').toLowerCase() === uname.toLowerCase())) {
+        throw new Error('Team member already exists.');
+      }
+      const hashed = await hashPasswordAsync(pw);
+      const record = {
+        username: uname,
+        role,
+        password_hash: hashed.password_hash,
+        password_salt: hashed.password_salt,
+        disabled: false,
+        created_at: Math.floor(Date.now() / 1000),
+        last_login_at: null,
+      };
+      list.push(record);
+      if (!writeJsonSafe(TEAM_FILE, list)) throw new Error('Failed saving team list');
+      appendAuditEvent({ event: 'team_add', username: currentSession?.username || 'admin', target: uname, role, status: 'ok' });
+      return { username: record.username, role: record.role, disabled: false, created_at: record.created_at, last_login_at: null };
+    }
+
+    case 'team_set_role': {
+      const uname = String(args?.username || '').trim();
+      const role = validateSafeToken(String(args?.role || '').toLowerCase(), /^(?:admin|operator|read_only)$/, 'role');
+      const list = Array.isArray(readJsonSafe(TEAM_FILE, [])) ? readJsonSafe(TEAM_FILE, []) : [];
+      const target = list.find(u => String(u.username || '').toLowerCase() === uname.toLowerCase());
+      if (!target) return false;
+      target.role = role;
+      if (args?.disabled !== undefined) target.disabled = Boolean(args.disabled);
+      writeJsonSafe(TEAM_FILE, list);
+      appendAuditEvent({ event: 'team_set_role', username: currentSession?.username || 'admin', target: target.username, role, status: 'ok' });
+      return true;
+    }
+
+    case 'team_remove': {
+      const uname = String(args?.username || '').trim();
+      const list = Array.isArray(readJsonSafe(TEAM_FILE, [])) ? readJsonSafe(TEAM_FILE, []) : [];
+      const next = list.filter(u => String(u.username || '').toLowerCase() !== uname.toLowerCase());
+      if (next.length === list.length) return false;
+      writeJsonSafe(TEAM_FILE, next);
+      appendAuditEvent({ event: 'team_remove', username: currentSession?.username || 'admin', target: uname, status: 'ok' });
+      return true;
+    }
+
+    case 'sso_get_config': {
+      return readJsonSafe(SSO_FILE, {
+        enabled: false,
+        provider_name: 'OIDC Identity Provider',
+        issuer_url: '',
+        client_id: '',
+        redirect_uri: '',
+        default_role: 'read_only',
+      });
+    }
+
+    case 'sso_set_config': {
+      const cfg = args?.config || args || {};
+      const enabled = Boolean(cfg.enabled);
+      const issuerUrl = String(cfg.issuer_url || cfg.issuerUrl || '').trim();
+      if (enabled && !issuerUrl.startsWith('https://')) {
+        throw new Error('SSO OIDC Issuer URL must use https:// when enabled.');
+      }
+      const defaultRole = validateSafeToken(String(cfg.default_role || cfg.defaultRole || 'read_only').toLowerCase(), /^(?:admin|operator|read_only)$/, 'default_role');
+      const next = {
+        enabled,
+        provider_name: String(cfg.provider_name || cfg.providerName || 'OIDC Identity Provider').trim().slice(0, 64),
+        issuer_url: issuerUrl,
+        client_id: String(cfg.client_id || cfg.clientId || '').trim().slice(0, 256),
+        redirect_uri: String(cfg.redirect_uri || cfg.redirectUri || '').trim().slice(0, 512),
+        default_role: defaultRole,
+      };
+      if (!writeJsonSafe(SSO_FILE, next)) throw new Error('Failed persisting SSO config.');
+      appendAuditEvent({ event: 'sso_set_config', username: currentSession?.username || 'admin', target: issuerUrl, status: 'ok' });
+      return next;
+    }
+
+    case 'approval_request': {
+      const action = String(args?.action || '').trim();
+      const target = String(args?.target || '').trim();
+      if (!action || action.length > 64 || !target || target.length > 256) {
+        throw new Error('Invalid approval action or target.');
+      }
+      const list = Array.isArray(readJsonSafe(APPROVALS_FILE, [])) ? readJsonSafe(APPROVALS_FILE, []) : [];
+      const rec = {
+        id: crypto.randomUUID(),
+        action,
+        target,
+        reason: String(args?.reason || '').trim().slice(0, 256),
+        requested_by: currentSession?.username || 'user',
+        status: 'pending',
+        decided_by: null,
+        created_at: new Date().toISOString(),
+        decided_at: null,
+      };
+      list.push(rec);
+      writeJsonSafe(APPROVALS_FILE, list.slice(-500));
+      appendAuditEvent({ event: 'approval_request', username: rec.requested_by, target, action, status: 'pending' });
+      return rec;
+    }
+
+    case 'approval_list': {
+      const list = readJsonSafe(APPROVALS_FILE, []);
+      return Array.isArray(list) ? [...list].reverse() : [];
+    }
+
+    case 'approval_decide': {
+      const id = String(args?.id || '').trim();
+      const decision = validateSafeToken(String(args?.decision || '').toLowerCase(), /^(?:approved|rejected)$/, 'decision');
+      const list = Array.isArray(readJsonSafe(APPROVALS_FILE, [])) ? readJsonSafe(APPROVALS_FILE, []) : [];
+      const item = list.find(x => x.id === id);
+      if (!item) return null;
+      item.status = decision;
+      item.decided_by = currentSession?.username || 'admin';
+      item.decided_at = new Date().toISOString();
+      writeJsonSafe(APPROVALS_FILE, list);
+      appendAuditEvent({ event: 'approval_decide', username: item.decided_by, target: item.target, action: item.action, status: decision });
+      return item;
+    }
+
+    case 'recordings_list': {
+      const idxPath = path.join(RECORDINGS_DIR, 'index.json');
+      const list = readJsonSafe(idxPath, []);
+      return Array.isArray(list) ? [...list].reverse() : [];
+    }
+
+    case 'recordings_save': {
+      const contentCast = String(args?.content_cast || args?.contentCast || '');
+      if (!contentCast || Buffer.byteLength(contentCast, 'utf8') > 10 * 1024 * 1024) {
+        throw new Error('Session recording empty or exceeds 10 MiB limit.');
+      }
+      if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR, { recursive: true, mode: 0o700 });
+      const id = crypto.randomUUID();
+      const castPath = path.join(RECORDINGS_DIR, `${id}.cast`);
+      fs.writeFileSync(castPath, contentCast, { encoding: 'utf8', mode: 0o600 });
+      const meta = {
+        id,
+        title: String(args?.title || 'SSH Terminal Recording').trim().slice(0, 128),
+        host: String(args?.host || 'unknown').trim().slice(0, 128),
+        bytes: Buffer.byteLength(contentCast, 'utf8'),
+        created_at: new Date().toISOString(),
+      };
+      const idxPath = path.join(RECORDINGS_DIR, 'index.json');
+      const idx = Array.isArray(readJsonSafe(idxPath, [])) ? readJsonSafe(idxPath, []) : [];
+      idx.push(meta);
+      writeJsonSafe(idxPath, idx.slice(-200));
+      appendAuditEvent({ event: 'recordings_save', username: currentSession?.username || 'user', target: meta.host, bytes: meta.bytes, status: 'ok' });
+      return meta;
+    }
+
+    case 'recordings_get': {
+      const id = validateSafeToken(String(args?.id || '').trim(), /^[a-zA-Z0-9-]{8,64}$/, 'recording id');
+      const castPath = path.join(RECORDINGS_DIR, `${id}.cast`);
+      if (!fs.existsSync(castPath)) throw new Error('Recording not found.');
+      return fs.readFileSync(castPath, 'utf8');
+    }
+
+    case 'ssh_rotate_server_key': {
+      if (!entry) throw new Error('No active SSH connection.');
+      const rawName = String(args?.filename || `id_ed25519_rot_${Date.now()}`).trim();
+      const safeName = validateSafeToken(rawName, /^[a-zA-Z0-9._-]{1,64}$/, 'filename');
+      const privPath = path.join(KEYS_DIR, safeName);
+      const pubPath = `${privPath}.pub`;
+      const comment = String(args?.comment || 'sshdesktop-rotated').replace(/[\r\n\0]/g, '').slice(0, 128);
+      const passphrase = String(args?.passphrase || '');
+      child_process.execFileSync('ssh-keygen', ['-t', 'ed25519', '-C', comment, '-N', passphrase, '-f', privPath], { stdio: 'pipe', timeout: 15000 });
+      try { fs.chmodSync(privPath, 0o600); } catch {}
+      const pubContent = fs.readFileSync(pubPath, 'utf8').trim();
+      let fp = '';
+      try { fp = child_process.execFileSync('ssh-keygen', ['-lf', pubPath], { encoding: 'utf8' }).trim().split(/\s+/)[1] || ''; } catch {}
+      const installCmd = `mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qxF -- ${shellQuote(pubContent)} ~/.ssh/authorized_keys || printf '%s\\n' ${shellQuote(pubContent)} >> ~/.ssh/authorized_keys)`;
+      const instRes = await runRemoteExec(entry.client, installCmd);
+      if (instRes.exit_code !== 0) throw new Error(instRes.stderr || 'Failed to install rotated SSH public key');
+      const oldPub = String(args?.old_public_key || args?.oldPublicKey || '').trim();
+      if (oldPub && oldPub !== pubContent && !/[\r\n\0]/.test(oldPub)) {
+        await runRemoteExec(entry.client, `if [ -f ~/.ssh/authorized_keys ]; then grep -vxF -- ${shellQuote(oldPub)} ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys; fi`);
+      }
+      appendAuditEvent({ event: 'ssh_rotate_server_key', username: currentSession?.username || 'admin', target: safeName, status: 'ok' });
+      return { private_key_path: privPath, public_key_path: pubPath, public_key_content: pubContent, fingerprint_sha256: fp };
+    }
+
     case 'audit_get_logs': {
       const limit = validateInt(args?.limit ?? 200, 1, 2000, 'limit');
       if (!fs.existsSync(AUDIT_LOG_FILE)) return [];
@@ -2186,11 +2866,19 @@ async function handleInvokeCommand(cmd, args, currentSession = null, clientIp = 
           native_webview_window: false,
           putty_launch: false,
           keyring_vault: true,
+          vault_rotation: true,
           socks5_auth: true,
           local_fs: process.env.SSHDESKTOP_ENABLE_LOCAL_FS === 'true',
           audit_log: true,
           rbac_policy: true,
           config_backup: true,
+          mfa_totp: true,
+          scoped_api_tokens: true,
+          team_management: true,
+          command_approvals: true,
+          session_recording: true,
+          ssh_key_rotation: true,
+          oidc_sso: true,
         },
         db_engines: {
           postgresql: false,
@@ -2969,12 +3657,26 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
 
     case 'process_kill': {
       if (!entry) return;
-      const pid = validateInt(args?.pid, 1, 4194304, 'PID');
+      const pid = validateInt(args?.pid, 2, 4194304, 'PID');
       const rawSig = args?.signal ?? 9;
       const sig = typeof rawSig === 'number'
         ? validateInt(rawSig, 1, 64, 'signal')
         : validateSafeToken(rawSig, /^(?:[1-9]|[1-5]\d|6[0-4]|SIG[A-Z0-9]+|[A-Z0-9]+)$/, 'signal');
-      await runRemotePrivExec(entry, `kill -${sig} ${pid}`);
+      const expRaw = String(args?.expectedName || args?.expected_name || '').trim();
+      const expBase = expRaw ? expRaw.split('/').pop()?.trim() : '';
+      let cmd = `kill -${sig} ${pid}`;
+      if (expBase && expBase.length <= 128 && !/[\x00-\x1f\x7f]/.test(expBase)) {
+        const qExp = shellQuote(expBase);
+        cmd = `ACTUAL_COMM=$(ps -p ${pid} -o comm= 2>/dev/null | head -n1 | xargs); ` +
+          `if [ -z "$ACTUAL_COMM" ]; then echo 'PROCESS_IDENTITY_MISMATCH: PID ${pid} is no longer running.' >&2; exit 6; fi; ` +
+          `if [ "$ACTUAL_COMM" != ${qExp} ] && ! echo "$ACTUAL_COMM" | grep -qF -- ${qExp}; then ` +
+          `echo "PROCESS_IDENTITY_MISMATCH: PID ${pid} now belongs to '$ACTUAL_COMM' (expected ${expBase})." >&2; exit 6; fi && kill -${sig} ${pid}`;
+      }
+      const res = await runRemotePrivExec(entry, cmd);
+      if (res.exit_code !== 0) {
+        throw new Error(res.stderr || res.stdout || `Failed to signal PID ${pid}`);
+      }
+      appendAuditEvent({ event: 'process_kill', username: currentSession?.username || '', ip: clientIp, target: `pid:${pid}`, signal: String(sig), status: 'ok' });
       return;
     }
 
@@ -3285,16 +3987,24 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       } else if (fw.includes('firewalld')) {
         cmd = enable ? 'systemctl enable --now firewalld 2>&1 && firewall-cmd --state 2>&1' : 'systemctl stop firewalld 2>&1 && (firewall-cmd --state 2>&1 || echo "not running")';
       } else if (fw.includes('nftables')) {
-        cmd = enable ? 'systemctl enable --now nftables 2>&1 && nft list tables 2>&1' : 'systemctl stop nftables 2>&1';
+        cmd = enable ? 'systemctl enable --now nftables 2>&1 && systemctl is-active nftables 2>&1 && nft list tables 2>&1' : 'systemctl stop nftables 2>&1 && (systemctl is-active nftables 2>&1 || true)';
       } else if (fw.includes('iptables')) {
         cmd = enable
-          ? 'if systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl enable --now iptables 2>&1; elif systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then systemctl enable --now netfilter-persistent 2>&1; else echo "Raw iptables has no unified service daemon." >&2; exit 1; fi'
-          : 'if systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl stop iptables 2>&1; elif systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then systemctl stop netfilter-persistent 2>&1; else echo "Raw iptables cannot be safely disabled via service stop." >&2; exit 1; fi';
+          ? 'if systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl enable --now iptables 2>&1 && systemctl is-active iptables 2>&1; elif systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then systemctl enable --now netfilter-persistent 2>&1 && systemctl is-active netfilter-persistent 2>&1; else echo "Raw iptables has no unified service daemon." >&2; exit 1; fi'
+          : 'if systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl stop iptables 2>&1 && (systemctl is-active iptables 2>&1 || true); elif systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then systemctl stop netfilter-persistent 2>&1 && (systemctl is-active netfilter-persistent 2>&1 || true); else echo "Raw iptables cannot be safely disabled via service stop." >&2; exit 1; fi';
       } else {
         throw new Error('No supported firewall backend (ufw, firewalld, nftables, iptables) is installed.');
       }
       const res = await runRemotePrivExec(entry, cmd);
       if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to toggle firewall');
+      const lowOut = String(res.stdout || '').toLowerCase();
+      const verified =
+        (fw.includes('ufw') && (enable ? lowOut.includes('status: active') : lowOut.includes('inactive'))) ||
+        (fw.includes('firewalld') && (enable ? (lowOut.includes('running') && !lowOut.includes('not running')) : lowOut.includes('not running'))) ||
+        ((fw.includes('nftables') || fw.includes('iptables')) && (enable ? lowOut.split(/\r?\n/).some(l => l.trim() === 'active') : !lowOut.split(/\r?\n/).some(l => l.trim() === 'active')));
+      if (!verified) {
+        throw new Error(`Firewall '${fw}' toggle did not verify expected ${enable ? 'active' : 'inactive'} state: ${res.stdout}`);
+      }
       appendAuditEvent({ event: 'firewall_toggle', username: currentSession?.username || '', ip: clientIp, backend: fw, enable, status: 'ok' });
       return res.stdout || 'Firewall toggled';
     }
@@ -3304,9 +4014,9 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       const detectRes = await runRemoteExec(entry.client, "if command -v ufw >/dev/null 2>&1; then echo 'ufw'; elif command -v firewall-cmd >/dev/null 2>&1; then echo 'firewalld'; elif command -v nft >/dev/null 2>&1; then echo 'nftables'; elif command -v iptables >/dev/null 2>&1; then echo 'iptables'; else echo 'none'; fi");
       const fw = (detectRes.stdout || '').trim().toLowerCase();
       let cmd = '';
-      if (fw.includes('firewalld')) cmd = 'firewall-cmd --reload 2>&1';
-      else if (fw.includes('ufw')) cmd = 'ufw reload 2>&1';
-      else if (fw.includes('nftables')) cmd = 'nft -c -f /etc/nftables.conf 2>&1 && systemctl reload nftables 2>&1';
+      if (fw.includes('firewalld')) cmd = 'firewall-cmd --reload 2>&1 && firewall-cmd --state 2>&1';
+      else if (fw.includes('ufw')) cmd = 'ufw reload 2>&1 && ufw status | head -n 1';
+      else if (fw.includes('nftables')) cmd = 'nft -c -f /etc/nftables.conf 2>&1 && systemctl reload nftables 2>&1 && systemctl is-active nftables 2>&1';
       else if (fw.includes('iptables')) cmd = 'if command -v netfilter-persistent >/dev/null 2>&1; then netfilter-persistent reload 2>&1; elif systemctl list-unit-files iptables.service >/dev/null 2>&1; then systemctl reload iptables 2>&1; else echo "No persistent iptables reload helper found." >&2; exit 1; fi';
       else throw new Error('No supported firewall backend is installed on this host.');
       const res = await runRemotePrivExec(entry, cmd);
@@ -3322,9 +4032,28 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       if (!entry) return '';
       const payload = args?.payload || args || {};
       const port = validateInt(payload.port || payload.to_port, 1, 65535, 'port');
-      const proto = validateSafeToken(payload.protocol || 'tcp', /^(?:tcp|udp)$/i, 'protocol').toLowerCase();
+      const proto = validateSafeToken(payload.protocol || 'tcp', /^(?:tcp|udp|any)$/i, 'protocol').toLowerCase();
       const action = validateSafeToken(payload.action || 'allow', /^(?:allow|deny|reject|limit)$/i, 'action').toLowerCase();
-      const res = await runRemotePrivExec(entry, `ufw ${action} ${port}/${proto} 2>&1 || firewall-cmd --permanent --add-port=${port}/${proto} 2>&1`);
+      const detectRes = await runRemoteExec(entry.client, "if command -v ufw >/dev/null 2>&1; then echo 'ufw'; elif command -v firewall-cmd >/dev/null 2>&1; then echo 'firewalld'; elif command -v nft >/dev/null 2>&1; then echo 'nftables'; elif command -v iptables >/dev/null 2>&1; then echo 'iptables'; else echo 'none'; fi");
+      const fw = payload.backend ? validateSafeToken(payload.backend, /^(?:ufw|firewalld|iptables|nftables)$/i, 'backend').toLowerCase() : (detectRes.stdout || '').trim().toLowerCase();
+      let cmd = '';
+      if (fw.includes('ufw')) {
+        cmd = `${proto === 'any' ? `ufw ${action} ${port}` : `ufw ${action} ${port}/${proto}`} 2>&1 && ufw status | head -n 15 2>&1`;
+      } else if (fw.includes('firewalld')) {
+        if (action !== 'allow') throw new Error(`firewalld port rule helper only supports 'allow'; use rich rules for '${action}'.`);
+        cmd = proto === 'any'
+          ? `firewall-cmd --permanent --add-port=${port}/tcp 2>&1 && firewall-cmd --permanent --add-port=${port}/udp 2>&1 && firewall-cmd --reload 2>&1 && firewall-cmd --list-ports 2>&1`
+          : `firewall-cmd --permanent --add-port=${port}/${proto} 2>&1 && firewall-cmd --reload 2>&1 && firewall-cmd --list-ports 2>&1`;
+      } else if (fw.includes('iptables')) {
+        const target = action === 'allow' ? 'ACCEPT' : action === 'reject' ? 'REJECT' : 'DROP';
+        const ipProto = proto === 'any' ? 'tcp' : proto;
+        cmd = `iptables -A INPUT -p ${ipProto} --dport ${port} -j ${target} 2>&1 && iptables -L INPUT -n --line-numbers | head -n 15 2>&1`;
+      } else {
+        throw new Error(`Adding rules is not supported on backend '${fw}' in web mode.`);
+      }
+      const res = await runRemotePrivExec(entry, cmd);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to add firewall rule');
+      appendAuditEvent({ event: 'firewall_add_rule', username: currentSession?.username || '', ip: clientIp, backend: fw, port, proto, action, status: 'ok' });
       return res.stdout || 'Rule added';
     }
 
@@ -3332,20 +4061,27 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       if (!entry) return '';
       const ruleNum = args?.rule_number || args?.ruleNumber;
       const rawPort = args?.port;
-      const proto = validateSafeToken(args?.protocol || 'tcp', /^(?:tcp|udp)$/i, 'protocol').toLowerCase();
+      const proto = validateSafeToken(args?.protocol || 'tcp', /^(?:tcp|udp|any)$/i, 'protocol').toLowerCase();
+      const detectRes = await runRemoteExec(entry.client, "if command -v ufw >/dev/null 2>&1; then echo 'ufw'; elif command -v firewall-cmd >/dev/null 2>&1; then echo 'firewalld'; elif command -v nft >/dev/null 2>&1; then echo 'nftables'; elif command -v iptables >/dev/null 2>&1; then echo 'iptables'; else echo 'none'; fi");
+      const fw = args?.backend ? validateSafeToken(args.backend, /^(?:ufw|firewalld|iptables|nftables)$/i, 'backend').toLowerCase() : (detectRes.stdout || '').trim().toLowerCase();
       let cmd = '';
-      if (ruleNum) {
+      if (fw.includes('ufw')) {
         const num = validateInt(ruleNum, 1, 100000, 'rule number');
-        cmd = `ufw --force delete ${num} 2>&1`;
+        cmd = `echo y | ufw delete ${num} 2>&1 && ufw status | head -n 15 2>&1`;
+      } else if (fw.includes('firewalld')) {
+        const port = validateInt(rawPort, 1, 65535, 'port');
+        cmd = proto === 'any'
+          ? `c1=0; firewall-cmd --permanent --remove-port=${port}/tcp 2>&1 || c1=$?; c2=0; firewall-cmd --permanent --remove-port=${port}/udp 2>&1 || c2=$?; [ $c1 -eq 0 ] || [ $c2 -eq 0 ] || exit 1; firewall-cmd --reload 2>&1 && firewall-cmd --list-ports 2>&1`
+          : `firewall-cmd --permanent --remove-port=${port}/${proto} 2>&1 && firewall-cmd --reload 2>&1 && firewall-cmd --list-ports 2>&1`;
+      } else if (fw.includes('iptables')) {
+        const num = validateInt(ruleNum, 1, 100000, 'rule number');
+        cmd = `iptables -D INPUT ${num} 2>&1 && iptables -L INPUT -n --line-numbers | head -n 15 2>&1`;
       } else {
-        const port = validateInt(rawPort, 1, 65535, 'port');
-        cmd = `ufw delete allow ${port}/${proto} 2>&1`;
-      }
-      if (rawPort) {
-        const port = validateInt(rawPort, 1, 65535, 'port');
-        cmd += ` || firewall-cmd --permanent --remove-port=${port}/${proto} 2>&1`;
+        throw new Error(`Deleting rules is not supported on backend '${fw}' in web mode.`);
       }
       const res = await runRemotePrivExec(entry, cmd);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to delete firewall rule');
+      appendAuditEvent({ event: 'firewall_delete_rule', username: currentSession?.username || '', ip: clientIp, backend: fw, ruleNum, status: 'ok' });
       return res.stdout || 'Rule deleted';
     }
 
@@ -3606,6 +4342,25 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
         throw new Error(res.stderr || res.stdout || `Failed to remove package '${pkg}'`);
       }
       return res.stdout || res.stderr;
+    }
+
+    case 'package_preview': {
+      if (!entry) return '';
+      const pkg = validateSafeToken(args?.name, /^[a-zA-Z0-9.+_:@=-]{1,128}$/, 'package name');
+      const action = validateSafeToken(String(args?.action || 'install').toLowerCase(), /^(?:install|remove)$/, 'action');
+      const pm = await detectPkgManager(entry.client);
+      const qPkg = shellQuote(pkg);
+      let cmd = '';
+      if (pm === 'apt') cmd = `DEBIAN_FRONTEND=noninteractive apt-get -s ${action} ${qPkg} 2>&1`;
+      else if (pm === 'dnf') cmd = `dnf ${action} --assumeno ${qPkg} 2>&1 || true`;
+      else if (pm === 'yum') cmd = `yum ${action} --assumeno ${qPkg} 2>&1 || true`;
+      else if (pm === 'pacman') cmd = action === 'install' ? `pacman -Sp --print-format '%n %v %s' ${qPkg} 2>&1` : `pacman -Rsp --print-format '%n %v %s' ${qPkg} 2>&1`;
+      else if (pm === 'zypper') cmd = `zypper --non-interactive ${action === 'install' ? 'install' : 'rm'} --dry-run ${qPkg} 2>&1`;
+      else if (pm === 'apk') cmd = `apk ${action === 'install' ? 'add' : 'del'} --simulate ${qPkg} 2>&1`;
+      else throw new Error(`Dependency simulation preview unsupported for '${pm}'`);
+
+      const res = await runRemotePrivExec(entry, cmd, 60000);
+      return res.stdout || res.stderr || `No additional dependency changes reported for ${pkg}.`;
     }
 
     case 'package_update': {
@@ -3895,7 +4650,13 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       if (!schedule || !command || /[\r\n\0]/.test(schedule) || /[\r\n\0]/.test(command)) {
         throw new Error('Invalid cron schedule or command');
       }
-      await runRemoteExec(entry.client, `(crontab -l 2>/dev/null; printf '%s\\n' ${shellQuote(`${schedule} ${command}`)}) | crontab -`);
+      const updateCmd = `(crontab -l 2>/dev/null; printf '%s\\n' ${shellQuote(`${schedule} ${command}`)}) | crontab -`;
+      const wrapped = `LOCK_FILE="/tmp/.sshdesktop_cron_$(id -u).lock"; BAK_FILE="$HOME/.sshdesktop_crontab.bak"; ` +
+        `run_u() { (crontab -l 2>/dev/null > "$BAK_FILE" || true); ${updateCmd}; }; ` +
+        `if command -v flock >/dev/null 2>&1; then (flock -w 5 9 || { echo 'CRON_LOCK_TIMEOUT' >&2; exit 4; }; run_u) 9>"$LOCK_FILE"; else run_u; fi`;
+      const res = await runRemoteExec(entry.client, wrapped);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to add cron entry');
+      appendAuditEvent({ event: 'cron_add', username: currentSession?.username || '', ip: clientIp, status: 'ok' });
       return;
     }
 
@@ -3903,8 +4664,22 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
       if (!entry) return;
       const cmdToRemove = (args?.command || '').trim();
       if (!cmdToRemove || /[\r\n\0]/.test(cmdToRemove)) throw new Error('Invalid cron pattern');
-      await runRemoteExec(entry.client, `crontab -l 2>/dev/null | grep -vF -- ${shellQuote(cmdToRemove)} | crontab -`);
+      const updateCmd = `crontab -l 2>/dev/null | grep -vF -- ${shellQuote(cmdToRemove)} | crontab -`;
+      const wrapped = `LOCK_FILE="/tmp/.sshdesktop_cron_$(id -u).lock"; BAK_FILE="$HOME/.sshdesktop_crontab.bak"; ` +
+        `run_u() { (crontab -l 2>/dev/null > "$BAK_FILE" || true); ${updateCmd}; }; ` +
+        `if command -v flock >/dev/null 2>&1; then (flock -w 5 9 || { echo 'CRON_LOCK_TIMEOUT' >&2; exit 4; }; run_u) 9>"$LOCK_FILE"; else run_u; fi`;
+      const res = await runRemoteExec(entry.client, wrapped);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to remove cron entry');
+      appendAuditEvent({ event: 'cron_remove', username: currentSession?.username || '', ip: clientIp, status: 'ok' });
       return;
+    }
+
+    case 'cron_rollback': {
+      if (!entry) return '';
+      const res = await runRemoteExec(entry.client, 'BAK="$HOME/.sshdesktop_crontab.bak"; if [ ! -f "$BAK" ]; then echo "No crontab backup snapshot found." >&2; exit 2; fi; crontab "$BAK" && echo "Crontab restored from previous snapshot."');
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to restore crontab snapshot');
+      appendAuditEvent({ event: 'cron_rollback', username: currentSession?.username || '', ip: clientIp, status: 'ok' });
+      return res.stdout.trim();
     }
 
     // ==========================================
@@ -4494,15 +5269,37 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
         return true;
       }
       const textContent = String(args?.content ?? '');
+      const expectedHash = String(args?.expectedHash || args?.expected_hash || '').trim().toLowerCase();
+      if (expectedHash && /^[a-f0-9]{64}$/.test(expectedHash)) {
+        const hashCheck = await runRemoteExec(entry.client, `(sha256sum ${shellQuote(targetPath)} 2>/dev/null || shasum -a 256 ${shellQuote(targetPath)} 2>/dev/null) | awk '{print $1}'`);
+        const remoteHash = (hashCheck.stdout || '').trim().toLowerCase();
+        if (remoteHash && remoteHash !== expectedHash) {
+          throw new Error('CONFLICT_DETECTED: Remote file changed on disk since it was opened.');
+        }
+      }
       const buf = Buffer.from(textContent, 'utf8');
       if (buf.length > 48 * 1024 * 1024) throw new Error('Upload exceeds 48 MiB limit');
       try {
         let sftp = entry.sftp || await getSftp(entry.client);
+        const dirName = path.posix.dirname(targetPath);
+        const baseName = path.posix.basename(targetPath);
+        const atomicTmp = `${dirName}/.${baseName}.sshdesktop_${crypto.randomBytes(6).toString('hex')}.tmp`;
         await new Promise((resolve, reject) => {
-          const stream = sftp.createWriteStream(targetPath, { flags: 'w' });
+          const stream = sftp.createWriteStream(atomicTmp, { flags: 'w' });
           stream.on('close', () => resolve());
           stream.on('error', err => reject(err));
           stream.end(buf);
+        });
+        await new Promise((resolve, reject) => {
+          sftp.rename(atomicTmp, targetPath, (err) => {
+            if (err) {
+              // Some SFTP servers don't overwrite on rename; unlink+rename or clean up temp
+              sftp.unlink(atomicTmp, () => {});
+              reject(err);
+            } else {
+              resolve();
+            }
+          });
         });
         appendAuditEvent({ event: 'sftp_write', target: targetPath, bytes: buf.length, status: 'ok' });
         return true;
@@ -4895,6 +5692,28 @@ curl -4s --connect-timeout 2 https://api.ipify.org 2>/dev/null || curl -4s --con
         }
       }
       writeJsonSafe(CONNECTIONS_FILE, list.filter(c => c.id !== connId));
+      return true;
+    }
+
+    case 'store_update_connection': {
+      const conn = args?.connection || args;
+      if (!conn || !conn.id) return false;
+      const list = readJsonSafe(CONNECTIONS_FILE, []);
+      const idx = list.findIndex(c => c.id === conn.id);
+      if (idx === -1) return false;
+      const sanitized = { ...list[idx], ...conn };
+      const rawKey = sanitized.private_key || sanitized.privateKey;
+      if (rawKey && typeof rawKey === 'string' && rawKey.trim()) {
+        const savedPath = ensureKeyFile(sanitized.id, rawKey);
+        if (savedPath) {
+          sanitized.privateKeyPath = savedPath;
+          sanitized.private_key_path = savedPath;
+        }
+      }
+      delete sanitized.private_key;
+      delete sanitized.privateKey;
+      list[idx] = sanitized;
+      writeJsonSafe(CONNECTIONS_FILE, list);
       return true;
     }
 
@@ -5341,9 +6160,232 @@ done
       }
     }
 
+    case 'db_get_capabilities': {
+      return {
+        engine: 'web-unavailable',
+        server_version: '',
+        supports_transactions: false,
+        supports_schemas: false,
+        supports_procedures: false,
+        supports_functions: false,
+        supports_triggers: false,
+        supports_views: false,
+        supports_indexes: false,
+        supports_roles: false,
+        supports_explain: false,
+        supports_export: false,
+        note: 'Direct DB drivers execute in Desktop (Tauri) mode; web server mode provides SSH tunnels and vaulted connection profiles.',
+      };
+    }
+
+    case 'sftp_read_file': {
+      const targetPath = String(args?.path || '').trim();
+      if (!targetPath) throw new Error('Missing remote path');
+      if (!entry || !entry.client) {
+        if (process.env.SSHDESKTOP_ENABLE_LOCAL_FS !== 'true') {
+          throw new Error('No active SSH connection. Local host filesystem access is disabled by policy.');
+        }
+        const buf = fs.readFileSync(targetPath);
+        if (buf.length > 48 * 1024 * 1024) throw new Error('File exceeds 48 MiB limit');
+        return Array.from(buf);
+      }
+      const sftp = entry.sftp || await getSftp(entry.client);
+      const buf = await new Promise((resolve, reject) => {
+        sftp.readFile(targetPath, (err, data) => {
+          if (err) reject(err);
+          else resolve(data);
+        });
+      });
+      if (buf.length > 48 * 1024 * 1024) throw new Error('File exceeds 48 MiB limit');
+      return Array.from(buf);
+    }
+
+    case 'ssh_verify_host_key': {
+      const host = validateSafeToken(String(args?.host || '').trim(), /^[a-zA-Z0-9._:-]{1,253}$/, 'host');
+      const port = validateInt(args?.port ?? 22, 1, 65535, 'port');
+      const khPath = path.join(DATA_DIR, 'known_hosts');
+      try {
+        const scanned = child_process.execFileSync('ssh-keyscan', ['-p', String(port), '-T', '5', host], {
+          encoding: 'utf8',
+          timeout: 8000,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        const firstLine = scanned.split('\n').map(l => l.trim()).find(l => l && !l.startsWith('#'));
+        if (!firstLine) {
+          return { status: 'failed', message: `No SSH host key returned by ${host}:${port}.` };
+        }
+        const parts = firstLine.split(/\s+/);
+        const keyType = parts[1] || 'unknown';
+        const keyB64 = parts[2] || '';
+        const existing = fs.existsSync(khPath) ? fs.readFileSync(khPath, 'utf8') : '';
+        return evaluateKnownHostsContent(existing, host, port, keyType, keyB64);
+      } catch (err) {
+        return { status: 'error', message: `Host key scan failed: ${err.message}` };
+      }
+    }
+
+    case 'ssh_trust_host_key': {
+      const host = validateSafeToken(String(args?.host || '').trim(), /^[a-zA-Z0-9._:-]{1,253}$/, 'host');
+      const port = validateInt(args?.port ?? 22, 1, 65535, 'port');
+      const keyType = validateSafeToken(String(args?.keyType || args?.key_type || '').trim(), /^[a-zA-Z0-9._@-]{3,64}$/, 'keyType');
+      const pubB64 = validateSafeToken(String(args?.publicKeyB64 || args?.public_key_b64 || '').trim(), /^[A-Za-z0-9+/=]{16,4096}$/, 'publicKeyB64');
+      const khPath = path.join(DATA_DIR, 'known_hosts');
+      const hostToken = port === 22 ? host : `[${host}]:${port}`;
+      const existing = fs.existsSync(khPath) ? fs.readFileSync(khPath, 'utf8').split(/\r?\n/) : [];
+      const filtered = existing.filter(l => {
+        const t = l.trim();
+        if (!t || t.startsWith('#') || t.startsWith('@revoked') || t.startsWith('@cert-authority')) return true;
+        return !(t.split(/\s+/)[0]?.split(',').includes(hostToken));
+      });
+      filtered.push(`${hostToken} ${keyType} ${pubB64}`);
+      fs.writeFileSync(khPath, filtered.filter(Boolean).join('\n') + '\n', { encoding: 'utf8', mode: 0o600 });
+      appendAuditEvent({ event: 'ssh_trust_host_key', host: hostToken, keyType, status: 'ok' });
+      return;
+    }
+
+    case 'ssh_generate_key_pair': {
+      const rawName = String(args?.filename || `id_ed25519_${Date.now()}`).trim();
+      const safeName = validateSafeToken(rawName, /^[a-zA-Z0-9._-]{1,64}$/, 'filename');
+      const privPath = path.join(KEYS_DIR, safeName);
+      const pubPath = `${privPath}.pub`;
+      if (fs.existsSync(privPath)) {
+        throw new Error(`Key '${safeName}' already exists.`);
+      }
+      const comment = String(args?.comment || 'ssh-desktop').replace(/[\r\n\0]/g, '').slice(0, 128);
+      const passphrase = String(args?.passphrase || '');
+      child_process.execFileSync('ssh-keygen', ['-t', 'ed25519', '-C', comment, '-N', passphrase, '-f', privPath], {
+        stdio: 'pipe',
+        timeout: 15000,
+      });
+      try { fs.chmodSync(privPath, 0o600); } catch {}
+      const pubContent = fs.existsSync(pubPath) ? fs.readFileSync(pubPath, 'utf8').trim() : '';
+      let fp = '';
+      try {
+        fp = child_process.execFileSync('ssh-keygen', ['-lf', pubPath], { encoding: 'utf8' }).trim().split(/\s+/)[1] || '';
+      } catch {}
+      return {
+        private_key_path: privPath,
+        public_key_path: pubPath,
+        public_key_content: pubContent,
+        fingerprint_sha256: fp,
+      };
+    }
+
+    case 'ssh_list_local_keys': {
+      if (!fs.existsSync(KEYS_DIR)) return [];
+      const entries = fs.readdirSync(KEYS_DIR);
+      return entries
+        .filter(name => !name.endsWith('.pub') && !name.startsWith('.'))
+        .map(name => {
+          const full = path.join(KEYS_DIR, name);
+          const hasPub = fs.existsSync(`${full}.pub`);
+          return {
+            filename: name,
+            full_path: full,
+            has_public: hasPub,
+            key_type: name.includes('rsa') ? 'rsa' : 'ed25519',
+          };
+        });
+    }
+
+    case 'ssh_install_public_key': {
+      if (!entry) throw new Error('No active SSH connection.');
+      const pubKey = String(args?.publicKey || args?.public_key || '').trim();
+      if (!pubKey || /[\r\n\0]/.test(pubKey) || !/^(?:ssh-|ecdsa-|sk-)/.test(pubKey)) {
+        throw new Error('Invalid SSH public key format.');
+      }
+      const cmd = `mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && ` +
+        `(grep -qxF -- ${shellQuote(pubKey)} ~/.ssh/authorized_keys || printf '%s\\n' ${shellQuote(pubKey)} >> ~/.ssh/authorized_keys)`;
+      const res = await runRemoteExec(entry.client, cmd);
+      if (res.exit_code !== 0) throw new Error(res.stderr || res.stdout || 'Failed to install public key');
+      return 'Public key installed in ~/.ssh/authorized_keys';
+    }
+
+    case 'ssh_config_get_path': {
+      return path.join(os.homedir(), '.ssh', 'config');
+    }
+
+    case 'ssh_config_read_hosts': {
+      const cfgPath = path.join(os.homedir(), '.ssh', 'config');
+      if (!fs.existsSync(cfgPath)) return [];
+      const raw = fs.readFileSync(cfgPath, 'utf8');
+      const hosts = [];
+      let current = null;
+      for (const line of raw.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const m = trimmed.match(/^([A-Za-z]+)\s+(.+)$/);
+        if (!m) continue;
+        const key = m[1].toLowerCase();
+        const val = m[2].trim();
+        if (key === 'host') {
+          if (current) hosts.push(current);
+          current = { host: val };
+        } else if (current) {
+          if (key === 'hostname') current.hostname = val;
+          else if (key === 'user') current.user = val;
+          else if (key === 'port') current.port = parseInt(val, 10) || 22;
+          else if (key === 'identityfile') current.identity_file = val;
+          else if (key === 'proxyjump') current.proxy_jump = val;
+        }
+      }
+      if (current) hosts.push(current);
+      return hosts;
+    }
+
+    case 'ssh_config_save_host': {
+      const hostObj = args?.host || {};
+      const alias = validateSafeToken(String(hostObj.host || '').trim(), /^[a-zA-Z0-9._*-]{1,128}$/, 'host');
+      const sshDir = path.join(os.homedir(), '.ssh');
+      if (!fs.existsSync(sshDir)) fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 });
+      const cfgPath = path.join(sshDir, 'config');
+      const block = [
+        `Host ${alias}`,
+        hostObj.hostname ? `  HostName ${String(hostObj.hostname).replace(/[\r\n]/g, '')}` : null,
+        hostObj.user ? `  User ${String(hostObj.user).replace(/[\r\n]/g, '')}` : null,
+        hostObj.port ? `  Port ${validateInt(hostObj.port, 1, 65535, 'port')}` : null,
+        hostObj.identity_file ? `  IdentityFile ${String(hostObj.identity_file).replace(/[\r\n]/g, '')}` : null,
+        hostObj.proxy_jump ? `  ProxyJump ${String(hostObj.proxy_jump).replace(/[\r\n]/g, '')}` : null,
+      ].filter(Boolean).join('\n') + '\n\n';
+      fs.appendFileSync(cfgPath, block, { encoding: 'utf8', mode: 0o600 });
+      return;
+    }
+
+    case 'db_connect':
+    case 'db_disconnect':
+    case 'db_test_connection':
+    case 'db_execute_query':
+    case 'db_list_tables':
+    case 'db_get_table_columns':
+    case 'redis_scan_keys':
+    case 'redis_get_value':
+    case 'redis_set_value':
+    case 'redis_delete_key':
+    case 'mongodb_list_collections':
+    case 'mongodb_find_documents':
+    case 'mongodb_insert_document':
+    case 'db_execute_operation':
+    case 'db_get_object_definition':
+    case 'sftp_download':
+    case 'sftp_download_to_downloads':
+    case 'sftp_upload':
+    case 'ssh_agent_get_status':
+    case 'ssh_exec_stream':
+    case 'ssh_exec_stop':
+    case 'logs_stream_start':
+    case 'logs_stream_stop':
+    case 'app_request_shutdown': {
+      const err = new Error(`UNSUPPORTED_IN_WEB_MODE: Command '${cmd}' requires the native Desktop (Tauri) runtime.`);
+      err.code = 'UNSUPPORTED_IN_WEB_MODE';
+      err.statusCode = 501;
+      throw err;
+    }
+
     default: {
-      console.log(`[SSH Desktop Web IPC] Unhandled command: '${cmd}'`);
-      return null;
+      const err = new Error(`UNKNOWN_COMMAND: Unrecognized IPC command '${cmd}'.`);
+      err.code = 'UNKNOWN_COMMAND';
+      err.statusCode = 400;
+      throw err;
     }
   }
 }
@@ -6570,6 +7612,46 @@ const backendServer = http.createServer({ maxHeaderSize: 16 * 1024 }, async (req
     return;
   }
 
+  if (req.url === '/api/sso/status' && req.method === 'GET') {
+    const sso = readJsonSafe(SSO_FILE, { enabled: false, provider_name: 'OIDC Identity Provider' });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ enabled: Boolean(sso.enabled && sso.issuer_url && sso.client_id), provider_name: sso.provider_name || 'SSO' }));
+    return;
+  }
+
+  if (req.url === '/api/sso/start' && req.method === 'GET') {
+    const sso = readJsonSafe(SSO_FILE, { enabled: false });
+    if (!sso.enabled || !sso.issuer_url || !sso.client_id) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'OIDC SSO is not configured/enabled.' }));
+      return;
+    }
+    try {
+      const wellKnownUrl = `${String(sso.issuer_url).replace(/\/+$/, '')}/.well-known/openid-configuration`;
+      const discRes = await fetch(wellKnownUrl);
+      if (!discRes.ok) throw new Error(`OIDC discovery HTTP ${discRes.status}`);
+      const meta = await discRes.json();
+      if (!meta.authorization_endpoint) throw new Error('OIDC discovery missing authorization_endpoint');
+      const codeVerifier = crypto.randomBytes(32).toString('base64url');
+      const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+      const state = crypto.randomBytes(16).toString('hex');
+      const authUrl = new URL(meta.authorization_endpoint);
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('client_id', sso.client_id);
+      authUrl.searchParams.set('redirect_uri', sso.redirect_uri || `http://${req.headers.host || 'localhost:2222'}/api/sso/callback`);
+      authUrl.searchParams.set('scope', 'openid profile email');
+      authUrl.searchParams.set('state', state);
+      authUrl.searchParams.set('code_challenge', codeChallenge);
+      authUrl.searchParams.set('code_challenge_method', 'S256');
+      res.writeHead(302, { Location: authUrl.toString() });
+      res.end();
+    } catch (err) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `OIDC discovery failed: ${err.message}` }));
+    }
+    return;
+  }
+
   // Unified Web IPC Invoke Endpoint with HttpOnly Session Cookie + CSRF Protection
   if (req.url === '/api/invoke' && req.method === 'POST') {
     const reqReferer = String(req.headers['referer'] || '');
@@ -6617,7 +7699,7 @@ const backendServer = http.createServer({ maxHeaderSize: 16 * 1024 }, async (req
         const payload = JSON.parse(rawBody || '{}');
         const { cmd, args } = payload;
         const token = extractSessionToken(req, payload);
-        const session = getSession(token);
+        const session = getSession(token) || resolveApiToken(token);
         const clientIp = getClientIp(req);
 
         // Public auth commands do not require an active session
@@ -7162,10 +8244,19 @@ export {
   validateVaultKeyName,
   vaultEncryptValue,
   vaultDecryptValue,
+  vaultRotateKey,
+  base32Encode,
+  base32Decode,
+  computeTotpAt,
+  verifyTotpCode,
+  resolveApiToken,
   appendAuditEvent,
   verifyAuditChain,
   getSecurityPolicy,
   enforcePolicyPermission,
+  evaluateKnownHostsContent,
+  backendServer,
+  frontendServer,
 };
 
 // Backend is private. Only the frontend is exposed to the network.

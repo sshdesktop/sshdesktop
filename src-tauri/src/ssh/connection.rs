@@ -796,8 +796,9 @@ pub fn resolve_connection(state: &AppState, conn_id: &str) -> Option<SshConnecti
             return None;
         }
         let mut lock = state.connections.lock();
+        let was_empty = lock.is_empty();
         lock.insert(restored.id.clone(), restored.clone());
-        if conn_id == "default" || lock.get("default").is_none() {
+        if conn_id == "default" || (was_empty && lock.get("default").is_none()) {
             lock.insert("default".to_string(), restored.clone());
         }
         log::info!("SSH Desktop: Auto-restored SSH connection '{}' from disk storage into memory", conn_id);

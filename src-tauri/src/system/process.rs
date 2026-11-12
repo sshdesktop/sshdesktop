@@ -110,13 +110,36 @@ async fn process_list_aux(state: &AppState, conn_id: &str) -> Result<Vec<Process
     Ok(list)
 }
 
+fn sanitize_expected_process_name(raw: &str) -> Option<String> {
+    let base = raw.trim().rsplit('/').next().unwrap_or("").trim();
+    if base.is_empty() || base.len() > 128 || base.chars().any(|c| c.is_control() || c == '\0') {
+        return None;
+    }
+    Some(base.to_string())
+}
+
+fn build_pid_identity_guard(pid: u32, expected_name: &str) -> String {
+    let escaped = expected_name.replace('\'', r"'\''");
+    format!(
+        "ACTUAL_COMM=$(ps -p {pid} -o comm= 2>/dev/null | head -n1 | xargs); \
+         if [ -z \"$ACTUAL_COMM\" ]; then echo 'PROCESS_IDENTITY_MISMATCH: PID {pid} is no longer running.' >&2; exit 6; fi; \
+         if [ \"$ACTUAL_COMM\" != '{expected}' ] && ! echo \"$ACTUAL_COMM\" | grep -qF -- '{expected}'; then \
+           echo \"PROCESS_IDENTITY_MISMATCH: PID {pid} now belongs to '$ACTUAL_COMM' (expected '{expected}').\" >&2; exit 6; \
+         fi",
+        pid = pid,
+        expected = escaped
+    )
+}
+
 #[tauri::command]
 pub async fn process_kill(
     state: tauri::State<'_, AppState>,
     conn_id: String,
     pid: u32,
     signal: String,
+    expected_name: Option<String>,
 ) -> Result<(), String> {
+    crate::store::audit::enforce_policy_permission("process_kill")?;
     // Validate signal name to prevent injection
     let safe_signal = match signal.to_uppercase().as_str() {
         "TERM" | "SIGTERM" | "15" => "TERM",
@@ -135,17 +158,28 @@ pub async fn process_kill(
         return Err("Refusing to send signal to PID 1 (init/systemd).".into());
     }
 
+    let kill_cmd = if let Some(exp) = expected_name.as_deref().and_then(sanitize_expected_process_name) {
+        format!("{} && kill -s {} {}", build_pid_identity_guard(pid, &exp), safe_signal, pid)
+    } else {
+        format!("kill -s {} {}", safe_signal, pid)
+    };
+
     // 1. Try direct kill first
-    let (stdout, code) = run_cmd(&state, &conn_id, &format!("kill -s {} {}", safe_signal, pid)).await;
+    let (stdout, code) = run_cmd(&state, &conn_id, &kill_cmd).await;
+    if code == 6 {
+        return Err(stdout.trim().to_string());
+    }
     if code == 0 {
+        crate::store::audit::append_audit_event("process_kill", "desktop-user", &format!("pid:{}", pid), "ok", Some(safe_signal.to_string()));
         log::info!("SSH Desktop: Sent signal {} to PID {} directly", safe_signal, pid);
         return Ok(());
     }
 
     // 2. Direct kill failed (e.g. Operation not permitted for non-root user).
     // Automatically elevate with sudo using run_cmd_priv!
-    let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &format!("kill -s {} {}", safe_signal, pid)).await;
+    let (priv_out, priv_code) = run_cmd_priv(&state, &conn_id, &kill_cmd).await;
     if priv_code == 0 {
+        crate::store::audit::append_audit_event("process_kill", "desktop-user", &format!("pid:{}", pid), "ok", Some(format!("{} (sudo)", safe_signal)));
         log::info!("SSH Desktop: Sent signal {} to PID {} with sudo elevation", safe_signal, pid);
         return Ok(());
     }
@@ -183,6 +217,7 @@ pub async fn process_renice(
     pid: u32,
     value: i32,
 ) -> Result<(), String> {
+    crate::store::audit::enforce_policy_permission("process_renice")?;
     // Nice values: -20 (highest priority) to 19 (lowest)
     if value < -20 || value > 19 {
         return Err(format!("Nice value must be between -20 and 19, got {}", value));
@@ -213,4 +248,18 @@ pub async fn process_renice(
         .collect();
     let msg = filtered.join(" ");
     Err(if msg.is_empty() { format!("Failed to renice PID {}", pid) } else { msg })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pid_identity_guard_sanitizes_and_checks_comm() {
+        assert_eq!(sanitize_expected_process_name("/usr/bin/nginx"), Some("nginx".into()));
+        assert_eq!(sanitize_expected_process_name("bad\nname"), None);
+        let guard = build_pid_identity_guard(4321, "nginx");
+        assert!(guard.contains("ps -p 4321 -o comm="));
+        assert!(guard.contains("PROCESS_IDENTITY_MISMATCH"));
+    }
 }

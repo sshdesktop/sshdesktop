@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { ApiTabState, ApiCollection, HistoryItem, ApiEnvironment, SavedRequest, HttpMethod } from './types';
 import { sftpReadTextFile, sftpWriteTextFile, sftpMkdir } from '../../lib/tauri-bridge';
+import { sanitizeApiBundleForExport } from '../../lib/security-utils';
 
 const STORAGE_KEY_COLLECTIONS = 'sshdesktop_api_collections_v1';
 const LEGACY_STORAGE_KEY_COLLECTIONS = 'clouddesk_api_collections_v1';
@@ -79,6 +80,7 @@ interface ApiStore {
   // Remote Server Persistence (~/.sshdesktop/api_studio.json)
   hydrateFromServer: (connId: string, userHome: string) => Promise<boolean>;
   syncToServer: (connId: string, userHome: string) => Promise<boolean>;
+  exportSanitizedBundle: () => string;
 }
 
 export const useApiStore = create<ApiStore>((set, get) => {
@@ -499,6 +501,11 @@ export const useApiStore = create<ApiStore>((set, get) => {
         set({ isSyncingServer: false });
         return false;
       }
+    },
+
+    exportSanitizedBundle: () => {
+      const bundle = sanitizeApiBundleForExport(get().collections, get().environments);
+      return JSON.stringify(bundle, null, 2);
     },
   };
 });

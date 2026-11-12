@@ -1,0 +1,11 @@
+# Enterprise review ownership for security, backend contracts, and release automation
+* @sshdesktop/maintainers
+
+/.github/ @sshdesktop/maintainers @sshdesktop/security
+/src-tauri/src/ssh/ @sshdesktop/maintainers @sshdesktop/security
+/src-tauri/src/database/ @sshdesktop/maintainers @sshdesktop/security
+/src-tauri/src/store/ @sshdesktop/maintainers @sshdesktop/security
+/src-tauri/src/system/ @sshdesktop/maintainers @sshdesktop/security
+/server.js @sshdesktop/maintainers @sshdesktop/security
+/src/lib/ipc-contract.ts @sshdesktop/maintainers @sshdesktop/security
+/src/lib/tauri.ts @sshdesktop/maintainers @sshdesktop/security

@@ -203,6 +203,7 @@ fn main() {
             ssh::key_gen::ssh_generate_key_pair,
             ssh::key_gen::ssh_list_local_keys,
             ssh::key_gen::ssh_install_public_key,
+            ssh::key_gen::ssh_rotate_server_key,
             ssh::agent::ssh_agent_get_status,
             
             // System commands
@@ -234,6 +235,7 @@ fn main() {
             system::package::package_search,
             system::package::package_install,
             system::package::package_remove,
+            system::package::package_preview,
             system::package::package_update,
             system::package::package_upgradable,
             system::package::package_detect_manager,
@@ -256,6 +258,7 @@ fn main() {
             system::cron::cron_list_all,
             system::cron::cron_add,
             system::cron::cron_remove,
+            system::cron::cron_rollback,
             system::logs::logs_journal,
             system::logs::logs_file,
             system::logs::logs_stream_start,
@@ -341,8 +344,17 @@ fn main() {
             store::auth::auth_login,
             store::auth::auth_change_credentials,
             store::auth::auth_logout,
+            store::auth::auth_totp_setup,
+            store::auth::auth_totp_enable,
+            store::auth::auth_totp_disable,
+            store::auth::team_list,
+            store::auth::team_add,
+            store::auth::team_set_role,
+            store::auth::team_remove,
+            store::auth::sso_get_config,
+            store::auth::sso_set_config,
 
-            // Audit Log, Security Policy, Capabilities & Workspace Backup
+            // Audit Log, Security Policy, Capabilities, API Tokens & Workspace Backup
             store::audit::audit_get_logs,
             store::audit::audit_verify_chain,
             store::audit::policy_get_mode,
@@ -350,6 +362,16 @@ fn main() {
             store::audit::runtime_capabilities,
             store::audit::backup_export_config,
             store::audit::backup_import_config,
+            store::audit::tokens_list,
+            store::audit::tokens_create,
+            store::audit::tokens_revoke,
+            store::audit::vault_rotate_key,
+            store::audit::approval_request,
+            store::audit::approval_list,
+            store::audit::approval_decide,
+            store::audit::recordings_list,
+            store::audit::recordings_save,
+            store::audit::recordings_get,
 
             // Browser Reverse Proxy command
             store::proxy::browser_proxy_fetch,

@@ -381,3 +381,37 @@ pub async fn ssh_install_public_key(
         Err(format!("Server returned error installing key: {}", output))
     }
 }
+
+#[tauri::command]
+pub async fn ssh_rotate_server_key(
+    state: tauri::State<'_, crate::AppState>,
+    conn_id: String,
+    old_public_key: Option<String>,
+    filename: Option<String>,
+    comment: Option<String>,
+    passphrase: Option<String>,
+) -> Result<GeneratedKeyPair, String> {
+    let generated = ssh_generate_key_pair(filename, comment, passphrase).await?;
+    ssh_install_public_key(state.clone(), conn_id.clone(), generated.public_key_content.clone()).await?;
+
+    if let Some(old_pub) = old_public_key.as_deref().map(str::trim).filter(|s| !s.is_empty() && !s.contains('\n') && !s.contains('\r')) {
+        if old_pub != generated.public_key_content.trim() {
+            let sessions = state.sessions.lock().await;
+            if let Some(handle) = sessions.get(&conn_id) {
+                let remove_cmd = "IFS= read -r old_key && umask 077 && if [ -f ~/.ssh/authorized_keys ]; then grep -vxF -- \"$old_key\" ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys; fi";
+                let mut payload = old_pub.to_string();
+                payload.push('\n');
+                let _ = crate::ssh::session::run_exec_channel_with_stdin(handle, remove_cmd, payload.as_bytes()).await;
+            }
+        }
+    }
+
+    crate::store::audit::append_audit_event(
+        "ssh_rotate_server_key",
+        "desktop-user",
+        &conn_id,
+        "ok",
+        Some(generated.public_key_path.clone()),
+    );
+    Ok(generated)
+}
