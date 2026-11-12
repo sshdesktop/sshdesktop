@@ -27,17 +27,17 @@ async fn run_scp_transfer(
         _ => conn.config.private_key_path.is_some() || conn.config.password.is_none(),
     };
     let selected_key_path = if is_key_auth { conn.config.private_key_path.as_deref() } else { None };
-    if let Some(key) = selected_key_path {
-        if crate::ssh::connection::resolve_key_path(key).is_none() {
-            return Err(format!("Selected SSH identity '{}' could not be found.", key));
-        }
-    }
+    let resolved_key_path = match selected_key_path {
+        Some(key) => Some(crate::ssh::connection::resolve_key_path(key)
+            .ok_or_else(|| format!("Selected SSH identity '{}' could not be found or secured.", key))?),
+        None => None,
+    };
     let password = if is_key_auth { None } else { conn.config.password.as_deref().filter(|p| !p.is_empty()) };
     if !is_key_auth && password.is_none() {
         return Err("Password authentication was selected, but no SSH password is configured.".into());
     }
 
-    let use_putty = !is_key_auth || selected_key_path.map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
+    let use_putty = !is_key_auth || resolved_key_path.as_deref().map(crate::ssh::connection::is_ppk_key).unwrap_or(false);
     let host_spec = if conn.config.host.contains(':') && !conn.config.host.starts_with('[') {
         format!("[{}]", conn.config.host)
     } else {
@@ -67,7 +67,7 @@ async fn run_scp_transfer(
             if output.status.success() { return Ok(()); }
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
         }
-        if let Some(key) = selected_key_path {
+        if let Some(key) = resolved_key_path.as_deref() {
             command.arg("-i").arg(key);
         }
         command
