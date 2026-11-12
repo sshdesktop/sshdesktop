@@ -245,8 +245,8 @@ pub async fn connect_sqlite(
             let wal_path = format!("{}-wal", escaped);
             let shm_path = format!("{}-shm", escaped);
             let sidecar_cmd = format!(
-                "if [ -L '{}' ] || [ -L '{}' ]; then echo INVALID_SIDECAR; exit 2; elif [ -s '{}' ]; then echo WAL_ACTIVE; exit 3; elif [ -e '{}' ] && [ ! -f '{}' ]; then echo INVALID_SHM; exit 4; else echo SIDECARS_CLEAR; fi",
-                wal_path, shm_path, wal_path, shm_path, shm_path
+                "if [ -L '{}' ] || [ -L '{}' ]; then echo INVALID_SIDECAR; exit 2; elif [ -e '{}' ] && [ ! -f '{}' ]; then echo INVALID_WAL; exit 3; elif [ -s '{}' ]; then echo WAL_ACTIVE; exit 4; elif [ -e '{}' ] && [ ! -f '{}' ]; then echo INVALID_SHM; exit 5; else echo SIDECARS_CLEAR; fi",
+                wal_path, shm_path, wal_path, wal_path, wal_path, shm_path, shm_path
             );
             let (sidecar_out, sidecar_code) = crate::ssh::exec::run_cmd(app_state, &conn_id, &sidecar_cmd).await;
             if sidecar_code != 0 || !sidecar_out.contains("SIDECARS_CLEAR") {
@@ -833,6 +833,9 @@ mod sqlite_sync_validation_tests {
         let mut bad_format = valid_test_sqlite_header();
         bad_format[18] = 3;
         assert!(validate_sqlite_file_header(&bad_format).is_err());
+        let mut bad_write_format = valid_test_sqlite_header();
+        bad_write_format[19] = 0;
+        assert!(validate_sqlite_file_header(&bad_write_format).is_err());
         let mut bad_fraction = valid_test_sqlite_header();
         bad_fraction[21] = 63;
         assert!(validate_sqlite_file_header(&bad_fraction).is_err());
@@ -840,6 +843,9 @@ mod sqlite_sync_validation_tests {
         bad_reserved[16..18].copy_from_slice(&512u16.to_be_bytes());
         bad_reserved[20] = 33;
         assert!(validate_sqlite_file_header(&bad_reserved).is_err());
+        let mut truncated_pages = valid_test_sqlite_header();
+        truncated_pages[28..32].copy_from_slice(&1u32.to_be_bytes());
+        assert!(validate_sqlite_file_header(&truncated_pages).is_err());
     }
 
     #[test]
@@ -882,5 +888,19 @@ mod sqlite_sync_validation_tests {
     fn operation_sql_enforces_byte_limit() {
         let sql = format!("SELECT '{}';", "x".repeat(5 * 1024 * 1024));
         assert!(validate_single_operation_sql(&sql).is_err());
+    }
+
+    #[test]
+    fn sqlite_metadata_rejects_oversized_and_nul_values() {
+        assert!(validate_sqlite_metadata_text("users", "name", 255).is_ok());
+        assert!(validate_sqlite_metadata_text(&"x".repeat(256), "name", 255).is_err());
+        assert!(validate_sqlite_metadata_text("bad\0name", "name", 255).is_err());
+    }
+
+    #[test]
+    fn sqlite_metadata_enforces_independent_type_and_default_limits() {
+        assert!(validate_sqlite_metadata_text(&"t".repeat(1024), "type", 1024).is_ok());
+        assert!(validate_sqlite_metadata_text(&"t".repeat(1025), "type", 1024).is_err());
+        assert!(validate_sqlite_metadata_text(&"d".repeat(16 * 1024 + 1), "default", 16 * 1024).is_err());
     }
 }
