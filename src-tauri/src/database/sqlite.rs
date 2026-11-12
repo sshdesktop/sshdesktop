@@ -84,9 +84,10 @@ use super::serialization::{serialize_sqlite_row, split_sql_statements_for_engine
 use super::tunnel::from_base64;
 
 fn validate_remote_sqlite_path(path: &str) -> Result<(), String> {
-    if path.is_empty() || path.len() > 4096 || !path.starts_with('/')
+    if path.is_empty() || path == "/" || path.len() > 4096 || !path.starts_with('/')
         || path.chars().any(|c| c.is_control() || c == '\0')
         || path.split('/').any(|part| part == "." || part == "..")
+        || path.contains("//") || path.ends_with('/')
     {
         return Err("Remote SQLite path must be a normalized absolute POSIX path of at most 4096 bytes.".into());
     }
@@ -147,11 +148,38 @@ fn validate_sqlite_file_header(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() < 100 || !bytes.starts_with(b"SQLite format 3\0") {
         return Err("Remote file is not a valid SQLite 3 database header.".into());
     }
+    let encoded_page_size = u16::from_be_bytes([bytes[16], bytes[17]]);
+    let page_size = if encoded_page_size == 1 { 65_536usize } else { encoded_page_size as usize };
+    if !(512..=65_536).contains(&page_size) || !page_size.is_power_of_two() {
+        return Err("SQLite database header contains an invalid page size.".into());
+    }
+    if !matches!(bytes[18], 1 | 2) || !matches!(bytes[19], 1 | 2) {
+        return Err("SQLite database header contains unsupported read/write format versions.".into());
+    }
+    if bytes[21] != 64 || bytes[22] != 32 || bytes[23] != 32 {
+        return Err("SQLite database header contains invalid payload fraction values.".into());
+    }
+    let reserved = bytes[20] as usize;
+    if reserved >= page_size.saturating_sub(480) {
+        return Err("SQLite database header contains an invalid reserved-byte count.".into());
+    }
+    let declared_pages = u32::from_be_bytes([bytes[28], bytes[29], bytes[30], bytes[31]]) as usize;
+    if declared_pages > 0 && declared_pages > bytes.len() / page_size {
+        return Err("SQLite database file is shorter than its declared page count.".into());
+    }
     Ok(())
 }
 
 fn ensure_no_pending_local_wal(cache_path: &std::path::Path) -> Result<(), String> {
     let wal_path = std::path::PathBuf::from(format!("{}-wal", cache_path.display()));
+    let shm_path = std::path::PathBuf::from(format!("{}-shm", cache_path.display()));
+    match std::fs::symlink_metadata(&shm_path) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() =>
+            return Err("Refusing remote sync because the local SQLite shared-memory sidecar is not a regular file.".into()),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound =>
+            return Err(format!("Could not inspect local SQLite shared-memory sidecar: {}", e)),
+        _ => {}
+    }
     match std::fs::symlink_metadata(&wal_path) {
         Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() =>
             Err("Refusing remote sync because the local SQLite WAL sidecar is not a regular file.".into()),
@@ -208,10 +236,14 @@ pub async fn connect_sqlite(
             let _cache_guard = cache_lock.lock().await;
             // A non-empty SQLite WAL may contain committed changes absent from the main file.
             let wal_path = format!("{}-wal", escaped);
-            let wal_cmd = format!("if [ -s '{}' ]; then echo WAL_ACTIVE; else echo WAL_CLEAR; fi", wal_path);
-            let (wal_out, wal_code) = crate::ssh::exec::run_cmd(app_state, &conn_id, &wal_cmd).await;
-            if wal_code != 0 || !wal_out.contains("WAL_CLEAR") {
-                return Err("Remote SQLite database has an active or unreadable WAL sidecar. Checkpoint it on the server before connecting; main-file-only synchronization is unsafe while WAL data exists.".into());
+            let shm_path = format!("{}-shm", escaped);
+            let sidecar_cmd = format!(
+                "if [ -L '{}' ] || [ -L '{}' ]; then echo INVALID_SIDECAR; exit 2; elif [ -s '{}' ]; then echo WAL_ACTIVE; exit 3; elif [ -e '{}' ] && [ ! -f '{}' ]; then echo INVALID_SHM; exit 4; else echo SIDECARS_CLEAR; fi",
+                wal_path, shm_path, wal_path, shm_path, shm_path
+            );
+            let (sidecar_out, sidecar_code) = crate::ssh::exec::run_cmd(app_state, &conn_id, &sidecar_cmd).await;
+            if sidecar_code != 0 || !sidecar_out.contains("SIDECARS_CLEAR") {
+                return Err(format!("Remote SQLite WAL/SHM sidecar state is unsafe or unreadable: {}", sidecar_out.trim()));
             }
 
             if test_out.contains("MISSING") {
