@@ -402,6 +402,17 @@ pub async fn connect_session_with_passphrase_auth(
     passphrase: Option<&str>,
     allow_default_keys: bool,
 ) -> Result<ClientHandle, Box<dyn std::error::Error + Send + Sync>> {
+    crate::ssh::connection::validate_ssh_target(host, port, user)
+        .map_err(|error| format!("Invalid SSH connection target: {}", error))?;
+    if key_path.map(|key| key.len() > 16 * 1024 * 1024).unwrap_or(false) {
+        return Err("SSH identity input exceeds the 16 MiB safety limit.".into());
+    }
+    if password.map(|value| value.len() > 16 * 1024).unwrap_or(false) {
+        return Err("SSH password exceeds the 16 KiB safety limit.".into());
+    }
+    if passphrase.map(|value| value.len() > 16 * 1024).unwrap_or(false) {
+        return Err("SSH key passphrase exceeds the 16 KiB safety limit.".into());
+    }
     let config = Arc::new(russh::client::Config::default());
     let handler = ClientHandler {
         host: host.to_string(),
