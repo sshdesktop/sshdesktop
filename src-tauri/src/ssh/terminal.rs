@@ -635,7 +635,9 @@ pub async fn ssh_launch_putty(
         }
     }
 
-    // If remote directory specified, create startup script to cd to that location
+    // If remote directory specified, create a short-lived startup script.
+    // Keep it until PuTTY exits because PuTTY may read -m asynchronously.
+    let mut startup_script: Option<std::path::PathBuf> = None;
     if let Some(ref dir) = remote_dir {
         if !dir.is_empty() && dir != "/" {
             let temp_dir = std::env::temp_dir();
@@ -643,13 +645,33 @@ pub async fn ssh_launch_putty(
             let script_body = format!("cd '{}' 2>/dev/null || cd ~; exec $SHELL -l\n", dir.replace('\'', r"'\''"));
             if std::fs::write(&script_file, script_body).is_ok() {
                 cmd.arg("-m").arg(&script_file);
+                startup_script = Some(script_file);
             }
         }
     }
 
     cmd.arg(&conn.config.host);
 
-    cmd.spawn().map_err(|e| format!("Failed to launch PuTTY: {}", e))?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(path) = startup_script.as_ref() {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(format!("Failed to launch PuTTY: {}", error));
+        }
+    };
+
+    if let Some(script_path) = startup_script {
+        // Reap the child and remove the temporary command file after PuTTY exits.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            let _ = std::fs::remove_file(script_path);
+        });
+    } else {
+        // PuTTY continues independently; no child handle needs to be retained.
+        drop(child);
+    }
     Ok(())
 }
 
