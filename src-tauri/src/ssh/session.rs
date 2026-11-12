@@ -303,7 +303,7 @@ pub async fn run_log_stream_channel(
             Err(_) => {
                 let _ = app.emit("log-stream-data", serde_json::json!({
                     "stream_id": stream_id,
-                    "data": "\\r\\n[SSH log stream timed out after 5 minutes without output]\\r\\n",
+                    "data": "\r\n[SSH log stream timed out after 5 minutes without output]\r\n",
                     "done": true,
                     "exit_code": 1
                 }));
@@ -317,7 +317,7 @@ pub async fn run_log_stream_channel(
                 if total_streamed > MAX_LOG_STREAM_BYTES {
                     let _ = app.emit("log-stream-data", serde_json::json!({
                         "stream_id": stream_id,
-                        "data": "\\r\\n[Log stream exceeded maximum 64 MiB safety limit]\\r\\n",
+                        "data": "\r\n[Log stream exceeded maximum 64 MiB safety limit]\r\n",
                         "done": true,
                         "exit_code": 1
                     }));
@@ -335,7 +335,7 @@ pub async fn run_log_stream_channel(
                 if total_streamed > MAX_LOG_STREAM_BYTES {
                     let _ = app.emit("log-stream-data", serde_json::json!({
                         "stream_id": stream_id,
-                        "data": "\\r\\n[Log stream exceeded maximum 64 MiB safety limit]\\r\\n",
+                        "data": "\r\n[Log stream exceeded maximum 64 MiB safety limit]\r\n",
                         "done": true,
                         "exit_code": 1
                     }));
